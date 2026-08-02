@@ -73,11 +73,44 @@ export async function listOrgs(): Promise<OrgConfig[]> {
 }
 
 export async function isOrgKnown(orgId: string): Promise<boolean> {
-  return (await listOrgs()).some((o) => o.orgId === orgId);
+  return (await orgById(orgId)) !== null;
 }
 
+/**
+ * Org por id, com o cache como ATALHO e nunca como veredito negativo.
+ *
+ * O acerto vem do cache; o "não achei" força uma leitura direta antes de virar
+ * resposta. A diferença importa porque este processo é serverless: o cache é
+ * por INSTÂNCIA, não global. Cadastrado um tenant novo, as instâncias que já
+ * tinham lido a lista antiga seguiriam devolvendo "org desconhecida" por até um
+ * minuto — e cada uma dessas é um 403 no `/notify`, ou seja, uma notificação
+ * PERDIDA, já que o ImobPro não retenta.
+ *
+ * Foi exatamente o que aconteceu no primeiro teste em produção: duas chamadas
+ * idênticas, 202 numa instância e 403 na outra.
+ *
+ * O custo do caminho pessimista é baixo e limitado: só quem tem assinatura HMAC
+ * válida chega aqui, então não dá pra usar isso como amplificador de query.
+ */
 export async function orgById(orgId: string): Promise<OrgConfig | null> {
-  return (await listOrgs()).find((o) => o.orgId === orgId) ?? null;
+  const hit = (await listOrgs()).find((o) => o.orgId === orgId);
+  if (hit) return hit;
+
+  const rows = await query<{ org_id: string; org_name: string; api_token_enc: string }>(
+    `SELECT org_id, org_name, api_token_enc FROM org_config
+      WHERE org_id = $1 AND active`,
+    [orgId]
+  );
+  if (rows.length === 0) return null;
+
+  // Achou fora do cache: ele está velho. Invalida para que a próxima leitura
+  // traga a lista inteira atualizada, em vez de só esta org.
+  cache = null;
+  return {
+    orgId: rows[0].org_id,
+    orgName: rows[0].org_name,
+    apiToken: decrypt(rows[0].api_token_enc),
+  };
 }
 
 /** Só para os testes — invalida o cache entre cenários. */
