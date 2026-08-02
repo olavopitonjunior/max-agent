@@ -112,3 +112,29 @@ O contrato do HMAC é testado dos **dois lados**: aqui em
 `apps/web/src/lib/max/__tests__/notify-trigger.test.ts`. Se um lado mudar o que
 entra na assinatura, toda notificação é recusada em produção — e nenhum dos dois
 repositórios quebra sozinho.
+
+## Deploy
+
+Projeto na Vercel: `max-agent` (`prj_yaG4UFnvaRnLjRCGLKtLKv43cSRl`).
+
+**Passos manuais pendentes**, nesta ordem:
+
+1. **Conectar o GitHub à conta Vercel.** O `vercel link` criou o projeto mas não
+   conseguiu ligar o repositório: a conta precisa de um *Login Connection* com o
+   GitHub (Vercel → Settings → Authentication). Sem isso não há deploy
+   automático por push — dá pra publicar por `npx vercel --prod` enquanto isso.
+2. **Contratar a instância Z-API e parear o número do Max** por QR. Uma
+   instância atende um número; a instância atual (`3F2F70D1…`) está no chip do
+   Newton e não pode ser dividida.
+3. **Criar o database do Max no Neon** e rodar `npm run db:migrate`.
+4. **Preencher as env** na Vercel (ver `.env.example`). `MAX_NOTIFY_SECRET`
+   precisa ser **idêntico** ao do Contractmaker, senão toda notificação é
+   recusada com 401.
+5. **Cadastrar as orgs** em `org_config`, com um token de API por tenant.
+6. **Apontar o webhook** no painel da Z-API e desligar "notificar mensagens
+   enviadas por mim".
+7. No Contractmaker, setar `MAX_NOTIFY_URL`/`MAX_NOTIFY_SECRET` e ligar
+   `vendas.max` no primeiro tenant.
+
+Até o passo 4, `/admin/max` no ImobPro mostra "serviço não configurado" — que é
+o estado correto, não um erro.
