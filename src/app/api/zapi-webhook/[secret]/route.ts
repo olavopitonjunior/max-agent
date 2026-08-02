@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseInbound, isExpectedInstance } from "@/lib/zapi";
+import { parseInbound, isExpectedInstance, sendText } from "@/lib/zapi";
 import { query } from "@/lib/db";
+import { runTurn } from "@/graph/graph";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -13,8 +14,14 @@ export const runtime = "nodejs";
  * mais fraco que HMAC: trate a URL como credencial, nunca a coloque em log de
  * acesso público, e rotacione-a se vazar.
  *
- * Responde 200 rápido e sempre. Webhook que demora leva a Z-API a reentregar,
- * e reentrega é justamente o que a tabela `inbound_seen` existe para conter.
+ * Responde 200 SEMPRE — inclusive quando o turn falha. Um 5xx faria a Z-API
+ * reentregar, e o dedupe já consumiu o `messageId`: o usuário ficaria sem
+ * resposta e sem rastro.
+ *
+ * O turn roda INLINE por enquanto, o que é aceitável porque o grafo ainda não
+ * chama modelo. Quando a Fase 2 entrar, isso tem que virar fila: uma resposta
+ * de LLM demora mais que o timeout da Z-API, e o retry dela esbarraria no
+ * dedupe — silêncio, não duplicata.
  */
 export async function POST(
   req: NextRequest,
@@ -61,11 +68,31 @@ export async function POST(
     return NextResponse.json({ ok: true, duplicate: true });
   }
 
-  // Conversa entra na Fase 2. Até lá o Max é canal de notificação: registrar e
-  // devolver 200 é honesto — melhor não responder do que responder mal.
   console.log(
     `[zapi-webhook] inbound ${msg.kind} de ${msg.fromPhone}${msg.groupId ? ` (grupo ${msg.groupId})` : ""}`
   );
+
+  // Grupo não é respondido: o Max nasce como canal de DM, e responder em grupo
+  // sem gate de menção transformaria qualquer conversa em barulho. A leitura de
+  // grupo do Newton (WhatsappGroup/DealGroupLink) é outro assunto.
+  if (msg.groupId) {
+    return NextResponse.json({ ok: true, ignored: "grupo" });
+  }
+
+  try {
+    const reply = await runTurn(msg);
+    if (reply) {
+      await sendText({ to: msg.fromPhone, body: reply, quoteMessageId: msg.messageId });
+    }
+  } catch (err) {
+    // Nunca propaga: erro aqui viraria 5xx, a Z-API reentregaria, e o dedupe
+    // acima já consumiu o messageId — o usuário ficaria sem resposta E sem
+    // rastro. Logar e devolver 200 mantém o incidente visível num lugar só.
+    console.error(
+      "[zapi-webhook] turn falhou:",
+      err instanceof Error ? err.message : String(err)
+    );
+  }
 
   return NextResponse.json({ ok: true, accepted: true });
 }
