@@ -83,7 +83,7 @@ VALUES ('cm...', 'RE/MAX Trio', '<saída de encrypt()>');
 ```
 
 No painel da Z-API: webhook "Ao receber" →
-`https://<dominio>/api/zapi-webhook/<ZAPI_WEBHOOK_SECRET>`, e
+`https://max-agent-olive.vercel.app/api/zapi-webhook/<ZAPI_WEBHOOK_SECRET>`, e
 **"notificar mensagens enviadas por mim" DESLIGADO** — senão cada resposta
 volta como mensagem nova e o bot conversa sozinho.
 
@@ -122,16 +122,17 @@ criado e migrado; env de produção preenchidas — menos as da Z-API.
 
 **Passos manuais pendentes**, nesta ordem:
 
-0. **DESLIGAR a Deployment Protection** (Vercel → max-agent → Settings →
-   Deployment Protection). Ela vem ligada em projeto de time e devolve **302
-   em todas as rotas** para quem não tem cookie de SSO — o que inclui o webhook
-   da Z-API e o `/notify` vindo do Contractmaker. Enquanto estiver ligada, nada
-   funciona de fora. Alternativa, se quiser manter a proteção: usar
-   *Protection Bypass for Automation* e mandar o header em ambos os chamadores.
-1. **Conectar o GitHub à conta Vercel.** O `vercel link` criou o projeto mas não
-   conseguiu ligar o repositório: a conta precisa de um *Login Connection* com o
-   GitHub (Vercel → Settings → Authentication). Sem isso não há deploy
-   automático por push — dá pra publicar por `npx vercel --prod` enquanto isso.
+**Domínio de produção: `https://max-agent-olive.vercel.app`.**
+
+Use SEMPRE este, e não a URL gerada `max-agent-<hash>-<team>.vercel.app`. A
+*Deployment Protection* fica ligada em **Standard Protection**, que protege as
+URLs geradas e os previews mas **não** o alias de produção — testar na URL
+gerada dá 302 e leva a concluir, errado, que a proteção precisa ser desligada.
+Ela não precisa: o alias de produção responde 200 com ela ligada, e é por ele
+que o webhook da Z-API e o `/notify` do Contractmaker entram.
+
+1. ~~Conectar o GitHub à conta Vercel~~ — **feito** em 2026-08-02. Push na
+   `master` dispara deploy.
 2. **Contratar a instância Z-API e parear o número do Max** por QR. Uma
    instância atende um número; a instância atual (`3F2F70D1…`) está no chip do
    Newton e não pode ser dividida.
