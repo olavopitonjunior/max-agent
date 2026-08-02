@@ -117,8 +117,17 @@ repositórios quebra sozinho.
 
 Projeto na Vercel: `max-agent` (`prj_yaG4UFnvaRnLjRCGLKtLKv43cSRl`).
 
+Deploy de produção feito em 2026-08-02; banco Neon (`quiet-sunset-47581096`)
+criado e migrado; env de produção preenchidas — menos as da Z-API.
+
 **Passos manuais pendentes**, nesta ordem:
 
+0. **DESLIGAR a Deployment Protection** (Vercel → max-agent → Settings →
+   Deployment Protection). Ela vem ligada em projeto de time e devolve **302
+   em todas as rotas** para quem não tem cookie de SSO — o que inclui o webhook
+   da Z-API e o `/notify` vindo do Contractmaker. Enquanto estiver ligada, nada
+   funciona de fora. Alternativa, se quiser manter a proteção: usar
+   *Protection Bypass for Automation* e mandar o header em ambos os chamadores.
 1. **Conectar o GitHub à conta Vercel.** O `vercel link` criou o projeto mas não
    conseguiu ligar o repositório: a conta precisa de um *Login Connection* com o
    GitHub (Vercel → Settings → Authentication). Sem isso não há deploy
