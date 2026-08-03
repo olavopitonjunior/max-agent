@@ -59,11 +59,6 @@ d("resolveIdentity", () => {
     await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [PHONE]);
   });
 
-  afterAll(async () => {
-    await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [PHONE]);
-    await db().end();
-  });
-
   it("telefone em nenhuma org é desconhecido", async () => {
     mockByPhone([]);
     expect(await resolveIdentity(PHONE)).toEqual({ kind: "unknown" });
@@ -206,4 +201,124 @@ describe("askWhichOrg", () => {
     expect(texto).toContain("2. Fincasa");
     expect(texto).toContain("número ou o nome");
   });
+});
+
+/**
+ * Corretor não é usuário da plataforma — a maioria não tem login. O `by-phone`
+ * responde 404 para eles, e antes disso o 404 encerrava a org: quem só existia
+ * como comissionado era simplesmente desconhecido para o Max, em todas as casas.
+ */
+d("corretor atribuído", () => {
+  /** by-phone 404 em tudo; broker-scope 200 nas orgs de `achaEm`. */
+  function mockBroker(achaEm: string[]) {
+    const fn = vi.fn(
+      async (url: string, init: { headers: Record<string, string> }) => {
+        const token = init.headers.Authorization.replace("Bearer ", "");
+        const org = [TRIO, ATIVA].find((o) => o.apiToken === token);
+        const naoAchou = {
+          ok: false,
+          status: 404,
+          json: async () => ({}),
+        } as unknown as Response;
+
+        if (!String(url).includes("/broker-scope")) return naoAchou;
+        if (!org || !achaEm.includes(org.orgId)) return naoAchou;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            splitRecipientId: `sr-${org.orgId}`,
+            label: "Carlos Corretor",
+            dealIds: ["deal-1", "deal-2"],
+            scanned: 2,
+            truncated: false,
+          }),
+        } as unknown as Response;
+      }
+    );
+    vi.stubGlobal("fetch", fn);
+    return fn;
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+    list.mockResolvedValue([TRIO, ATIVA]);
+    byId.mockImplementation(
+      async (id: string) => [TRIO, ATIVA].find((o) => o.orgId === id) ?? null
+    );
+    await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [PHONE]);
+  });
+
+  it("quem não é usuário mas é corretor atribuído é reconhecido", async () => {
+    mockBroker([TRIO.orgId]);
+
+    const r = await resolveIdentity(PHONE);
+
+    expect(r.kind).toBe("resolved");
+    if (r.kind !== "resolved") return;
+    expect(r.candidate.kind).toBe("broker");
+    expect(r.org.orgId).toBe(TRIO.orgId);
+  });
+
+  /**
+   * A lista de negócios muda quando alguém entra ou sai da comissão. Congelada
+   * na linha de escolha, ela daria acesso a negócio do qual o corretor já saiu.
+   */
+  it("o candidato NÃO carrega a lista de negócios", async () => {
+    mockBroker([TRIO.orgId]);
+
+    const r = await resolveIdentity(PHONE);
+
+    if (r.kind !== "resolved") throw new Error("esperava resolved");
+    expect(r.candidate).not.toHaveProperty("dealIds");
+  });
+
+  it("corretor nas duas casas é perguntado, não escolhido", async () => {
+    mockBroker([TRIO.orgId, ATIVA.orgId]);
+
+    const r = await resolveIdentity(PHONE);
+
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind !== "ambiguous") return;
+    expect(r.candidates.map((c) => c.orgId).sort()).toEqual(
+      [ATIVA.orgId, TRIO.orgId].sort()
+    );
+  });
+
+  /**
+   * Quem é usuário E corretor na mesma casa entra como usuário: o escopo do
+   * RBAC é o mais específico dos dois, e estreitá-lo para "só onde é
+   * comissionado" tiraria acesso de um gerente que também vende.
+   */
+  it("usuário da plataforma não vira candidato de corretor na mesma org", async () => {
+    const fn = mockByPhone([TRIO.orgId]);
+
+    const r = await resolveIdentity(PHONE);
+
+    if (r.kind !== "resolved") throw new Error("esperava resolved");
+    expect(r.candidate.kind).toBe("user");
+    const urls = fn.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("/broker-scope") && u.includes("trio"))).toBe(
+      false
+    );
+  });
+
+  it("corretor não atribuído continua desconhecido", async () => {
+    mockBroker([]);
+
+    expect((await resolveIdentity(PHONE)).kind).toBe("unknown");
+  });
+});
+
+/**
+ * Teardown no NÍVEL DO ARQUIVO: o pool é compartilhado por todos os blocos, e
+ * fechá-lo dentro de um `describe` derruba os que rodam depois — falha que
+ * aparece como "Cannot use a pool after calling end on the pool" no bloco
+ * seguinte, e não onde o pool foi fechado.
+ */
+afterAll(async () => {
+  if (!hasDb) return;
+  await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [PHONE]);
+  await db().end();
 });

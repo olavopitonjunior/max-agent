@@ -17,13 +17,37 @@ import { normalizeBrPhone } from "./phone";
  * pergunta.** Nunca escolhe.
  */
 
-export interface Candidate {
+interface CandidateBase {
   orgId: string;
   orgName: string;
-  /** Hoje só `user`; `broker` entra quando o lookup de corretor existir. */
+}
+
+/** Usuário da plataforma: o escopo dele sai do RBAC, não desta camada. */
+export interface UserCandidate extends CandidateBase {
   kind: "user";
   userId: string;
   userName: string | null;
+}
+
+/**
+ * Corretor atribuído pela imobiliária (`SplitRecipient.maxEnabled`).
+ *
+ * **Não guarda `dealIds`.** A lista muda quando alguém entra ou sai da comissão
+ * de um negócio, e um candidato congelado numa linha de `phone_org_choice`
+ * continuaria dando acesso a negócio do qual o corretor já saiu. Os negócios
+ * são buscados na hora, por `brokerDealIds`.
+ */
+export interface BrokerCandidate extends CandidateBase {
+  kind: "broker";
+  splitRecipientId: string;
+  label: string;
+}
+
+export type Candidate = UserCandidate | BrokerCandidate;
+
+/** Nome de exibição, seja qual for a classe. */
+export function displayName(c: Candidate): string | null {
+  return c.kind === "user" ? c.userName : c.label;
 }
 
 export type Identity =
@@ -54,13 +78,24 @@ async function scanOrgs(e164: string): Promise<Candidate[]> {
         `${BASE()}/api/users/by-phone?phone=${encodeURIComponent(e164)}`,
         { headers: { Authorization: `Bearer ${org.apiToken}` } }
       );
-      if (res.status === 404) continue;
+
+      // 404 não encerra a org: quem não é USUÁRIO da plataforma ainda pode ser
+      // CORRETOR atribuído. São cadastros diferentes, e a maioria dos corretores
+      // não tem login.
+      if (res.status === 404) {
+        const broker = await scanBroker(org, e164);
+        if (broker) found.push(broker);
+        continue;
+      }
       if (!res.ok) {
         console.warn(`[identity] by-phone ${res.status} na org ${org.orgId}`);
         continue;
       }
       const r = (await res.json()) as { userId?: string; name?: string | null };
       if (r.userId) {
+        // Quem é usuário E corretor na mesma casa entra como usuário: o escopo
+        // do RBAC é o mais específico dos dois, e não seria correto estreitá-lo
+        // para "só os negócios em que ele é comissionado".
         found.push({
           orgId: org.orgId,
           orgName: org.orgName,
@@ -81,6 +116,67 @@ async function scanOrgs(e164: string): Promise<Candidate[]> {
   }
 
   return found;
+}
+
+/**
+ * Corretor atribuído naquela org, ou nada.
+ *
+ * O 404 do `broker-scope` cobre desconhecido, não-atribuído, inativo e
+ * telefone duplicado dentro da org — de propósito: distinguir os casos
+ * confirmaria a existência de um cadastro para quem tem token de outra casa.
+ * Aqui todos viram o mesmo "não é candidato".
+ */
+async function scanBroker(
+  org: OrgConfig,
+  e164: string
+): Promise<BrokerCandidate | null> {
+  const res = await fetch(
+    `${BASE()}/api/agents/broker-scope?phone=${encodeURIComponent(e164)}`,
+    { headers: { Authorization: `Bearer ${org.apiToken}` } }
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    console.warn(`[identity] broker-scope ${res.status} na org ${org.orgId}`);
+    return null;
+  }
+  const r = (await res.json()) as {
+    splitRecipientId?: string;
+    label?: string;
+  };
+  if (!r.splitRecipientId) return null;
+  return {
+    orgId: org.orgId,
+    orgName: org.orgName,
+    kind: "broker",
+    splitRecipientId: r.splitRecipientId,
+    label: r.label ?? "",
+  };
+}
+
+/**
+ * Os negócios do corretor, buscados na hora.
+ *
+ * Fora do `Candidate` de propósito — ver `BrokerCandidate`. Uma lista vazia é
+ * resposta válida ("não participa de nenhum"); `null` é falha de leitura, e o
+ * chamador tem que tratar diferente: com `null`, não falar de negócio nenhum.
+ */
+export async function brokerDealIds(
+  org: OrgConfig,
+  rawPhone: string
+): Promise<string[] | null> {
+  const e164 = normalizeBrPhone(rawPhone);
+  if (!e164) return null;
+  try {
+    const res = await fetch(
+      `${BASE()}/api/agents/broker-scope?phone=${encodeURIComponent(e164)}`,
+      { headers: { Authorization: `Bearer ${org.apiToken}` } }
+    );
+    if (!res.ok) return null;
+    const r = (await res.json()) as { dealIds?: string[] };
+    return Array.isArray(r.dealIds) ? r.dealIds : null;
+  } catch {
+    return null;
+  }
 }
 
 interface ChoiceRow extends Record<string, unknown> {

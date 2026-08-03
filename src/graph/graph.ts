@@ -11,6 +11,7 @@ import {
   matchChoice,
   saveChoice,
   askWhichOrg,
+  displayName,
   type Candidate,
 } from "@/lib/identity";
 import { complete, DEFAULT_MODEL, type LlmUsage } from "@/lib/llm";
@@ -163,7 +164,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   const system = buildSystemPrompt({
     tenantInstructions: state.instructions,
     orgName: state.identity.orgName,
-    userName: state.identity.userName,
+    userName: displayName(state.identity),
     hits: state.hits,
     summary: state.summary,
   });
