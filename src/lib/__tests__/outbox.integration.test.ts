@@ -151,6 +151,13 @@ d("outbox (Postgres real)", () => {
    * `FOR UPDATE SKIP LOCKED`: a Vercel pode disparar o cron de novo antes de o
    * anterior terminar. Duas passadas concorrentes têm que dividir o trabalho,
    * nunca repetir.
+   *
+   * A asserção é sobre as LINHAS, não sobre quantas cada passada reivindicou:
+   * este banco é o de produção, onde o cron real roda a cada minuto e disputa
+   * as mesmas linhas. Contar claims globais daria um número diferente sempre
+   * que a execução caísse na virada do minuto — e falharia sem haver bug.
+   * `attempts = 1` é a prova direta do que interessa: ninguém foi despachado
+   * duas vezes.
    */
   it("execuções concorrentes do cron não despacham a mesma linha duas vezes", async () => {
     for (let i = 0; i < 6; i++) {
@@ -160,10 +167,59 @@ d("outbox (Postgres real)", () => {
       `UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE org_id = 'org-test'`
     );
 
-    const [a, b] = await Promise.all([dispatchDue(), dispatchDue()]);
+    await Promise.all([dispatchDue(), dispatchDue()]);
 
-    expect(a.claimed + b.claimed).toBe(6);
-    expect(sent).toHaveBeenCalledTimes(6);
+    const rows = await query<{ status: string; attempts: number }>(
+      `SELECT status, attempts FROM outbox WHERE org_id = 'org-test'`
+    );
+    expect(rows).toHaveLength(6);
+    for (const r of rows) {
+      expect(r.status).toBe("sent");
+      expect(r.attempts).toBe(1);
+    }
+  });
+
+  /**
+   * Regressão do envio duplo.
+   *
+   * Enquanto o claim não mudava o estado, a linha ficava `pending` e vencida
+   * ENTRE o claim e o envio — porque `FOR UPDATE SKIP LOCKED` só vale dentro do
+   * statement, e claim e envio são statements separados. Uma segunda passada
+   * nesse intervalo a reivindicava de novo e a mensagem saía duas vezes.
+   *
+   * Aqui o envio é lento de propósito para alargar exatamente esse intervalo.
+   */
+  it("segunda passada durante um envio em curso NÃO pega a mesma linha", async () => {
+    let liberar: () => void = () => {};
+    const emVoo = new Promise<void>((r) => {
+      liberar = r;
+    });
+    sent.mockImplementation(async () => {
+      await emVoo;
+      return { messageId: "MID" };
+    });
+
+    await enqueue(args({ dedupeKey: "k-inflight" }));
+    await query(
+      `UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = 'k-inflight'`
+    );
+
+    const primeira = dispatchDue();
+    // Dá tempo de a primeira reivindicar e ficar presa no envio.
+    await new Promise((r) => setTimeout(r, 300));
+    const segunda = await dispatchDue();
+
+    expect(segunda.claimed).toBe(0);
+
+    liberar();
+    await primeira;
+
+    const row = await query<{ status: string; attempts: number }>(
+      `SELECT status, attempts FROM outbox WHERE dedupe_key = 'k-inflight'`
+    );
+    expect(row[0].status).toBe("sent");
+    expect(row[0].attempts).toBe(1);
+    expect(sent).toHaveBeenCalledTimes(1);
   });
 });
 

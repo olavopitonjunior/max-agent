@@ -1,6 +1,10 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
+import { config as loadEnv } from "dotenv";
+
+// `.env.test` primeiro só quando pedido — migrar produção é o default.
+loadEnv({ path: process.env.MIGRATE_ENV ?? ".env.local" });
 
 /**
  * Migrações em SQL puro, aplicadas em ordem de nome.

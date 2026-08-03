@@ -118,26 +118,43 @@ interface OutboxRow extends Record<string, unknown> {
 const MAX_ATTEMPTS = 3;
 
 /**
+ * Quanto tempo uma linha pode ficar em `sending` antes de ser considerada
+ * órfã. Folga larga sobre o `maxDuration` do cron (60s), pra nunca disputar
+ * com uma execução ainda viva.
+ */
+const SENDING_ORPHAN_MINUTES = 10;
+
+/**
  * Despacha o que está vencido. Chamado pelo cron.
  *
- * O claim é atômico (`UPDATE ... RETURNING` com `FOR UPDATE SKIP LOCKED`):
- * duas execuções sobrepostas do cron — que a Vercel pode disparar — não
- * mandam a mesma mensagem duas vezes.
+ * **O claim MUDA O ESTADO para `sending`, e é isso que impede o envio duplo.**
+ * `FOR UPDATE SKIP LOCKED` sozinho não basta: ele segura o lock só enquanto o
+ * statement roda, e como claim e envio são statements separados, entre um e
+ * outro a linha voltaria a ficar `pending` e vencida — elegível de novo pra
+ * segunda execução do cron. Medido: duas passadas concorrentes despachavam a
+ * mesma linha (`attempts` chegava a 2).
+ *
+ * `sending` é transitório. Quem morrer entre o claim e o envio deixa a linha
+ * presa nele — daí a recuperação por `last_attempt_at`, que devolve o órfão ao
+ * conjunto reivindicável depois de `SENDING_ORPHAN_MINUTES`.
  */
 export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
   const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0 };
 
   const rows = await query<OutboxRow>(
-    `UPDATE outbox SET attempts = attempts + 1
+    `UPDATE outbox
+        SET status = 'sending', attempts = attempts + 1, last_attempt_at = now()
       WHERE id IN (
         SELECT id FROM outbox
-         WHERE status = 'pending' AND deliver_after <= now()
+         WHERE (status = 'pending' AND deliver_after <= now())
+            OR (status = 'sending'
+                AND last_attempt_at < now() - ($2 || ' minutes')::interval)
          ORDER BY deliver_after
          LIMIT $1
          FOR UPDATE SKIP LOCKED
       )
       RETURNING id, phone, title, body, link_url, org_name, recipient_name, attempts`,
-    [limit]
+    [limit, String(SENDING_ORPHAN_MINUTES)]
   );
   totals.claimed = rows.length;
 
