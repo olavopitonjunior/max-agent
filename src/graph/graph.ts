@@ -8,7 +8,7 @@ import {
   type Identity,
   type KnowledgeHit,
 } from "@/lib/cm";
-import { complete, type LlmUsage } from "@/lib/llm";
+import { complete, DEFAULT_MODEL, type LlmUsage } from "@/lib/llm";
 import { buildSystemPrompt, shouldSearch } from "./prompt";
 import type { InboundMessage } from "@/lib/zapi";
 
@@ -86,7 +86,7 @@ export const MaxState = Annotation.Root({
   }),
   model: Annotation<string>({
     reducer: (_prev, next) => next,
-    default: () => "claude-sonnet-4-6",
+    default: () => DEFAULT_MODEL,
   }),
 });
 
@@ -134,10 +134,11 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
     };
   }
 
-  return {
-    model: profile?.model ?? state.model,
-    instructions: profile?.instructions?.composed ?? null,
-  };
+  // `profile.model` é IGNORADO de propósito: aquele campo carrega id de modelo
+  // Anthropic e este runtime fala com o OpenRouter. O registry do ImobPro já
+  // declara `supports.model: false` pro Max — a tela não oferece o controle
+  // justamente porque ele não valeria nada aqui.
+  return { instructions: profile?.instructions?.composed ?? null };
 }
 
 async function retrieve(state: MaxStateType): Promise<MaxUpdate> {
@@ -228,8 +229,9 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
           content: `${state.summary ? `Resumo anterior:\n${state.summary}\n\n` : ""}${transcript}`,
         },
       ],
-      // Trabalho mecânico: modelo barato, não o do perfil.
-      model: "claude-haiku-4-5-20251001",
+      // Mesmo modelo do turn: o nano já é o barato da casa, e trocar de
+      // modelo só pra resumir acrescentaria uma segunda tabela de preço a
+      // manter sem economizar nada.
       maxTokens: 400,
     });
 

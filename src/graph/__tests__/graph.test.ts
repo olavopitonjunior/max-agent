@@ -6,7 +6,10 @@ vi.mock("@/lib/cm", () => ({
   searchKnowledge: vi.fn(),
   reportUsage: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("@/lib/llm", () => ({ complete: vi.fn() }));
+vi.mock("@/lib/llm", () => ({
+  complete: vi.fn(),
+  DEFAULT_MODEL: "openai/gpt-5.4-nano",
+}));
 
 const { buildGraph, threadIdFor } = await import("../graph");
 const { fetchProfile, searchKnowledge, reportUsage } = await import("@/lib/cm");
@@ -39,7 +42,7 @@ function inbound(text: string) {
   };
 }
 
-function llmOk(text: string, model = "claude-sonnet-4-6") {
+function llmOk(text: string, model = "openai/gpt-5.4-nano") {
   return {
     text,
     usage: { model, promptTokens: 100, completionTokens: 20, latencyMs: 50, success: true },
@@ -95,13 +98,18 @@ describe("grafo de conversa", () => {
     expect(r.reply).toBe("O formulário tem 7 etapas.");
   });
 
-  it("usa o modelo do perfil, não o default", async () => {
+  /**
+   * O `model` do perfil carrega id Anthropic e este runtime fala com o
+   * OpenRouter — honrá-lo mandaria um id inexistente. O registry do ImobPro já
+   * declara `supports.model: false` pro Max por isso.
+   */
+  it("IGNORA o modelo do perfil (é id Anthropic; aqui é OpenRouter)", async () => {
     profile.mockResolvedValue({ enabled: true, model: "claude-opus-4-6", instructions: null });
 
     await run("como funciona o formulário?");
 
     expect(llm).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "claude-opus-4-6" })
+      expect.objectContaining({ model: "openai/gpt-5.4-nano" })
     );
   });
 
@@ -147,7 +155,7 @@ describe("grafo de conversa", () => {
     expect(usage).toHaveBeenCalledWith(
       "org1",
       expect.objectContaining({
-        model: "claude-sonnet-4-6",
+        model: "openai/gpt-5.4-nano",
         promptTokens: 100,
         success: true,
       })
@@ -187,7 +195,7 @@ describe("compactação", () => {
   it("histórico longo vira resumo E encolhe de verdade", async () => {
     llm
       .mockResolvedValueOnce(llmOk("resposta do turn"))
-      .mockResolvedValueOnce(llmOk("resumo dos turnos antigos", "claude-haiku-4-5-20251001"));
+      .mockResolvedValueOnce(llmOk("resumo dos turnos antigos"));
 
     const r = await run("pergunta qualquer sobre contrato", { messages: historico(20) });
 
@@ -197,14 +205,14 @@ describe("compactação", () => {
     expect(r.messages[r.messages.length - 1].content).toBe("resposta do turn");
   });
 
-  it("compacta com modelo barato, não com o do perfil", async () => {
+  it("compacta com teto de tokens curto — resumo não é redação", async () => {
     llm
       .mockResolvedValueOnce(llmOk("resposta"))
-      .mockResolvedValueOnce(llmOk("resumo", "claude-haiku-4-5-20251001"));
+      .mockResolvedValueOnce(llmOk("resumo"));
 
     await run("pergunta qualquer sobre contrato", { messages: historico(20) });
 
-    expect(llm.mock.calls[1][0].model).toBe("claude-haiku-4-5-20251001");
+    expect(llm.mock.calls[1][0].maxTokens).toBe(400);
   });
 
   /**

@@ -179,7 +179,7 @@ export async function reportUsage(
         Authorization: `Bearer ${org.apiToken}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ agentKey: "max", provider: "anthropic", ...usage }),
+      body: JSON.stringify({ agentKey: "max", provider: "openrouter", ...usage }),
     });
   } catch (err) {
     // Fire-and-forget: perder a contabilidade de um turn é ruim, não responder

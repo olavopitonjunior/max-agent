@@ -14,7 +14,6 @@
     "db:migrate": "tsx scripts/migrate.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.115.0",
     "@langchain/core": "^0.3.40",
     "@langchain/langgraph": "^0.2.44",
     "@langchain/langgraph-checkpoint-postgres": "^0.0.4",
