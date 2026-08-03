@@ -1,13 +1,18 @@
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
-  identifyByPhone,
   fetchProfile,
   searchKnowledge,
   reportUsage,
-  type Identity,
   type KnowledgeHit,
 } from "@/lib/cm";
+import {
+  resolveIdentity,
+  matchChoice,
+  saveChoice,
+  askWhichOrg,
+  type Candidate,
+} from "@/lib/identity";
 import { complete, DEFAULT_MODEL, type LlmUsage } from "@/lib/llm";
 import { buildSystemPrompt, shouldSearch } from "./prompt";
 import type { InboundMessage } from "@/lib/zapi";
@@ -52,7 +57,7 @@ type MessagesUpdate = ChatMessage[] | { replace: ChatMessage[] };
 export const MaxState = Annotation.Root({
   inbound: Annotation<InboundMessage>,
   /** Resolvida ANTES do grafo — é ela que determina o `thread_id`. */
-  identity: Annotation<Identity>,
+  identity: Annotation<Candidate>,
 
   messages: Annotation<ChatMessage[], MessagesUpdate>({
     reducer: (prev, next) =>
@@ -286,20 +291,46 @@ export async function getCheckpointer(): Promise<PostgresSaver> {
  * conversa em duas memórias.
  */
 export async function runTurn(inbound: InboundMessage): Promise<string | null> {
-  const identity = await identifyByPhone(inbound.fromPhone);
-  if (!identity) {
-    // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
-    // respondeu a um aviso, engano ou spam.
+  const texto = inbound.text?.trim() ?? "";
+  const identity = await resolveIdentity(inbound.fromPhone);
+
+  // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
+  // respondeu a um aviso, engano ou spam.
+  if (identity.kind === "unknown") {
     return (
       "Oi! Sou o Max, assistente das imobiliárias parceiras. Não reconheci " +
       "este número — fale com seu corretor para liberar o acesso."
     );
   }
 
+  // Primeira vez com o telefone em mais de uma imobiliária: pergunta e para.
+  if (identity.kind === "ambiguous") {
+    return askWhichOrg(identity.candidates);
+  }
+
+  // Já perguntamos: esta mensagem PODE ser a resposta.
+  if (identity.kind === "pending") {
+    const escolhido = matchChoice(texto, identity.candidates);
+    if (!escolhido) {
+      // Não insistir com o texto igual seria pior — repetir a lista deixa claro
+      // que o Max ainda está esperando, em vez de parecer que ignorou.
+      return askWhichOrg(identity.candidates);
+    }
+    await saveChoice(inbound.fromPhone, escolhido.orgId);
+    return (
+      `Certo, ${escolhido.orgName}. Pode mandar sua pergunta que eu respondo ` +
+      "com o material dessa imobiliária."
+    );
+  }
+
   const app = buildGraph().compile({ checkpointer: await getCheckpointer() });
   const result = await app.invoke(
-    { inbound, identity },
-    { configurable: { thread_id: threadIdFor(identity.orgId, inbound.fromPhone) } }
+    { inbound, identity: identity.candidate },
+    {
+      configurable: {
+        thread_id: threadIdFor(identity.candidate.orgId, inbound.fromPhone),
+      },
+    }
   );
 
   return result.reply ?? null;

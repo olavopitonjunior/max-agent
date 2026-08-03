@@ -1,6 +1,5 @@
-import { listOrgs, orgById, type OrgConfig } from "./orgs";
+import { orgById } from "./orgs";
 import { query } from "./db";
-import { normalizeBrPhone } from "./phone";
 
 /**
  * Cliente das APIs do ImobPro.
@@ -24,87 +23,12 @@ async function get<T>(path: string, token: string): Promise<T | null> {
   return (await res.json()) as T;
 }
 
-export interface Identity {
-  orgId: string;
-  orgName: string;
-  userId: string;
-  userName: string | null;
-}
-
 /**
- * Telefone → tenant + usuário.
- *
- * Não existe endpoint "de qual org é este telefone": o Bearer do ImobPro deriva
- * a org do dono do token, então a busca é uma por org, em sequência. Como
- * `User.phone` lá é unique GLOBAL, há no máximo um acerto — e a primeira
- * resposta positiva encerra a varredura.
- *
- * O cache guarda também o NEGATIVO. Sem isso, cada mensagem de um número
- * desconhecido (cliente que respondeu a uma notificação, engano, spam) custaria
- * uma chamada por tenant, para sempre.
+ * `identifyByPhone` saiu daqui para `lib/identity.ts` quando a resolução deixou
+ * de poder devolver UMA org: o mesmo telefone pode estar em duas imobiliárias, e
+ * a versão antiga parava no primeiro acerto — o desempate saía da ordem de
+ * cadastro. Ver `resolveIdentity`.
  */
-export async function identifyByPhone(rawPhone: string): Promise<Identity | null> {
-  const e164 = normalizeBrPhone(rawPhone);
-  if (!e164) return null;
-
-  const cached = await query<{
-    org_id: string | null;
-    user_id: string | null;
-    user_name: string | null;
-  }>(
-    `SELECT org_id, user_id, user_name FROM phone_org_cache
-      WHERE phone = $1 AND resolved_at > now() - interval '24 hours'`,
-    [e164]
-  );
-  if (cached.length > 0) {
-    const c = cached[0];
-    if (!c.org_id || !c.user_id) return null;
-    const org = await orgById(c.org_id);
-    return org
-      ? { orgId: c.org_id, orgName: org.orgName, userId: c.user_id, userName: c.user_name }
-      : null;
-  }
-
-  let found: { org: OrgConfig; user: { userId: string; name?: string } } | null = null;
-  for (const org of await listOrgs()) {
-    try {
-      const r = await get<{ userId: string; orgId: string; name?: string }>(
-        `/api/users/by-phone?phone=${encodeURIComponent(e164)}`,
-        org.apiToken
-      );
-      if (r?.userId) {
-        found = { org, user: { userId: r.userId, name: r.name } };
-        break;
-      }
-    } catch (err) {
-      // Uma org fora do ar não pode impedir que as outras respondam.
-      console.warn(
-        `[cm] by-phone falhou na org ${org.orgId}:`,
-        err instanceof Error ? err.message : String(err)
-      );
-    }
-  }
-
-  await query(
-    `INSERT INTO phone_org_cache (phone, org_id, user_id, user_name, resolved_at)
-     VALUES ($1,$2,$3,$4, now())
-     ON CONFLICT (phone) DO UPDATE
-       SET org_id = EXCLUDED.org_id,
-           user_id = EXCLUDED.user_id,
-           user_name = EXCLUDED.user_name,
-           resolved_at = now()`,
-    [e164, found?.org.orgId ?? null, found?.user.userId ?? null, found?.user.name ?? null]
-  );
-
-  return found
-    ? {
-        orgId: found.org.orgId,
-        orgName: found.org.orgName,
-        userId: found.user.userId,
-        userName: found.user.name ?? null,
-      }
-    : null;
-}
 
 export interface AgentProfile {
   enabled: boolean;

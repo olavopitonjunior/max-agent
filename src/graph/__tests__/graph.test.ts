@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("@/lib/cm", () => ({
-  identifyByPhone: vi.fn(),
   fetchProfile: vi.fn(),
   searchKnowledge: vi.fn(),
   reportUsage: vi.fn().mockResolvedValue(undefined),
@@ -23,6 +22,7 @@ const llm = complete as unknown as ReturnType<typeof vi.fn>;
 const identity = {
   orgId: "org1",
   orgName: "RE/MAX Trio",
+  kind: "user" as const,
   userId: "u1",
   userName: "Marcia Gerente",
 };
