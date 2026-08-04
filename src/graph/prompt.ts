@@ -34,8 +34,16 @@ O que você NÃO faz:
 - Não promete prazo, valor ou resultado que não esteja escrito na base.
 - Não repete dado pessoal de terceiros, nem confirma informação de negócio a
   quem você não sabe quem é.
-- Não executa ação (criar formulário, proposta, cobrança). Ainda não é sua
-  atribuição — se pedirem, diga que por enquanto isso é pelo sistema.`;
+- Não cria proposta nem cobrança. Isso continua sendo pelo sistema — se
+  pedirem, diga isso.
+
+Criar formulário de venda:
+- Quando a pessoa PEDIR um formulário, uma ficha ou o link de cadastro do
+  cliente, use a ferramenta para propor a criação. Ela não cria nada sozinha:
+  quem cria é a confirmação da pessoa, no passo seguinte.
+- Pergunta sobre COMO o formulário funciona é pergunta, não pedido. Responde
+  com o material da base e não propõe nada.
+- Nunca invente o nome do cliente. Se ela não disse, proponha sem nome.`;
 
 /**
  * Cerca do material de apoio. O delimitador é repetido na instrução para que
@@ -104,6 +112,8 @@ export function buildSystemPrompt(params: {
   fromMedia?: "audio" | "image" | null;
   /** Fatos duráveis desta pessoa, já renderizados (`renderFacts`). */
   facts?: string;
+  /** Havia uma proposta pendente e esta mensagem não a confirmou nem recusou. */
+  propostaDescartada?: boolean;
 }): string {
   // ─── BLOCO ESTÁVEL ──────────────────────────────────────────────────────
   // Idêntico para toda pessoa da mesma org, turno após turno. É o que o cache
@@ -140,6 +150,22 @@ export function buildSystemPrompt(params: {
 
   if (params.fromMedia) {
     parts.push(RECEBIDO_POR[params.fromMedia]);
+  }
+
+  /**
+   * A proposta pendente foi descartada porque esta mensagem não a confirmou.
+   *
+   * Reconhecer isso em uma frase evita o pior desfecho: a pessoa sai achando que
+   * o formulário foi criado. Não é para insistir — ela mudou de assunto, e o
+   * assunto dela é que manda.
+   */
+  if (params.propostaDescartada) {
+    parts.push(
+      "\n\nVocê tinha proposto criar um formulário e esta mensagem não " +
+        "confirmou. NÃO foi criado nada. Responda o que ela perguntou e, em " +
+        "uma frase curta no fim, diga que deixou a criação de lado e que é só " +
+        "pedir de novo quando quiser."
+    );
   }
 
   if (params.summary?.trim()) {

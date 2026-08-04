@@ -45,6 +45,10 @@ function inbound(text: string) {
 function llmOk(text: string, model = "openai/gpt-5.4-nano") {
   return {
     text,
+    // Resposta em texto é `toolCalls` VAZIO, nunca ausente — é o contrato do
+    // `complete`. Um mock que omite o campo esconderia do teste o caminho de
+    // ferramenta em vez de exercitá-lo.
+    toolCalls: [],
     usage: { model, promptTokens: 100, completionTokens: 20, latencyMs: 50, success: true },
   };
 }

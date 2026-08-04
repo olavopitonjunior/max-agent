@@ -131,6 +131,85 @@ export async function transcribeMedia(
   }
 }
 
+export interface FormularioCriado {
+  token: string;
+  /**
+   * URL ABSOLUTA, pronta pra mandar no WhatsApp.
+   *
+   * O ImobPro devolve caminho (`/f/<token>/<slug>`) porque quem chama de dentro
+   * tem `origin`. Aqui não tem, e montar isso no chamador espalharia a base por
+   * mais um arquivo — pior, um esquecimento produziria uma mensagem com um link
+   * relativo, que no WhatsApp não é link nenhum.
+   */
+  url: string;
+  dealId: string;
+}
+
+/**
+ * Cria um formulário de venda vazio e devolve o link público.
+ *
+ * A única ESCRITA que o Max faz. Usa `POST /api/forms`, que já existia e já
+ * aceitava Bearer — o que faltava era o token carregar `documents:rw`. Nenhuma
+ * rota nova foi criada: uma `/api/agents/forms` teria que duplicar as seis
+ * etapas do handler existente, porque lá a lógica é inline e não há helper.
+ *
+ * `idempotencyKey` é o `messageId` da mensagem em que a pessoa CONFIRMOU, e não
+ * um uuid novo. É o que faz a retentativa devolver o MESMO formulário em vez de
+ * criar um segundo: o `withIdempotency` do ImobPro guarda a resposta por 24h sob
+ * `(userId, key)`. Um uuid gerado aqui seria diferente a cada tentativa e não
+ * protegeria de nada.
+ *
+ * `corretorIds` semeia `dataJson.comissao.comissionados` e
+ * `notificationsJson.brokerIds` — é por ele que o corretor entra na comissão e
+ * recebe notificação do negócio, já que o `Deal.userId` fica com o usuário de
+ * serviço.
+ *
+ * Erro SOBE, ao contrário dos outros clientes deste arquivo. Perder o relato de
+ * custo é aceitável; deixar a pessoa achar que o formulário foi criado não é.
+ */
+export async function criarFormularioVenda(
+  orgId: string,
+  params: {
+    title?: string;
+    corretorIds?: string[];
+    idempotencyKey: string;
+  }
+): Promise<FormularioCriado> {
+  const org = await orgById(orgId);
+  if (!org) throw new Error(`org ${orgId} não configurada`);
+
+  const res = await fetch(`${BASE()}/api/forms`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${org.apiToken}`,
+      "Content-Type": "application/json",
+      "X-Idempotency-Key": params.idempotencyKey,
+    },
+    body: JSON.stringify({
+      ...(params.title ? { title: params.title } : {}),
+      ...(params.corretorIds?.length ? { corretorIds: params.corretorIds } : {}),
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(
+      `ImobPro /api/forms ${res.status}: ${(await res.text()).slice(0, 300)}`
+    );
+  }
+
+  const data = (await res.json()) as Partial<FormularioCriado>;
+  // Sem token não há link, e sem link a resposta seria "criei" sem dizer onde —
+  // pior que o erro, porque tem cara de sucesso.
+  if (!data.token || !data.dealId) {
+    throw new Error("ImobPro /api/forms respondeu sem token/dealId");
+  }
+  return {
+    token: data.token,
+    url: `${BASE()}${data.url ?? `/f/${data.token}`}`,
+    dealId: data.dealId,
+  };
+}
+
 /**
  * Reporta o custo do turn. Uma linha POR MODELO: um turn multi-modelo somado
  * num bucket só cobraria Sonnet a preço de Haiku, e esse número alimenta o teto
