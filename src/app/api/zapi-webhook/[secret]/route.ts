@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseInbound, isExpectedInstance, sendText } from "@/lib/zapi";
-import { query } from "@/lib/db";
-import { runTurn } from "@/graph/graph";
+import { waitUntil } from "@vercel/functions";
+import { parseInbound, isExpectedInstance } from "@/lib/zapi";
+import { enqueueInbound, processInboundNow } from "@/lib/inbound";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -14,14 +14,24 @@ export const runtime = "nodejs";
  * mais fraco que HMAC: trate a URL como credencial, nunca a coloque em log de
  * acesso público, e rotacione-a se vazar.
  *
- * Responde 200 SEMPRE — inclusive quando o turn falha. Um 5xx faria a Z-API
- * reentregar, e o dedupe já consumiu o `messageId`: o usuário ficaria sem
- * resposta e sem rastro.
+ * Responde 200 SEMPRE — inclusive quando algo falha. Um 5xx faria a Z-API
+ * reentregar, e a linha da fila já foi criada: a mensagem seria processada uma
+ * vez e reentregue mesmo assim.
  *
- * O turn roda INLINE por enquanto, o que é aceitável porque o grafo ainda não
- * chama modelo. Quando a Fase 2 entrar, isso tem que virar fila: uma resposta
- * de LLM demora mais que o timeout da Z-API, e o retry dela esbarraria no
- * dedupe — silêncio, não duplicata.
+ * ── Esta rota só ACEITA ──────────────────────────────────────────────────
+ * O turn rodava INLINE aqui. Era aceitável enquanto o grafo não chamava modelo,
+ * e o comentário anterior registrava o prazo; a Fase 2 entrou em produção em
+ * 2026-08-03 e a premissa caiu.
+ *
+ * O modo de falha é o pior tipo: um turn mais lento que o timeout do webhook
+ * faz a Z-API REENTREGAR, a reentrega bate no dedupe (que já consumiu o
+ * `messageId`), e a pessoa fica sem resposta e sem rastro. Duplicata incomoda;
+ * silêncio ninguém vê.
+ *
+ * Agora: grava na fila, responde, e processa em background. O `waitUntil`
+ * mantém a latência de conversa (não espera o cron), e o cron varre o que ele
+ * não fechou — a function pode ser morta a qualquer momento, então o caminho
+ * rápido é otimização, nunca a garantia.
  */
 export async function POST(
   req: NextRequest,
@@ -56,45 +66,28 @@ export async function POST(
   // sozinho.
   if (!msg) return NextResponse.json({ ok: true, ignored: true });
 
-  // Dedupe ANTES de qualquer trabalho: a Z-API reentrega em timeout, e sem
-  // isto uma resposta lenta viraria dois turnos para a mesma mensagem.
-  const claimed = await query<{ message_id: string }>(
-    `INSERT INTO inbound_seen (message_id) VALUES ($1)
-     ON CONFLICT (message_id) DO NOTHING
-     RETURNING message_id`,
-    [msg.messageId]
-  );
-  if (claimed.length === 0) {
-    return NextResponse.json({ ok: true, duplicate: true });
-  }
-
-  console.log(
-    `[zapi-webhook] inbound ${msg.kind} de ${msg.fromPhone}${msg.groupId ? ` (grupo ${msg.groupId})` : ""}`
-  );
-
   // Grupo não é respondido: o Max nasce como canal de DM, e responder em grupo
-  // sem gate de menção transformaria qualquer conversa em barulho. A leitura de
-  // grupo do Newton (WhatsappGroup/DealGroupLink) é outro assunto.
+  // sem gate de menção transformaria qualquer conversa em barulho. Descartado
+  // ANTES da fila — o que nunca vai ser processado não merece linha, e reentrega
+  // de grupo cai aqui de novo e é ignorada do mesmo jeito.
   if (msg.groupId) {
     return NextResponse.json({ ok: true, ignored: "grupo" });
   }
 
-  try {
-    const reply = await runTurn(msg);
-    if (reply) {
-      await sendText({ to: msg.fromPhone, body: reply, quoteMessageId: msg.messageId });
-    }
-  } catch (err) {
-    // Nunca propaga: erro aqui viraria 5xx, a Z-API reentregaria, e o dedupe
-    // acima já consumiu o messageId — o usuário ficaria sem resposta E sem
-    // rastro. Logar e devolver 200 mantém o incidente visível num lugar só.
-    console.error(
-      "[zapi-webhook] turn falhou:",
-      err instanceof Error ? err.message : String(err)
-    );
+  const enfileirado = await enqueueInbound(msg);
+  if (enfileirado.status === "duplicate") {
+    return NextResponse.json({ ok: true, duplicate: true });
   }
 
-  return NextResponse.json({ ok: true, accepted: true });
+  console.log(
+    `[zapi-webhook] aceito ${msg.kind} de ${msg.fromPhone} (${enfileirado.id})`
+  );
+
+  // Fire-and-forget de verdade: sem `waitUntil` a Vercel congela a function no
+  // instante da resposta e o processamento morreria no meio.
+  waitUntil(processInboundNow(enfileirado.id));
+
+  return NextResponse.json({ ok: true, accepted: true, id: enfileirado.id });
 }
 
 /**
