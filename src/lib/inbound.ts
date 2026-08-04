@@ -204,9 +204,19 @@ export type SettleStatus = "done" | "failed" | "retry";
 export async function runQueued(row: InboundRow): Promise<SettleStatus> {
   try {
     let reply = row.reply_text;
+    /**
+     * Trabalho pós-resposta do turn — hoje, a extração de memória.
+     *
+     * Fica `undefined` na retentativa que só reenvia: o grafo não rodou de
+     * novo, então não há turn novo do qual aprender. Extrair ali gravaria os
+     * mesmos fatos uma segunda vez, com uma segunda chamada de modelo paga.
+     */
+    let afterReply: (() => Promise<void>) | undefined;
 
     if (reply == null) {
-      reply = await runTurn(toInboundMessage(row));
+      const turn = await runTurn(toInboundMessage(row));
+      reply = turn.reply;
+      afterReply = turn.afterReply;
       // Grava mesmo quando é null: "o grafo decidiu não responder" é resultado,
       // e sem persistir isso a retentativa rodaria o modelo de novo à toa.
       await query(`UPDATE inbound_queue SET reply_text = $2 WHERE id = $1`, [
@@ -232,6 +242,25 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
         WHERE id = $1`,
       [row.id, replyMessageId]
     );
+
+    /**
+     * Só agora. A pessoa já recebeu a resposta e a linha já está liquidada —
+     * daqui pra frente nada do que acontecer pode atrasar a conversa nem
+     * reabrir o que já fechou.
+     *
+     * `catch` próprio, e não dentro do `try` de cima: uma falha na memória não
+     * pode reverter um turn que deu certo pra `pending` e fazer o cron reenviar
+     * a MESMA resposta.
+     */
+    if (afterReply) {
+      await afterReply().catch((err) =>
+        console.warn(
+          "[inbound] memória não gravada (turn já respondido):",
+          err instanceof Error ? err.message : String(err)
+        )
+      );
+    }
+
     return "done";
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

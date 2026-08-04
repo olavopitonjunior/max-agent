@@ -21,7 +21,7 @@ vi.mock("../zapi", () => ({
 }));
 
 vi.mock("@/graph/graph", () => ({
-  runTurn: vi.fn().mockResolvedValue("resposta do Max"),
+  runTurn: vi.fn().mockResolvedValue({ reply: "resposta do Max" }),
 }));
 
 const { enqueueInbound, sweepInbound, processInboundNow } = await import(
@@ -72,7 +72,7 @@ d("inbound_queue (Postgres real)", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     sent.mockResolvedValue({ messageId: "REPLY-MID" });
-    turn.mockResolvedValue("resposta do Max");
+    turn.mockResolvedValue({ reply: "resposta do Max" });
     status.mockResolvedValue({ connected: true, raw: {} });
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
   });
@@ -204,13 +204,75 @@ d("inbound_queue (Postgres real)", () => {
     const r = await enqueueInbound(msg());
     if (r.status !== "queued") throw new Error("esperava queued");
 
-    turn.mockResolvedValue(null);
+    turn.mockResolvedValue({ reply: null });
     await processInboundNow(r.id);
 
     const row = await statusDe(r.id);
     expect(row.status).toBe("done");
     expect(row.reply_message_id).toBeNull();
     expect(sent).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A promessa do desenho: a memória é extraída FORA do caminho crítico.
+   *
+   * `afterReply` é um thunk justamente pra que isso seja estrutura e não
+   * comentário — mas estrutura só vale se alguém a chamar no lugar certo. Este
+   * teste é o que prova a ORDEM: a pessoa recebe a resposta primeiro, e só
+   * depois o modelo de extração roda.
+   */
+  it("memória é extraída DEPOIS do envio da resposta", async () => {
+    const after = vi.fn().mockResolvedValue(undefined);
+    turn.mockResolvedValue({ reply: "resposta do Max", afterReply: after });
+
+    const r = await enqueueInbound(msg());
+    if (r.status !== "queued") throw new Error("esperava queued");
+    await processInboundNow(r.id);
+
+    expect(after).toHaveBeenCalledTimes(1);
+    expect(after.mock.invocationCallOrder[0]).toBeGreaterThan(
+      sent.mock.invocationCallOrder[0]
+    );
+  });
+
+  /**
+   * Falha na memória não pode desfazer um turn que deu certo. Se ela reabrisse
+   * a linha, o cron reenviaria a MESMA resposta — a pessoa receberia duas vezes
+   * por causa de um erro em algo opcional.
+   */
+  it("memória que falha não reabre o turn nem duplica a resposta", async () => {
+    turn.mockResolvedValue({
+      reply: "resposta do Max",
+      afterReply: vi.fn().mockRejectedValue(new Error("banco fora")),
+    });
+
+    const r = await enqueueInbound(msg());
+    if (r.status !== "queued") throw new Error("esperava queued");
+    await processInboundNow(r.id);
+
+    expect((await statusDe(r.id)).status).toBe("done");
+    expect(sent).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Retentativa que só REENVIA não tem turn novo do qual aprender: o grafo não
+   * rodou. Extrair ali gravaria os mesmos fatos de novo, com uma segunda
+   * chamada de modelo paga.
+   */
+  it("reenvio não extrai memória de novo", async () => {
+    const after = vi.fn().mockResolvedValue(undefined);
+    turn.mockResolvedValue({ reply: "resposta do Max", afterReply: after });
+
+    const r = await enqueueInbound(msg());
+    if (r.status !== "queued") throw new Error("esperava queued");
+
+    sent.mockRejectedValueOnce(new Error("z-api fora do ar"));
+    await processInboundNow(r.id); // grafo roda, envio falha
+    await sweepInbound(); // só reenvia
+
+    expect(sent).toHaveBeenCalledTimes(2);
+    expect(turn).toHaveBeenCalledTimes(1);
+    expect(after).not.toHaveBeenCalled();
   });
 
   /**

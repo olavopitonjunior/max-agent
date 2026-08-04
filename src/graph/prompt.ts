@@ -102,6 +102,8 @@ export function buildSystemPrompt(params: {
   summary?: string | null;
   /** Turn originado de mídia transcrita, quando for o caso. */
   fromMedia?: "audio" | "image" | null;
+  /** Fatos duráveis desta pessoa, já renderizados (`renderFacts`). */
+  facts?: string;
 }): string {
   // ─── BLOCO ESTÁVEL ──────────────────────────────────────────────────────
   // Idêntico para toda pessoa da mesma org, turno após turno. É o que o cache
@@ -128,6 +130,12 @@ export function buildSystemPrompt(params: {
   // não pode preceder o que nunca muda.
   if (params.userName) {
     parts.push(`\nVocê está falando com ${params.userName}.`);
+  }
+
+  // Junto do nome, porque é da mesma natureza: varia por PESSOA. Antes do
+  // resumo e do material, que variam por turn.
+  if (params.facts) {
+    parts.push(params.facts);
   }
 
   if (params.fromMedia) {

@@ -101,7 +101,7 @@ describe("mídia vira o turno da pessoa", () => {
   it("download falho vira aviso, não silêncio", async () => {
     baixar.mockResolvedValue(null);
 
-    const reply = await runTurn(midia("audio"));
+    const { reply } = await runTurn(midia("audio"));
 
     expect(reply).toContain("Não consegui ouvir");
     expect(transcrever).not.toHaveBeenCalled();
@@ -110,12 +110,12 @@ describe("mídia vira o turno da pessoa", () => {
   it("transcrição falha vira aviso, com o verbo certo pra imagem", async () => {
     transcrever.mockResolvedValue(null);
 
-    expect(await runTurn(midia("audio"))).toContain("Não consegui ouvir");
-    expect(await runTurn(midia("image"))).toContain("Não consegui ver");
+    expect((await runTurn(midia("audio"))).reply).toContain("Não consegui ouvir");
+    expect((await runTurn(midia("image"))).reply).toContain("Não consegui ver");
   });
 
   it("mensagem sem mediaUrl não tenta baixar", async () => {
-    const reply = await runTurn(midia("audio", { mediaUrl: null }));
+    const { reply } = await runTurn(midia("audio", { mediaUrl: null }));
 
     expect(baixar).not.toHaveBeenCalled();
     expect(reply).toContain("Não consegui ouvir");
@@ -142,7 +142,7 @@ describe("mídia vira o turno da pessoa", () => {
       candidates: [CANDIDATO, { ...CANDIDATO, orgId: "org2", orgName: "RE/MAX Ace" }],
     });
 
-    const reply = await runTurn(midia("audio"));
+    const { reply } = await runTurn(midia("audio"));
 
     expect(reply).toContain("por escrito");
     expect(transcrever).not.toHaveBeenCalled();
