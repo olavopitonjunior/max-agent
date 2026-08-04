@@ -14,6 +14,7 @@ vi.mock("@/lib/cm", () => ({
   searchKnowledge: vi.fn(),
   reportUsage: vi.fn().mockResolvedValue(undefined),
   criarFormularioVenda: vi.fn(),
+  brokerRecipientId: vi.fn(),
 }));
 vi.mock("@/lib/llm", () => ({
   complete: vi.fn(),
@@ -23,14 +24,14 @@ vi.mock("@/lib/llm", () => ({
 const { buildGraph } = await import("../graph");
 const { TOOL_PROPOR_FORM, PENDING_TTL_MS, lerConfirmacao, shouldOfferTools } =
   await import("../tools");
-const { fetchProfile, searchKnowledge, criarFormularioVenda } = await import(
-  "@/lib/cm"
-);
+const { fetchProfile, searchKnowledge, criarFormularioVenda, brokerRecipientId } =
+  await import("@/lib/cm");
 const { complete } = await import("@/lib/llm");
 
 const profile = fetchProfile as unknown as ReturnType<typeof vi.fn>;
 const search = searchKnowledge as unknown as ReturnType<typeof vi.fn>;
 const criar = criarFormularioVenda as unknown as ReturnType<typeof vi.fn>;
+const recipient = brokerRecipientId as unknown as ReturnType<typeof vi.fn>;
 const llm = complete as unknown as ReturnType<typeof vi.fn>;
 
 const usuario = {
@@ -131,6 +132,7 @@ beforeEach(() => {
     url: "https://imobpro.ia.br/f/tok123/joao-silva",
     dealId: "deal1",
   });
+  recipient.mockResolvedValue("sr-wesley");
 });
 
 describe("propor", () => {
@@ -199,15 +201,39 @@ describe("confirmar", () => {
     expect(criar).toHaveBeenCalledTimes(1);
     expect(criar).toHaveBeenCalledWith("org1", {
       title: "Formulário — João Silva",
-      corretorIds: ["u1"],
+      /**
+       * Id de SplitRecipient resolvido pelo broker-scope, NUNCA o userId da
+       * identidade: os corretorIds do /api/forms são SplitRecipient, e um
+       * userId ali seria descartado em silêncio — form sem comissionado e sem
+       * notificação, sem ninguém perceber.
+       */
+      corretorIds: ["sr-wesley"],
       // A mensagem que CONFIRMOU. Um uuid novo seria diferente a cada
       // retentativa e não protegeria de criar dois.
       idempotencyKey: "m-confirma",
     });
+    // O broker-scope foi consultado com o TELEFONE de quem confirmou.
+    expect(recipient).toHaveBeenCalledWith("org1", "5511987654321");
     expect(s.reply).toContain("https://imobpro.ia.br/f/tok123/joao-silva");
     expect(s.pendingAction).toBeNull();
     // Turn de confirmação custa ZERO token: quem responde é o template.
     expect(llm).not.toHaveBeenCalled();
+  });
+
+  /**
+   * `null` do broker-scope é resultado normal — gerente que pede form sem ser
+   * comissionado. O form nasce sem seed, e nada disso é erro.
+   */
+  it("sem SplitRecipient, cria sem corretorIds em vez de falhar", async () => {
+    recipient.mockResolvedValue(null);
+
+    const s = await run("sim", { pendingAction: pendenciaDe("João") });
+
+    expect(criar).toHaveBeenCalledWith(
+      "org1",
+      expect.objectContaining({ corretorIds: undefined })
+    );
+    expect(s.reply).toContain("https://imobpro.ia.br/f/tok123");
   });
 
   it("NÃO cancela sem criar nada", async () => {

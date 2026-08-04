@@ -6,6 +6,7 @@ import {
   reportUsage,
   transcribeMedia,
   criarFormularioVenda,
+  brokerRecipientId,
   type KnowledgeHit,
 } from "@/lib/cm";
 import {
@@ -277,14 +278,22 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
   // Confirmado. A partir daqui há escrita de verdade.
   const nomeCliente = pending.args.nomeCliente;
   try {
+    /**
+     * `corretorIds` do `/api/forms` são ids de `SplitRecipient`, NÃO de `User`
+     * — o where de lá é org-scoped e descarta id desconhecido em silêncio.
+     * Mandar `identity.userId` não erraria: só deixaria o form sem comissionado
+     * e sem notificação, sem ninguém perceber. O vínculo certo é pelo telefone,
+     * via broker-scope. `null` é normal (gerente pede form sem ser comissionado)
+     * e vira omissão — o Deal nasce do usuário de serviço de qualquer jeito.
+     */
+    const recipientId = await brokerRecipientId(
+      state.identity.orgId,
+      state.inbound.fromPhone
+    );
+
     const form = await criarFormularioVenda(state.identity.orgId, {
       title: nomeCliente ? `Formulário — ${nomeCliente}` : undefined,
-      // O Deal nasce do usuário de serviço (o Bearer do ImobPro deriva o ator do
-      // dono do token, e `requireApiAuth` ignora `X-Act-As-User`). É por aqui
-      // que o corretor entra na comissão e volta a receber notificação.
-      corretorIds: podeEscrever(state.identity)
-        ? [state.identity.userId]
-        : undefined,
+      corretorIds: recipientId ? [recipientId] : undefined,
       // A mensagem que CONFIRMOU, não um uuid novo: é o que faz a retentativa
       // devolver o mesmo formulário em vez de criar um segundo.
       idempotencyKey: state.inbound.messageId,

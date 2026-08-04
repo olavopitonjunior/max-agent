@@ -1,4 +1,5 @@
 import { orgById } from "./orgs";
+import { normalizeBrPhone } from "./phone";
 import { query } from "./db";
 
 /**
@@ -162,11 +163,47 @@ export interface FormularioCriado {
  * `corretorIds` semeia `dataJson.comissao.comissionados` e
  * `notificationsJson.brokerIds` — é por ele que o corretor entra na comissão e
  * recebe notificação do negócio, já que o `Deal.userId` fica com o usuário de
- * serviço.
+ * serviço. **São ids de `SplitRecipient`, NÃO de `User`** — o `/api/forms`
+ * filtra por `splitRecipient.findMany({id: {in}, orgId})` e descarta o resto em
+ * silêncio; mandar um userId aqui não erra, só não semeia nada. Resolver com
+ * `brokerRecipientId` antes de chamar.
  *
  * Erro SOBE, ao contrário dos outros clientes deste arquivo. Perder o relato de
  * custo é aceitável; deixar a pessoa achar que o formulário foi criado não é.
  */
+/**
+ * O `SplitRecipient` do corretor NESTA org, pelo telefone — ou `null`.
+ *
+ * Existe porque os `corretorIds` do `/api/forms` são ids de `SplitRecipient`, e
+ * a identidade do Max só carrega `userId`. O vínculo entre os dois é o telefone,
+ * e quem resolve isso é o `broker-scope` — a mesma rota que a identidade já usa,
+ * com as mesmas travas (org do token, `maxEnabled`, 404 pra tudo que não
+ * resolve).
+ *
+ * `null` é resultado NORMAL, não falha: gerente pede formulário sem ser
+ * comissionado, e o form nasce sem seed. Por isso nenhum erro sobe daqui.
+ */
+export async function brokerRecipientId(
+  orgId: string,
+  rawPhone: string
+): Promise<string | null> {
+  const org = await orgById(orgId);
+  if (!org) return null;
+  const e164 = normalizeBrPhone(rawPhone);
+  if (!e164) return null;
+  try {
+    const res = await fetch(
+      `${BASE()}/api/agents/broker-scope?phone=${encodeURIComponent(e164)}`,
+      { headers: { Authorization: `Bearer ${org.apiToken}` } }
+    );
+    if (!res.ok) return null;
+    const r = (await res.json()) as { splitRecipientId?: string };
+    return typeof r.splitRecipientId === "string" ? r.splitRecipientId : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function criarFormularioVenda(
   orgId: string,
   params: {
