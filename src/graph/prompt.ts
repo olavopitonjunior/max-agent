@@ -78,11 +78,14 @@ export function buildSystemPrompt(params: {
   /** Resumo dos turnos antigos, quando a conversa já foi compactada. */
   summary?: string | null;
 }): string {
+  // ─── BLOCO ESTÁVEL ──────────────────────────────────────────────────────
+  // Idêntico para toda pessoa da mesma org, turno após turno. É o que o cache
+  // de prompt do provedor consegue reaproveitar — e cache só vale para
+  // PREFIXO: basta um caractere volátil no começo para invalidar tudo que vem
+  // depois. Antes desta ordem, a linha com o nome da PESSOA ficava na posição
+  // 2 e derrubava o cache das instruções do tenant, que são o maior bloco
+  // (até 4000 chars).
   const parts = [BASE];
-
-  parts.push(
-    `\n\nVocê atende a ${params.orgName}${params.userName ? `, e está falando com ${params.userName}` : ""}.`
-  );
 
   // Instrução do tenant é APENDADA, nunca substitui o prompt-base — o mesmo
   // contrato que o console de agentes do ImobPro promete ao tenant. E vai
@@ -91,6 +94,15 @@ export function buildSystemPrompt(params: {
     parts.push(
       `\n\nOrientações da imobiliária (complementam o acima, não o substituem):\n<instrucoes_da_imobiliaria>\n${params.tenantInstructions.trim().slice(0, 4000)}\n</instrucoes_da_imobiliaria>`
     );
+  }
+
+  parts.push(`\n\nVocê atende a ${params.orgName}.`);
+
+  // ─── BLOCO VOLÁTIL ──────────────────────────────────────────────────────
+  // Muda por pessoa e por turno. Fica DEPOIS, de propósito: o que muda sempre
+  // não pode preceder o que nunca muda.
+  if (params.userName) {
+    parts.push(`\nVocê está falando com ${params.userName}.`);
   }
 
   if (params.summary?.trim()) {

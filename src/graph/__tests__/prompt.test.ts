@@ -131,3 +131,68 @@ describe("shouldSearch", () => {
     }
   });
 });
+
+/**
+ * Ordem do prompt: estável antes de volátil.
+ *
+ * Cache de prompt do provedor vale só para PREFIXO — um caractere volátil no
+ * começo invalida tudo que vem depois. A versão anterior punha a linha com o
+ * nome da PESSOA na posição 2, derrubando o cache das instruções do tenant,
+ * que são o maior bloco do prompt.
+ *
+ * Este teste é sobre POSIÇÃO RELATIVA, não sobre o texto: a regressão que ele
+ * pega é alguém acrescentar um bloco volátil no lugar cômodo (o começo).
+ */
+describe("ordem estável → volátil (proteção do cache)", () => {
+  const base = {
+    tenantInstructions: "Trate todo cliente por senhor.",
+    orgName: "RE/MAX Trio",
+    userName: "Marcia",
+    hits: [{ title: "T", content: "C", score: 0.9 } as never],
+    summary: "Falamos sobre comissão.",
+  };
+
+  it("instruções do tenant vêm ANTES do nome da pessoa", () => {
+    const p = buildSystemPrompt(base);
+
+    expect(p.indexOf("<instrucoes_da_imobiliaria>")).toBeLessThan(
+      p.indexOf("Marcia")
+    );
+  });
+
+  it("o nome da ORG (estável) vem antes do nome da PESSOA (volátil)", () => {
+    const p = buildSystemPrompt(base);
+
+    expect(p.indexOf("RE/MAX Trio")).toBeLessThan(p.indexOf("Marcia"));
+  });
+
+  it("resumo e material vêm depois de tudo que é estável", () => {
+    const p = buildSystemPrompt(base);
+    const fimDoEstavel = p.indexOf("RE/MAX Trio");
+
+    expect(p.indexOf("Falamos sobre comissão")).toBeGreaterThan(fimDoEstavel);
+    expect(p.indexOf("<material>")).toBeGreaterThan(fimDoEstavel);
+  });
+
+  /**
+   * O prefixo estável tem que ser IDÊNTICO entre duas pessoas da mesma org —
+   * é literalmente a condição para o cache pegar.
+   */
+  it("duas pessoas da mesma org compartilham o mesmo prefixo", () => {
+    const a = buildSystemPrompt({ ...base, userName: "Marcia" });
+    const b = buildSystemPrompt({ ...base, userName: "Roberto" });
+
+    const prefixoA = a.slice(0, a.indexOf("Você está falando com"));
+    const prefixoB = b.slice(0, b.indexOf("Você está falando com"));
+    expect(prefixoA).toBe(prefixoB);
+    // E o prefixo compartilhado carrega o bloco caro, não só a persona.
+    expect(prefixoA).toContain("<instrucoes_da_imobiliaria>");
+  });
+
+  it("sem userName o prompt não ganha linha vazia nem quebra", () => {
+    const p = buildSystemPrompt({ ...base, userName: null });
+
+    expect(p).toContain("Você atende a RE/MAX Trio.");
+    expect(p).not.toContain("Você está falando com");
+  });
+});
