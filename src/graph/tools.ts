@@ -22,38 +22,100 @@ import type { Candidate } from "@/lib/identity";
 /** Quanto tempo uma proposta pendente continua válida. */
 export const PENDING_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * O que o Max sabe criar. `venda` e `locacao` são formulário em branco + link;
+ * `proposta` é um RASCUNHO de proposta + link.
+ */
+export const TIPOS_CRIAVEIS = ["venda", "locacao", "proposta"] as const;
+export type TipoCriavel = (typeof TIPOS_CRIAVEIS)[number];
+
 export interface PendingAction {
-  kind: "criar_form_venda";
-  args: { nomeCliente?: string };
+  kind: "criar_documento";
+  args: {
+    tipo: TipoCriavel;
+    nomeCliente?: string;
+    /** Só locação e proposta de locação. */
+    finalidade?: "residencial" | "comercial";
+  };
   /** Epoch ms de quando a proposta foi feita. */
   askedAt: number;
-  /** `messageId` do turn que propôs — rastro, e chave de idempotência na execução. */
+  /** `messageId` do turn que propôs — rastro. */
   askedForMessageId: string;
 }
 
-export const TOOL_PROPOR_FORM = "propor_formulario_venda";
+export const TOOL_PROPOR_FORM = "propor_criacao";
 
+/**
+ * UMA ferramenta com um parâmetro, e não três ferramentas parecidas.
+ *
+ * Modelo pequeno erra mais escolhendo entre ferramentas de descrição vizinha
+ * ("criar formulário de venda" × "criar formulário de locação") do que
+ * preenchendo um enum — as três se desambiguam entre si e a fronteira fica na
+ * redação, que é onde ele é fraco. Com um enum, a decisão vira uma palavra que
+ * a própria pessoa disse.
+ *
+ * Bônus: a definição que vai no prompt fica ~1/3 do tamanho, em todo turn que
+ * passa o prefiltro.
+ */
 export const FORM_TOOL: LlmTool = {
   name: TOOL_PROPOR_FORM,
+  /**
+   * A descrição é o que decide a chamada — mais que o prompt.
+   *
+   * A primeira versão embutia "se não deixou claro se é venda ou aluguel, NÃO
+   * chame: pergunte" dentro do parâmetro `tipo`. Medido: o recall caiu de 100%
+   * para 50%, e os TRÊS casos de proposta falharam — o modelo lia aquilo como
+   * condição de bloqueio geral e se abstinha, inclusive onde "venda ou aluguel"
+   * nem se aplicava. Desambiguar é assunto do prompt; aqui só se descreve o que
+   * a ferramenta faz.
+   */
   description:
-    "Propõe criar um formulário de venda em branco e devolver o link público " +
-    "para o cliente preencher. Use quando a pessoa PEDIR um formulário, uma " +
-    "ficha, um cadastro de cliente ou o link de preenchimento. Não use para " +
-    "perguntas sobre como o formulário funciona.",
+    "Cria um formulário ou uma proposta e devolve o link. Chame sempre que a " +
+    "pessoa pedir para CRIAR, ABRIR, GERAR ou MANDAR um formulário, uma ficha, " +
+    "um cadastro, uma proposta ou o link de preenchimento — mesmo que ela não " +
+    "dê detalhes. A criação não acontece agora: a pessoa ainda confirma depois.",
   parameters: {
     type: "object",
     properties: {
+      tipo: {
+        type: "string",
+        enum: [...TIPOS_CRIAVEIS],
+        description:
+          "venda = formulário de compra e venda (comprador, imóvel à venda). " +
+          "locacao = formulário de aluguel (inquilino, locação, locatário). " +
+          "proposta = rascunho de proposta comercial.",
+      },
       nome_cliente: {
         type: "string",
         description:
           "Nome do cliente, se a pessoa disse. Omita se ela não disse — " +
           "não invente nem deduza.",
       },
+      finalidade: {
+        type: "string",
+        enum: ["residencial", "comercial"],
+        description:
+          "Só para locação. Omita se a pessoa não disse — o padrão é residencial.",
+      },
     },
-    required: [],
+    required: ["tipo"],
     additionalProperties: false,
   },
 };
+
+/** Lê o `tipo` da chamada do modelo. `null` quando ele mandou algo fora do enum. */
+export function lerTipo(bruto: unknown): TipoCriavel | null {
+  return typeof bruto === "string" &&
+    (TIPOS_CRIAVEIS as readonly string[]).includes(bruto)
+    ? (bruto as TipoCriavel)
+    : null;
+}
+
+export function lerFinalidade(
+  bruto: unknown
+): "residencial" | "comercial" | undefined {
+  return bruto === "comercial" || bruto === "residencial" ? bruto : undefined;
+}
 
 /**
  * Só usuário da plataforma escreve.
@@ -80,7 +142,7 @@ export function podeEscrever(identity: Candidate): identity is Extract<
  * alguns tokens de entrada, falso negativo custa a feature inteira.
  */
 const PEDE_ESCRITA =
-  /(formul[aá]ri|ficha|cadastr|link|abrir?|cri(a|ar|e)|nov[oa] (neg[oó]cio|venda|cliente)|manda?r? o link)/i;
+  /(formul[aá]ri|ficha|cadastr|link|proposta|abrir?|cri(a|ar|e)|nov[oa] (neg[oó]cio|venda|loca[cç][aã]o|cliente)|manda?r? o link)/i;
 
 export function shouldOfferTools(text: string): boolean {
   return PEDE_ESCRITA.test(text);
@@ -143,22 +205,69 @@ export function propostaExpirou(pending: PendingAction, agora: number): boolean 
  * pode criar pro João" e o Max não reconheceria. Ou o matcher afrouxa e passa a
  * aceitar "sim, mas...", ou a pergunta ensina — e ensinar é o lado seguro.
  */
-export function textoProposta(args: { nomeCliente?: string }): string {
+/** Como cada tipo é chamado na conversa. Uma fonte só, usada nos três textos. */
+const NOME_DO_TIPO: Record<TipoCriavel, string> = {
+  venda: "formulário de venda",
+  locacao: "formulário de locação",
+  proposta: "rascunho de proposta",
+};
+
+export function descreverPendencia(args: PendingAction["args"]): string {
+  const base = NOME_DO_TIPO[args.tipo];
+  const fim =
+    args.tipo === "locacao" && args.finalidade === "comercial"
+      ? " comercial"
+      : "";
+  return `${base}${fim}`;
+}
+
+export function textoProposta(args: PendingAction["args"]): string {
   const alvo = args.nomeCliente ? ` para ${args.nomeCliente}` : "";
+  const oQue = descreverPendencia(args);
+  const paraQue =
+    args.tipo === "proposta"
+      ? "e te mandar o link para completar os valores"
+      : "e te mandar o link para o cliente preencher";
   return (
-    `Posso criar um formulário de venda${alvo} e te mandar o link para o ` +
-    `cliente preencher.\n\nConfirma? Responde SIM que eu crio.`
+    `Posso criar um ${oQue}${alvo} ${paraQue}.\n\n` +
+    `Confirma? Responde SIM que eu crio.`
   );
 }
 
 export function textoCriado(params: {
   url: string;
-  nomeCliente?: string;
+  args: PendingAction["args"];
 }): string {
-  const alvo = params.nomeCliente ? ` de ${params.nomeCliente}` : "";
+  const alvo = params.args.nomeCliente ? ` de ${params.args.nomeCliente}` : "";
+  const oQue = descreverPendencia(params.args);
+
+  // A proposta nasce RASCUNHO e sem valores — dizer isso é o que impede o
+  // corretor de mandar o link direto pro cliente achando que está pronto.
+  if (params.args.tipo === "proposta") {
+    return (
+      `Pronto, ${oQue}${alvo} criado — ainda em RASCUNHO, sem valores. ` +
+      `Completa por aqui antes de mandar pro cliente:\n\n${params.url}`
+    );
+  }
+
   return (
-    `Pronto, formulário${alvo} criado. Manda este link para o cliente ` +
+    `Pronto, ${oQue}${alvo} criado. Manda este link para o cliente ` +
     `preencher:\n\n${params.url}`
+  );
+}
+
+/**
+ * O tenant não tem o módulo/feature ligado.
+ *
+ * Mensagem própria porque a causa é diferente de falha: nada vai dar certo
+ * tentando de novo, e quem resolve não é o corretor — é a imobiliária ligando o
+ * módulo. Devolver "tenta de novo em instantes" mandaria a pessoa bater na
+ * mesma parede.
+ */
+export function textoModuloDesligado(args: PendingAction["args"]): string {
+  return (
+    `Não consegui criar: ${descreverPendencia(args)} não está habilitado nesta ` +
+    `imobiliária. Nada foi criado. Fala com quem administra a conta.`
   );
 }
 

@@ -9,11 +9,17 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
  * teste que dependesse do nano provaria o humor do modelo, não o código.
  */
 
-vi.mock("@/lib/cm", () => ({
+vi.mock("@/lib/cm", async (orig) => ({
+  // `ModuloDesligadoError` vem do módulo REAL: o `confirm` faz `instanceof`
+  // nela, e uma classe redefinida no mock nunca casaria — o teste passaria
+  // exercitando o caminho de falha genérica, que é o oposto do que ele afirma.
+  ...(await orig<typeof import("@/lib/cm")>()),
   fetchProfile: vi.fn(),
   searchKnowledge: vi.fn(),
   reportUsage: vi.fn().mockResolvedValue(undefined),
   criarFormularioVenda: vi.fn(),
+  criarFormularioLocacao: vi.fn(),
+  criarRascunhoProposta: vi.fn(),
   brokerRecipientId: vi.fn(),
 }));
 vi.mock("@/lib/llm", () => ({
@@ -24,13 +30,22 @@ vi.mock("@/lib/llm", () => ({
 const { buildGraph } = await import("../graph");
 const { TOOL_PROPOR_FORM, PENDING_TTL_MS, lerConfirmacao, shouldOfferTools } =
   await import("../tools");
-const { fetchProfile, searchKnowledge, criarFormularioVenda, brokerRecipientId } =
-  await import("@/lib/cm");
+const {
+  fetchProfile,
+  searchKnowledge,
+  criarFormularioVenda,
+  criarFormularioLocacao,
+  criarRascunhoProposta,
+  brokerRecipientId,
+  ModuloDesligadoError,
+} = await import("@/lib/cm");
 const { complete } = await import("@/lib/llm");
 
 const profile = fetchProfile as unknown as ReturnType<typeof vi.fn>;
 const search = searchKnowledge as unknown as ReturnType<typeof vi.fn>;
 const criar = criarFormularioVenda as unknown as ReturnType<typeof vi.fn>;
+const criarLocacao = criarFormularioLocacao as unknown as ReturnType<typeof vi.fn>;
+const criarProposta = criarRascunhoProposta as unknown as ReturnType<typeof vi.fn>;
 const recipient = brokerRecipientId as unknown as ReturnType<typeof vi.fn>;
 const llm = complete as unknown as ReturnType<typeof vi.fn>;
 
@@ -80,7 +95,7 @@ function llmTexto(text: string) {
   };
 }
 
-function llmChamaFerramenta(args: Record<string, unknown> = {}) {
+function llmChamaFerramenta(args: Record<string, unknown> = { tipo: "venda" }) {
   return {
     // Chamada de ferramenta vem com `content: null` no provedor — é o formato
     // normal, e foi o que quase quebrou o `complete`.
@@ -113,10 +128,14 @@ async function run(
   });
 }
 
-function pendenciaDe(nomeCliente?: string, askedAt = Date.now()) {
+function pendenciaDe(
+  nomeCliente?: string,
+  askedAt = Date.now(),
+  extra: Record<string, unknown> = {}
+) {
   return {
-    kind: "criar_form_venda" as const,
-    args: { nomeCliente },
+    kind: "criar_documento" as const,
+    args: { tipo: "venda", nomeCliente, ...extra },
     askedAt,
     askedForMessageId: "m-anterior",
   };
@@ -132,17 +151,29 @@ beforeEach(() => {
     url: "https://imobpro.ia.br/f/tok123/joao-silva",
     dealId: "deal1",
   });
+  criarLocacao.mockResolvedValue({
+    token: "loc456",
+    url: "https://imobpro.ia.br/f/loc456/ana",
+    dealId: "deal2",
+  });
+  criarProposta.mockResolvedValue({
+    id: "prop1",
+    url: "https://imobpro.ia.br/pipeline/propostas/prop1/editar",
+  });
   recipient.mockResolvedValue("sr-wesley");
 });
 
 describe("propor", () => {
   it("chamada de ferramenta vira pendência e pergunta — sem criar nada", async () => {
-    llm.mockResolvedValue(llmChamaFerramenta({ nome_cliente: "João Silva" }));
+    llm.mockResolvedValue(
+      llmChamaFerramenta({ tipo: "venda", nome_cliente: "João Silva" })
+    );
 
     const s = await run("me manda um link de formulário pro João Silva");
 
     expect(criar).not.toHaveBeenCalled();
-    expect(s.pendingAction?.kind).toBe("criar_form_venda");
+    expect(s.pendingAction?.kind).toBe("criar_documento");
+    expect(s.pendingAction?.args.tipo).toBe("venda");
     expect(s.pendingAction?.args.nomeCliente).toBe("João Silva");
     expect(s.reply).toContain("João Silva");
     // A pergunta ensina a palavra que confirma — sem isso o casamento estrito
@@ -157,7 +188,7 @@ describe("propor", () => {
    */
   it("a pergunta não vem do modelo", async () => {
     llm.mockResolvedValue({
-      ...llmChamaFerramenta({ nome_cliente: "João" }),
+      ...llmChamaFerramenta({ tipo: "venda", nome_cliente: "João" }),
       text: "TEXTO INVENTADO PELO MODELO",
     });
 
@@ -167,12 +198,26 @@ describe("propor", () => {
   });
 
   it("nome ausente propõe sem nome, não inventa", async () => {
-    llm.mockResolvedValue(llmChamaFerramenta({}));
+    llm.mockResolvedValue(llmChamaFerramenta({ tipo: "venda" }));
 
     const s = await run("preciso de um formulário novo");
 
     expect(s.pendingAction?.args.nomeCliente).toBeUndefined();
     expect(s.reply).toContain("Confirma?");
+  });
+
+  /**
+   * O nano às vezes inventa um valor fora do enum ("aluguel", "form"). Escolher
+   * o mais parecido criaria a coisa errada com a confirmação da pessoa em cima:
+   * ela leria "formulário de venda" tendo dito "aluguel".
+   */
+  it("tipo fora do enum descarta a chamada em vez de adivinhar", async () => {
+    llm.mockResolvedValue(llmChamaFerramenta({ tipo: "aluguel" }));
+
+    const s = await run("cria um formulário de aluguel");
+
+    expect(s.pendingAction).toBeNull();
+    expect(criar).not.toHaveBeenCalled();
   });
 
   it("corretor sem login não recebe a ferramenta e nada é proposto", async () => {
@@ -285,6 +330,66 @@ describe("confirmar", () => {
     const s = await run("sim");
 
     expect(criar).not.toHaveBeenCalled();
+    expect(s.pendingAction).toBeNull();
+  });
+});
+
+describe("locação e proposta", () => {
+  it("locação usa a rota de locação, com a finalidade, e NÃO manda corretorIds", async () => {
+    const s = await run(
+      "sim",
+      { pendingAction: pendenciaDe("Ana", Date.now(), { tipo: "locacao", finalidade: "comercial" }) },
+      usuario,
+      "m-loc"
+    );
+
+    expect(criarLocacao).toHaveBeenCalledWith("org1", {
+      title: "Formulário — Ana",
+      finalidade: "comercial",
+      idempotencyKey: "m-loc",
+    });
+    // A rota de locação não aceita o campo — mandá-lo seria erro de contrato.
+    expect(criar).not.toHaveBeenCalled();
+    expect(s.reply).toContain("https://imobpro.ia.br/f/loc456");
+  });
+
+  /**
+   * A proposta nasce RASCUNHO e sem valores. A resposta precisa dizer isso: sem
+   * o aviso, o corretor manda o link direto pro cliente achando que está
+   * pronto, e o cliente abre uma proposta vazia.
+   */
+  it("proposta cria rascunho, avisa que está vazio e aponta pra tela de edição", async () => {
+    const s = await run(
+      "sim",
+      { pendingAction: pendenciaDe("Carlos", Date.now(), { tipo: "proposta" }) },
+      usuario,
+      "m-prop"
+    );
+
+    expect(criarProposta).toHaveBeenCalledWith("org1", {
+      title: "Proposta — Carlos",
+      schemaType: "compra_venda_v1",
+      idempotencyKey: "m-prop",
+    });
+    expect(s.reply).toContain("RASCUNHO");
+    expect(s.reply).toContain("/pipeline/propostas/prop1/editar");
+  });
+
+  /**
+   * Módulo desligado não é falha transitória: retentar não resolve e quem
+   * resolve não é quem pediu. "Tenta de novo em instantes" mandaria a pessoa
+   * bater na mesma parede.
+   */
+  it("módulo desligado diz o que é, e não manda tentar de novo", async () => {
+    criarLocacao.mockRejectedValue(new ModuloDesligadoError("/api/locacao/forms"));
+
+    const s = await run("sim", {
+      pendingAction: pendenciaDe(undefined, Date.now(), { tipo: "locacao" }),
+    });
+
+    expect(s.reply).toContain("não está habilitado");
+    expect(s.reply).toContain("Nada foi criado");
+    expect(s.reply).not.toContain("Tenta de novo");
     expect(s.pendingAction).toBeNull();
   });
 });

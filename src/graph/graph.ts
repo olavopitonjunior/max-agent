@@ -6,17 +6,23 @@ import {
   reportUsage,
   transcribeMedia,
   criarFormularioVenda,
+  criarFormularioLocacao,
+  criarRascunhoProposta,
   brokerRecipientId,
+  ModuloDesligadoError,
   type KnowledgeHit,
 } from "@/lib/cm";
 import {
   FORM_TOOL,
   TOOL_PROPOR_FORM,
   lerConfirmacao,
+  lerFinalidade,
+  lerTipo,
   podeEscrever,
   propostaExpirou,
   shouldOfferTools,
   textoCriado,
+  textoModuloDesligado,
   textoProposta,
   TEXTO_CANCELADO,
   TEXTO_FALHOU,
@@ -276,57 +282,100 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
   }
 
   // Confirmado. A partir daqui há escrita de verdade.
-  const nomeCliente = pending.args.nomeCliente;
+  const responder = (texto: string): MaxUpdate => ({
+    pendingAction: null,
+    messages: [
+      { role: "user", content: userText },
+      { role: "assistant", content: texto },
+    ],
+    reply: texto,
+  });
+
   try {
-    /**
-     * `corretorIds` do `/api/forms` são ids de `SplitRecipient`, NÃO de `User`
-     * — o where de lá é org-scoped e descarta id desconhecido em silêncio.
-     * Mandar `identity.userId` não erraria: só deixaria o form sem comissionado
-     * e sem notificação, sem ninguém perceber. O vínculo certo é pelo telefone,
-     * via broker-scope. `null` é normal (gerente pede form sem ser comissionado)
-     * e vira omissão — o Deal nasce do usuário de serviço de qualquer jeito.
-     */
-    const recipientId = await brokerRecipientId(
-      state.identity.orgId,
-      state.inbound.fromPhone
-    );
-
-    const form = await criarFormularioVenda(state.identity.orgId, {
-      title: nomeCliente ? `Formulário — ${nomeCliente}` : undefined,
-      corretorIds: recipientId ? [recipientId] : undefined,
+    const url = await executar(
+      state,
+      pending.args,
       // A mensagem que CONFIRMOU, não um uuid novo: é o que faz a retentativa
-      // devolver o mesmo formulário em vez de criar um segundo.
-      idempotencyKey: state.inbound.messageId,
-    });
-
-    const texto = textoCriado({ url: form.url, nomeCliente });
-    console.log(
-      `[confirm] form ${form.token} criado para ${state.identity.orgId} (deal ${form.dealId})`
+      // devolver o mesmo documento em vez de criar um segundo.
+      state.inbound.messageId
     );
-    return {
-      pendingAction: null,
-      messages: [
-        { role: "user", content: userText },
-        { role: "assistant", content: texto },
-      ],
-      reply: texto,
-    };
+    return responder(textoCriado({ url, args: pending.args }));
   } catch (err) {
+    // Módulo desligado não é falha transitória: retentar não resolve, e quem
+    // resolve não é quem pediu.
+    if (err instanceof ModuloDesligadoError) {
+      console.warn(`[confirm] ${err.message} em ${state.identity.orgId}`);
+      return responder(textoModuloDesligado(pending.args));
+    }
     console.error(
-      "[confirm] criação do formulário falhou:",
+      "[confirm] criação falhou:",
       err instanceof Error ? err.message : String(err)
     );
     // Limpa a pendência mesmo na falha: mantê-la faria a próxima mensagem da
     // pessoa ser lida como confirmação de novo, e ela não confirmou duas vezes.
-    return {
-      pendingAction: null,
-      messages: [
-        { role: "user", content: userText },
-        { role: "assistant", content: TEXTO_FALHOU },
-      ],
-      reply: TEXTO_FALHOU,
-    };
+    return responder(TEXTO_FALHOU);
   }
+}
+
+/**
+ * A escrita em si, por tipo. Devolve a URL absoluta para o texto de resposta.
+ *
+ * Fora do `confirm` para que aquele nó continue legível como máquina de estado:
+ * lá se decide SE executa, aqui O QUE se executa.
+ */
+async function executar(
+  state: MaxStateType,
+  args: PendingAction["args"],
+  idempotencyKey: string
+): Promise<string> {
+  const orgId = state.identity.orgId;
+  const nome = args.nomeCliente;
+
+  if (args.tipo === "proposta") {
+    const proposta = await criarRascunhoProposta(orgId, {
+      // `title` é obrigatório na rota; sem nome, um rótulo que diz de onde veio
+      // é melhor que "Proposta" — quem abrir a lista amanhã sabe a origem.
+      title: nome ? `Proposta — ${nome}` : "Proposta (criada pelo Max)",
+      schemaType: "compra_venda_v1",
+      idempotencyKey,
+    });
+    console.log(`[confirm] proposta ${proposta.id} criada para ${orgId}`);
+    return proposta.url;
+  }
+
+  if (args.tipo === "locacao") {
+    const form = await criarFormularioLocacao(orgId, {
+      title: nome ? `Formulário — ${nome}` : undefined,
+      finalidade: args.finalidade,
+      idempotencyKey,
+    });
+    console.log(
+      `[confirm] form de locação ${form.token} criado para ${orgId} (deal ${form.dealId})`
+    );
+    return form.url;
+  }
+
+  /**
+   * `corretorIds` do `/api/forms` são ids de `SplitRecipient`, NÃO de `User` —
+   * o where de lá é org-scoped e descarta id desconhecido em silêncio. Mandar
+   * `identity.userId` não erraria: só deixaria o form sem comissionado e sem
+   * notificação, sem ninguém perceber. O vínculo certo é pelo telefone, via
+   * broker-scope. `null` é normal (gerente pede form sem ser comissionado) e
+   * vira omissão — o Deal nasce do usuário de serviço de qualquer jeito.
+   *
+   * Só vendas: `POST /api/locacao/forms` não aceita este campo.
+   */
+  const recipientId = await brokerRecipientId(orgId, state.inbound.fromPhone);
+
+  const form = await criarFormularioVenda(orgId, {
+    title: nome ? `Formulário — ${nome}` : undefined,
+    corretorIds: recipientId ? [recipientId] : undefined,
+    idempotencyKey,
+  });
+  console.log(
+    `[confirm] form ${form.token} criado para ${orgId} (deal ${form.dealId})`
+  );
+  return form.url;
 }
 
 async function retrieve(state: MaxStateType): Promise<MaxUpdate> {
@@ -407,18 +456,37 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    * parafraseando isso anularia o sentido de confirmar.
    */
   const chamada = result.toolCalls.find((c) => c.name === TOOL_PROPOR_FORM);
-  if (chamada) {
+  const tipo = chamada ? lerTipo(chamada.args.tipo) : null;
+
+  /**
+   * `tipo` fora do enum é chamada DESCARTADA, não adivinhada.
+   *
+   * O nano às vezes inventa um valor ("aluguel", "form"). Escolher o mais
+   * parecido criaria a coisa errada com a confirmação da pessoa em cima —
+   * ela leria "formulário de venda" e teria dito "aluguel". Sem tipo, o turn
+   * cai no caminho de texto e ela repete o pedido.
+   */
+  if (chamada && !tipo) {
+    console.warn(`[answer] tipo inválido na chamada: ${JSON.stringify(chamada.args)}`);
+  }
+
+  if (chamada && tipo) {
     const bruto = chamada.args.nome_cliente;
     const nomeCliente =
       typeof bruto === "string" && bruto.trim() ? bruto.trim().slice(0, 80) : undefined;
 
+    const args: PendingAction["args"] = {
+      tipo,
+      nomeCliente,
+      finalidade: lerFinalidade(chamada.args.finalidade),
+    };
     const pending: PendingAction = {
-      kind: "criar_form_venda",
-      args: { nomeCliente },
+      kind: "criar_documento",
+      args,
       askedAt: Date.now(),
       askedForMessageId: state.inbound.messageId,
     };
-    const texto = textoProposta({ nomeCliente });
+    const texto = textoProposta(args);
 
     return {
       pendingAction: pending,

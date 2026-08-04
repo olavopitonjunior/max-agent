@@ -248,6 +248,143 @@ export async function criarFormularioVenda(
 }
 
 /**
+ * O tenant não tem o módulo/sub-função ligado.
+ *
+ * Erro próprio porque o tratamento é outro: não adianta retentar e quem resolve
+ * não é quem pediu. Quem chama traduz isso numa frase que diz o que fazer.
+ */
+export class ModuloDesligadoError extends Error {
+  constructor(rota: string) {
+    super(`módulo desabilitado para ${rota}`);
+    this.name = "ModuloDesligadoError";
+  }
+}
+
+/** 403 com código de módulo, ou 412 de pipeline não semeado — mesma conclusão. */
+function ehModuloDesligado(status: number, corpo: string): boolean {
+  if (status === 412) return true; // pipeline de locação não semeado
+  return status === 403 && /MODULE_DISABLED|FEATURE_DISABLED|desabilitad/i.test(corpo);
+}
+
+/**
+ * Formulário de LOCAÇÃO em branco + link.
+ *
+ * Espelha `criarFormularioVenda`, e as diferenças são todas do outro lado:
+ * `POST /api/locacao/forms` exige o escopo `locacao:rw` **e** a permissão
+ * `LEASE_CREATE` (o `ensureLocacaoApiAccess` checa as duas), não aceita
+ * `corretorIds`, e 412 quando o pipeline de locação não foi semeado na org.
+ */
+export async function criarFormularioLocacao(
+  orgId: string,
+  params: {
+    title?: string;
+    finalidade?: "residencial" | "comercial";
+    idempotencyKey: string;
+  }
+): Promise<FormularioCriado> {
+  const org = await orgById(orgId);
+  if (!org) throw new Error(`org ${orgId} não configurada`);
+
+  const res = await fetch(`${BASE()}/api/locacao/forms`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${org.apiToken}`,
+      "Content-Type": "application/json",
+      "X-Idempotency-Key": params.idempotencyKey,
+    },
+    body: JSON.stringify({
+      finalidade: params.finalidade ?? "residencial",
+      ...(params.title ? { title: params.title } : {}),
+    }),
+  });
+
+  if (!res.ok) {
+    const corpo = await res.text();
+    if (ehModuloDesligado(res.status, corpo)) {
+      throw new ModuloDesligadoError("/api/locacao/forms");
+    }
+    throw new Error(
+      `ImobPro /api/locacao/forms ${res.status}: ${corpo.slice(0, 300)}`
+    );
+  }
+
+  const data = (await res.json()) as Partial<FormularioCriado>;
+  if (!data.token || !data.dealId) {
+    throw new Error("ImobPro /api/locacao/forms respondeu sem token/dealId");
+  }
+  return {
+    token: data.token,
+    url: `${BASE()}${data.url ?? `/f/${data.token}`}`,
+    dealId: data.dealId,
+  };
+}
+
+export interface PropostaCriada {
+  id: string;
+  /** URL absoluta do rascunho no painel — NÃO é link público de aceite. */
+  url: string;
+}
+
+/**
+ * RASCUNHO de proposta + link para completar.
+ *
+ * Deliberadamente leve, pelo mesmo motivo que o formulário: `POST /api/proposals`
+ * exige só `title` e `schemaType`; `dataJson` tem default `{}` e `signers` é
+ * opcional. Preencher valor, condição de pagamento e signatários por WhatsApp
+ * seria ditar quinze campos num canal onde ninguém relê o que mandou — e um
+ * nano transcrevendo número é exatamente onde não se quer economizar.
+ *
+ * Então o Max abre o rascunho com o nome certo e devolve o link. Quem põe os
+ * valores é o corretor, na tela que já existe para isso.
+ *
+ * A proposta nasce sem `validUntil` de propósito: a rota aplica
+ * `defaultValidUntil` (7 dias), e mandar `null` daqui produziria proposta que
+ * não expira em lugar nenhum.
+ */
+export async function criarRascunhoProposta(
+  orgId: string,
+  params: {
+    title: string;
+    schemaType: "compra_venda_v1" | "locacao_residencial_v1" | "locacao_comercial_v1";
+    idempotencyKey: string;
+  }
+): Promise<PropostaCriada> {
+  const org = await orgById(orgId);
+  if (!org) throw new Error(`org ${orgId} não configurada`);
+
+  const res = await fetch(`${BASE()}/api/proposals`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${org.apiToken}`,
+      "Content-Type": "application/json",
+      "X-Idempotency-Key": params.idempotencyKey,
+    },
+    body: JSON.stringify({
+      title: params.title,
+      schemaType: params.schemaType,
+      dataJson: {},
+    }),
+  });
+
+  if (!res.ok) {
+    const corpo = await res.text();
+    if (ehModuloDesligado(res.status, corpo)) {
+      throw new ModuloDesligadoError("/api/proposals");
+    }
+    throw new Error(`ImobPro /api/proposals ${res.status}: ${corpo.slice(0, 300)}`);
+  }
+
+  const data = (await res.json()) as { proposal?: { id?: string } };
+  const id = data.proposal?.id;
+  if (!id) throw new Error("ImobPro /api/proposals respondeu sem id");
+
+  // `/pipeline/propostas/[id]/editar`, e não o `/p/[token]` público: o rascunho
+  // ainda não tem valores, e mandar o link de aceite agora seria pedir ao
+  // cliente que aceitasse o vazio. A tela de edição é onde o corretor completa.
+  return { id, url: `${BASE()}/pipeline/propostas/${id}/editar` };
+}
+
+/**
  * Reporta o custo do turn. Uma linha POR MODELO: um turn multi-modelo somado
  * num bucket só cobraria Sonnet a preço de Haiku, e esse número alimenta o teto
  * mensal por agente e o painel.
