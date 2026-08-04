@@ -17,6 +17,7 @@ const d = hasDb ? describe : describe.skip;
 
 vi.mock("../zapi", () => ({
   sendText: vi.fn().mockResolvedValue({ messageId: "REPLY-MID" }),
+  connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 
 vi.mock("@/graph/graph", () => ({
@@ -27,11 +28,12 @@ const { enqueueInbound, sweepInbound, processInboundNow } = await import(
   "../inbound"
 );
 const { query, db } = await import("../db");
-const { sendText } = await import("../zapi");
+const { sendText, connectionStatus } = await import("../zapi");
 const { runTurn } = await import("@/graph/graph");
 
 const sent = sendText as unknown as ReturnType<typeof vi.fn>;
 const turn = runTurn as unknown as ReturnType<typeof vi.fn>;
+const status = connectionStatus as unknown as ReturnType<typeof vi.fn>;
 
 const PHONE = "5511900000001";
 
@@ -71,6 +73,7 @@ d("inbound_queue (Postgres real)", () => {
     vi.clearAllMocks();
     sent.mockResolvedValue({ messageId: "REPLY-MID" });
     turn.mockResolvedValue("resposta do Max");
+    status.mockResolvedValue({ connected: true, raw: {} });
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
   });
 
@@ -208,5 +211,60 @@ d("inbound_queue (Postgres real)", () => {
     expect(row.status).toBe("done");
     expect(row.reply_message_id).toBeNull();
     expect(sent).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Instância fora do ar — a mesma armadilha do outbox, deste lado.
+   *
+   * Sem a checagem, `sendText` responde 200 com um `messageId` que não chega a
+   * ninguém e a linha vira `done` com `reply_message_id`: o registro afirmando
+   * que a pessoa foi respondida quando não foi.
+   */
+  describe("instância desemparelhada", () => {
+    it("não processa, não paga o modelo e não queima tentativa", async () => {
+      const r = await enqueueInbound(msg());
+      if (r.status !== "queued") throw new Error("esperava queued");
+      status.mockResolvedValue({ connected: false, raw: {} });
+
+      await processInboundNow(r.id);
+      const totals = await sweepInbound();
+
+      expect(turn).not.toHaveBeenCalled(); // o modelo não é pago à toa
+      expect(sent).not.toHaveBeenCalled();
+      expect(totals.blocked).toBeGreaterThanOrEqual(1);
+
+      const row = await statusDe(r.id);
+      expect(row.status).toBe("pending");
+      expect(row.attempts).toBe(0);
+    });
+
+    it("reconectou: a mensagem é respondida, nada se perdeu", async () => {
+      const r = await enqueueInbound(msg());
+      if (r.status !== "queued") throw new Error("esperava queued");
+
+      status.mockResolvedValue({ connected: false, raw: {} });
+      await sweepInbound();
+
+      status.mockResolvedValue({ connected: true, raw: {} });
+      const totals = await sweepInbound();
+
+      expect(totals.done).toBeGreaterThanOrEqual(1);
+      expect((await statusDe(r.id)).status).toBe("done");
+    });
+
+    it("status indisponível → processa mesmo assim (falha aberta)", async () => {
+      const r = await enqueueInbound(msg());
+      if (r.status !== "queued") throw new Error("esperava queued");
+      status.mockRejectedValue(new Error("timeout"));
+
+      await processInboundNow(r.id);
+
+      expect((await statusDe(r.id)).status).toBe("done");
+    });
+
+    it("fila vazia não paga a consulta de status", async () => {
+      await sweepInbound();
+      expect(status).not.toHaveBeenCalled();
+    });
   });
 });

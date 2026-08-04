@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
-import { sendText, type InboundMessage } from "./zapi";
+import { sendText, connectionStatus, type InboundMessage } from "./zapi";
 import { runTurn } from "@/graph/graph";
 
 /**
@@ -92,6 +92,43 @@ export async function enqueueInbound(
 const CLAIM_COLUMNS = `id, message_id, from_phone, group_id, kind, text,
   media_url, mime_type, sender_name, reply_to_message_id, timestamp_ms,
   attempts, reply_text`;
+
+/**
+ * Dá pra responder agora?
+ *
+ * Mesma armadilha do outbox, e o mesmo motivo pra checar ANTES do claim: numa
+ * instância desemparelhada o `send-text` responde 200 com um `messageId` que
+ * não chega a ninguém, e a linha viraria `done` com `reply_message_id` — o
+ * registro afirmando que a pessoa foi respondida quando não foi.
+ *
+ * Antes do claim porque reivindicar incrementa `attempts`: uma queda de vinte
+ * minutos queimaria as três tentativas e marcaria como `failed` mensagens que
+ * só precisavam esperar o canal voltar.
+ *
+ * Aqui a checagem economiza mais que no outbox — sem ela o grafo rodaria e o
+ * modelo seria PAGO para produzir uma resposta que morre no envio.
+ *
+ * Falha ABERTA: não conseguir perguntar não é estar desconectado.
+ */
+async function podeResponder(): Promise<boolean> {
+  try {
+    const status = await connectionStatus();
+    if (!status.connected) {
+      console.error(
+        `[inbound] INSTÂNCIA DESEMPARELHADA — nada processado, a fila espera. ` +
+          `Estado: ${JSON.stringify(status.raw)}`
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(
+      "[inbound] não deu pra checar a instância:",
+      err instanceof Error ? err.message : String(err)
+    );
+    return true;
+  }
+}
 
 /**
  * Reivindica UMA linha específica — o caminho rápido, logo depois do webhook.
@@ -222,6 +259,7 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
  */
 export async function processInboundNow(id: string): Promise<void> {
   try {
+    if (!(await podeResponder())) return; // a linha fica pending; o cron retoma
     const row = await claimById(id);
     if (!row) return; // o cron chegou primeiro
     await runQueued(row);
@@ -238,11 +276,38 @@ export interface InboundTotals {
   done: number;
   failed: number;
   retry: number;
+  /**
+   * Havia o que responder mas a instância está fora — nada foi tentado.
+   * Campo próprio pelo mesmo motivo do outbox: "o canal caiu" não é "a
+   * mensagem tem problema", e só o primeiro precisa acordar alguém.
+   */
+  blocked: number;
 }
 
 /** Varredura do cron: pega o que o caminho rápido não fechou. */
 export async function sweepInbound(limit = 20): Promise<InboundTotals> {
-  const totals: InboundTotals = { claimed: 0, done: 0, failed: 0, retry: 0 };
+  const totals: InboundTotals = {
+    claimed: 0,
+    done: 0,
+    failed: 0,
+    retry: 0,
+    blocked: 0,
+  };
+
+  // Só paga a consulta de status quando há o que responder — a maioria das
+  // execuções não acha nada.
+  const [{ due }] = await query<{ due: number }>(
+    `SELECT count(*)::int AS due FROM inbound_queue
+      WHERE status = 'pending'
+         OR (status = 'processing'
+             AND last_attempt_at < now() - ($1 || ' minutes')::interval)`,
+    [String(PROCESSING_ORPHAN_MINUTES)]
+  );
+  if (due > 0 && !(await podeResponder())) {
+    totals.blocked = due;
+    return totals;
+  }
+
   const rows = await claimBatch(limit);
   totals.claimed = rows.length;
 

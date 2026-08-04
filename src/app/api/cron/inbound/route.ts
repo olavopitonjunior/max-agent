@@ -32,7 +32,11 @@ export async function GET(req: NextRequest) {
 
   try {
     const totals = await sweepInbound();
-    if (totals.claimed > 0) {
+    if (totals.blocked > 0) {
+      console.error(
+        `[cron/inbound] ${totals.blocked} sem resposta — instância desemparelhada`
+      );
+    } else if (totals.claimed > 0) {
       console.log(
         `[cron/inbound] ${totals.done} respondidas, ${totals.retry} pra retentar, ` +
           `${totals.failed} falhas de ${totals.claimed}`
