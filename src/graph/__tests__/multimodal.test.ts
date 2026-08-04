@@ -23,6 +23,7 @@ vi.mock("@/lib/llm", () => ({
   DEFAULT_MODEL: "openai/gpt-5.4-nano",
   complete: vi.fn().mockResolvedValue({
     text: "Entendi que você perguntou do contrato. Ele está pronto.",
+    toolCalls: [],
     usage: { model: "m", promptTokens: 1, completionTokens: 1, latencyMs: 1 },
   }),
 }));

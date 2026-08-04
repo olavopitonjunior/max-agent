@@ -38,8 +38,34 @@ export interface LlmUsage {
   success: boolean;
 }
 
+/**
+ * Ferramenta oferecida ao modelo, no formato do OpenAI/OpenRouter.
+ *
+ * `parameters` é JSON Schema. Fica como `unknown` de propósito: tipar o schema
+ * aqui não valida nada em runtime (quem valida é o provedor) e só acrescentaria
+ * um tipo para manter.
+ */
+export interface LlmTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface LlmToolCall {
+  name: string;
+  /** Já parseado. Vem como string JSON do provedor. */
+  args: Record<string, unknown>;
+}
+
 export interface LlmResult {
   text: string;
+  /**
+   * Vazio quando o modelo respondeu em texto — o caso comum.
+   *
+   * Nunca há texto E chamada juntos no uso deste projeto: quando o modelo
+   * chama ferramenta, quem escreve a resposta é o template, não ele.
+   */
+  toolCalls: LlmToolCall[];
   usage: LlmUsage;
 }
 
@@ -49,6 +75,14 @@ export interface CompleteParams {
   model?: string;
   maxTokens?: number;
   temperature?: number;
+  /**
+   * Quando presente, o modelo pode chamar uma destas em vez de responder.
+   *
+   * Só é passado nos turns em que o prefiltro achou plausível — expor ferramenta
+   * em toda mensagem custa tokens de entrada em TODO turn e dá ao nano mais
+   * oportunidade de chamar sem motivo.
+   */
+  tools?: LlmTool[];
 }
 
 /**
@@ -58,11 +92,57 @@ export interface CompleteParams {
  */
 const DEFAULT_MAX_TOKENS = 700;
 
+interface OpenRouterToolCall {
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
 interface OpenRouterResponse {
   model?: string;
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{
+    message?: { content?: string | null; tool_calls?: OpenRouterToolCall[] };
+  }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   error?: { message?: string };
+}
+
+/**
+ * Converte as chamadas do provedor, descartando o que não dá pra usar.
+ *
+ * `arguments` vem como STRING JSON, e um modelo pequeno às vezes devolve JSON
+ * quebrado. Uma chamada sem nome ou com args ilegíveis é descartada em vez de
+ * propagada: quem consome isto decide executar uma ação, e argumento adivinhado
+ * é a pior coisa que se pode passar adiante. Descartar faz o turn cair no
+ * caminho de texto, que é o comportamento seguro.
+ */
+function parseToolCalls(raw: OpenRouterToolCall[] | undefined): LlmToolCall[] {
+  if (!raw?.length) return [];
+
+  const out: LlmToolCall[] = [];
+  for (const call of raw) {
+    const name = call.function?.name;
+    if (!name) continue;
+
+    const rawArgs = call.function?.arguments?.trim();
+    let args: Record<string, unknown> = {};
+    if (rawArgs) {
+      try {
+        const parsed = JSON.parse(rawArgs);
+        // `JSON.parse` aceita `"texto"`, `3` e `null` — nada disso é argumento.
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          console.warn(`[llm] args de ${name} não são objeto — chamada ignorada`);
+          continue;
+        }
+        args = parsed as Record<string, unknown>;
+      } catch {
+        console.warn(`[llm] args de ${name} não são JSON — chamada ignorada`);
+        continue;
+      }
+    }
+    out.push({ name, args });
+  }
+  return out;
 }
 
 export async function complete(p: CompleteParams): Promise<LlmResult> {
@@ -103,6 +183,22 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
         max_tokens: p.maxTokens ?? DEFAULT_MAX_TOKENS,
         temperature: p.temperature ?? 0.3,
         messages: [{ role: "system", content: p.system }, ...p.messages],
+        ...(p.tools?.length
+          ? {
+              tools: p.tools.map((t) => ({
+                type: "function",
+                function: {
+                  name: t.name,
+                  description: t.description,
+                  parameters: t.parameters,
+                },
+              })),
+              // `auto` e não `required`: a esmagadora maioria dos turns é
+              // pergunta de processo, e forçar chamada transformaria "como
+              // funciona a assinatura?" numa proposta de criar formulário.
+              tool_choice: "auto",
+            }
+          : {}),
       }),
     });
 
@@ -121,11 +217,26 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
   // resposta vazia ao usuário, em silêncio.
   if (data.error) return fail(`OpenRouter: ${data.error.message ?? "erro sem mensagem"}`);
 
-  const text = (data.choices?.[0]?.message?.content ?? "").trim();
-  if (!text) return fail("OpenRouter devolveu resposta vazia");
+  const message = data.choices?.[0]?.message;
+  const text = (message?.content ?? "").trim();
+  const toolCalls = parseToolCalls(message?.tool_calls);
+
+  /**
+   * Vazio só é falha quando NÃO houve chamada de ferramenta.
+   *
+   * Uma resposta com `tool_calls` traz `content: null` — é o formato normal, não
+   * um erro. Antes desta linha o retorno vazio era falha incondicional, e ligar
+   * ferramenta sem mexer aqui faria TODA chamada virar erro, com o agravante de
+   * o `fail` registrar consumo com `success: false` e o usuário receber o texto
+   * genérico de "tive um problema pra responder".
+   */
+  if (!text && toolCalls.length === 0) {
+    return fail("OpenRouter devolveu resposta vazia");
+  }
 
   return {
     text,
+    toolCalls,
     usage: {
       // O provedor pode ter roteado pra outra variante; o custo é do que ELE
       // diz ter usado, não do que pedimos.

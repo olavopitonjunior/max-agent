@@ -5,8 +5,23 @@ import {
   searchKnowledge,
   reportUsage,
   transcribeMedia,
+  criarFormularioVenda,
+  brokerRecipientId,
   type KnowledgeHit,
 } from "@/lib/cm";
+import {
+  FORM_TOOL,
+  TOOL_PROPOR_FORM,
+  lerConfirmacao,
+  podeEscrever,
+  propostaExpirou,
+  shouldOfferTools,
+  textoCriado,
+  textoProposta,
+  TEXTO_CANCELADO,
+  TEXTO_FALHOU,
+  type PendingAction,
+} from "./tools";
 import { downloadMedia } from "@/lib/zapi";
 import {
   loadFacts,
@@ -128,6 +143,41 @@ export const MaxState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => ({}),
   }),
+
+  /**
+   * Escrita proposta e ainda não confirmada.
+   *
+   * Mora AQUI, no checkpoint, e em nenhum outro lugar. A alternativa considerada
+   * era o `interrupt()` do LangGraph, e ela foi recusada: `interrupt()` modela
+   * "o grafo está bloqueado esperando um valor", e conversa de WhatsApp não é
+   * isso — a pessoa muda de assunto, corrige um campo, pergunta outra coisa. Um
+   * grafo pausado ou força a resposta ou precisa ser abandonado, e obrigaria
+   * `runTurn` a perguntar "esta thread está pausada?" a cada turn.
+   *
+   * Como estado comum, a fila de entrada não muda em nada: todo turn continua
+   * sendo UM `invoke`, e `reply_text` segue separando "o grafo falhou" de "o
+   * envio falhou". Duas verdades sobre pendência aqui reproduziriam o bug que a
+   * `inbound_seen` causou.
+   *
+   * `reducer` que aceita `null` explicitamente: limpar a pendência é a operação
+   * mais comum deste campo, e um `next ?? prev` a tornaria impossível.
+   */
+  pendingAction: Annotation<PendingAction | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+
+  /**
+   * Havia proposta pendente e esta mensagem não foi sim nem não.
+   *
+   * Só vale para o turn atual (o `answer` lê e o `compact` não guarda). Serve
+   * para o Max reconhecer, numa frase, que deixou a criação de lado — sem isso
+   * a proposta sumiria em silêncio e a pessoa poderia achar que foi criada.
+   */
+  propostaDescartada: Annotation<boolean>({
+    reducer: (_prev, next) => next,
+    default: () => false,
+  }),
 });
 
 export type MaxStateType = typeof MaxState.State;
@@ -181,6 +231,104 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
   return { instructions: profile?.instructions?.composed ?? null };
 }
 
+/**
+ * Resolve uma proposta pendente. **Não chama modelo.**
+ *
+ * É deliberado que este nó seja determinístico: o turn que EXECUTA uma escrita é
+ * o mais caro de errar, e o `gpt-5.4-nano` seria mais uma fonte de variação
+ * justamente ali. Custo do turn de confirmação: zero token.
+ *
+ * A pendência sobrevive no máximo UM turn. Mensagem que não é sim nem não a
+ * descarta e a conversa segue normalmente — é o que garante que nenhuma thread
+ * fique travada esperando uma confirmação que não vem. O TTL cobre o outro caso:
+ * a próxima mensagem chega três dias depois e por acaso é "sim", respondendo
+ * outra coisa na cabeça da pessoa.
+ */
+async function confirm(state: MaxStateType): Promise<MaxUpdate> {
+  const pending = state.pendingAction;
+  if (!pending) return {};
+
+  const userText = state.inbound.text?.trim() || "";
+
+  if (propostaExpirou(pending, Date.now())) {
+    // Sem aviso: para a pessoa, uma proposta de meia hora atrás já saiu da
+    // conversa. Anunciar o descarte reabriria um assunto que ela encerrou.
+    return { pendingAction: null };
+  }
+
+  const resposta = lerConfirmacao(userText);
+
+  if (resposta === "nao") {
+    return {
+      pendingAction: null,
+      messages: [
+        { role: "user", content: userText },
+        { role: "assistant", content: TEXTO_CANCELADO },
+      ],
+      reply: TEXTO_CANCELADO,
+    };
+  }
+
+  if (resposta === "nenhum") {
+    // Descarta e deixa o fluxo normal responder. O `answer` recebe o aviso e
+    // reconhece numa frase que deixou a criação de lado.
+    return { pendingAction: null, propostaDescartada: true };
+  }
+
+  // Confirmado. A partir daqui há escrita de verdade.
+  const nomeCliente = pending.args.nomeCliente;
+  try {
+    /**
+     * `corretorIds` do `/api/forms` são ids de `SplitRecipient`, NÃO de `User`
+     * — o where de lá é org-scoped e descarta id desconhecido em silêncio.
+     * Mandar `identity.userId` não erraria: só deixaria o form sem comissionado
+     * e sem notificação, sem ninguém perceber. O vínculo certo é pelo telefone,
+     * via broker-scope. `null` é normal (gerente pede form sem ser comissionado)
+     * e vira omissão — o Deal nasce do usuário de serviço de qualquer jeito.
+     */
+    const recipientId = await brokerRecipientId(
+      state.identity.orgId,
+      state.inbound.fromPhone
+    );
+
+    const form = await criarFormularioVenda(state.identity.orgId, {
+      title: nomeCliente ? `Formulário — ${nomeCliente}` : undefined,
+      corretorIds: recipientId ? [recipientId] : undefined,
+      // A mensagem que CONFIRMOU, não um uuid novo: é o que faz a retentativa
+      // devolver o mesmo formulário em vez de criar um segundo.
+      idempotencyKey: state.inbound.messageId,
+    });
+
+    const texto = textoCriado({ url: form.url, nomeCliente });
+    console.log(
+      `[confirm] form ${form.token} criado para ${state.identity.orgId} (deal ${form.dealId})`
+    );
+    return {
+      pendingAction: null,
+      messages: [
+        { role: "user", content: userText },
+        { role: "assistant", content: texto },
+      ],
+      reply: texto,
+    };
+  } catch (err) {
+    console.error(
+      "[confirm] criação do formulário falhou:",
+      err instanceof Error ? err.message : String(err)
+    );
+    // Limpa a pendência mesmo na falha: mantê-la faria a próxima mensagem da
+    // pessoa ser lida como confirmação de novo, e ela não confirmou duas vezes.
+    return {
+      pendingAction: null,
+      messages: [
+        { role: "user", content: userText },
+        { role: "assistant", content: TEXTO_FALHOU },
+      ],
+      reply: TEXTO_FALHOU,
+    };
+  }
+}
+
 async function retrieve(state: MaxStateType): Promise<MaxUpdate> {
   const text = state.inbound.text ?? "";
   if (!shouldSearch(text)) return { hits: [] };
@@ -203,10 +351,26 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     summary: state.summary,
     fromMedia: state.fromMedia,
     facts: renderFacts(state.facts),
+    propostaDescartada: state.propostaDescartada,
+    // Quem não pode escrever recebe um prompt que não descreve a ferramenta —
+    // e diz de quem é o caminho. Descrever capacidade que não está no pedido é
+    // a forma mais barata de um modelo pequeno prometer o que não entrega.
+    podeEscrever: podeEscrever(state.identity),
   });
 
   const userText = state.inbound.text?.trim() || "(mensagem sem texto)";
   const history = state.messages.slice(-MAX_HISTORY);
+
+  /**
+   * A ferramenta só entra quando a mensagem plausivelmente pede escrita E quem
+   * fala pode escrever. As duas condições são baratas e cortam o caso comum:
+   * expor em todo turn custaria os tokens da definição sempre e daria ao nano
+   * mais chance de chamar sem motivo.
+   */
+  const tools =
+    podeEscrever(state.identity) && shouldOfferTools(userText)
+      ? [FORM_TOOL]
+      : undefined;
 
   let result;
   try {
@@ -214,6 +378,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       system,
       messages: [...history, { role: "user", content: userText }],
       model: state.model,
+      tools,
     });
   } catch (err) {
     // O turn que falhou também custou: sem registrar a tentativa, um agente que
@@ -232,6 +397,38 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   // Fire-and-forget: perder a contabilidade de um turn é ruim; não responder
   // ao usuário por causa dela é pior.
   void reportUsage(state.identity.orgId, result.usage);
+
+  /**
+   * O modelo pediu para propor uma escrita.
+   *
+   * **Não há segunda chamada ao modelo.** O texto da confirmação sai de template
+   * a partir dos argumentos: é mais barato, e sobretudo confiável — o que a
+   * pessoa lê para confirmar precisa ser exatamente o que será feito, e um nano
+   * parafraseando isso anularia o sentido de confirmar.
+   */
+  const chamada = result.toolCalls.find((c) => c.name === TOOL_PROPOR_FORM);
+  if (chamada) {
+    const bruto = chamada.args.nome_cliente;
+    const nomeCliente =
+      typeof bruto === "string" && bruto.trim() ? bruto.trim().slice(0, 80) : undefined;
+
+    const pending: PendingAction = {
+      kind: "criar_form_venda",
+      args: { nomeCliente },
+      askedAt: Date.now(),
+      askedForMessageId: state.inbound.messageId,
+    };
+    const texto = textoProposta({ nomeCliente });
+
+    return {
+      pendingAction: pending,
+      messages: [
+        { role: "user", content: userText },
+        { role: "assistant", content: texto },
+      ],
+      reply: texto,
+    };
+  }
 
   return {
     messages: [
@@ -290,18 +487,35 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
   }
 }
 
-function afterGate(state: MaxStateType): "retrieve" | typeof END {
-  return state.halt ? END : "retrieve";
+function afterGate(state: MaxStateType): "confirm" | typeof END {
+  return state.halt ? END : "confirm";
+}
+
+/**
+ * O `confirm` já respondeu?
+ *
+ * Ele responde quando executou, cancelou ou falhou — nos três casos o turn está
+ * resolvido e passar pelo modelo seria pagar por uma resposta que já existe.
+ * Vai direto pro `compact`, que ainda precisa rodar: o `confirm` acrescentou
+ * turnos ao histórico como qualquer outro nó.
+ */
+function afterConfirm(state: MaxStateType): "retrieve" | "compact" {
+  return state.reply ? "compact" : "retrieve";
 }
 
 export function buildGraph() {
   return new StateGraph(MaxState)
     .addNode("gate", gate)
+    .addNode("confirm", confirm)
     .addNode("retrieve", retrieve)
     .addNode("answer", answer)
     .addNode("compact", compact)
     .addEdge(START, "gate")
-    .addConditionalEdges("gate", afterGate, { retrieve: "retrieve", [END]: END })
+    .addConditionalEdges("gate", afterGate, { confirm: "confirm", [END]: END })
+    .addConditionalEdges("confirm", afterConfirm, {
+      retrieve: "retrieve",
+      compact: "compact",
+    })
     .addEdge("retrieve", "answer")
     .addEdge("answer", "compact")
     .addEdge("compact", END);
@@ -437,6 +651,21 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
       identity: identity.candidate,
       fromMedia,
       facts,
+      /**
+       * Campos de UM turn, zerados explicitamente na entrada.
+       *
+       * O checkpointer restaura o estado inteiro, inclusive o que só fazia
+       * sentido no turn passado. `reply` é o caso grave: ele decide, no
+       * `afterConfirm`, se o turn já foi resolvido — e restaurado do turn
+       * anterior faria TODA mensagem pular o `retrieve`/`answer` e responder o
+       * que já tinha sido respondido. `halt` e `propostaDescartada` têm o mesmo
+       * defeito, menos visível.
+       *
+       * Só `messages`, `summary` e `pendingAction` atravessam turns de propósito.
+       */
+      reply: null,
+      halt: null,
+      propostaDescartada: false,
     },
     {
       configurable: {
