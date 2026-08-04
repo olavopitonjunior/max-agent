@@ -4,8 +4,17 @@ import {
   fetchProfile,
   searchKnowledge,
   reportUsage,
+  transcribeMedia,
   type KnowledgeHit,
 } from "@/lib/cm";
+import { downloadMedia } from "@/lib/zapi";
+import {
+  loadFacts,
+  saveFacts,
+  extractFacts,
+  renderFacts,
+  type Facts,
+} from "@/lib/memory";
 import {
   resolveIdentity,
   matchChoice,
@@ -94,6 +103,31 @@ export const MaxState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => DEFAULT_MODEL,
   }),
+
+  /**
+   * O texto deste turn veio de áudio ou imagem transcritos, não digitados.
+   *
+   * Muda o prompt: a resposta reafirma o entendido na primeira frase. É a
+   * correção mais barata que existe — se a transcrição errou um endereço ou um
+   * valor, a pessoa percebe na primeira linha em vez de agir sobre a resposta
+   * errada. Vale sobretudo em áudio, que não dá pra reler.
+   */
+  fromMedia: Annotation<"audio" | "image" | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+
+  /**
+   * Fatos duráveis desta pessoa, carregados antes do grafo.
+   *
+   * Não confundir com `summary`: aquele é o histórico DESTA conversa comprimido
+   * (lossy, some ao ser recomprimido); estes são frases curtas que sobrevivem a
+   * qualquer compactação e a qualquer intervalo entre conversas.
+   */
+  facts: Annotation<Facts>({
+    reducer: (_prev, next) => next,
+    default: () => ({}),
+  }),
 });
 
 export type MaxStateType = typeof MaxState.State;
@@ -167,6 +201,8 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     userName: displayName(state.identity),
     hits: state.hits,
     summary: state.summary,
+    fromMedia: state.fromMedia,
+    facts: renderFacts(state.facts),
   });
 
   const userText = state.inbound.text?.trim() || "(mensagem sem texto)";
@@ -291,48 +327,170 @@ export async function getCheckpointer(): Promise<PostgresSaver> {
  * primeira mensagem de cada pessoa cair numa thread provisória, separando a
  * conversa em duas memórias.
  */
-export async function runTurn(inbound: InboundMessage): Promise<string | null> {
+export interface TurnResult {
+  reply: string | null;
+  /**
+   * Trabalho que só pode acontecer DEPOIS de a resposta sair — hoje, a extração
+   * de memória.
+   *
+   * É um thunk e não uma chamada direta de propósito: a promessa "fora do
+   * caminho crítico" vira estrutura em vez de comentário. Quem chama não
+   * consegue rodar isto antes de enviar sem escrever a linha errada de
+   * propósito. Nunca lança.
+   */
+  afterReply?: () => Promise<void>;
+}
+
+export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   const texto = inbound.text?.trim() ?? "";
   const identity = await resolveIdentity(inbound.fromPhone);
 
   // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
   // respondeu a um aviso, engano ou spam.
   if (identity.kind === "unknown") {
-    return (
-      "Oi! Sou o Max, assistente das imobiliárias parceiras. Não reconheci " +
-      "este número — fale com seu corretor para liberar o acesso."
-    );
+    return {
+      reply:
+        "Oi! Sou o Max, assistente das imobiliárias parceiras. Não reconheci " +
+        "este número — fale com seu corretor para liberar o acesso.",
+    };
   }
 
   // Primeira vez com o telefone em mais de uma imobiliária: pergunta e para.
   if (identity.kind === "ambiguous") {
-    return askWhichOrg(identity.candidates);
+    return { reply: askWhichOrg(identity.candidates) };
   }
 
   // Já perguntamos: esta mensagem PODE ser a resposta.
   if (identity.kind === "pending") {
+    // Mídia aqui não dá pra transcrever: a transcrição precisa do token de UMA
+    // org, e é justamente a org que ainda não sabemos. Mandar o áudio pra
+    // primeira candidata entregaria o conteúdo de alguém a uma imobiliária que
+    // pode não ser a dele.
+    if (!texto && inbound.kind !== "text") {
+      return {
+        reply:
+          "Antes de continuar preciso saber de qual imobiliária você fala. " +
+          "Responde por escrito, por favor:\n\n" +
+          askWhichOrg(identity.candidates),
+      };
+    }
     const escolhido = matchChoice(texto, identity.candidates);
     if (!escolhido) {
       // Não insistir com o texto igual seria pior — repetir a lista deixa claro
       // que o Max ainda está esperando, em vez de parecer que ignorou.
-      return askWhichOrg(identity.candidates);
+      return { reply: askWhichOrg(identity.candidates) };
     }
     await saveChoice(inbound.fromPhone, escolhido.orgId);
-    return (
-      `Certo, ${escolhido.orgName}. Pode mandar sua pergunta que eu respondo ` +
-      "com o material dessa imobiliária."
-    );
+    return {
+      reply:
+        `Certo, ${escolhido.orgName}. Pode mandar sua pergunta que eu respondo ` +
+        "com o material dessa imobiliária.",
+    };
   }
+
+  /**
+   * Áudio e imagem viram texto ANTES do grafo.
+   *
+   * Aqui, e não num nó: o transcrito passa a ser o turno da pessoa no histórico
+   * e tudo depois dele — decidir se busca no RAG, montar o prompt, compactar —
+   * funciona sem saber que a origem era voz. Um nó de transcrição obrigaria
+   * cada etapa seguinte a lidar com "texto ou mídia".
+   *
+   * Depois da identidade porque a transcrição roda no ImobPro com o token DA
+   * ORG: sem saber a org, não há credencial nem a quem cobrar o custo.
+   */
+  let turnText = texto;
+  let fromMedia: "audio" | "image" | null = null;
+
+  if (!turnText && (inbound.kind === "audio" || inbound.kind === "image")) {
+    fromMedia = inbound.kind;
+    const transcrito = inbound.mediaUrl
+      ? await transcreverMidia(identity.candidate.orgId, inbound)
+      : null;
+
+    if (!transcrito) {
+      // Dizer que não deu, sempre. Silêncio faria a pessoa esperar resposta de
+      // uma coisa que o agente nunca recebeu — e no WhatsApp ela não tem como
+      // saber a diferença entre "ignorou" e "não chegou".
+      return {
+        reply:
+          fromMedia === "audio"
+            ? "Não consegui ouvir esse áudio. Pode me mandar por escrito?"
+            : "Não consegui ver essa imagem. Pode me contar por escrito?",
+      };
+    }
+    turnText = transcrito;
+  }
+
+  const orgId = identity.candidate.orgId;
+  const phone = inbound.fromPhone;
+
+  // Carregado ANTES do grafo, junto com o resto do que o prompt precisa. É
+  // uma query indexada pela PK — mais barata que a busca semântica que o mesmo
+  // turn já faz.
+  const facts = await loadFacts(orgId, phone);
 
   const app = buildGraph().compile({ checkpointer: await getCheckpointer() });
   const result = await app.invoke(
-    { inbound, identity: identity.candidate },
+    {
+      inbound: { ...inbound, text: turnText },
+      identity: identity.candidate,
+      fromMedia,
+      facts,
+    },
     {
       configurable: {
-        thread_id: threadIdFor(identity.candidate.orgId, inbound.fromPhone),
+        thread_id: threadIdFor(orgId, phone),
       },
     }
   );
 
-  return result.reply ?? null;
+  const reply = result.reply ?? null;
+
+  return {
+    reply,
+    // Só vale extrair de um turn que teve as duas pontas: sem resposta não há
+    // conversa da qual aprender, e um turn que falhou no modelo ensinaria o
+    // erro.
+    afterReply:
+      reply && turnText
+        ? async () => {
+            const novos = await extractFacts({
+              orgId,
+              phone,
+              userText: turnText,
+              replyText: reply,
+              known: facts,
+            });
+            const gravados = await saveFacts(orgId, phone, novos);
+            if (gravados > 0) {
+              console.log(`[memory] ${gravados} fato(s) de ${phone} em ${orgId}`);
+            }
+          }
+        : undefined,
+  };
+}
+
+/** Baixa da Z-API e manda transcrever no ImobPro. `null` em qualquer tropeço. */
+async function transcreverMidia(
+  orgId: string,
+  inbound: InboundMessage
+): Promise<string | null> {
+  const baixado = await downloadMedia(inbound.mediaUrl!);
+  if (!baixado) return null;
+
+  // O `mimeType` do webhook é o que a Z-API declara; o `content-type` do
+  // download é o que o servidor de mídia respondeu. Preferir o do webhook e cair
+  // no outro: nota de voz costuma vir certa lá e como `application/octet-stream`
+  // aqui, e o Gemini precisa do tipo real pra decodificar.
+  const mimeType =
+    inbound.mimeType ??
+    baixado.contentType ??
+    (inbound.kind === "audio" ? "audio/ogg" : "image/jpeg");
+
+  return transcribeMedia(orgId, {
+    kind: inbound.kind === "audio" ? "audio" : "image",
+    mimeType,
+    data: baixado.data,
+  });
 }

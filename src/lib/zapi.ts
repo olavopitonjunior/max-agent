@@ -94,6 +94,62 @@ export async function sendAudio(params: {
 }
 
 /**
+ * Teto do que aceitamos baixar.
+ *
+ * Amarrado ao limite do outro lado: o `/api/agents/media/transcribe` do ImobPro
+ * recusa acima de 3 MB, e o corpo da Vercel para em 4.5 MB com base64 inflando
+ * 33%. Baixar 20 MB de vídeo pra tomar 413 depois é gastar banda e latência
+ * pra chegar no mesmo "não deu".
+ */
+export const MAX_MEDIA_BYTES = 3 * 1024 * 1024;
+
+/**
+ * Baixa a mídia de uma mensagem recebida.
+ *
+ * A URL vem do webhook da Z-API e é lida como DADO — só o `content-length` e os
+ * bytes interessam. Nada do que vier aqui vira instrução, e o conteúdo é
+ * repassado ao ImobPro como binário, nunca como link (lá isso seria SSRF com
+ * credencial de tenant).
+ *
+ * `null` em qualquer problema: mídia é melhor-esforço, e quem chama tem que
+ * saber dizer "não consegui ouvir" em vez de calar.
+ */
+export async function downloadMedia(
+  url: string
+): Promise<{ data: Buffer; contentType: string | null } | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn(`[zapi] download de mídia ${res.status}`);
+      return null;
+    }
+
+    // Recusa pelo cabeçalho ANTES de puxar o corpo, quando ele existe: é a
+    // diferença entre desistir de graça e desistir depois de baixar tudo.
+    const declared = Number(res.headers.get("content-length") ?? "0");
+    if (declared > MAX_MEDIA_BYTES) {
+      console.warn(`[zapi] mídia grande demais (${declared} bytes) — ignorada`);
+      return null;
+    }
+
+    const data = Buffer.from(await res.arrayBuffer());
+    // Conferido de novo sobre o real: `content-length` pode faltar ou mentir.
+    if (data.byteLength === 0 || data.byteLength > MAX_MEDIA_BYTES) {
+      console.warn(`[zapi] mídia fora do limite (${data.byteLength} bytes)`);
+      return null;
+    }
+
+    return { data, contentType: res.headers.get("content-type") };
+  } catch (err) {
+    console.error(
+      "[zapi] download de mídia falhou:",
+      err instanceof Error ? err.message : String(err)
+    );
+    return null;
+  }
+}
+
+/**
  * Estado da instância. É o ÚNICO jeito de saber se as mensagens estão mesmo
  * saindo: desemparelhada, a Z-API aceita o `send-text` com 200 e um
  * `messageId` que nunca chega a lugar nenhum.
