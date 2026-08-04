@@ -352,6 +352,10 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     fromMedia: state.fromMedia,
     facts: renderFacts(state.facts),
     propostaDescartada: state.propostaDescartada,
+    // Quem não pode escrever recebe um prompt que não descreve a ferramenta —
+    // e diz de quem é o caminho. Descrever capacidade que não está no pedido é
+    // a forma mais barata de um modelo pequeno prometer o que não entrega.
+    podeEscrever: podeEscrever(state.identity),
   });
 
   const userText = state.inbound.text?.trim() || "(mensagem sem texto)";

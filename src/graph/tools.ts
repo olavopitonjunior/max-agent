@@ -175,7 +175,8 @@ export const TEXTO_FALHOU =
   "Não consegui criar o formulário agora — nada foi criado. " +
   "Tenta de novo em instantes, ou cria pelo sistema se for urgente.";
 
-/** Corretor sem login pediu escrita. Dizer de quem é o caminho, não sumir com o assunto. */
-export const TEXTO_SEM_PERMISSAO =
-  "Criar formulário ainda é pelo sistema, com quem tem login na imobiliária. " +
-  "Fala com seu gerente que ele gera o link em um minuto.";
+// A recusa a corretor sem login NÃO mora aqui: ela é uma instrução condicional
+// do prompt (`NAO_SABE_CRIAR_FORM` em prompt.ts), porque a pessoa pode estar
+// perguntando outra coisa junto e uma frase pronta atropelaria a pergunta dela.
+// O determinismo que importa — o texto que a pessoa CONFIRMA e o link que ela
+// recebe — segue por template acima.

@@ -229,6 +229,86 @@ d("inbound_queue (Postgres real)", () => {
   });
 
   /**
+   * A prova que faltava — e que expôs o bug.
+   *
+   * O teste acima espera a primeira linha virar `processing` ANTES de tentar a
+   * segunda, ou seja, espera a primeira transação COMMITAR. Com isso ele prova
+   * que uma linha já em processamento bloqueia — e não prova nada sobre o que
+   * importa: duas transações cujas janelas se SOBREPÕEM.
+   *
+   * Sob READ COMMITTED, o `NOT EXISTS` do claim é uma leitura sem lock: ela não
+   * enxerga escrita não-commitada da outra transação. Antes da migration 006 as
+   * duas passavam e dois turns do mesmo telefone rodavam no mesmo `thread_id` —
+   * check-then-act clássico, exatamente o bug que a serialização dizia fechar.
+   *
+   * Aqui as duas transações são abertas à mão e ficam vivas ao mesmo tempo, o
+   * que só é possível com conexões dedicadas (o `query()` do módulo é
+   * autocommit por statement).
+   */
+  it("duas transações SOBREPOSTAS não reivindicam o mesmo telefone", async () => {
+    const a = await enqueueInbound(msg({ messageId: "m-corrida-1" }));
+    const b = await enqueueInbound(msg({ messageId: "m-corrida-2" }));
+    if (a.status !== "queued" || b.status !== "queued") {
+      throw new Error("esperava queued");
+    }
+
+    const c1 = await db().connect();
+    const c2 = await db().connect();
+    const CLAIM = `UPDATE inbound_queue
+        SET status = 'processing', attempts = attempts + 1, last_attempt_at = now()
+      WHERE id = $1 AND status = 'pending'
+        AND NOT EXISTS (
+          SELECT 1 FROM inbound_queue outro
+           WHERE outro.from_phone = inbound_queue.from_phone
+             AND outro.id <> inbound_queue.id
+             AND outro.status = 'processing')
+      RETURNING id`;
+
+    try {
+      await c1.query("BEGIN");
+      await c2.query("BEGIN");
+
+      const r1 = await c1.query(CLAIM, [a.id]);
+      expect(r1.rowCount).toBe(1); // a primeira sempre passa
+
+      // A segunda roda com a primeira AINDA não commitada. Sem o índice da 006
+      // ela também passaria — o `NOT EXISTS` não vê a escrita da outra.
+      // Com o índice, ela bloqueia até o commit e então falha com 23505.
+      const segunda = c2.query(CLAIM, [b.id]).then(
+        (r) => ({ ok: true as const, rows: r.rowCount }),
+        (err: { code?: string }) => ({ ok: false as const, code: err.code })
+      );
+
+      await c1.query("COMMIT");
+      const resultado = await segunda;
+      await c2.query("COMMIT").catch(() => c2.query("ROLLBACK"));
+
+      // Ou o índice recusou (23505), ou o compare-and-swap não casou. O que
+      // NÃO pode acontecer é as duas reivindicarem.
+      if (resultado.ok) {
+        expect(resultado.rows).toBe(0);
+      } else {
+        expect(resultado.code).toBe("23505");
+      }
+
+      const processando = await query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM inbound_queue
+          WHERE from_phone = $1 AND status = 'processing'`,
+        [PHONE]
+      );
+      expect(processando[0].n).toBe(1);
+    } finally {
+      c1.release();
+      c2.release();
+      await query(
+        `UPDATE inbound_queue SET status = 'done', settled_at = now()
+          WHERE from_phone = $1 AND status = 'processing'`,
+        [PHONE]
+      );
+    }
+  });
+
+  /**
    * O dreno só pega mensagem NOVA (`attempts = 0`).
    *
    * Sem esse recorte ele repescaria a linha que acabou de falhar — ela voltou a

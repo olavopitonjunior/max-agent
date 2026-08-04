@@ -35,7 +35,16 @@ O que você NÃO faz:
 - Não repete dado pessoal de terceiros, nem confirma informação de negócio a
   quem você não sabe quem é.
 - Não cria proposta nem cobrança. Isso continua sendo pelo sistema — se
-  pedirem, diga isso.
+  pedirem, diga isso.`;
+
+/**
+ * A seção de escrita, que só existe para quem PODE escrever.
+ *
+ * Condicional, e não uma frase fixa que o modelo deveria ignorar às vezes:
+ * descrever uma ferramenta que não está no pedido é a forma mais barata de
+ * fazer um modelo pequeno prometer o que não consegue entregar.
+ */
+const SABE_CRIAR_FORM = `
 
 Criar formulário de venda:
 - Quando a pessoa PEDIR um formulário, uma ficha ou o link de cadastro do
@@ -44,6 +53,19 @@ Criar formulário de venda:
 - Pergunta sobre COMO o formulário funciona é pergunta, não pedido. Responde
   com o material da base e não propõe nada.
 - Nunca invente o nome do cliente. Se ela não disse, proponha sem nome.`;
+
+/**
+ * Corretor comissionado sem login na plataforma.
+ *
+ * Sem `User` não há `userId`, e o formulário nasceria sem dono e sem
+ * comissionado — órfão dos dois lados, pior que não criar. A instrução diz DE
+ * QUEM é o caminho: recusar sem encaminhar deixaria a pessoa sem saída.
+ */
+const NAO_SABE_CRIAR_FORM = `
+
+Criar formulário de venda não é com você para esta pessoa: só quem tem login na
+imobiliária consegue. Se ela pedir, diga que é pelo sistema e oriente a falar
+com o gerente, que gera o link em um minuto. Não prometa fazer depois.`;
 
 /**
  * Cerca do material de apoio. O delimitador é repetido na instrução para que
@@ -114,6 +136,14 @@ export function buildSystemPrompt(params: {
   facts?: string;
   /** Havia uma proposta pendente e esta mensagem não a confirmou nem recusou. */
   propostaDescartada?: boolean;
+  /**
+   * Esta pessoa pode acionar escrita (é `User` da plataforma)?
+   *
+   * Fica no bloco ESTÁVEL junto do resto da persona porque varia por PESSOA e
+   * não por turno — e o cache de prefixo do provedor só aproveita o que não
+   * muda. Mesmo motivo pelo qual o nome vem depois das instruções do tenant.
+   */
+  podeEscrever?: boolean;
 }): string {
   // ─── BLOCO ESTÁVEL ──────────────────────────────────────────────────────
   // Idêntico para toda pessoa da mesma org, turno após turno. É o que o cache
@@ -122,7 +152,10 @@ export function buildSystemPrompt(params: {
   // depois. Antes desta ordem, a linha com o nome da PESSOA ficava na posição
   // 2 e derrubava o cache das instruções do tenant, que são o maior bloco
   // (até 4000 chars).
-  const parts = [BASE];
+  const parts = [
+    BASE,
+    params.podeEscrever ? SABE_CRIAR_FORM : NAO_SABE_CRIAR_FORM,
+  ];
 
   // Instrução do tenant é APENDADA, nunca substitui o prompt-base — o mesmo
   // contrato que o console de agentes do ImobPro promete ao tenant. E vai
