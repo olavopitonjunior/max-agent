@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
-import { sendText } from "./zapi";
+import { sendText, connectionStatus } from "./zapi";
 
 /**
  * Fila de saída das notificações proativas.
@@ -97,6 +97,14 @@ export interface DispatchTotals {
   claimed: number;
   sent: number;
   failed: number;
+  /**
+   * Havia fila mas a instância estava desemparelhada — nada foi tentado.
+   *
+   * Campo próprio e não `failed`: a diferença é entre "a mensagem tem problema"
+   * e "o CANAL está fora". Somar os dois faria uma queda de instância parecer
+   * um lote de mensagens ruins, e é a queda que precisa acordar alguém.
+   */
+  blocked: number;
 }
 
 interface OutboxRow extends Record<string, unknown> {
@@ -139,7 +147,66 @@ const SENDING_ORPHAN_MINUTES = 10;
  * conjunto reivindicável depois de `SENDING_ORPHAN_MINUTES`.
  */
 export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
-  const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0 };
+  const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0 };
+
+  /**
+   * ── A checagem que faltava ─────────────────────────────────────────────
+   *
+   * `send-text` numa instância DESEMPARELHADA responde 200 com um `messageId`
+   * que nunca chega a lugar nenhum. Sem conferir o estado, a linha virava
+   * `sent`, com id de provedor e sem erro — e o log dizia "4 enviadas, 0
+   * falhas" enquanto ninguém recebia nada. Aconteceu em 2026-08-04, com quatro
+   * mensagens reais.
+   *
+   * `connectionStatus()` já existia neste arquivo, com um comentário dizendo
+   * que era "o ÚNICO jeito de saber se as mensagens estão mesmo saindo", e
+   * nunca era chamado.
+   *
+   * ANTES do claim, de propósito: reivindicar incrementa `attempts`, e uma
+   * instância fora do ar por vinte minutos queimaria as três tentativas de toda
+   * a fila e marcaria como `failed` mensagens que não têm defeito nenhum.
+   *
+   * Só custa quando há o que enviar — a maioria das execuções não acha nada e
+   * nem chega aqui.
+   */
+  const [{ due }] = await query<{ due: number }>(
+    `SELECT count(*)::int AS due FROM outbox
+      WHERE (status = 'pending' AND deliver_after <= now())
+         OR (status = 'sending'
+             AND last_attempt_at < now() - ($1 || ' minutes')::interval)`,
+    [String(SENDING_ORPHAN_MINUTES)]
+  );
+
+  if (due > 0) {
+    const status = await connectionStatus().catch((err) => {
+      // Não conseguir PERGUNTAR não é o mesmo que estar desconectado. Seguir é
+      // o comportamento antigo, que ao menos entrega quando está tudo bem.
+      console.warn(
+        "[outbox] não deu pra checar a instância:",
+        err instanceof Error ? err.message : String(err)
+      );
+      return { connected: true, raw: null };
+    });
+
+    if (!status.connected) {
+      totals.blocked = due;
+      // Ruidoso de propósito: é a única linha que distingue "ninguém tinha o
+      // que receber" de "o canal caiu e a fila está represada".
+      console.error(
+        `[outbox] INSTÂNCIA DESEMPARELHADA — ${due} mensagem(ns) represada(s), nada enviado. ` +
+          `A fila não é perdida: volta a sair quando a instância reconectar. ` +
+          `Estado: ${JSON.stringify(status.raw)}`
+      );
+      // Carimba o motivo nas linhas vencidas SEM tocar em status nem attempts:
+      // quem for olhar a tabela precisa achar a explicação ali, não só no log.
+      await query(
+        `UPDATE outbox
+            SET last_error = 'instancia z-api desemparelhada — nada foi enviado'
+          WHERE status = 'pending' AND deliver_after <= now()`
+      );
+      return totals;
+    }
+  }
 
   const rows = await query<OutboxRow>(
     `UPDATE outbox

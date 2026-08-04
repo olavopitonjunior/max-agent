@@ -27,7 +27,13 @@ export async function GET(req: NextRequest) {
 
   try {
     const totals = await dispatchDue();
-    if (totals.claimed > 0) {
+    if (totals.blocked > 0) {
+      // Nível de erro, e não info: fila represada por canal fora do ar é o
+      // estado que precisa acordar alguém. `dispatchDue` já logou o detalhe.
+      console.error(
+        `[cron/outbox] ${totals.blocked} represada(s) — instância desemparelhada`
+      );
+    } else if (totals.claimed > 0) {
       console.log(
         `[cron/outbox] ${totals.sent} enviadas, ${totals.failed} falhas de ${totals.claimed}`
       );

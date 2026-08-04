@@ -17,13 +17,15 @@ const d = hasDb ? describe : describe.skip;
 
 vi.mock("../zapi", () => ({
   sendText: vi.fn().mockResolvedValue({ messageId: "MID" }),
+  connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 
 const { enqueue, dispatchDue, renderMessage } = await import("../outbox");
 const { query, db } = await import("../db");
-const { sendText } = await import("../zapi");
+const { sendText, connectionStatus } = await import("../zapi");
 
 const sent = sendText as unknown as ReturnType<typeof vi.fn>;
+const status = connectionStatus as unknown as ReturnType<typeof vi.fn>;
 
 function args(over: Partial<Parameters<typeof enqueue>[0]> = {}) {
   return {
@@ -45,12 +47,12 @@ d("outbox (Postgres real)", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     sent.mockResolvedValue({ messageId: "MID" });
+    status.mockResolvedValue({ connected: true, raw: {} });
     await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
   });
 
   afterAll(async () => {
     await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
-    await db().end();
   });
 
   it("enfileira e devolve o horário de entrega", async () => {
@@ -249,4 +251,115 @@ describe("renderMessage", () => {
     expect(out).not.toContain("Oi, !");
     expect(out.startsWith("*T*")).toBe(true);
   });
+});
+
+/**
+ * Instância desemparelhada.
+ *
+ * Incidente de 2026-08-04: quatro mensagens reais viraram `sent`, com
+ * `messageId` do provedor e sem erro nenhum, e o log disse "4 enviadas, 0
+ * falhas" — nenhuma chegou. `send-text` numa instância desconectada responde
+ * 200 com um id que não vai a lugar nenhum.
+ *
+ * Estes testes existem porque o modo de falha é INVISÍVEL: sem eles, a
+ * regressão volta e ninguém percebe até alguém reclamar que não recebeu.
+ */
+const d2 = hasDb ? describe : describe.skip;
+
+d2("instância fora do ar (Postgres real)", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    sent.mockResolvedValue({ messageId: "MID" });
+    status.mockResolvedValue({ connected: true, raw: {} });
+    await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
+  });
+
+  afterAll(async () => {
+    await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
+  });
+
+  it("desconectada: não envia nada e reporta represado", async () => {
+    await enqueue(args());
+    status.mockResolvedValue({ connected: false, raw: { connected: false } });
+
+    const totals = await dispatchDue();
+
+    expect(sent).not.toHaveBeenCalled();
+    expect(totals.blocked).toBe(1);
+    expect(totals.sent).toBe(0);
+  });
+
+  /**
+   * O ponto mais importante. Se o claim rodasse, uma instância fora do ar por
+   * vinte minutos queimaria as três tentativas de TODA a fila e marcaria como
+   * `failed` mensagens que não têm defeito nenhum — perda definitiva por causa
+   * de um problema de canal, temporário por natureza.
+   */
+  it("não queima tentativa: a linha continua pending com attempts em zero", async () => {
+    const r = await enqueue(args());
+    if (r.status !== "queued") throw new Error("esperava queued");
+    status.mockResolvedValue({ connected: false, raw: {} });
+
+    await dispatchDue();
+    await dispatchDue();
+    await dispatchDue();
+
+    const [row] = await query<{ status: string; attempts: number; last_error: string }>(
+      `SELECT status, attempts, last_error FROM outbox WHERE id = $1`,
+      [r.id]
+    );
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    // O motivo tem que estar na TABELA, não só no log de quem estava olhando.
+    expect(row.last_error).toContain("desemparelhada");
+  });
+
+  it("reconectou: a mesma fila sai, nada se perdeu", async () => {
+    const r = await enqueue(args());
+    if (r.status !== "queued") throw new Error("esperava queued");
+
+    status.mockResolvedValue({ connected: false, raw: {} });
+    expect((await dispatchDue()).blocked).toBe(1);
+
+    status.mockResolvedValue({ connected: true, raw: {} });
+    const totals = await dispatchDue();
+
+    expect(totals.sent).toBe(1);
+    expect(sent).toHaveBeenCalledTimes(1);
+    const [row] = await query<{ status: string }>(
+      `SELECT status FROM outbox WHERE id = $1`,
+      [r.id]
+    );
+    expect(row.status).toBe("sent");
+  });
+
+  /**
+   * Não conseguir PERGUNTAR não é o mesmo que estar desconectado. Falhar
+   * fechado aqui deixaria uma instabilidade do endpoint de status calar um
+   * canal que estava funcionando.
+   */
+  it("status indisponível → segue enviando (falha aberta)", async () => {
+    await enqueue(args());
+    status.mockRejectedValue(new Error("timeout"));
+
+    const totals = await dispatchDue();
+
+    expect(totals.sent).toBe(1);
+    expect(totals.blocked).toBe(0);
+  });
+
+  /** Fila vazia não paga a chamada de status — é a maioria das execuções. */
+  it("sem nada vencido, nem pergunta o estado da instância", async () => {
+    await dispatchDue();
+    expect(status).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Fechado no NÍVEL DO ARQUIVO, não dentro de um describe. O `afterAll` de um
+ * bloco roda antes dos blocos seguintes, então encerrar o pool ali derrubaria
+ * tudo que viesse depois com um erro que não tem nada a ver com o teste.
+ */
+afterAll(async () => {
+  if (hasDb) await db().end();
 });
