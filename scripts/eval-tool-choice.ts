@@ -31,6 +31,8 @@ interface Caso {
   texto: string;
   /** A ferramenta DEVE ser chamada? */
   esperado: boolean;
+  /** Quando deve, qual `tipo`. Chamar certo com o tipo errado é pior que não chamar. */
+  tipo?: "venda" | "locacao" | "proposta";
 }
 
 /**
@@ -39,19 +41,25 @@ interface Caso {
  * exatamente onde um modelo pequeno confunde pergunta com ordem.
  */
 const CASOS: Caso[] = [
-  // Pedem formulário.
-  { texto: "me manda um link de formulário pro João Silva", esperado: true },
-  { texto: "cria um formulário de venda aí", esperado: true },
-  { texto: "preciso do link pro cliente preencher", esperado: true },
-  { texto: "abre uma ficha nova pra Maria Souza", esperado: true },
-  { texto: "gera um formulário pra eu mandar pro comprador", esperado: true },
-  { texto: "cadastra um cliente novo pra mim", esperado: true },
-  { texto: "manda o link do formulário", esperado: true },
-  { texto: "quero abrir um negócio novo, me manda a ficha", esperado: true },
-  { texto: "faz um formulário pro Pedro Almeida por favor", esperado: true },
-  { texto: "consegue criar o formulário do apartamento da Vila Nova?", esperado: true },
+  // ── Pedem VENDA ──────────────────────────────────────────────────────────
+  { texto: "me manda um link de formulário de venda pro João Silva", esperado: true, tipo: "venda" },
+  { texto: "cria um formulário de compra e venda aí", esperado: true, tipo: "venda" },
+  { texto: "abre uma ficha de venda nova pra Maria Souza", esperado: true, tipo: "venda" },
+  { texto: "gera o formulário pra eu mandar pro comprador", esperado: true, tipo: "venda" },
+  { texto: "faz um formulário de venda pro Pedro Almeida por favor", esperado: true, tipo: "venda" },
 
-  // Perguntam SOBRE o formulário, ou sobre outra coisa.
+  // ── Pedem LOCAÇÃO ────────────────────────────────────────────────────────
+  { texto: "cria um formulário de locação pro inquilino", esperado: true, tipo: "locacao" },
+  { texto: "me manda a ficha de aluguel do apartamento da Vila Nova", esperado: true, tipo: "locacao" },
+  { texto: "abre um cadastro de locação comercial pra loja", esperado: true, tipo: "locacao" },
+  { texto: "preciso do link do formulário de aluguel", esperado: true, tipo: "locacao" },
+
+  // ── Pedem PROPOSTA ───────────────────────────────────────────────────────
+  { texto: "cria uma proposta pro Carlos", esperado: true, tipo: "proposta" },
+  { texto: "abre uma proposta nova aí", esperado: true, tipo: "proposta" },
+  { texto: "monta um rascunho de proposta pra esse cliente", esperado: true, tipo: "proposta" },
+
+  // ── Perguntam SOBRE, ou é outra coisa ────────────────────────────────────
   { texto: "como funciona o formulário de venda?", esperado: false },
   { texto: "quantas etapas tem o formulário?", esperado: false },
   { texto: "o cliente precisa de login pra preencher o formulário?", esperado: false },
@@ -61,7 +69,7 @@ const CASOS: Caso[] = [
   { texto: "quando cai a comissão depois do contrato assinado?", esperado: false },
   { texto: "bom dia, tudo bem?", esperado: false },
   { texto: "o link que você mandou expirou?", esperado: false },
-  { texto: "preciso de um contrato de locação, não de venda", esperado: false },
+  { texto: "a proposta que mandei semana passada foi aceita?", esperado: false },
 ];
 
 async function main() {
@@ -81,6 +89,12 @@ async function main() {
   let fp = 0;
   let vn = 0;
   let fn = 0;
+  /**
+   * Chamou certo, com o tipo ERRADO. Contado à parte porque é o erro mais caro
+   * dos três: a pessoa lê "formulário de venda", confirma achando que pediu
+   * aluguel, e o documento errado nasce COM a confirmação dela em cima.
+   */
+  let tipoErrado = 0;
   const erros: string[] = [];
   /** O prefiltro barra ANTES do modelo — um falso negativo dele é definitivo. */
   const barradosPeloPrefiltro: string[] = [];
@@ -90,6 +104,7 @@ async function main() {
     if (!ofereceu && caso.esperado) barradosPeloPrefiltro.push(caso.texto);
 
     let chamou = false;
+    let tipo: unknown;
     if (ofereceu) {
       const r = await complete({
         system,
@@ -97,28 +112,43 @@ async function main() {
         model,
         tools: [FORM_TOOL],
       });
-      chamou = r.toolCalls.some((c) => c.name === TOOL_PROPOR_FORM);
+      const call = r.toolCalls.find((c) => c.name === TOOL_PROPOR_FORM);
+      chamou = Boolean(call);
+      tipo = call?.args.tipo;
     }
 
-    if (caso.esperado && chamou) vp++;
-    else if (caso.esperado && !chamou) {
+    let simbolo = ".";
+    if (caso.esperado && chamou) {
+      vp++;
+      if (caso.tipo && tipo !== caso.tipo) {
+        tipoErrado++;
+        simbolo = "T";
+        erros.push(
+          `  TIPO (esperado ${caso.tipo}, veio ${String(tipo)}): "${caso.texto}"`
+        );
+      }
+    } else if (caso.esperado && !chamou) {
       fn++;
+      simbolo = "x";
       erros.push(`  FN (não propôs): "${caso.texto}"`);
     } else if (!caso.esperado && chamou) {
       fp++;
+      simbolo = "x";
       erros.push(`  FP (propôs à toa): "${caso.texto}"`);
     } else vn++;
 
-    process.stdout.write(caso.esperado === chamou ? "." : "x");
+    process.stdout.write(simbolo);
   }
 
   const recall = vp + fn > 0 ? vp / (vp + fn) : 1;
   const precisao = vp + fp > 0 ? vp / (vp + fp) : 1;
+  const acertoDeTipo = vp > 0 ? (vp - tipoErrado) / vp : 1;
 
   console.log("\n");
   console.log(`recall:   ${(recall * 100).toFixed(0)}%  (${vp}/${vp + fn} pedidos atendidos)`);
   console.log(`precisão: ${(precisao * 100).toFixed(0)}%  (${fp} proposta(s) à toa)`);
-  console.log(`acertos:  ${vp + vn}/${CASOS.length}`);
+  console.log(`tipo:     ${(acertoDeTipo * 100).toFixed(0)}%  (${tipoErrado} com tipo errado)`);
+  console.log(`acertos:  ${vp - tipoErrado + vn}/${CASOS.length}`);
 
   if (erros.length) console.log(`\n${erros.join("\n")}`);
   if (barradosPeloPrefiltro.length) {
@@ -128,12 +158,25 @@ async function main() {
     );
   }
 
-  // Recall é o que decide trocar de modelo; precisão se conserta no prompt.
-  console.log(
+  /**
+   * Dois critérios, e o de TIPO é o mais duro de propósito.
+   *
+   * Recall baixo custa a feature (a pessoa pede e não é atendida). Tipo errado
+   * custa CONFIANÇA: o documento errado nasce com a confirmação da pessoa em
+   * cima, e ela não tem como saber que confirmou outra coisa senão relendo. Um
+   * recall de 90% com tipo de 80% é pior que o contrário.
+   */
+  const veredito =
     recall < 0.8
-      ? "\nVEREDITO: recall abaixo de 80% — o nano não serve para esta escolha. " +
-          "Subir o modelo SÓ nos turns que passam o prefiltro."
-      : "\nVEREDITO: recall aceitável para seguir com o nano."
+      ? "recall abaixo de 80% — o nano não serve para esta escolha."
+      : acertoDeTipo < 0.9
+        ? "recall ok, mas o TIPO erra demais — a pessoa confirmaria a coisa errada."
+        : null;
+
+  console.log(
+    veredito
+      ? `\nVEREDITO: ${veredito} Subir o modelo SÓ nos turns que passam o prefiltro.`
+      : "\nVEREDITO: aceitável para seguir com o nano."
   );
 }
 
