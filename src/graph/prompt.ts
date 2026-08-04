@@ -69,6 +69,29 @@ ${body}
 </material>`;
 }
 
+/**
+ * Instrução extra quando o turn veio de áudio ou imagem.
+ *
+ * Fica no bloco VOLÁTIL (é por turn), e o texto é fixo pra não virar mais uma
+ * variação que quebre o cache de prefixo.
+ *
+ * Reafirmar o entendido é a correção mais barata que existe: se a transcrição
+ * trocou um número ou um endereço, a pessoa vê na primeira linha, antes de agir
+ * sobre a resposta errada. Em áudio isso vale dobrado — ela não tem como reler
+ * o que mandou.
+ */
+const RECEBIDO_POR: Record<"audio" | "image", string> = {
+  audio:
+    "\n\nA mensagem desta pessoa chegou como ÁUDIO e foi transcrita — o texto " +
+    "pode ter erros. Comece a resposta reafirmando, em uma frase curta, o que " +
+    "você entendeu, e só depois responda. Não comente que é uma transcrição.",
+  image:
+    "\n\nA mensagem desta pessoa chegou como IMAGEM e foi descrita em texto — a " +
+    "descrição pode ter erros. Comece a resposta reafirmando, em uma frase " +
+    "curta, o que você entendeu da imagem, e só depois responda. Não comente " +
+    "que é uma descrição.",
+};
+
 export function buildSystemPrompt(params: {
   /** Instruções do tenant, vindas do AgentProfile do ImobPro. */
   tenantInstructions?: string | null;
@@ -77,6 +100,8 @@ export function buildSystemPrompt(params: {
   hits: KnowledgeHit[];
   /** Resumo dos turnos antigos, quando a conversa já foi compactada. */
   summary?: string | null;
+  /** Turn originado de mídia transcrita, quando for o caso. */
+  fromMedia?: "audio" | "image" | null;
 }): string {
   // ─── BLOCO ESTÁVEL ──────────────────────────────────────────────────────
   // Idêntico para toda pessoa da mesma org, turno após turno. É o que o cache
@@ -103,6 +128,10 @@ export function buildSystemPrompt(params: {
   // não pode preceder o que nunca muda.
   if (params.userName) {
     parts.push(`\nVocê está falando com ${params.userName}.`);
+  }
+
+  if (params.fromMedia) {
+    parts.push(RECEBIDO_POR[params.fromMedia]);
   }
 
   if (params.summary?.trim()) {
