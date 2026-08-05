@@ -163,8 +163,54 @@ export async function connectionStatus(): Promise<{
     method: "GET",
     headers: headers(),
   });
+
+  /**
+   * Resposta não-2xx LANÇA. Antes não checava `res.ok`, e isso produzia um
+   * diagnóstico errado com cara de certo.
+   *
+   * Um 401/403 (Client-Token da conta trocado), um 404 (instance id errado) ou
+   * um 5xx devolvem um corpo SEM o campo `connected` — e `Boolean(undefined)` é
+   * `false`. Ou seja: qualquer falha de credencial ou de rota era carimbada na
+   * fila como **"instância desemparelhada"**, que manda quem for investigar
+   * pegar o celular e ler um QR code que não vai resolver nada.
+   *
+   * Custou uma tarde: a instância foi re-pareada mais de uma vez enquanto a
+   * causa podia ser outra, e a fila ficou represada em silêncio com a
+   * explicação errada colada nela.
+   *
+   * Lançar é o comportamento certo porque os dois chamadores já distinguem os
+   * casos: eles tratam exceção como "não consegui PERGUNTAR" e seguem (fail
+   * open), registrando o motivo real no log. É a mesma regra do `orgById` —
+   * atalho pode confirmar o acerto, nunca decretar o negativo.
+   */
+  if (!res.ok) {
+    const corpo = await res.text().catch(() => "");
+    throw new Error(
+      `Z-API /status ${res.status} — NÃO é desemparelhamento, é a chamada ` +
+        `falhando (confira ZAPI_INSTANCE_ID/ZAPI_TOKEN/ZAPI_CLIENT_TOKEN): ` +
+        corpo.slice(0, 200)
+    );
+  }
+
   const raw = await res.json().catch(() => null);
-  const p = (raw ?? {}) as { connected?: boolean; smartphoneConnected?: boolean; session?: string };
+  const p = (raw ?? {}) as {
+    connected?: boolean;
+    smartphoneConnected?: boolean;
+    session?: string;
+  };
+
+  /**
+   * 200 sem NENHUM dos dois campos também não é "desconectado" — é um formato
+   * que este código não entende. Tratar como desconectado repetiria, mais de
+   * leve, o mesmo erro de cima.
+   */
+  if (p.connected === undefined && p.smartphoneConnected === undefined) {
+    throw new Error(
+      `Z-API /status 200 sem campo de conexão — formato inesperado: ` +
+        JSON.stringify(raw).slice(0, 200)
+    );
+  }
+
   return {
     connected: Boolean(p.connected ?? p.smartphoneConnected),
     session: p.session,

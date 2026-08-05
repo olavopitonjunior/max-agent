@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { parseInbound, isGroupJid, sendText, sendAudio } from "../zapi";
+import {
+  parseInbound,
+  isGroupJid,
+  sendText,
+  sendAudio,
+  connectionStatus,
+} from "../zapi";
 
 /**
  * O parser existe porque o payload da Z-API tem defeitos que já custaram
@@ -121,6 +127,68 @@ describe("envio", () => {
     vi.stubGlobal("fetch", fn);
     return fn;
   }
+
+  /**
+   * ── "Desemparelhada" não pode ser o veredito de toda falha ────────────────
+   *
+   * `connectionStatus` não checava `res.ok`. Um 401 (Client-Token da conta
+   * trocado) ou 404 (instance id errado) devolvem corpo sem `connected`, e
+   * `Boolean(undefined)` é `false` — então erro de credencial era carimbado na
+   * fila como "instância desemparelhada", mandando quem investigasse ler um QR
+   * code que não resolveria nada. Custou re-pareamentos que não eram o problema.
+   *
+   * Lançar é o certo porque os chamadores tratam exceção como "não consegui
+   * PERGUNTAR" e seguem (fail open), com o motivo real no log.
+   */
+  it("401 LANÇA em vez de dizer desemparelhada", async () => {
+    mockFetch({
+      ok: false,
+      status: 401,
+      text: async () => '{"error":"invalid client-token"}',
+    });
+
+    await expect(connectionStatus()).rejects.toThrow(/401.*NÃO é desemparelhamento/s);
+  });
+
+  it("404 (instance id errado) também lança", async () => {
+    mockFetch({ ok: false, status: 404, text: async () => "not found" });
+
+    await expect(connectionStatus()).rejects.toThrow(/ZAPI_INSTANCE_ID/);
+  });
+
+  /** 200 sem campo de conexão é formato desconhecido, não desconexão. */
+  it("200 sem campo de conexão lança em vez de assumir desconectado", async () => {
+    mockFetch({ ok: true, status: 200, json: async () => ({ foo: "bar" }) });
+
+    await expect(connectionStatus()).rejects.toThrow(/formato inesperado/);
+  });
+
+  /** O caso real de desconexão continua sendo relatado como desconexão. */
+  it("desemparelhamento de verdade devolve connected:false, sem lançar", async () => {
+    mockFetch({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        connected: false,
+        session: false,
+        error: "You are not connected.",
+        smartphoneConnected: false,
+      }),
+    });
+
+    const s = await connectionStatus();
+    expect(s.connected).toBe(false);
+  });
+
+  it("conectada devolve connected:true", async () => {
+    mockFetch({
+      ok: true,
+      status: 200,
+      json: async () => ({ connected: true, smartphoneConnected: true }),
+    });
+
+    expect((await connectionStatus()).connected).toBe(true);
+  });
 
   it("send-text monta a URL da instância e manda o Client-Token", async () => {
     const fetchMock = mockFetch();
