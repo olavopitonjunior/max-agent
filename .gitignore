@@ -11,3 +11,7 @@ node_modules/
 # seguinte, com os segredos de produção dentro.
 .env*
 !.env.example
+
+# templates de env (sem valores) sao versionados
+!.env*.tmpl
+!*.env.tmpl
