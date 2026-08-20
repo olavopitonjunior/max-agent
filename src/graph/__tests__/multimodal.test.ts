@@ -43,6 +43,14 @@ const transcrever = transcribeMedia as unknown as ReturnType<typeof vi.fn>;
 const baixar = downloadMedia as unknown as ReturnType<typeof vi.fn>;
 const identidade = resolveIdentity as unknown as ReturnType<typeof vi.fn>;
 
+/**
+ * Os três testes que chegam ao `invoke` do grafo precisam do checkpointer real
+ * (Postgres). Pulam sem `DATABASE_URL` para que `npm test` continue verde em
+ * quem não tem o banco de teste — mesmo gate dos `*.integration.test.ts`.
+ */
+const hasDb = Boolean(process.env.DATABASE_URL);
+const itDb = hasDb ? it : it.skip;
+
 const CANDIDATO = {
   orgId: "org1",
   orgName: "RE/MAX Trio",
@@ -75,7 +83,7 @@ beforeEach(() => {
 });
 
 describe("mídia vira o turno da pessoa", () => {
-  it("áudio é baixado e transcrito com a org já resolvida", async () => {
+  itDb("áudio é baixado e transcrito com a org já resolvida", async () => {
     await runTurn(midia("audio"));
 
     expect(baixar).toHaveBeenCalledWith("https://media.z-api.io/abc");
@@ -85,7 +93,7 @@ describe("mídia vira o turno da pessoa", () => {
     );
   }, 30_000);
 
-  it("imagem segue o mesmo caminho", async () => {
+  itDb("imagem segue o mesmo caminho", async () => {
     transcrever.mockResolvedValue("Uma matrícula de imóvel.");
     await runTurn(midia("image"));
 
@@ -126,7 +134,7 @@ describe("mídia vira o turno da pessoa", () => {
    * Áudio com legenda: o texto digitado ganha. Transcrever seria pagar modelo
    * para obter o que a pessoa já escreveu.
    */
-  it("mídia COM texto usa o texto e não transcreve", async () => {
+  itDb("mídia COM texto usa o texto e não transcreve", async () => {
     await runTurn(midia("audio", { text: "e aí, saiu?" }));
 
     expect(transcrever).not.toHaveBeenCalled();
