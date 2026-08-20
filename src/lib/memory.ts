@@ -233,8 +233,23 @@ export function renderFacts(facts: Facts): string {
  * quem quiser prazo diferente ajusta a env sem deploy.
  */
 export async function pruneOldFacts(): Promise<number> {
-  const days = Number(process.env.MEMORY_TTL_DAYS ?? "180");
-  if (!Number.isFinite(days) || days <= 0) return 0;
+  const raw = process.env.MEMORY_TTL_DAYS;
+  let days = 180;
+  if (raw !== undefined && raw !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) {
+      days = n;
+    } else {
+      // Env presente mas inválida ("180d", vazio com espaço) NÃO desliga a
+      // retenção em silêncio — cai no default com barulho. Desligar de
+      // propósito é MEMORY_TTL_DAYS=off.
+      if (raw === "off") return 0;
+      console.error(
+        `[memory] MEMORY_TTL_DAYS inválida ("${raw}") — usando default 180. ` +
+          `Para desligar a poda, use MEMORY_TTL_DAYS=off.`
+      );
+    }
+  }
   const rows = await query<{ count: string }>(
     `WITH apagados AS (
        DELETE FROM memory_facts

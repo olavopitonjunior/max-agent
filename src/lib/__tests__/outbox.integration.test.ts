@@ -15,6 +15,15 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 const hasDb = Boolean(process.env.DATABASE_URL);
 const d = hasDb ? describe : describe.skip;
 
+// Semeadura e identidade mockadas: o assunto deste arquivo é a FILA. Sem o
+// mock, cada dispatch rodaria o checkpointer real (DDL + linhas de checkpoint
+// que a limpeza daqui não cobre) e a resolução de identidade faria fetch.
+vi.mock("@/graph/graph", () => ({
+  seedNotification: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../identity", () => ({
+  resolveIdentity: vi.fn().mockResolvedValue({ kind: "unknown" }),
+}));
 vi.mock("../zapi", () => ({
   sendText: vi.fn().mockResolvedValue({ messageId: "MID" }),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),

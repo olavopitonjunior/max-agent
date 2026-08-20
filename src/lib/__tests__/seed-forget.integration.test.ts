@@ -81,6 +81,36 @@ d("fase 4B", () => {
     expect(restantes.imovel_interesse).toBe("apto 2q");
   });
 
+  it("forget apaga também a variante sem o 9º dígito — JID da Z-API diverge", async () => {
+    vi.stubEnv("MAX_NOTIFY_SECRET", "s-forget");
+    const { POST } = await import("@/app/api/admin/forget/route");
+
+    // A pessoa conversou pela forma SEM o 9º dígito (como a Z-API entrega em
+    // alguns aparelhos); o operador digita a forma completa do cadastro.
+    const semNove = "5511" + PHONE.slice(5); // remove o 9 após o DDD
+    await query(
+      `INSERT INTO memory_facts (org_id, phone, key, value) VALUES ($1, $2, 'k', 'v')`,
+      [ORG, semNove]
+    );
+
+    const rawBody = JSON.stringify({ phone: PHONE });
+    const ts = String(Date.now());
+    const res = await POST(
+      new NextRequest("http://max.test/api/admin/forget", {
+        method: "POST",
+        body: rawBody,
+        headers: {
+          "x-max-timestamp": ts,
+          "x-max-signature": sign(ts, rawBody, "s-forget"),
+        },
+      })
+    );
+    const { deleted, forms } = await res.json();
+    expect(forms).toBe(2);
+    expect(deleted.memory_facts).toBe(1);
+    await query(`DELETE FROM memory_facts WHERE phone = $1`, [semNove]);
+  });
+
   it("forget apaga as seis superfícies e devolve as contagens", async () => {
     vi.stubEnv("MAX_NOTIFY_SECRET", "s-forget");
     const { POST } = await import("@/app/api/admin/forget/route");
