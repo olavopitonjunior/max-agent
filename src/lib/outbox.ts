@@ -284,18 +284,36 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
       // Esgotou as tentativas → `failed` (terminal, visível no painel). Ainda
       // tem crédito → volta pra `pending` com backoff, e o próximo cron pega.
       const exhausted = row.attempts >= MAX_ATTEMPTS;
-      await query(
-        `UPDATE outbox
-            SET status = $2,
-                last_error = $3,
-                -- Envio FALHOU: limpa o marcador, a retentativa deve reenviar.
-                send_started_at = NULL,
-                deliver_after = CASE WHEN $2 = 'pending'
-                                     THEN now() + ($4 || ' minutes')::interval
-                                     ELSE deliver_after END
-          WHERE id = $1`,
-        [row.id, exhausted ? "failed" : "pending", message.slice(0, 500), String(row.attempts * 5)]
-      );
+      const settleFailure = () =>
+        query(
+          `UPDATE outbox
+              SET status = $2,
+                  last_error = $3,
+                  -- Envio FALHOU: limpa o marcador, a retentativa deve reenviar.
+                  send_started_at = NULL,
+                  deliver_after = CASE WHEN $2 = 'pending'
+                                       THEN now() + ($4 || ' minutes')::interval
+                                       ELSE deliver_after END
+            WHERE id = $1`,
+          [row.id, exhausted ? "failed" : "pending", message.slice(0, 500), String(row.attempts * 5)]
+        );
+      /**
+       * Guardado com retry próprio: se este UPDATE subisse, derrubaria o
+       * `dispatchDue` inteiro (as linhas seguintes ficariam `sending` até a
+       * janela de órfã) E deixaria o marcador na linha — que a retomada
+       * liquidaria como `sent` sem ter enviado (achado do code review).
+       */
+      await settleFailure().catch(async () => {
+        await new Promise((r) => setTimeout(r, 500));
+        await settleFailure().catch((e) =>
+          console.error(
+            `[outbox] FALHA NÃO REGISTRADA (${row.id}) — linha segue 'sending' com ` +
+              `marcador; a retomada vai marcá-la 'sent' SEM envio. Intervenção: ` +
+              `SET send_started_at = NULL, status = 'pending'. Motivo: ` +
+              (e instanceof Error ? e.message : String(e))
+          )
+        );
+      });
       totals.failed += 1;
     }
   }

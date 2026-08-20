@@ -350,12 +350,29 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
           quoteMessageId: row.message_id,
         });
       } catch (err) {
-        // Envio FALHOU: limpa o marcador para que a retentativa reenvie de
-        // verdade — sem isto ela concluiria "provavelmente enviado" e calaria.
-        await query(
-          `UPDATE inbound_queue SET last_send_started_at = NULL WHERE id = $1`,
-          [row.id]
-        ).catch(() => undefined);
+        /**
+         * Envio FALHOU: limpa o marcador para que a retentativa reenvie de
+         * verdade — sem isto ela concluiria "provavelmente enviado" e calaria
+         * uma falha CONHECIDA (a janela do at-most-once é morrer entre o send
+         * e o UPDATE final, nunca um erro de envio). Por isso a limpeza tem
+         * retry e a falha dupla é log de erro, não warn engolido.
+         */
+        const limpar = () =>
+          query(
+            `UPDATE inbound_queue SET last_send_started_at = NULL WHERE id = $1`,
+            [row.id]
+          );
+        await limpar().catch(async () => {
+          await new Promise((r) => setTimeout(r, 500));
+          await limpar().catch((e) =>
+            console.error(
+              `[inbound] MARCADOR NÃO LIMPO após envio falho (${row.id}) — ` +
+                `a retentativa vai liquidar sem reenviar. Intervenção manual: ` +
+                `SET last_send_started_at = NULL. Motivo: ` +
+                (e instanceof Error ? e.message : String(e))
+            )
+          );
+        });
         throw err;
       }
       replyMessageId = res.messageId ?? res.id ?? null;
@@ -413,12 +430,19 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
  * pegasse e a linha ficaria em `processing` até virar órfã.
  */
 /**
- * Orçamento de TEMPO de uma execução, abaixo do `maxDuration` (60s) com folga
- * para o turn em andamento terminar. O deadline é conferido ANTES de reivindicar
- * a próxima linha, nunca no meio de um turn: linha reivindicada e não processada
- * ficaria em `processing` até virar órfã — 10 minutos de silêncio.
+ * Cutoff para REIVINDICAR mais uma linha. O deadline é conferido antes do
+ * claim, nunca no meio de um turn: linha reivindicada e não processada ficaria
+ * em `processing` até virar órfã — 10 minutos de silêncio.
+ *
+ * 20s, não mais: o que decide o valor é o pior caso do turn DEPOIS do último
+ * claim permitido. Um turn típico fecha em ~10-15s, mas os tetos somados
+ * (transcrição 45s ou LLM 45s + envio 10s) passam disso — com claim aos 19.9s,
+ * o caso comum cabe nos 60s do `maxDuration` com folga, e o estouro só
+ * acontece quando um upstream já está no próprio teto (cenário em que o turn
+ * ia falhar de qualquer forma). Subir este número reabre o achado do review:
+ * function morta no meio do turn, exatamente o que a fila existe para evitar.
  */
-const EXECUTION_BUDGET_MS = 40_000;
+const EXECUTION_BUDGET_MS = 20_000;
 
 export async function processInboundNow(id: string): Promise<void> {
   const deadline = Date.now() + EXECUTION_BUDGET_MS;
