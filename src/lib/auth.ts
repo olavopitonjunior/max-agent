@@ -54,6 +54,19 @@ export async function requireHmac(
   let verdict = verifySignature({ timestamp, signature, rawBody: signedPayload, secret });
   if (!verdict.ok && opts.signQuery && opts.allowLegacyEmptyBody) {
     verdict = verifySignature({ timestamp, signature, rawBody: "", secret });
+    if (verdict.ok) {
+      /**
+       * TELEMETRIA DO SUNSET: enquanto este log aparecer, o cliente ainda
+       * assina o formato antigo e o replay cross-tenant continua possível.
+       * Quando a migração do Contractmaker entrar (issue #347 de lá) e este
+       * log ZERAR por alguns dias, remova o `allowLegacyEmptyBody` — sem o
+       * log, o flag viraria permanente e a correção, cerimônia.
+       */
+      console.warn(
+        `[auth] assinatura LEGADA aceita em ${req.nextUrl.pathname} — ` +
+          `migrar o cliente e remover allowLegacyEmptyBody (contractmaker#347)`
+      );
+    }
   }
 
   if (!verdict.ok) {

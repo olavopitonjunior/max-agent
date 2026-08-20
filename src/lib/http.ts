@@ -14,10 +14,12 @@
 /** Z-API: API de mensageria, responde em ms; 10s já é generosidade. */
 export const ZAPI_TIMEOUT_MS = 10_000;
 
-/** ImobPro: consultas de identidade/RAG/escrita. A transcrição é a exceção
- * (sobe 3 MB de mídia e espera o Gemini) e usa o dobro. */
+/** ImobPro: consultas de identidade/RAG/escrita. A transcrição é a exceção —
+ * sobe até 3 MB em base64 E espera o Gemini transcrever um áudio que pode ter
+ * minutos; 20s cortava exatamente as mídias que MAX_MEDIA_BYTES aceita
+ * (achado do code review), então ela usa a classe do LLM. */
 export const IMOBPRO_TIMEOUT_MS = 8_000;
-export const IMOBPRO_TRANSCRIBE_TIMEOUT_MS = 20_000;
+export const IMOBPRO_TRANSCRIBE_TIMEOUT_MS = 45_000;
 
 /** LLM: a resposta longa de um modelo lento. O `answer` usa o teto cheio;
  * compactação e extração de memória são curtas e não merecem esperar tanto. */

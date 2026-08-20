@@ -47,7 +47,7 @@ import {
 } from "@/lib/identity";
 import { complete, DEFAULT_MODEL, type LlmUsage } from "@/lib/llm";
 import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
-import { db } from "@/lib/db";
+import { checkpointerPool } from "@/lib/db";
 import { maskPhone } from "@/lib/phone";
 import { buildSystemPrompt, shouldSearch } from "./prompt";
 import type { InboundMessage } from "@/lib/zapi";
@@ -598,10 +598,11 @@ let checkpointer: PostgresSaver | null = null;
 
 export async function getCheckpointer(): Promise<PostgresSaver> {
   if (!checkpointer) {
-    // A MESMA pool do resto do serviço, não uma segunda via `fromConnString`:
-    // o `max: 3` do `db.ts` existe porque o Neon cobra por conexão, e uma pool
-    // paralela sem teto furava essa contabilidade.
-    checkpointer = new PostgresSaver(db());
+    // Pool própria COM teto (ver `checkpointerPool` em db.ts): o saver segura
+    // um client em transação por escrita — na pool compartilhada ele
+    // estrangulava as queries da fila; via `fromConnString` era uma pool sem
+    // teto furando a contabilidade do Neon.
+    checkpointer = new PostgresSaver(checkpointerPool());
     // `setup()` é DDL idempotente, mas rodar a cada cold start é uma rodada de
     // CREATE IF NOT EXISTS por instância. Depois do primeiro deploy com as
     // tabelas criadas, desligue com MAX_CHECKPOINTER_SETUP=0.

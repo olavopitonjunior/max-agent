@@ -16,6 +16,11 @@ describe("maskPhone", () => {
     expect(maskPhone("123456")).toBe("***");
     expect(maskPhone("")).toBe("***");
   });
+
+  it("7-8 dígitos também: prefixo+sufixo devolveria o número quase inteiro", () => {
+    expect(maskPhone("12345678")).toBe("***");
+    expect(maskPhone("1234567")).toBe("***");
+  });
 });
 
 describe("normalizeBrPhone", () => {

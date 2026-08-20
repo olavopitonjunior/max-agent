@@ -41,6 +41,8 @@ export function toZapiPhone(raw: string): string | null {
  */
 export function maskPhone(raw: string): string {
   const d = onlyDigits(raw ?? "");
-  if (d.length <= 6) return "***";
+  // <= 8: com 7-8 dígitos, prefixo 4 + sufixo 4 devolveria o número inteiro
+  // (ou quase) — mascarado só no nome.
+  if (d.length <= 8) return "***";
   return `${d.slice(0, 4)}***${d.slice(-4)}`;
 }
