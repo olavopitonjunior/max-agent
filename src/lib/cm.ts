@@ -135,6 +135,9 @@ export async function transcribeMedia(
       },
       IMOBPRO_TRANSCRIBE_TIMEOUT_MS
     );
+    // 409 é o idioma da casa para "já tenho este" (ver /notify): desfecho
+    // duplicado aceito é sucesso — carimbar evita reportar para sempre.
+    if (res.status === 409) return "ok";
     if (!res.ok) {
       console.warn(
         `[cm] transcrição recusada (${res.status}): ${(await res.text()).slice(0, 200)}`
@@ -494,6 +497,8 @@ export async function reportDeliveryOutcome(outcome: {
   at: string;
   providerMessageId: string | null;
 }): Promise<ReportOutcome> {
+  // O chamador atual (reconcile) já pré-garante o secret; esta guarda existe
+  // para chamadores futuros — não é o caminho testado.
   const secret = process.env.MAX_WEBHOOK_SECRET;
   if (!secret) return "unavailable";
 
@@ -514,12 +519,16 @@ export async function reportDeliveryOutcome(outcome: {
       IMOBPRO_TIMEOUT_MS
     );
     if (!res.ok) {
-      // 404 é o estado normal até a rota existir lá; 503 é o "sem secret" do
-      // outro lado; 5xx é incidente. Nenhum deles é defeito DESTA linha.
+      // Integração (não a linha): 404 rota ainda não deployada; 5xx (inclui o
+      // 503 "sem secret" de lá); 408/429 timeout/rate-limit; 401/403 drift de
+      // secret/proteção de deploy — auth não é defeito de payload, e tratá-la
+      // como recusa queimaria o teto de tudo durante uma rotação capenga.
+      // Recusa de payload é o resto (400/422).
       console.warn(`[cm] report de entrega ${res.status} (${outcome.dedupeKey})`);
-      return res.status === 404 || res.status === 503 || res.status >= 500
-        ? "unavailable"
-        : "rejected";
+      const transitorio =
+        res.status === 404 || res.status === 408 || res.status === 429 ||
+        res.status === 401 || res.status === 403 || res.status >= 500;
+      return transitorio ? "unavailable" : "rejected";
     }
     return "ok";
   } catch (err) {
