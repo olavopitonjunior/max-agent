@@ -104,8 +104,18 @@ volta como mensagem nova e o bot conversa sozinho.
 ```bash
 npm test          # vitest
 npm run typecheck
+npm run lint
 npm run build     # pega erro de bundle que typecheck não vê
 ```
+
+Sem `DATABASE_URL`, os testes de integração (e os três de `multimodal` que
+chegam ao checkpointer) são **pulados** — `npm test` tem que terminar com
+`0 failed` mesmo assim; é esse modo que o CI roda. Para rodá-los, crie um
+**`.env.test`** (gitignorado) com `DATABASE_URL` apontando para um **branch
+Neon dedicado a teste** — nunca o banco de produção: o cron do outbox roda a
+cada minuto lá e despacharia as linhas criadas pelos testes com o `sendText`
+real (ver comentário em `vitest.config.ts`). As demais vars não são
+necessárias nos testes.
 
 O contrato do HMAC é testado dos **dois lados**: aqui em
 `src/lib/__tests__/hmac.test.ts` e no Contractmaker em
