@@ -94,3 +94,26 @@ export function requireCronSecret(req: NextRequest): NextResponse | null {
   }
   return null;
 }
+
+/**
+ * Gate das rotas de webhook da Z-API (mensagens e status): segredo no PATH.
+ *
+ * Num lugar só pelo mesmo motivo do HMAC acima — a checagem existia copiada
+ * nas duas rotas (quatro contando os GET), e um conserto futuro (rotação com
+ * dois valores aceitos, rate limit de sondagem) esqueceria uma cópia.
+ *
+ * Sem env → 500, nunca 200 silencioso (deploy sem env descartaria tudo
+ * parecendo saudável). Segredo errado → 404: para quem sonda a URL, o
+ * endpoint não deve nem existir.
+ */
+export function requireZapiSecret(paramSecret: string): NextResponse | null {
+  const expected = process.env.ZAPI_WEBHOOK_SECRET;
+  if (!expected) {
+    console.error("[auth] ZAPI_WEBHOOK_SECRET não configurada");
+    return NextResponse.json({ error: "not_configured" }, { status: 500 });
+  }
+  if (paramSecret !== expected) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+  return null;
+}

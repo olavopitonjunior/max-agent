@@ -1,6 +1,7 @@
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import { query } from "./db";
+import { sign } from "./hmac";
 import {
   fetchWithTimeout,
   imobproBase,
@@ -451,5 +452,64 @@ export async function reportUsage(
     // Fire-and-forget: perder a contabilidade de um turn é ruim, não responder
     // ao usuário por causa disso é pior.
     console.warn("[cm] reportUsage falhou:", err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
+ * Entrega ao Contractmaker o DESFECHO de uma notificação — o caminho de volta
+ * que fecha o ponto cego do 202 (docs/max.md §8 de lá).
+ *
+ * A costura é a `dedupeKey`: é a mesma chave que veio no `/notify` e que os
+ * logs de lá (`DealNotificationLog`/`UserNotificationDelivery`) guardam.
+ * Nenhum id nosso viaja — o Max não sabe de qual trilho a notificação nasceu,
+ * e não precisa.
+ *
+ * Assinado com o MESMO formato HMAC do `/notify` (`timestamp.rawBody`, já
+ * travado por vetor fixo nos dois repos), mas com um secret PRÓPRIO
+ * (`MAX_WEBHOOK_SECRET`): o `MAX_NOTIFY_SECRET` autentica o Contractmaker
+ * falando com o Max; este autentica o Max falando com o Contractmaker.
+ * Compartilhar o mesmo valor deixaria qualquer um dos lados forjar o outro.
+ *
+ * `false` = não reportado (rota ainda não existe lá, secret ausente, rede).
+ * Quem chama deixa `reported_at` nulo e retenta na próxima passada — o lado
+ * de lá é idempotente pela dedupeKey, então reportar duas vezes é inofensivo.
+ */
+export async function reportDeliveryOutcome(outcome: {
+  dedupeKey: string;
+  status: string;
+  at: string;
+  providerMessageId: string | null;
+}): Promise<boolean> {
+  const secret = process.env.MAX_WEBHOOK_SECRET;
+  if (!secret) return false;
+
+  const rawBody = JSON.stringify(outcome);
+  const timestamp = String(Date.now());
+  try {
+    const res = await fetchWithTimeout(
+      `${BASE()}/api/webhooks/max`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-max-timestamp": timestamp,
+          "x-max-signature": sign(timestamp, rawBody, secret),
+        },
+        body: rawBody,
+      },
+      IMOBPRO_TIMEOUT_MS
+    );
+    if (!res.ok) {
+      // 404 é o estado normal até a rota existir lá — log de aviso, não erro.
+      console.warn(`[cm] report de entrega ${res.status} (${outcome.dedupeKey})`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(
+      "[cm] report de entrega falhou:",
+      err instanceof Error ? err.message : String(err)
+    );
+    return false;
   }
 }

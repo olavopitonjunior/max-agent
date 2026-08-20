@@ -3,6 +3,7 @@ import { waitUntil } from "@vercel/functions";
 import { parseInbound, isExpectedInstance } from "@/lib/zapi";
 import { enqueueInbound, processInboundNow } from "@/lib/inbound";
 import { maskPhone } from "@/lib/phone";
+import { requireZapiSecret } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -47,18 +48,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { secret: string } }
 ) {
-  const expected = process.env.ZAPI_WEBHOOK_SECRET;
-  if (!expected) {
-    // 500, não 200: responder ok sem a env configurada descartava TODA
-    // mensagem em silêncio — um deploy com env faltando parecia saudável. O
-    // 5xx faz a Z-API reentregar, e quando a env voltar nada se perdeu.
-    console.error("[zapi-webhook] ZAPI_WEBHOOK_SECRET não configurada");
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-  if (params.secret !== expected) {
-    // 404, não 401: para quem sonda a URL, o endpoint não deve nem existir.
-    return NextResponse.json({ error: "not_found" }, { status: 404 });
-  }
+  const denied = requireZapiSecret(params.secret);
+  if (denied) return denied;
 
   let payload: unknown;
   try {
@@ -112,9 +103,7 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { secret: string } }
 ) {
-  const expected = process.env.ZAPI_WEBHOOK_SECRET;
-  if (!expected || params.secret !== expected) {
-    return NextResponse.json({ error: "not_found" }, { status: 404 });
-  }
+  const denied = requireZapiSecret(params.secret);
+  if (denied) return denied;
   return NextResponse.json({ ok: true, service: "max-agent" });
 }
