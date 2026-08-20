@@ -42,11 +42,21 @@ export function mapZapiStatus(status: string): "sent" | "delivered" | "read" | n
   }
 }
 
-const RANK_SQL = `CASE delivery_status
-  WHEN 'sent' THEN 1 WHEN 'unconfirmed' THEN 1
-  WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END`;
+/**
+ * O CASE do SQL é DERIVADO do mesmo RANK — três cópias sincronizadas à mão
+ * (mapa JS + duas strings) era corrupção silenciosa esperando um drift
+ * (achado do code review): um status novo só no mapa faria o guard comparar
+ * contra ELSE 0 e callbacks atrasados regredirem linhas.
+ */
+function rankSql(column: string): string {
+  const whens = Object.entries(RANK)
+    .map(([status, rank]) => `WHEN '${status}' THEN ${rank}`)
+    .join(" ");
+  return `CASE ${column} ${whens} ELSE 0 END`;
+}
 
-const REPLY_RANK_SQL = RANK_SQL.replace("delivery_status", "reply_delivery_status");
+const RANK_SQL = rankSql("delivery_status");
+const REPLY_RANK_SQL = rankSql("reply_delivery_status");
 
 export interface ApplyTotals {
   outbox: number;
@@ -132,8 +142,16 @@ export async function reconcile(): Promise<ReconcileTotals> {
     `UPDATE outbox
         SET delivery_status = 'unconfirmed'
       WHERE status = 'sent'
-        AND delivery_status IS NULL
+        -- 'sent' vindo de callback também é "sem notícia de ENTREGA": número
+        -- bloqueado/aparelho morto recebe SENT e nunca RECEIVED — isentá-lo
+        -- invisibilizava exatamente o caso que a feature caça (achado do
+        -- code review). O que conta é delivered_at.
+        AND (delivery_status IS NULL OR delivery_status = 'sent')
+        AND delivered_at IS NULL
         AND sent_at < now() - ($1 || ' minutes')::interval
+        -- Piso de 24h: o acervo antigo não vira avalanche de unconfirmed no
+        -- dia do deploy (a 009 também backfilla, isto é a segunda cerca).
+        AND sent_at > now() - interval '24 hours'
       RETURNING id`,
     [String(UNCONFIRMED_AFTER_MIN)]
   );
@@ -148,10 +166,24 @@ export async function reconcile(): Promise<ReconcileTotals> {
 
   if (!process.env.MAX_WEBHOOK_SECRET) return totals;
 
+  /**
+   * Orçamento de PAREDE do lote de reports: cada POST pode custar até 8s
+   * (IMOBPRO_TIMEOUT_MS) e o cron inteiro tem 60s — 50 reports sequenciais
+   * num Contractmaker pendurado matariam a function no meio e calariam até o
+   * alarme de instância desemparelhada que loga DEPOIS daqui (achado do code
+   * review). O que não coube fica para a próxima passada (1 min).
+   */
+  const deadline = Date.now() + 20_000;
+
+  /** Depois disso, desiste da linha — cabe a alguém olhar o log. */
+  const MAX_REPORT_ATTEMPTS = 10;
+
   // Desfechos devendo report: entrega confirmada/lida, sem confirmação, ou a
   // própria falha de envio. `sent` puro NÃO é reportado — o Contractmaker já
   // tratou o 202/409 como assumido; reportá-lo seria um POST de ruído por
-  // mensagem. Lote pequeno — o cron roda a cada minuto.
+  // mensagem. `report_attempts` primeiro na ordem: linha condenada não pode
+  // monopolizar o lote (head-of-line) — as novas passam na frente das que já
+  // falharam.
   const devendo = await query<{
     id: string;
     dedupe_key: string;
@@ -161,18 +193,22 @@ export async function reconcile(): Promise<ReconcileTotals> {
     sent_at: Date | null;
     delivered_at: Date | null;
     read_at: Date | null;
+    report_attempts: number;
   }>(
     `SELECT id, dedupe_key, status, delivery_status, provider_message_id,
-            sent_at, delivered_at, read_at
+            sent_at, delivered_at, read_at, report_attempts
        FROM outbox
       WHERE reported_at IS NULL
+        AND report_attempts < $1
         AND (delivery_status IN ('delivered', 'read', 'unconfirmed')
              OR status = 'failed')
-      ORDER BY created_at
-      LIMIT 50`
+      ORDER BY report_attempts, created_at
+      LIMIT 20`,
+    [MAX_REPORT_ATTEMPTS]
   );
 
   for (const row of devendo) {
+    if (Date.now() > deadline) break;
     const outcome = row.status === "failed" ? "failed" : row.delivery_status!;
     const at =
       outcome === "read"
@@ -187,9 +223,33 @@ export async function reconcile(): Promise<ReconcileTotals> {
       providerMessageId: row.provider_message_id,
     });
     if (ok) {
-      await query(`UPDATE outbox SET reported_at = now() WHERE id = $1`, [row.id]);
+      /**
+       * Compare-and-set no que foi DE FATO reportado: um upgrade (delivered →
+       * read) que chegar durante o POST zera o reported_at via
+       * applyStatusCallback, e um carimbo incondicional aqui engoliria a
+       * notícia — o Contractmaker ficaria com "entregue e nunca lida" para
+       * sempre (achado do code review). Estado mudou → não carimba → a
+       * próxima passada reporta o upgrade.
+       */
+      await query(
+        `UPDATE outbox SET reported_at = now()
+          WHERE id = $1
+            AND status = $2
+            AND delivery_status IS NOT DISTINCT FROM $3`,
+        [row.id, row.status, row.delivery_status]
+      );
       totals.reported += 1;
     } else {
+      await query(
+        `UPDATE outbox SET report_attempts = report_attempts + 1 WHERE id = $1`,
+        [row.id]
+      );
+      if (row.report_attempts + 1 >= MAX_REPORT_ATTEMPTS) {
+        console.error(
+          `[reconcile] report desistido após ${MAX_REPORT_ATTEMPTS} tentativas ` +
+            `(${row.dedupe_key}) — o Contractmaker não aceitou o desfecho.`
+        );
+      }
       totals.reportFailed += 1;
     }
   }

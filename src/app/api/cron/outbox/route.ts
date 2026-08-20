@@ -26,12 +26,13 @@ export async function GET(req: NextRequest) {
     // Reconciliação na MESMA passada, depois do despacho (sem cron novo):
     // marca `unconfirmed` o que ficou sem callback e reporta desfechos ao
     // Contractmaker. Falha aqui não desfaz envio nenhum.
+    // Falha vira marcador no payload, não `null`: um reconcile morto por
+    // semanas com o cron respondendo 200 limpo seria invisível ao monitoramento
+    // (achado do code review).
     const rec = await reconcile().catch((err) => {
-      console.error(
-        "[cron/outbox] reconcile falhou:",
-        err instanceof Error ? err.message : String(err)
-      );
-      return null;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[cron/outbox] reconcile falhou:", message);
+      return { error: message };
     });
     if (totals.blocked > 0) {
       // Nível de erro, e não info: fila represada por canal fora do ar é o

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseStatusCallback, isExpectedInstance } from "@/lib/zapi";
 import { applyStatusCallback } from "@/lib/delivery";
+import { requireZapiSecret } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -27,15 +28,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { secret: string } }
 ) {
-  const expected = process.env.ZAPI_WEBHOOK_SECRET;
-  if (!expected) {
-    console.error("[zapi-status] ZAPI_WEBHOOK_SECRET não configurada");
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-  if (params.secret !== expected) {
-    // 404, não 401: para quem sonda a URL, o endpoint não deve nem existir.
-    return NextResponse.json({ error: "not_found" }, { status: 404 });
-  }
+  const denied = requireZapiSecret(params.secret);
+  if (denied) return denied;
 
   let payload: unknown;
   try {
@@ -71,9 +65,7 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { secret: string } }
 ) {
-  const expected = process.env.ZAPI_WEBHOOK_SECRET;
-  if (!expected || params.secret !== expected) {
-    return NextResponse.json({ error: "not_found" }, { status: 404 });
-  }
+  const denied = requireZapiSecret(params.secret);
+  if (denied) return denied;
   return NextResponse.json({ ok: true, service: "max-agent", handler: "status" });
 }

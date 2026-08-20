@@ -61,16 +61,19 @@ export async function GET(req: NextRequest) {
     // A fila de ENTRADA era invisível: falha de conversa (failed, órfã em
     // processing) não aparecia em lugar nenhum — o operador não tinha como
     // ver que respostas estavam falhando.
+    // `.catch` nas três consultas novas, como no probe da Z-API: na janela
+    // deploy-antes-de-migrar uma coluna ausente não pode derrubar o painel
+    // inteiro — que é onde o operador olharia nessa hora.
     query<{ status: string; n: string }>(
       `SELECT status, COUNT(*)::text AS n
          FROM inbound_queue
         WHERE created_at > now() - interval '7 days'
         GROUP BY status`
-    ),
+    ).catch(() => []),
     query<{ oldest: string | null }>(
       `SELECT min(created_at)::text AS oldest
          FROM inbound_queue WHERE status = 'pending'`
-    ),
+    ).catch(() => []),
     // Reconciliação de entrega: o que saiu e está sem notícia é o número que
     // acorda alguém.
     query<{ delivery_status: string; n: string }>(
@@ -81,7 +84,7 @@ export async function GET(req: NextRequest) {
           AND ($1::text IS NULL OR org_id = $1)
         GROUP BY 1`,
       [orgId]
-    ),
+    ).catch(() => []),
   ]);
 
   const byStatus = Object.fromEntries(counts.map((c) => [c.status, Number(c.n)]));
@@ -108,6 +111,10 @@ export async function GET(req: NextRequest) {
       recent,
     },
     inbound: {
+      // A fila de entrada não tem org_id (migration 004): este bloco é SEMPRE
+      // global, mesmo com ?orgId= — o campo scope evita que o painel apresente
+      // contagem de todos os tenants como se fosse de um.
+      scope: "global",
       last7d: inboundByStatus,
       pending: inboundByStatus.pending ?? 0,
       processing: inboundByStatus.processing ?? 0,

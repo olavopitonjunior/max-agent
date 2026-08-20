@@ -135,6 +135,35 @@ d("entrega", () => {
     expect(r[0].reply_delivery_status).toBe("read");
   });
 
+  it("SENT sem RECEIVED também vira unconfirmed — número bloqueado não escapa", async () => {
+    // O achado do review: callback SENT marcava delivery_status='sent' e a
+    // linha ficava isenta da varredura para sempre.
+    const id = await outboxRow({ sent_at: new Date(Date.now() - 20 * 60_000) });
+    await applyStatusCallback({ status: "SENT", messageIds: [MID], phone: null, momment: null });
+    expect((await outboxDe(id)).delivery_status).toBe("sent");
+
+    const totals = await reconcile();
+    expect(totals.unconfirmed).toBe(1);
+    expect((await outboxDe(id)).delivery_status).toBe("unconfirmed");
+  });
+
+  it("report que o Contractmaker rejeita não monopoliza o lote (teto de tentativas)", async () => {
+    vi.stubEnv("MAX_WEBHOOK_SECRET", "s3");
+    const id = await outboxRow();
+    await applyStatusCallback({ status: "READ", messageIds: [MID], phone: null, momment: null });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 422, text: async () => "" }));
+
+    for (let i = 0; i < 10; i++) await reconcile();
+
+    const r = await query<{ report_attempts: number }>(
+      `SELECT report_attempts FROM outbox WHERE id = $1`, [id]
+    );
+    expect(r[0].report_attempts).toBe(10);
+    // 11ª passada: a linha condenada nem entra no lote.
+    const totals = await reconcile();
+    expect(totals.reported + totals.reportFailed).toBe(0);
+  });
+
   it("sent antigo sem callback vira unconfirmed; callback atrasado corrige", async () => {
     const id = await outboxRow({
       sent_at: new Date(Date.now() - 20 * 60_000),
