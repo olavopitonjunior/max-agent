@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, type InboundMessage } from "./zapi";
+import { maskPhone } from "./phone";
 import { runTurn } from "@/graph/graph";
 
 /**
@@ -40,6 +41,8 @@ export interface InboundRow extends Record<string, unknown> {
   timestamp_ms: string | number | null;
   attempts: number;
   reply_text: string | null;
+  /** O envio COMEÇOU numa tentativa (ver migration 007). */
+  last_send_started_at: string | Date | null;
 }
 
 export type EnqueueInboundResult =
@@ -91,7 +94,7 @@ export async function enqueueInbound(
 
 const CLAIM_COLUMNS = `id, message_id, from_phone, group_id, kind, text,
   media_url, mime_type, sender_name, reply_to_message_id, timestamp_ms,
-  attempts, reply_text`;
+  attempts, reply_text, last_send_started_at`;
 
 /**
  * Dá pra responder agora?
@@ -244,8 +247,8 @@ async function claimById(id: string): Promise<InboundRow | null> {
  * conflitante derrubaria a varredura toda. Reivindicando linha a linha, a
  * colisão isola quem colidiu e o resto do lote segue.
  */
-async function claimBatch(limit: number): Promise<InboundRow[]> {
-  const candidatos = await query<{ id: string }>(
+async function selectCandidates(limit: number): Promise<Array<{ id: string }>> {
+  return query<{ id: string }>(
     `SELECT elegiveis.id FROM (
        -- Uma linha por TELEFONE, a mais antiga de cada um. Dois turns da mesma
        -- pessoa em paralelo escreveriam no mesmo thread do checkpointer; e a
@@ -264,15 +267,6 @@ async function claimBatch(limit: number): Promise<InboundRow[]> {
      LIMIT $1`,
     [limit, String(PROCESSING_ORPHAN_MINUTES)]
   );
-
-  const reivindicadas: InboundRow[] = [];
-  for (const { id } of candidatos) {
-    // `claimById` refaz o compare-and-swap: entre este SELECT e o UPDATE, outro
-    // cron pode ter pego a linha. Devolver `null` ali é o caso normal.
-    const row = await claimById(id);
-    if (row) reivindicadas.push(row);
-  }
-  return reivindicadas;
 }
 
 function toInboundMessage(row: InboundRow): InboundMessage {
@@ -322,15 +316,48 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
         row.id,
         reply,
       ]);
+    } else if (row.last_send_started_at != null) {
+      /**
+       * Resposta pronta E envio já iniciado: a tentativa anterior morreu ENTRE
+       * o `sendText` e o UPDATE final (se o envio tivesse falhado, o marcador
+       * teria sido limpo). Reenviar aqui era o bug: a pessoa recebia a mesma
+       * resposta duas vezes. At-most-once — liquida sem reenviar; o raro caso
+       * "começou e não saiu" vira nota na linha, e a reconciliação de entrega
+       * (Fase 4) passa a confirmar o desfecho.
+       */
+      await query(
+        `UPDATE inbound_queue
+            SET status = 'done', settled_at = now(),
+                last_error = 'envio anterior provavelmente concluído — não reenviado'
+          WHERE id = $1`,
+        [row.id]
+      );
+      return "done";
     }
 
     let replyMessageId: string | null = null;
     if (reply) {
-      const res = await sendText({
-        to: row.from_phone,
-        body: reply,
-        quoteMessageId: row.message_id,
-      });
+      // Marcador ANTES do send — é ele que a retentativa consulta acima.
+      await query(
+        `UPDATE inbound_queue SET last_send_started_at = now() WHERE id = $1`,
+        [row.id]
+      );
+      let res;
+      try {
+        res = await sendText({
+          to: row.from_phone,
+          body: reply,
+          quoteMessageId: row.message_id,
+        });
+      } catch (err) {
+        // Envio FALHOU: limpa o marcador para que a retentativa reenvie de
+        // verdade — sem isto ela concluiria "provavelmente enviado" e calaria.
+        await query(
+          `UPDATE inbound_queue SET last_send_started_at = NULL WHERE id = $1`,
+          [row.id]
+        ).catch(() => undefined);
+        throw err;
+      }
       replyMessageId = res.messageId ?? res.id ?? null;
     }
 
@@ -385,7 +412,16 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
  * Nunca lança — é chamado de `waitUntil`, onde uma exceção não teria quem a
  * pegasse e a linha ficaria em `processing` até virar órfã.
  */
+/**
+ * Orçamento de TEMPO de uma execução, abaixo do `maxDuration` (60s) com folga
+ * para o turn em andamento terminar. O deadline é conferido ANTES de reivindicar
+ * a próxima linha, nunca no meio de um turn: linha reivindicada e não processada
+ * ficaria em `processing` até virar órfã — 10 minutos de silêncio.
+ */
+const EXECUTION_BUDGET_MS = 40_000;
+
 export async function processInboundNow(id: string): Promise<void> {
+  const deadline = Date.now() + EXECUTION_BUDGET_MS;
   try {
     if (!(await podeResponder())) return; // a linha fica pending; o cron retoma
     const row = await claimById(id);
@@ -401,9 +437,10 @@ export async function processInboundNow(id: string): Promise<void> {
      * conversa (é exatamente o caso "cria um form" seguido de "sim").
      *
      * Uma linha por vez e em série, que é o ponto: drenar em paralelo desfaria
-     * a serialização que acabou de ser criada.
+     * a serialização que acabou de ser criada. Só até o deadline: o que sobrar
+     * é atraso de até um minuto (cron), nunca perda.
      */
-    await drenarTelefone(row.from_phone);
+    await drenarTelefone(row.from_phone, deadline);
   } catch (err) {
     console.error(
       "[inbound] caminho rápido falhou:",
@@ -421,8 +458,11 @@ export async function processInboundNow(id: string): Promise<void> {
  */
 const DRENO_MAX = 5;
 
-async function drenarTelefone(phone: string): Promise<void> {
+async function drenarTelefone(phone: string, deadline: number): Promise<void> {
   for (let i = 0; i < DRENO_MAX; i++) {
+    // Antes de REIVINDICAR, nunca no meio: sem tempo para mais um turn, o que
+    // resta fica `pending` para o cron.
+    if (Date.now() > deadline) return;
     /**
      * A MAIS ANTIGA pendente, com `attempts` junto — e as duas coisas importam.
      *
@@ -454,7 +494,7 @@ async function drenarTelefone(phone: string): Promise<void> {
     await runQueued(row);
   }
   console.warn(
-    `[inbound] ${phone} tinha mais de ${DRENO_MAX} mensagens represadas — o cron termina`
+    `[inbound] ${maskPhone(phone)} tinha mais de ${DRENO_MAX} mensagens represadas — o cron termina`
   );
 }
 
@@ -471,8 +511,15 @@ export interface InboundTotals {
   blocked: number;
 }
 
-/** Varredura do cron: pega o que o caminho rápido não fechou. */
+/**
+ * Varredura do cron: pega o que o caminho rápido não fechou.
+ *
+ * Limitada por TEMPO, não só por contagem: 20 turns em série não cabem nos 60s
+ * do cron — cada um chama modelo. O deadline é conferido antes de cada claim;
+ * o que não coube fica `pending` e a próxima varredura (1 min) continua.
+ */
 export async function sweepInbound(limit = 20): Promise<InboundTotals> {
+  const deadline = Date.now() + EXECUTION_BUDGET_MS;
   const totals: InboundTotals = {
     claimed: 0,
     done: 0,
@@ -495,12 +542,19 @@ export async function sweepInbound(limit = 20): Promise<InboundTotals> {
     return totals;
   }
 
-  const rows = await claimBatch(limit);
-  totals.claimed = rows.length;
-
-  for (const row of rows) {
+  const candidatos = await selectCandidates(limit);
+  for (const { id } of candidatos) {
+    if (Date.now() > deadline) break;
+    // `claimById` refaz o compare-and-swap: entre o SELECT e o UPDATE, outro
+    // cron pode ter pego a linha. Devolver `null` ali é o caso normal.
+    const row = await claimById(id);
+    if (!row) continue;
+    totals.claimed += 1;
     const r = await runQueued(row);
     totals[r] += 1;
+    // O caminho rápido pode ter morrido antes de drenar: a rajada deste
+    // telefone também é responsabilidade da varredura.
+    if (r === "done") await drenarTelefone(row.from_phone, deadline);
   }
   return totals;
 }
