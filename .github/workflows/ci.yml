@@ -1,0 +1,23 @@
+# CI mínimo: typecheck + lint + testes SEM DATABASE_URL.
+# Os testes de integração pulam sem banco (gate hasDb) — 0 failed é o contrato.
+# Testes com banco rodam localmente contra o branch Neon de teste (ver README).
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
