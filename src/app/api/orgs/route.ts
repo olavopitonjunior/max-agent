@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { verifySignature } from "@/lib/hmac";
+import { requireHmac } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { encrypt, __resetOrgCache } from "@/lib/orgs";
 import { clearIdentityCache } from "@/lib/identity";
@@ -32,30 +32,12 @@ const bodySchema = z.object({
  * exatamente o que o lado de lá faz quando a primeira tentativa falha.
  */
 export async function POST(req: NextRequest) {
-  const secret = process.env.MAX_NOTIFY_SECRET;
-  if (!secret) {
-    console.error("[orgs] MAX_NOTIFY_SECRET não configurada");
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-
-  // Corpo CRU: assinar o JSON reserializado quebraria na primeira diferença de
-  // ordem de chave.
-  const rawBody = await req.text();
-
-  const verdict = verifySignature({
-    timestamp: req.headers.get("x-max-timestamp"),
-    signature: req.headers.get("x-max-signature"),
-    rawBody,
-    secret,
-  });
-  if (!verdict.ok) {
-    console.warn(`[orgs] assinatura recusada: ${verdict.reason}`);
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  const auth = await requireHmac(req);
+  if (!auth.ok) return auth.response;
 
   let parsedJson: unknown;
   try {
-    parsedJson = JSON.parse(rawBody);
+    parsedJson = JSON.parse(auth.rawBody);
   } catch {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
@@ -108,25 +90,12 @@ const deleteSchema = z.object({ orgId: z.string().min(1) });
  * já enfileiradas podem sair nesse intervalo.
  */
 export async function DELETE(req: NextRequest) {
-  const secret = process.env.MAX_NOTIFY_SECRET;
-  if (!secret) {
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-
-  const rawBody = await req.text();
-  const verdict = verifySignature({
-    timestamp: req.headers.get("x-max-timestamp"),
-    signature: req.headers.get("x-max-signature"),
-    rawBody,
-    secret,
-  });
-  if (!verdict.ok) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  const auth = await requireHmac(req);
+  if (!auth.ok) return auth.response;
 
   let parsed;
   try {
-    parsed = deleteSchema.safeParse(JSON.parse(rawBody));
+    parsed = deleteSchema.safeParse(JSON.parse(auth.rawBody));
   } catch {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }

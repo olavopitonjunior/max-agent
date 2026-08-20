@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireCronSecret } from "@/lib/auth";
 import { sweepInbound } from "@/lib/inbound";
 
 export const dynamic = "force-dynamic";
@@ -21,14 +22,8 @@ export const maxDuration = 60;
  * reprocessamento da fila.
  */
 export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) {
-    console.error("[cron/inbound] CRON_SECRET não configurada");
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-  if (req.headers.get("authorization") !== `Bearer ${secret}`) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  const denied = requireCronSecret(req);
+  if (denied) return denied;
 
   try {
     const totals = await sweepInbound();
