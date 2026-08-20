@@ -183,12 +183,18 @@ d("entrega", () => {
     const id = await outboxRow();
     await applyStatusCallback({ status: "READ", messageIds: [MID], phone: null, momment: null });
 
-    // 1ª passada: o outro lado ainda não tem a rota (404) → segue devendo.
+    // 1ª passada: o outro lado ainda não tem a rota (404) → INTEGRAÇÃO fora,
+    // segue devendo SEM queimar tentativa (o período pré-deploy da rota não
+    // pode consumir o teto da linha).
     const fail = vi.fn().mockResolvedValue({ ok: false, status: 404, text: async () => "" });
     vi.stubGlobal("fetch", fail);
     let totals = await reconcile();
     expect(totals.reportFailed).toBe(1);
     expect((await outboxDe(id)).reported_at).toBeNull();
+    const semQueima = await query<{ report_attempts: number }>(
+      `SELECT report_attempts FROM outbox WHERE id = $1`, [id]
+    );
+    expect(semQueima[0].report_attempts).toBe(0);
 
     // 2ª passada: rota no ar → reporta com HMAC e carimba.
     const ok = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
@@ -203,6 +209,8 @@ d("entrega", () => {
     const body = JSON.parse(init.body);
     expect(body.status).toBe("read");
     expect(body.dedupeKey).toMatch(/^dk-/);
+    // A costura exige org — o receptor recusa payload sem ele.
+    expect(body.orgId).toBe("org-d");
   });
 
   it("sem MAX_WEBHOOK_SECRET o report é pulado sem barulho", async () => {

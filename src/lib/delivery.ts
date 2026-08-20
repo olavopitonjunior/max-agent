@@ -186,6 +186,7 @@ export async function reconcile(): Promise<ReconcileTotals> {
   // falharam.
   const devendo = await query<{
     id: string;
+    org_id: string;
     dedupe_key: string;
     status: string;
     delivery_status: string | null;
@@ -195,7 +196,7 @@ export async function reconcile(): Promise<ReconcileTotals> {
     read_at: Date | null;
     report_attempts: number;
   }>(
-    `SELECT id, dedupe_key, status, delivery_status, provider_message_id,
+    `SELECT id, org_id, dedupe_key, status, delivery_status, provider_message_id,
             sent_at, delivered_at, read_at, report_attempts
        FROM outbox
       WHERE reported_at IS NULL
@@ -216,13 +217,25 @@ export async function reconcile(): Promise<ReconcileTotals> {
         : outcome === "delivered"
           ? row.delivered_at
           : row.sent_at;
-    const ok = await reportDeliveryOutcome({
+    const resultado = await reportDeliveryOutcome({
+      orgId: row.org_id,
       dedupeKey: row.dedupe_key,
       status: outcome,
       at: (at ?? new Date()).toISOString(),
       providerMessageId: row.provider_message_id,
     });
-    if (ok) {
+
+    /**
+     * Integração FORA (404 antes do deploy da rota lá, 503 sem secret, rede):
+     * não é defeito da linha — nada de queimar report_attempts, e o resto do
+     * lote esperaria o mesmo muro. Para tudo e tenta na próxima passada.
+     */
+    if (resultado === "unavailable") {
+      totals.reportFailed += 1;
+      break;
+    }
+
+    if (resultado === "ok") {
       /**
        * Compare-and-set no que foi DE FATO reportado: um upgrade (delivered →
        * read) que chegar durante o POST zera o reported_at via
@@ -240,6 +253,7 @@ export async function reconcile(): Promise<ReconcileTotals> {
       );
       totals.reported += 1;
     } else {
+      // "rejected": o Contractmaker recusou ESTA linha — conta tentativa.
       await query(
         `UPDATE outbox SET report_attempts = report_attempts + 1 WHERE id = $1`,
         [row.id]

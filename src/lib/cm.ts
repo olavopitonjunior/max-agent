@@ -470,18 +470,32 @@ export async function reportUsage(
  * falando com o Max; este autentica o Max falando com o Contractmaker.
  * Compartilhar o mesmo valor deixaria qualquer um dos lados forjar o outro.
  *
- * `false` = não reportado (rota ainda não existe lá, secret ausente, rede).
- * Quem chama deixa `reported_at` nulo e retenta na próxima passada — o lado
- * de lá é idempotente pela dedupeKey, então reportar duas vezes é inofensivo.
+ * O desfecho é TRI-estado, e a diferença importa (achado do orquestrador):
+ *
+ *  - `"ok"`        → aceito; o chamador carimba `reported_at`.
+ *  - `"rejected"`  → o Contractmaker RECUSOU esta linha (4xx de payload) —
+ *                    conta tentativa; após o teto, desiste dela.
+ *  - `"unavailable"` → a INTEGRAÇÃO está fora (secret ausente, rota ainda não
+ *                    deployada = 404, 503, 5xx, rede/timeout). Não é culpa da
+ *                    linha: NÃO conta tentativa — senão o período entre ligar
+ *                    o secret aqui e o deploy da rota lá queimaria as 10
+ *                    tentativas de todo desfecho e o perderia para sempre.
+ *
+ * O lado de lá é idempotente pela dedupeKey; reportar duas vezes é inofensivo.
  */
+export type ReportOutcome = "ok" | "rejected" | "unavailable";
+
 export async function reportDeliveryOutcome(outcome: {
+  /** Escopo do update do outro lado — dedupeKey sozinho poderia casar linha
+   * de outro tenant; o receptor EXIGE org. */
+  orgId: string;
   dedupeKey: string;
   status: string;
   at: string;
   providerMessageId: string | null;
-}): Promise<boolean> {
+}): Promise<ReportOutcome> {
   const secret = process.env.MAX_WEBHOOK_SECRET;
-  if (!secret) return false;
+  if (!secret) return "unavailable";
 
   const rawBody = JSON.stringify(outcome);
   const timestamp = String(Date.now());
@@ -500,16 +514,19 @@ export async function reportDeliveryOutcome(outcome: {
       IMOBPRO_TIMEOUT_MS
     );
     if (!res.ok) {
-      // 404 é o estado normal até a rota existir lá — log de aviso, não erro.
+      // 404 é o estado normal até a rota existir lá; 503 é o "sem secret" do
+      // outro lado; 5xx é incidente. Nenhum deles é defeito DESTA linha.
       console.warn(`[cm] report de entrega ${res.status} (${outcome.dedupeKey})`);
-      return false;
+      return res.status === 404 || res.status === 503 || res.status >= 500
+        ? "unavailable"
+        : "rejected";
     }
-    return true;
+    return "ok";
   } catch (err) {
     console.warn(
       "[cm] report de entrega falhou:",
       err instanceof Error ? err.message : String(err)
     );
-    return false;
+    return "unavailable";
   }
 }
