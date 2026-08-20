@@ -34,21 +34,28 @@ vi.mock("@/lib/identity", () => ({
 vi.mock("@/lib/db", () => ({
   query: vi.fn().mockResolvedValue([]),
 }));
+vi.mock("@/lib/delivery", () => ({
+  applyStatusCallback: vi.fn().mockResolvedValue({ outbox: 1, replies: 0 }),
+  reconcile: vi.fn().mockResolvedValue({ unconfirmed: 0, reported: 0, reportFailed: 0 }),
+}));
 vi.mock("@/lib/zapi", async (orig) => ({
   ...(await orig<typeof import("@/lib/zapi")>()),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 
 const { POST: webhookPost } = await import("../zapi-webhook/[secret]/route");
+const { POST: statusPost } = await import("../zapi-status/[secret]/route");
 const { POST: notifyPost } = await import("../notify/route");
 const { GET: cronInbound } = await import("../cron/inbound/route");
 const { GET: cronOutbox } = await import("../cron/outbox/route");
 const { GET: adminStatus } = await import("../admin/status/route");
 const { sign } = await import("@/lib/hmac");
 const { enqueueInbound } = await import("@/lib/inbound");
+const { applyStatusCallback } = await import("@/lib/delivery");
 const { enqueue: enqueueOutbox } = await import("@/lib/outbox");
 
 const enfileira = enqueueInbound as unknown as ReturnType<typeof vi.fn>;
+const aplicaStatus = applyStatusCallback as unknown as ReturnType<typeof vi.fn>;
 const enfileiraOut = enqueueOutbox as unknown as ReturnType<typeof vi.fn>;
 
 const SECRET = "hmac-secret-de-teste";
@@ -116,6 +123,53 @@ describe("POST /api/zapi-webhook/[secret]", () => {
     const res = await webhookPost(...webhookReq({ ...MSG, instanceId: "OUTRA" }));
     expect(res.status).toBe(200);
     expect(enfileira).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/zapi-status/[secret]", () => {
+  function statusCbReq(body: unknown, secret = "hook-secret") {
+    return [
+      new NextRequest(`http://max.test/api/zapi-status/${secret}`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+      { params: { secret } },
+    ] as const;
+  }
+
+  const CB = {
+    instanceId: "INST",
+    type: "MessageStatusCallback",
+    status: "READ",
+    ids: ["PROV-1"],
+  };
+
+  it("segredo errado é 404", async () => {
+    expect((await statusPost(...statusCbReq(CB, "errado"))).status).toBe(404);
+  });
+
+  it("callback válido aplica o status", async () => {
+    const res = await statusPost(...statusCbReq(CB));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ applied: { outbox: 1 } });
+    expect(aplicaStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "READ", messageIds: ["PROV-1"] })
+    );
+  });
+
+  it("payload que não é status é ignorado sem tocar o banco", async () => {
+    const res = await statusPost(
+      ...statusCbReq({ instanceId: "INST", messageId: "M1", phone: "551199", text: { message: "oi" } })
+    );
+    expect(await res.json()).toMatchObject({ ignored: true });
+    expect(aplicaStatus).not.toHaveBeenCalled();
+  });
+
+  it("falha do banco ainda responde 200 — reentrega não resolveria", async () => {
+    aplicaStatus.mockRejectedValueOnce(new Error("db fora"));
+    const res = await statusPost(...statusCbReq(CB));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ error: true });
   });
 });
 
