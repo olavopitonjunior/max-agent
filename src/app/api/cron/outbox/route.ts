@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth";
 import { dispatchDue } from "@/lib/outbox";
+import { reconcile } from "@/lib/delivery";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -22,6 +23,16 @@ export async function GET(req: NextRequest) {
 
   try {
     const totals = await dispatchDue();
+    // Reconciliação na MESMA passada, depois do despacho (sem cron novo):
+    // marca `unconfirmed` o que ficou sem callback e reporta desfechos ao
+    // Contractmaker. Falha aqui não desfaz envio nenhum.
+    const rec = await reconcile().catch((err) => {
+      console.error(
+        "[cron/outbox] reconcile falhou:",
+        err instanceof Error ? err.message : String(err)
+      );
+      return null;
+    });
     if (totals.blocked > 0) {
       // Nível de erro, e não info: fila represada por canal fora do ar é o
       // estado que precisa acordar alguém. `dispatchDue` já logou o detalhe.
@@ -33,7 +44,7 @@ export async function GET(req: NextRequest) {
         `[cron/outbox] ${totals.sent} enviadas, ${totals.failed} falhas de ${totals.claimed}`
       );
     }
-    return NextResponse.json(totals);
+    return NextResponse.json({ ...totals, reconcile: rec });
   } catch (err) {
     // Nunca 500 silencioso: o cron da Vercel não repete no mesmo minuto, e um
     // erro engolido aqui é fila parada sem ninguém saber.
