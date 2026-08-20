@@ -32,7 +32,8 @@ async function outboxRow(over: Record<string, unknown> = {}) {
 
 async function outboxDe(id: string) {
   const r = await query<Record<string, unknown>>(
-    `SELECT status, delivery_status, delivered_at, read_at, reported_at, dedupe_key
+    `SELECT status, delivery_status, delivered_at, read_at, reported_at,
+            dedupe_key, report_attempts
        FROM outbox WHERE id = $1`,
     [id]
   );
@@ -147,21 +148,48 @@ d("entrega", () => {
     expect((await outboxDe(id)).delivery_status).toBe("unconfirmed");
   });
 
+  it("muro na integração interrompe o lote SEM condenar as outras linhas", async () => {
+    vi.stubEnv("MAX_WEBHOOK_SECRET", "s3");
+    const idA = await outboxRow({ provider_message_id: "MID-A" });
+    const idB = await outboxRow({ provider_message_id: "MID-B" });
+    await applyStatusCallback({ status: "READ", messageIds: ["MID-A", "MID-B"], phone: null, momment: null });
+
+    // Primeira linha bate num 500 → unavailable → break: a segunda nem é tentada.
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => "" });
+    vi.stubGlobal("fetch", fetchMock);
+    const totals = await reconcile();
+    expect(totals.reportUnavailable).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // A linha que bateu no muro contou tentativa (rotação); a outra ficou intacta.
+    const attempts = [
+      (await outboxDe(idA)).report_attempts,
+      (await outboxDe(idB)).report_attempts,
+    ].sort();
+    expect(attempts).toEqual([0, 1]);
+
+    // Integração volta: as DUAS são reportadas.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }));
+    const depois = await reconcile();
+    expect(depois.reported).toBe(2);
+  });
+
   it("report que o Contractmaker rejeita não monopoliza o lote (teto de tentativas)", async () => {
     vi.stubEnv("MAX_WEBHOOK_SECRET", "s3");
     const id = await outboxRow();
     await applyStatusCallback({ status: "READ", messageIds: [MID], phone: null, momment: null });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 422, text: async () => "" }));
 
-    for (let i = 0; i < 10; i++) await reconcile();
+    // 422 é recusa de payload: conta tentativa e o lote SEGUE (sem break).
+    let totals = await reconcile();
+    expect(totals.reportFailed).toBe(1);
+    expect((await outboxDe(id)).report_attempts).toBe(1);
 
-    const r = await query<{ report_attempts: number }>(
-      `SELECT report_attempts FROM outbox WHERE id = $1`, [id]
-    );
-    expect(r[0].report_attempts).toBe(10);
-    // 11ª passada: a linha condenada nem entra no lote.
-    const totals = await reconcile();
+    // No teto (60), a linha condenada sai do lote de vez.
+    await query(`UPDATE outbox SET report_attempts = 59 WHERE id = $1`, [id]);
+    await reconcile(); // 60ª tentativa — desiste com log
+    totals = await reconcile();
     expect(totals.reported + totals.reportFailed).toBe(0);
+    expect((await outboxDe(id)).report_attempts).toBe(60);
   });
 
   it("sent antigo sem callback vira unconfirmed; callback atrasado corrige", async () => {
@@ -183,12 +211,18 @@ d("entrega", () => {
     const id = await outboxRow();
     await applyStatusCallback({ status: "READ", messageIds: [MID], phone: null, momment: null });
 
-    // 1ª passada: o outro lado ainda não tem a rota (404) → segue devendo.
+    // 1ª passada: o outro lado ainda não tem a rota (404) → INTEGRAÇÃO fora,
+    // segue devendo SEM queimar tentativa (o período pré-deploy da rota não
+    // pode consumir o teto da linha).
     const fail = vi.fn().mockResolvedValue({ ok: false, status: 404, text: async () => "" });
     vi.stubGlobal("fetch", fail);
     let totals = await reconcile();
-    expect(totals.reportFailed).toBe(1);
+    expect(totals.reportUnavailable).toBe(1);
+    expect(totals.reportFailed).toBe(0);
     expect((await outboxDe(id)).reported_at).toBeNull();
+    // A tentativa CONTA (é o que rotaciona a fila), mas o teto de 60 e o
+    // break impedem a perda do desfecho no pré-deploy.
+    expect((await outboxDe(id)).report_attempts).toBe(1);
 
     // 2ª passada: rota no ar → reporta com HMAC e carimba.
     const ok = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
@@ -203,6 +237,8 @@ d("entrega", () => {
     const body = JSON.parse(init.body);
     expect(body.status).toBe("read");
     expect(body.dedupeKey).toMatch(/^dk-/);
+    // A costura exige org — o receptor recusa payload sem ele.
+    expect(body.orgId).toBe("org-d");
   });
 
   it("sem MAX_WEBHOOK_SECRET o report é pulado sem barulho", async () => {

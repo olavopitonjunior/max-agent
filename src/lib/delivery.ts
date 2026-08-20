@@ -121,7 +121,11 @@ const UNCONFIRMED_AFTER_MIN = 15;
 export interface ReconcileTotals {
   unconfirmed: number;
   reported: number;
+  /** Linhas que o Contractmaker RECUSOU (4xx de payload) — contam tentativa. */
   reportFailed: number;
+  /** A INTEGRAÇÃO estava fora nesta passada (404/5xx/rede) — lote interrompido,
+   * nada conta tentativa. 1 = houve muro; distinguível de recusa pontual. */
+  reportUnavailable: number;
 }
 
 /**
@@ -136,7 +140,7 @@ export interface ReconcileTotals {
  *    silêncio — é o estado normal até o PR do Contractmaker entrar.
  */
 export async function reconcile(): Promise<ReconcileTotals> {
-  const totals: ReconcileTotals = { unconfirmed: 0, reported: 0, reportFailed: 0 };
+  const totals: ReconcileTotals = { unconfirmed: 0, reported: 0, reportFailed: 0, reportUnavailable: 0 };
 
   const viraramUnconfirmed = await query<{ id: string }>(
     `UPDATE outbox
@@ -175,8 +179,16 @@ export async function reconcile(): Promise<ReconcileTotals> {
    */
   const deadline = Date.now() + 20_000;
 
-  /** Depois disso, desiste da linha — cabe a alguém olhar o log. */
-  const MAX_REPORT_ATTEMPTS = 10;
+  /**
+   * Depois disso, desiste da linha — com log de erro. 60, não 10: TODA falha
+   * conta tentativa (inclusive "unavailable" — é o que faz o ORDER BY
+   * rotacionar a fila e impede uma linha envenenada de monopolizar o lote
+   * para sempre), então o teto precisa sobreviver a uma outage real. Com
+   * break por passada, uma outage total gasta ~1 tentativa/minuto RODIZIADA
+   * pelo backlog: até backlog=1, 60 min de outage contínua antes de perder
+   * um desfecho.
+   */
+  const MAX_REPORT_ATTEMPTS = 60;
 
   // Desfechos devendo report: entrega confirmada/lida, sem confirmação, ou a
   // própria falha de envio. `sent` puro NÃO é reportado — o Contractmaker já
@@ -186,6 +198,7 @@ export async function reconcile(): Promise<ReconcileTotals> {
   // falharam.
   const devendo = await query<{
     id: string;
+    org_id: string;
     dedupe_key: string;
     status: string;
     delivery_status: string | null;
@@ -194,9 +207,10 @@ export async function reconcile(): Promise<ReconcileTotals> {
     delivered_at: Date | null;
     read_at: Date | null;
     report_attempts: number;
+    created_at: Date;
   }>(
-    `SELECT id, dedupe_key, status, delivery_status, provider_message_id,
-            sent_at, delivered_at, read_at, report_attempts
+    `SELECT id, org_id, dedupe_key, status, delivery_status, provider_message_id,
+            sent_at, delivered_at, read_at, report_attempts, created_at
        FROM outbox
       WHERE reported_at IS NULL
         AND report_attempts < $1
@@ -210,19 +224,57 @@ export async function reconcile(): Promise<ReconcileTotals> {
   for (const row of devendo) {
     if (Date.now() > deadline) break;
     const outcome = row.status === "failed" ? "failed" : row.delivery_status!;
+    // Fallback DETERMINÍSTICO (created_at, nunca o relógio da passada): um
+    // failed sem sent_at reportado horas depois carimbaria a hora da
+    // reconciliação como hora do desfecho, e mudaria a cada retentativa.
     const at =
-      outcome === "read"
+      (outcome === "read"
         ? row.read_at
         : outcome === "delivered"
           ? row.delivered_at
-          : row.sent_at;
-    const ok = await reportDeliveryOutcome({
+          : row.sent_at) ?? row.created_at;
+    const resultado = await reportDeliveryOutcome({
+      orgId: row.org_id,
       dedupeKey: row.dedupe_key,
       status: outcome,
-      at: (at ?? new Date()).toISOString(),
+      at: new Date(at).toISOString(),
       providerMessageId: row.provider_message_id,
     });
-    if (ok) {
+
+    const contarTentativa = async () => {
+      await query(
+        `UPDATE outbox SET report_attempts = report_attempts + 1 WHERE id = $1`,
+        [row.id]
+      );
+      if (row.report_attempts + 1 >= MAX_REPORT_ATTEMPTS) {
+        console.error(
+          `[reconcile] report desistido após ${MAX_REPORT_ATTEMPTS} tentativas ` +
+            `(${row.dedupe_key}, ${resultado}) — desfecho perdido.`
+        );
+      }
+    };
+
+    /**
+     * Integração FORA (404 pré-deploy, 5xx, 401/403 de drift, rede): o resto
+     * do lote esperaria o mesmo muro — break. A tentativa CONTA mesmo assim:
+     * é o que rotaciona a fila (ORDER BY report_attempts) e impede uma linha
+     * cujo body derruba o receptor de ficar pinada em primeiro para sempre.
+     * O teto de 60 absorve outage real; a desistência sai com console.error.
+     */
+    if (resultado === "unavailable") {
+      await contarTentativa();
+      totals.reportUnavailable += 1;
+      // Nível de erro, como o bloco da instância desemparelhada: muro na
+      // integração com secret configurado é o que precisa acordar alguém —
+      // e só loga quando o secret existe (pré-deploy fica no early-return).
+      console.error(
+        `[reconcile] Contractmaker indisponível para o report ` +
+          `(${row.dedupe_key}) — lote interrompido, retenta na próxima passada.`
+      );
+      break;
+    }
+
+    if (resultado === "ok") {
       /**
        * Compare-and-set no que foi DE FATO reportado: um upgrade (delivered →
        * read) que chegar durante o POST zera o reported_at via
@@ -231,26 +283,26 @@ export async function reconcile(): Promise<ReconcileTotals> {
        * sempre (achado do code review). Estado mudou → não carimba → a
        * próxima passada reporta o upgrade.
        */
-      await query(
+      const carimbou = await query<{ id: string }>(
         `UPDATE outbox SET reported_at = now()
           WHERE id = $1
             AND status = $2
-            AND delivery_status IS NOT DISTINCT FROM $3`,
+            AND delivery_status IS NOT DISTINCT FROM $3
+          RETURNING id`,
         [row.id, row.status, row.delivery_status]
       );
-      totals.reported += 1;
-    } else {
-      await query(
-        `UPDATE outbox SET report_attempts = report_attempts + 1 WHERE id = $1`,
-        [row.id]
-      );
-      if (row.report_attempts + 1 >= MAX_REPORT_ATTEMPTS) {
-        console.error(
-          `[reconcile] report desistido após ${MAX_REPORT_ATTEMPTS} tentativas ` +
-            `(${row.dedupe_key}) — o Contractmaker não aceitou o desfecho.`
-        );
-      }
+      // CAS vazio = upgrade chegou durante o POST; a próxima passada reporta
+      // o estado novo — contar como "reported" aqui mentiria pro cron.
+      totals.reported += carimbou.length;
+    } else if (resultado === "rejected") {
+      // Recusa do payload DESTA linha — conta tentativa e segue o lote.
+      await contarTentativa();
       totals.reportFailed += 1;
+    } else {
+      // Exaustividade: um quarto estado novo em ReportOutcome não pode cair
+      // num else que queima tentativa em silêncio.
+      const nunca: never = resultado;
+      throw new Error(`ReportOutcome desconhecido: ${String(nunca)}`);
     }
   }
 

@@ -135,6 +135,9 @@ export async function transcribeMedia(
       },
       IMOBPRO_TRANSCRIBE_TIMEOUT_MS
     );
+    // 409 é o idioma da casa para "já tenho este" (ver /notify): desfecho
+    // duplicado aceito é sucesso — carimbar evita reportar para sempre.
+    if (res.status === 409) return "ok";
     if (!res.ok) {
       console.warn(
         `[cm] transcrição recusada (${res.status}): ${(await res.text()).slice(0, 200)}`
@@ -470,18 +473,34 @@ export async function reportUsage(
  * falando com o Max; este autentica o Max falando com o Contractmaker.
  * Compartilhar o mesmo valor deixaria qualquer um dos lados forjar o outro.
  *
- * `false` = não reportado (rota ainda não existe lá, secret ausente, rede).
- * Quem chama deixa `reported_at` nulo e retenta na próxima passada — o lado
- * de lá é idempotente pela dedupeKey, então reportar duas vezes é inofensivo.
+ * O desfecho é TRI-estado, e a diferença importa (achado do orquestrador):
+ *
+ *  - `"ok"`        → aceito; o chamador carimba `reported_at`.
+ *  - `"rejected"`  → o Contractmaker RECUSOU esta linha (4xx de payload) —
+ *                    conta tentativa; após o teto, desiste dela.
+ *  - `"unavailable"` → a INTEGRAÇÃO está fora (secret ausente, rota ainda não
+ *                    deployada = 404, 503, 5xx, rede/timeout). Não é culpa da
+ *                    linha: NÃO conta tentativa — senão o período entre ligar
+ *                    o secret aqui e o deploy da rota lá queimaria as 10
+ *                    tentativas de todo desfecho e o perderia para sempre.
+ *
+ * O lado de lá é idempotente pela dedupeKey; reportar duas vezes é inofensivo.
  */
+export type ReportOutcome = "ok" | "rejected" | "unavailable";
+
 export async function reportDeliveryOutcome(outcome: {
+  /** Escopo do update do outro lado — dedupeKey sozinho poderia casar linha
+   * de outro tenant; o receptor EXIGE org. */
+  orgId: string;
   dedupeKey: string;
   status: string;
   at: string;
   providerMessageId: string | null;
-}): Promise<boolean> {
+}): Promise<ReportOutcome> {
+  // O chamador atual (reconcile) já pré-garante o secret; esta guarda existe
+  // para chamadores futuros — não é o caminho testado.
   const secret = process.env.MAX_WEBHOOK_SECRET;
-  if (!secret) return false;
+  if (!secret) return "unavailable";
 
   const rawBody = JSON.stringify(outcome);
   const timestamp = String(Date.now());
@@ -500,16 +519,23 @@ export async function reportDeliveryOutcome(outcome: {
       IMOBPRO_TIMEOUT_MS
     );
     if (!res.ok) {
-      // 404 é o estado normal até a rota existir lá — log de aviso, não erro.
+      // Integração (não a linha): 404 rota ainda não deployada; 5xx (inclui o
+      // 503 "sem secret" de lá); 408/429 timeout/rate-limit; 401/403 drift de
+      // secret/proteção de deploy — auth não é defeito de payload, e tratá-la
+      // como recusa queimaria o teto de tudo durante uma rotação capenga.
+      // Recusa de payload é o resto (400/422).
       console.warn(`[cm] report de entrega ${res.status} (${outcome.dedupeKey})`);
-      return false;
+      const transitorio =
+        res.status === 404 || res.status === 408 || res.status === 429 ||
+        res.status === 401 || res.status === 403 || res.status >= 500;
+      return transitorio ? "unavailable" : "rejected";
     }
-    return true;
+    return "ok";
   } catch (err) {
     console.warn(
       "[cm] report de entrega falhou:",
       err instanceof Error ? err.message : String(err)
     );
-    return false;
+    return "unavailable";
   }
 }
