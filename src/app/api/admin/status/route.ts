@@ -33,7 +33,7 @@ export async function GET(req: NextRequest) {
 
   const orgId = req.nextUrl.searchParams.get("orgId");
 
-  const [counts, recent, zapi] = await Promise.all([
+  const [counts, recent, zapi, inboundCounts, oldestPending, delivery] = await Promise.all([
     query<{ status: string; n: string }>(
       `SELECT status, COUNT(*)::text AS n
          FROM outbox
@@ -58,9 +58,39 @@ export async function GET(req: NextRequest) {
       error: err instanceof Error ? err.message : String(err),
       raw: null,
     })),
+    // A fila de ENTRADA era invisível: falha de conversa (failed, órfã em
+    // processing) não aparecia em lugar nenhum — o operador não tinha como
+    // ver que respostas estavam falhando.
+    query<{ status: string; n: string }>(
+      `SELECT status, COUNT(*)::text AS n
+         FROM inbound_queue
+        WHERE created_at > now() - interval '7 days'
+        GROUP BY status`
+    ),
+    query<{ oldest: string | null }>(
+      `SELECT min(created_at)::text AS oldest
+         FROM inbound_queue WHERE status = 'pending'`
+    ),
+    // Reconciliação de entrega: o que saiu e está sem notícia é o número que
+    // acorda alguém.
+    query<{ delivery_status: string; n: string }>(
+      `SELECT COALESCE(delivery_status, 'aguardando') AS delivery_status,
+              COUNT(*)::text AS n
+         FROM outbox
+        WHERE status = 'sent' AND created_at > now() - interval '7 days'
+          AND ($1::text IS NULL OR org_id = $1)
+        GROUP BY 1`,
+      [orgId]
+    ),
   ]);
 
   const byStatus = Object.fromEntries(counts.map((c) => [c.status, Number(c.n)]));
+  const inboundByStatus = Object.fromEntries(
+    inboundCounts.map((c) => [c.status, Number(c.n)])
+  );
+  const deliveryByStatus = Object.fromEntries(
+    delivery.map((c) => [c.delivery_status, Number(c.n)])
+  );
 
   return NextResponse.json({
     service: "max-agent",
@@ -73,7 +103,16 @@ export async function GET(req: NextRequest) {
       last7d: byStatus,
       pending: byStatus.pending ?? 0,
       failed: byStatus.failed ?? 0,
+      delivery7d: deliveryByStatus,
+      unconfirmed: deliveryByStatus.unconfirmed ?? 0,
       recent,
+    },
+    inbound: {
+      last7d: inboundByStatus,
+      pending: inboundByStatus.pending ?? 0,
+      processing: inboundByStatus.processing ?? 0,
+      failed: inboundByStatus.failed ?? 0,
+      oldestPending: oldestPending[0]?.oldest ?? null,
     },
   });
 }
