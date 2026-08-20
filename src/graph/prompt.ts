@@ -53,7 +53,8 @@ Criar formulário ou proposta:
 - Pergunta sobre COMO essas coisas funcionam é pergunta, não pedido. Responde
   com o material da base e não propõe nada.
 - **Se não estiver claro se é VENDA ou LOCAÇÃO, pergunte antes.** Não chute: a
-  pessoa confirmaria uma coisa achando que pediu outra.
+  pessoa confirmaria uma coisa achando que pediu outra. Vale para proposta
+  também — proposta de aluguel existe e é outra coisa que proposta de venda.
 - Nunca invente o nome do cliente. Se ela não disse, proponha sem nome.
 - A proposta nasce em rascunho e SEM valores — quem preenche preço e condições
   é o corretor, na tela. Não prometa preencher.`;

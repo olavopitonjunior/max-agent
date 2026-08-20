@@ -34,6 +34,8 @@ export interface PendingAction {
   args: {
     tipo: TipoCriavel;
     nomeCliente?: string;
+    /** Só proposta: de compra e venda (default) ou de locação. */
+    natureza?: "venda" | "locacao";
     /** Só locação e proposta de locação. */
     finalidade?: "residencial" | "comercial";
   };
@@ -83,7 +85,8 @@ export const FORM_TOOL: LlmTool = {
         description:
           "venda = formulário de compra e venda (comprador, imóvel à venda). " +
           "locacao = formulário de aluguel (inquilino, locação, locatário). " +
-          "proposta = rascunho de proposta comercial.",
+          "proposta = rascunho de proposta comercial, de venda OU de aluguel — " +
+          "pedido com a palavra 'proposta' é deste tipo; aluguel vai em natureza.",
       },
       nome_cliente: {
         type: "string",
@@ -91,11 +94,20 @@ export const FORM_TOOL: LlmTool = {
           "Nome do cliente, se a pessoa disse. Omita se ela não disse — " +
           "não invente nem deduza.",
       },
+      natureza: {
+        type: "string",
+        enum: ["venda", "locacao"],
+        description:
+          "Só para proposta: venda = proposta de compra e venda; locacao = " +
+          "proposta de aluguel/locação. Omita se a pessoa não disse — o " +
+          "padrão é venda.",
+      },
       finalidade: {
         type: "string",
         enum: ["residencial", "comercial"],
         description:
-          "Só para locação. Omita se a pessoa não disse — o padrão é residencial.",
+          "Só para locação (formulário ou proposta). Omita se a pessoa não " +
+          "disse — o padrão é residencial.",
       },
     },
     required: ["tipo"],
@@ -115,6 +127,11 @@ export function lerFinalidade(
   bruto: unknown
 ): "residencial" | "comercial" | undefined {
   return bruto === "comercial" || bruto === "residencial" ? bruto : undefined;
+}
+
+/** Fora do enum → undefined (= venda): valor estranho não pode virar locação. */
+export function lerNatureza(bruto: unknown): "venda" | "locacao" | undefined {
+  return bruto === "venda" || bruto === "locacao" ? bruto : undefined;
 }
 
 /**
@@ -213,11 +230,15 @@ const NOME_DO_TIPO: Record<TipoCriavel, string> = {
 };
 
 export function descreverPendencia(args: PendingAction["args"]): string {
-  const base = NOME_DO_TIPO[args.tipo];
-  const fim =
-    args.tipo === "locacao" && args.finalidade === "comercial"
-      ? " comercial"
-      : "";
+  // A descrição é o que a pessoa CONFIRMA — proposta de locação não pode
+  // aparecer como "rascunho de proposta" genérico, senão ela confirma achando
+  // que é de venda.
+  const ehPropostaLocacao = args.tipo === "proposta" && args.natureza === "locacao";
+  const base = ehPropostaLocacao
+    ? "rascunho de proposta de locação"
+    : NOME_DO_TIPO[args.tipo];
+  const temFinalidade = args.tipo === "locacao" || ehPropostaLocacao;
+  const fim = temFinalidade && args.finalidade === "comercial" ? " comercial" : "";
   return `${base}${fim}`;
 }
 

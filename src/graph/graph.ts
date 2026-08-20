@@ -17,6 +17,7 @@ import {
   TOOL_PROPOR_FORM,
   lerConfirmacao,
   lerFinalidade,
+  lerNatureza,
   lerTipo,
   podeEscrever,
   propostaExpirou,
@@ -362,11 +363,20 @@ async function executar(
   const nome = args.nomeCliente;
 
   if (args.tipo === "proposta") {
+    // A natureza decide o schema — os três já existiam na rota (`cm.ts`), o
+    // hardcode aqui era o que deixava proposta de locação inexistente por
+    // conversa. Default venda: valor fora do enum já virou undefined no parse.
+    const schemaType =
+      args.natureza === "locacao"
+        ? args.finalidade === "comercial"
+          ? ("locacao_comercial_v1" as const)
+          : ("locacao_residencial_v1" as const)
+        : ("compra_venda_v1" as const);
     const proposta = await criarRascunhoProposta(orgId, {
       // `title` é obrigatório na rota; sem nome, um rótulo que diz de onde veio
       // é melhor que "Proposta" — quem abrir a lista amanhã sabe a origem.
       title: nome ? `Proposta — ${nome}` : "Proposta (criada pelo Max)",
-      schemaType: "compra_venda_v1",
+      schemaType,
       idempotencyKey,
     });
     console.log(`[confirm] proposta ${proposta.id} criada para ${orgId}`);
@@ -508,6 +518,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     const args: PendingAction["args"] = {
       tipo,
       nomeCliente,
+      natureza: lerNatureza(chamada.args.natureza),
       finalidade: lerFinalidade(chamada.args.finalidade),
     };
     const pending: PendingAction = {

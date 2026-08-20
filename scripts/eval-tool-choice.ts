@@ -33,6 +33,8 @@ interface Caso {
   esperado: boolean;
   /** Quando deve, qual `tipo`. Chamar certo com o tipo errado é pior que não chamar. */
   tipo?: "venda" | "locacao" | "proposta";
+  /** Só proposta: a natureza esperada. undefined = venda (default) serve. */
+  natureza?: "venda" | "locacao";
 }
 
 /**
@@ -58,6 +60,13 @@ const CASOS: Caso[] = [
   { texto: "cria uma proposta pro Carlos", esperado: true, tipo: "proposta" },
   { texto: "abre uma proposta nova aí", esperado: true, tipo: "proposta" },
   { texto: "monta um rascunho de proposta pra esse cliente", esperado: true, tipo: "proposta" },
+
+  // ── Pedem PROPOSTA DE LOCAÇÃO ────────────────────────────────────────────
+  // A fronteira nova: "proposta de aluguel" tem que virar tipo=proposta COM
+  // natureza=locacao — nem formulário de locação, nem proposta de venda.
+  { texto: "cria uma proposta de locação pro Marcos", esperado: true, tipo: "proposta", natureza: "locacao" },
+  { texto: "faz uma proposta de aluguel pro apartamento do centro", esperado: true, tipo: "proposta", natureza: "locacao" },
+  { texto: "monta uma proposta de aluguel comercial pra loja da Dona Lúcia", esperado: true, tipo: "proposta", natureza: "locacao" },
 
   // ── Perguntam SOBRE, ou é outra coisa ────────────────────────────────────
   { texto: "como funciona o formulário de venda?", esperado: false },
@@ -105,6 +114,7 @@ async function main() {
 
     let chamou = false;
     let tipo: unknown;
+    let natureza: unknown;
     if (ofereceu) {
       const r = await complete({
         system,
@@ -115,6 +125,7 @@ async function main() {
       const call = r.toolCalls.find((c) => c.name === TOOL_PROPOR_FORM);
       chamou = Boolean(call);
       tipo = call?.args.tipo;
+      natureza = call?.args.natureza;
     }
 
     let simbolo = ".";
@@ -125,6 +136,18 @@ async function main() {
         simbolo = "T";
         erros.push(
           `  TIPO (esperado ${caso.tipo}, veio ${String(tipo)}): "${caso.texto}"`
+        );
+      } else if (
+        // Natureza só é julgada com o tipo certo. Esperada locacao e veio
+        // outra coisa = proposta de venda nasceria com a confirmação em cima;
+        // esperada venda (undefined) e veio locacao = o inverso.
+        caso.tipo === "proposta" &&
+        (caso.natureza ?? "venda") !== ((natureza as string) ?? "venda")
+      ) {
+        tipoErrado++;
+        simbolo = "N";
+        erros.push(
+          `  NATUREZA (esperada ${caso.natureza ?? "venda"}, veio ${String(natureza)}): "${caso.texto}"`
         );
       }
     } else if (caso.esperado && !chamou) {

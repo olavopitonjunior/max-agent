@@ -376,6 +376,49 @@ describe("locação e proposta", () => {
   });
 
   /**
+   * Proposta de LOCAÇÃO por conversa: a natureza escolhe o schema que a rota
+   * já aceitava — o hardcode de compra_venda_v1 era o que a deixava
+   * inexistente. E o texto de confirmação precisa DIZER que é de locação:
+   * a pessoa confirmaria "rascunho de proposta" achando que é de venda.
+   */
+  it("proposta de locação usa o schema de locação (residencial por padrão)", async () => {
+    const s = await run(
+      "sim",
+      {
+        pendingAction: pendenciaDe("Bia", Date.now(), {
+          tipo: "proposta",
+          natureza: "locacao",
+        }),
+      },
+      usuario,
+      "m-prop-loc"
+    );
+
+    expect(criarProposta).toHaveBeenCalledWith("org1", {
+      title: "Proposta — Bia",
+      schemaType: "locacao_residencial_v1",
+      idempotencyKey: "m-prop-loc",
+    });
+    expect(s.reply).toContain("RASCUNHO");
+  });
+
+  it("proposta de locação comercial usa o schema comercial e se descreve inteira", async () => {
+    const { textoProposta } = await import("../tools");
+    const args = {
+      tipo: "proposta",
+      natureza: "locacao",
+      finalidade: "comercial",
+    } as const;
+    expect(textoProposta(args)).toContain("rascunho de proposta de locação comercial");
+
+    await run("sim", { pendingAction: pendenciaDe(undefined, Date.now(), args) }, usuario, "m-plc");
+    expect(criarProposta).toHaveBeenCalledWith(
+      "org1",
+      expect.objectContaining({ schemaType: "locacao_comercial_v1" })
+    );
+  });
+
+  /**
    * Módulo desligado não é falha transitória: retentar não resolve e quem
    * resolve não é quem pediu. "Tenta de novo em instantes" mandaria a pessoa
    * bater na mesma parede.
