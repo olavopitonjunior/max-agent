@@ -30,3 +30,17 @@ export function toZapiPhone(raw: string): string | null {
   const e164 = normalizeBrPhone(raw);
   return e164 ? e164.replace(/^\+/, "") : null;
 }
+
+/**
+ * Telefone para LOG: DDI+DDD e os 4 finais, o meio mascarado.
+ *
+ * Log da Vercel é retido e pesquisável fora do nosso controle de acesso —
+ * telefone completo ali é PII vazando para onde ninguém audita. Os 4 finais
+ * bastam para correlacionar uma investigação com a linha da fila (lá o número
+ * está inteiro, atrás de credencial de banco).
+ */
+export function maskPhone(raw: string): string {
+  const d = onlyDigits(raw ?? "");
+  if (d.length <= 6) return "***";
+  return `${d.slice(0, 4)}***${d.slice(-4)}`;
+}
