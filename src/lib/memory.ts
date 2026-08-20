@@ -1,4 +1,5 @@
 import { query } from "./db";
+import { LLM_SHORT_TIMEOUT_MS } from "./http";
 import { complete } from "./llm";
 import { reportUsage } from "./cm";
 
@@ -192,6 +193,7 @@ export async function extractFacts(params: {
         },
       ],
       maxTokens: 300,
+      timeoutMs: LLM_SHORT_TIMEOUT_MS,
     });
 
     void reportUsage(params.orgId, result.usage);

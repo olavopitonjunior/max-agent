@@ -57,11 +57,13 @@ d("resolveIdentity", () => {
       [TRIO, ATIVA].find((o) => o.orgId === id) ?? null
     );
     await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [PHONE]);
+    // O cache da varredura (007) também é estado entre testes.
+    await query(`DELETE FROM identity_cache WHERE phone = $1`, [PHONE]);
   });
 
   it("telefone em nenhuma org é desconhecido", async () => {
     mockByPhone([]);
-    expect(await resolveIdentity(PHONE)).toEqual({ kind: "unknown" });
+    expect(await resolveIdentity(PHONE)).toEqual({ kind: "unknown", alreadyGreeted: false });
   });
 
   it("telefone em UMA org resolve direto, sem perguntar", async () => {
@@ -149,7 +151,9 @@ d("resolveIdentity", () => {
 
   it("telefone inválido nem chega a varrer as orgs", async () => {
     const f = mockByPhone([TRIO.orgId]);
-    expect(await resolveIdentity("123")).toEqual({ kind: "unknown" });
+    // alreadyGreeted true: número que nem normaliza NUNCA recebe apresentação
+    // (não entra no cache/greeted, que são indexados por E.164).
+    expect(await resolveIdentity("123")).toEqual({ kind: "unknown", alreadyGreeted: true });
     expect(f).not.toHaveBeenCalled();
   });
 });
@@ -248,6 +252,8 @@ d("corretor atribuído", () => {
       async (id: string) => [TRIO, ATIVA].find((o) => o.orgId === id) ?? null
     );
     await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [PHONE]);
+    // O cache da varredura (007) também é estado entre testes.
+    await query(`DELETE FROM identity_cache WHERE phone = $1`, [PHONE]);
   });
 
   it("quem não é usuário mas é corretor atribuído é reconhecido", async () => {
@@ -320,5 +326,7 @@ d("corretor atribuído", () => {
 afterAll(async () => {
   if (!hasDb) return;
   await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [PHONE]);
+    // O cache da varredura (007) também é estado entre testes.
+    await query(`DELETE FROM identity_cache WHERE phone = $1`, [PHONE]);
   await db().end();
 });

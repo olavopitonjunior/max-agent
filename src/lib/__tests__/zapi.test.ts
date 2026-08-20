@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   parseInbound,
+  parseStatusCallback,
   isGroupJid,
   sendText,
   sendAudio,
@@ -57,6 +58,37 @@ describe("parseInbound", () => {
       groupId: "120363407415575253-group",
       fromPhone: "5511987654321",
     });
+  });
+
+  /**
+   * A mesma URL pode receber outros callbacks se os campos do painel forem
+   * apontados errado. Status de entrega tem `phone` e `messageId` e passaria
+   * pelo resto do parse — virando um turn de LLM pago sobre um evento que não
+   * é mensagem.
+   */
+  it("descarta callback que não é ReceivedCallback", () => {
+    expect(
+      parseInbound({
+        ...base,
+        type: "MessageStatusCallback",
+        status: "READ",
+        ids: ["3EB0"],
+      })
+    ).toBeNull();
+    expect(parseInbound({ ...base, type: "PresenceChatCallback" })).toBeNull();
+    // `type` presente e correto segue normal.
+    expect(
+      parseInbound({ ...base, type: "ReceivedCallback", text: { message: "oi" } })
+    ).toMatchObject({ kind: "text" });
+  });
+
+  it("descarta reação e sticker — responder a um 👍 é ruído", () => {
+    expect(
+      parseInbound({ ...base, reaction: { value: "👍", referencedMessage: {} } })
+    ).toBeNull();
+    expect(
+      parseInbound({ ...base, sticker: { stickerUrl: "https://x/s.webp" } })
+    ).toBeNull();
   });
 
   it("grupo sem participantPhone é descartado em vez de virar turn do grupo", () => {
@@ -225,5 +257,41 @@ describe("envio", () => {
     await expect(sendText({ to: "5511999063228", body: "oi" })).rejects.toThrow(
       /ZAPI_INSTANCE_ID/
     );
+  });
+});
+
+/**
+ * O callback de status é o único canal que distingue "a Z-API aceitou" de
+ * "chegou no aparelho" — a reconciliação de entrega (Fase 4) consome isto.
+ */
+describe("parseStatusCallback", () => {
+  it("extrai status e ids", () => {
+    expect(
+      parseStatusCallback({
+        type: "MessageStatusCallback",
+        status: "READ",
+        ids: ["A1", "A2"],
+        phone: "5511999063228",
+        momment: 1_800_000_000_000,
+      })
+    ).toEqual({
+      status: "READ",
+      messageIds: ["A1", "A2"],
+      phone: "5511999063228",
+      momment: 1_800_000_000_000,
+    });
+  });
+
+  it("aceita messageId único no lugar de ids", () => {
+    expect(
+      parseStatusCallback({ type: "MessageStatusCallback", status: "SENT", messageId: "B9" })
+    ).toMatchObject({ status: "SENT", messageIds: ["B9"] });
+  });
+
+  it("recusa o que não é MessageStatusCallback, e status/ids ausentes", () => {
+    expect(parseStatusCallback({ type: "ReceivedCallback", status: "READ", ids: ["x"] })).toBeNull();
+    expect(parseStatusCallback({ type: "MessageStatusCallback", ids: ["x"] })).toBeNull();
+    expect(parseStatusCallback({ type: "MessageStatusCallback", status: "READ", ids: [] })).toBeNull();
+    expect(parseStatusCallback(null)).toBeNull();
   });
 });

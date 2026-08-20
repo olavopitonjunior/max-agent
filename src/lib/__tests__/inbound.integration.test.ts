@@ -144,6 +144,36 @@ d("inbound_queue (Postgres real)", () => {
   });
 
   /**
+   * O buraco que a migration 007 fecha: a function morre DEPOIS do send e
+   * ANTES do UPDATE final. A linha volta como órfã com a resposta pronta E o
+   * marcador de envio iniciado — reenviar aqui era a pessoa recebendo a mesma
+   * resposta duas vezes. At-most-once: liquida sem reenviar.
+   */
+  it("órfã com envio iniciado NÃO reenvia — liquida como done", async () => {
+    const r = await enqueueInbound(msg());
+    if (r.status !== "queued") throw new Error("esperava queued");
+
+    // O estado exato de quem morreu entre o sendText e o UPDATE final.
+    await query(
+      `UPDATE inbound_queue
+          SET status = 'processing', attempts = 1, reply_text = 'resposta do Max',
+              last_attempt_at = now() - interval '20 minutes',
+              last_send_started_at = now() - interval '20 minutes'
+        WHERE id = $1`,
+      [r.id]
+    );
+
+    const totals = await sweepInbound();
+    expect(totals.done).toBeGreaterThanOrEqual(1);
+
+    const fim = await statusDe(r.id);
+    expect(fim.status).toBe("done");
+    expect(fim.last_error).toMatch(/não reenviado/);
+    expect(sent).not.toHaveBeenCalled();
+    expect(turn).not.toHaveBeenCalled();
+  });
+
+  /**
    * O caminho rápido (`waitUntil`) e o cron correm juntos. O claim muda o
    * estado, então só um dos dois pega a linha — se ambos pegassem, a pessoa
    * receberia a mesma resposta duas vezes.

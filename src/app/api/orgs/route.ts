@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { verifySignature } from "@/lib/hmac";
+import { requireHmac } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { encrypt, __resetOrgCache } from "@/lib/orgs";
+import {
+  clearNegativeIdentityCache,
+  clearIdentityCacheForOrg,
+} from "@/lib/identity";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -31,30 +35,12 @@ const bodySchema = z.object({
  * exatamente o que o lado de lá faz quando a primeira tentativa falha.
  */
 export async function POST(req: NextRequest) {
-  const secret = process.env.MAX_NOTIFY_SECRET;
-  if (!secret) {
-    console.error("[orgs] MAX_NOTIFY_SECRET não configurada");
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-
-  // Corpo CRU: assinar o JSON reserializado quebraria na primeira diferença de
-  // ordem de chave.
-  const rawBody = await req.text();
-
-  const verdict = verifySignature({
-    timestamp: req.headers.get("x-max-timestamp"),
-    signature: req.headers.get("x-max-signature"),
-    rawBody,
-    secret,
-  });
-  if (!verdict.ok) {
-    console.warn(`[orgs] assinatura recusada: ${verdict.reason}`);
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  const auth = await requireHmac(req);
+  if (!auth.ok) return auth.response;
 
   let parsedJson: unknown;
   try {
-    parsedJson = JSON.parse(rawBody);
+    parsedJson = JSON.parse(auth.rawBody);
   } catch {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
@@ -83,6 +69,14 @@ export async function POST(req: NextRequest) {
   // (ver o incidente 202/403 narrado em lib/orgs.ts).
   __resetOrgCache();
 
+  // Org nova (ou reativada) muda quem a varredura de identidade acharia: um
+  // número cacheado como "desconhecido" pode ser usuário DELA. Só os
+  // NEGATIVOS: o upsert é retentado pelo Contractmaker e roda em rotação de
+  // token — um wipe completo aqui apagava os greeted de todo mundo a cada
+  // provisionamento. O cache é compartilhado (banco), vale para todas as
+  // instâncias.
+  await clearNegativeIdentityCache();
+
   return NextResponse.json({ ok: true, orgId: p.orgId, active: p.active });
 }
 
@@ -102,25 +96,12 @@ const deleteSchema = z.object({ orgId: z.string().min(1) });
  * já enfileiradas podem sair nesse intervalo.
  */
 export async function DELETE(req: NextRequest) {
-  const secret = process.env.MAX_NOTIFY_SECRET;
-  if (!secret) {
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-
-  const rawBody = await req.text();
-  const verdict = verifySignature({
-    timestamp: req.headers.get("x-max-timestamp"),
-    signature: req.headers.get("x-max-signature"),
-    rawBody,
-    secret,
-  });
-  if (!verdict.ok) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  const auth = await requireHmac(req);
+  if (!auth.ok) return auth.response;
 
   let parsed;
   try {
-    parsed = deleteSchema.safeParse(JSON.parse(rawBody));
+    parsed = deleteSchema.safeParse(JSON.parse(auth.rawBody));
   } catch {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
@@ -133,6 +114,8 @@ export async function DELETE(req: NextRequest) {
     [parsed.data.orgId]
   );
   __resetOrgCache();
+  // Caducam só os vínculos positivos que apontavam para ESTA org.
+  await clearIdentityCacheForOrg(parsed.data.orgId);
 
   // 200 mesmo quando não havia nada: desativar o que já não existe é o estado
   // desejado, e um 404 faria o lado de lá tratar sucesso como falha.

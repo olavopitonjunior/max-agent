@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { connectionStatus } from "@/lib/zapi";
-import { verifySignature } from "@/lib/hmac";
+import { requireHmac } from "@/lib/auth";
 import { isWithinWindow, nextDeliveryTime } from "@/lib/window";
 
 export const dynamic = "force-dynamic";
@@ -17,29 +17,19 @@ export const runtime = "nodejs";
  * painel vive no admin que já existe, e este endpoint é a única coisa que o
  * serviço precisa expor.
  *
- * Auth: o MESMO HMAC do `/notify`. Um segredo compartilhado a menos, e a
- * assinatura cobre `${timestamp}.${rawBody}` — em GET o corpo é vazio, mas o
- * timestamp continua limitando a validade da requisição capturada.
+ * Auth: o MESMO segredo do `/notify`, mas a assinatura cobre
+ * `${timestamp}.${method}.${path com query}` — assinar o corpo vazio deixava o
+ * `?orgId=` FORA da assinatura, e uma assinatura capturada valia 5 minutos
+ * para qualquer org (enumeração cross-tenant da fila). O formato antigo segue
+ * aceito enquanto o admin do Contractmaker não migra (`allowLegacyEmptyBody`).
  *
  * **`zapi.connected` é o número mais importante da tela.** Instância
  * desemparelhada aceita `send-text` com HTTP 200 e `messageId` válido e não
  * entrega nada: sem olhar aqui, a fila parece saudável enquanto ninguém recebe.
  */
 export async function GET(req: NextRequest) {
-  const secret = process.env.MAX_NOTIFY_SECRET;
-  if (!secret) {
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-
-  const verdict = verifySignature({
-    timestamp: req.headers.get("x-max-timestamp"),
-    signature: req.headers.get("x-max-signature"),
-    rawBody: "",
-    secret,
-  });
-  if (!verdict.ok) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  const auth = await requireHmac(req, { signQuery: true, allowLegacyEmptyBody: true });
+  if (!auth.ok) return auth.response;
 
   const orgId = req.nextUrl.searchParams.get("orgId");
 

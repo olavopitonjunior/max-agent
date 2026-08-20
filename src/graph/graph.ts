@@ -42,9 +42,13 @@ import {
   saveChoice,
   askWhichOrg,
   displayName,
+  markGreeted,
   type Candidate,
 } from "@/lib/identity";
 import { complete, DEFAULT_MODEL, type LlmUsage } from "@/lib/llm";
+import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
+import { checkpointerPool } from "@/lib/db";
+import { maskPhone } from "@/lib/phone";
 import { buildSystemPrompt, shouldSearch } from "./prompt";
 import type { InboundMessage } from "@/lib/zapi";
 
@@ -540,6 +544,7 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
       // modelo só pra resumir acrescentaria uma segunda tabela de preço a
       // manter sem economizar nada.
       maxTokens: 400,
+      timeoutMs: LLM_SHORT_TIMEOUT_MS,
     });
 
     void reportUsage(state.identity.orgId, result.usage);
@@ -593,10 +598,17 @@ let checkpointer: PostgresSaver | null = null;
 
 export async function getCheckpointer(): Promise<PostgresSaver> {
   if (!checkpointer) {
-    const url = process.env.DATABASE_URL;
-    if (!url) throw new Error("DATABASE_URL não configurada");
-    checkpointer = PostgresSaver.fromConnString(url);
-    await checkpointer.setup();
+    // Pool própria COM teto (ver `checkpointerPool` em db.ts): o saver segura
+    // um client em transação por escrita — na pool compartilhada ele
+    // estrangulava as queries da fila; via `fromConnString` era uma pool sem
+    // teto furando a contabilidade do Neon.
+    checkpointer = new PostgresSaver(checkpointerPool());
+    // `setup()` é DDL idempotente, mas rodar a cada cold start é uma rodada de
+    // CREATE IF NOT EXISTS por instância. Depois do primeiro deploy com as
+    // tabelas criadas, desligue com MAX_CHECKPOINTER_SETUP=0.
+    if (process.env.MAX_CHECKPOINTER_SETUP !== "0") {
+      await checkpointer.setup();
+    }
   }
   return checkpointer;
 }
@@ -630,6 +642,13 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
   // respondeu a um aviso, engano ou spam.
   if (identity.kind === "unknown") {
+    // Uma apresentação por ciclo do cache negativo, e depois silêncio:
+    // responder cada mensagem de um número estranho consome cota da Z-API e
+    // confirma ao spammer que o número é vivo.
+    if (identity.alreadyGreeted) return { reply: null };
+    // Falhar em marcar só significa reapresentar na próxima — nunca vale
+    // derrubar a resposta por isso.
+    await markGreeted(inbound.fromPhone).catch(() => undefined);
     return {
       reply:
         "Oi! Sou o Max, assistente das imobiliárias parceiras. Não reconheci " +
@@ -683,6 +702,19 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
    */
   let turnText = texto;
   let fromMedia: "audio" | "image" | null = null;
+
+  // Documento (e o que o parse não reconheceu) não tem transcrição — mas
+  // silêncio é pior, e passar pelo modelo com "(mensagem sem texto)" pagava um
+  // turn por uma resposta genérica. Template, sem LLM.
+  if (!turnText && (inbound.kind === "document" || inbound.kind === "unknown")) {
+    return {
+      reply:
+        inbound.kind === "document"
+          ? "Ainda não consigo ler documentos por aqui. Me conta por escrito o " +
+            "que você precisa?"
+          : "Não consegui entender esse tipo de mensagem. Pode mandar por escrito?",
+    };
+  }
 
   if (!turnText && (inbound.kind === "audio" || inbound.kind === "image")) {
     fromMedia = inbound.kind;
@@ -761,7 +793,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
             });
             const gravados = await saveFacts(orgId, phone, novos);
             if (gravados > 0) {
-              console.log(`[memory] ${gravados} fato(s) de ${phone} em ${orgId}`);
+              console.log(`[memory] ${gravados} fato(s) de ${maskPhone(phone)} em ${orgId}`);
             }
           }
         : undefined,

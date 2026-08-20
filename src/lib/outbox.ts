@@ -116,6 +116,8 @@ interface OutboxRow extends Record<string, unknown> {
   org_name: string;
   recipient_name: string;
   attempts: number;
+  /** O envio COMEÇOU numa tentativa anterior (ver migration 007). */
+  send_started_at: string | Date | null;
 }
 
 /**
@@ -220,36 +222,98 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
          LIMIT $1
          FOR UPDATE SKIP LOCKED
       )
-      RETURNING id, phone, title, body, link_url, org_name, recipient_name, attempts`,
+      RETURNING id, phone, title, body, link_url, org_name, recipient_name,
+                attempts, send_started_at`,
     [limit, String(SENDING_ORPHAN_MINUTES)]
   );
   totals.claimed = rows.length;
 
   for (const row of rows) {
-    try {
-      const res = await sendText({ to: row.phone, body: renderMessage(row) });
+    /**
+     * Órfã COM envio iniciado: a execução anterior morreu entre o `send-text`
+     * e o UPDATE final (falha de envio limpa o marcador). Reenviar duplicaria
+     * a notificação — liquida como `sent` com a ressalva na linha; a
+     * reconciliação de entrega (Fase 4) confirma o desfecho.
+     */
+    if (row.send_started_at != null) {
       await query(
         `UPDATE outbox
-            SET status = 'sent', sent_at = now(), provider_message_id = $2, last_error = NULL
+            SET status = 'sent', sent_at = now(),
+                last_error = 'envio anterior provavelmente concluído — não reenviado'
           WHERE id = $1`,
-        [row.id, res.messageId ?? res.id ?? null]
+        [row.id]
       );
+      totals.sent += 1;
+      continue;
+    }
+
+    try {
+      // Marcador ANTES do send — é ele que a retomada de órfã consulta acima.
+      await query(`UPDATE outbox SET send_started_at = now() WHERE id = $1`, [
+        row.id,
+      ]);
+      const res = await sendText({ to: row.phone, body: renderMessage(row) });
+      /**
+       * O UPDATE final ganha um retry local: falhar AQUI (blip do Neon) com a
+       * mensagem já entregue deixaria a linha órfã — e era o reenvio duplicado.
+       * Duas tentativas curtas resolvem o blip; se ambas falharem, o marcador
+       * acima garante que a retomada não reenvia.
+       */
+      const settle = () =>
+        query(
+          `UPDATE outbox
+              SET status = 'sent', sent_at = now(), provider_message_id = $2, last_error = NULL
+            WHERE id = $1`,
+          [row.id, res.messageId ?? res.id ?? null]
+        );
+      await settle().catch(async () => {
+        await new Promise((r) => setTimeout(r, 500));
+        // Segunda falha NÃO sobe: subir cairia no catch de envio, que limpa o
+        // marcador — e o reenvio duplicado voltaria. A linha fica `sending`
+        // com o marcador, e a retomada de órfã a liquida sem reenviar.
+        await settle().catch((e) =>
+          console.warn(
+            `[outbox] enviado mas não liquidado (${row.id}) — a retomada fecha:`,
+            e instanceof Error ? e.message : String(e)
+          )
+        );
+      });
       totals.sent += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Esgotou as tentativas → `failed` (terminal, visível no painel). Ainda
       // tem crédito → volta pra `pending` com backoff, e o próximo cron pega.
       const exhausted = row.attempts >= MAX_ATTEMPTS;
-      await query(
-        `UPDATE outbox
-            SET status = $2,
-                last_error = $3,
-                deliver_after = CASE WHEN $2 = 'pending'
-                                     THEN now() + ($4 || ' minutes')::interval
-                                     ELSE deliver_after END
-          WHERE id = $1`,
-        [row.id, exhausted ? "failed" : "pending", message.slice(0, 500), String(row.attempts * 5)]
-      );
+      const settleFailure = () =>
+        query(
+          `UPDATE outbox
+              SET status = $2,
+                  last_error = $3,
+                  -- Envio FALHOU: limpa o marcador, a retentativa deve reenviar.
+                  send_started_at = NULL,
+                  deliver_after = CASE WHEN $2 = 'pending'
+                                       THEN now() + ($4 || ' minutes')::interval
+                                       ELSE deliver_after END
+            WHERE id = $1`,
+          [row.id, exhausted ? "failed" : "pending", message.slice(0, 500), String(row.attempts * 5)]
+        );
+      /**
+       * Guardado com retry próprio: se este UPDATE subisse, derrubaria o
+       * `dispatchDue` inteiro (as linhas seguintes ficariam `sending` até a
+       * janela de órfã) E deixaria o marcador na linha — que a retomada
+       * liquidaria como `sent` sem ter enviado (achado do code review).
+       */
+      await settleFailure().catch(async () => {
+        await new Promise((r) => setTimeout(r, 500));
+        await settleFailure().catch((e) =>
+          console.error(
+            `[outbox] FALHA NÃO REGISTRADA (${row.id}) — linha segue 'sending' com ` +
+              `marcador; a retomada vai marcá-la 'sent' SEM envio. Intervenção: ` +
+              `SET send_started_at = NULL, status = 'pending'. Motivo: ` +
+              (e instanceof Error ? e.message : String(e))
+          )
+        );
+      });
       totals.failed += 1;
     }
   }

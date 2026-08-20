@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { verifySignature } from "@/lib/hmac";
+import { requireHmac } from "@/lib/auth";
 import { enqueue } from "@/lib/outbox";
 import { normalizeBrPhone } from "@/lib/phone";
 import { isOrgKnown } from "@/lib/orgs";
@@ -33,32 +33,12 @@ const bodySchema = z.object({
  * cron do outbox, possivelmente horas depois se chegou de madrugada.
  */
 export async function POST(req: NextRequest) {
-  const secret = process.env.MAX_NOTIFY_SECRET;
-  if (!secret) {
-    console.error("[notify] MAX_NOTIFY_SECRET não configurada");
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-
-  // O corpo CRU, byte a byte: assinar o JSON reserializado quebraria a
-  // verificação na primeira diferença de ordem de chave ou de escape.
-  const rawBody = await req.text();
-
-  const verdict = verifySignature({
-    timestamp: req.headers.get("x-max-timestamp"),
-    signature: req.headers.get("x-max-signature"),
-    rawBody,
-    secret,
-  });
-  if (!verdict.ok) {
-    // Sem detalhe no corpo: para quem não tem o segredo, "assinatura inválida"
-    // e "timestamp velho" não devem ser distinguíveis.
-    console.warn(`[notify] assinatura recusada: ${verdict.reason}`);
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  const auth = await requireHmac(req);
+  if (!auth.ok) return auth.response;
 
   let parsedJson: unknown;
   try {
-    parsedJson = JSON.parse(rawBody);
+    parsedJson = JSON.parse(auth.rawBody);
   } catch {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireCronSecret } from "@/lib/auth";
 import { dispatchDue } from "@/lib/outbox";
 
 export const dynamic = "force-dynamic";
@@ -16,14 +17,8 @@ export const maxDuration = 60;
  * crons dela; sem essa checagem qualquer um dispararia o envio da fila.
  */
 export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) {
-    console.error("[cron/outbox] CRON_SECRET não configurada");
-    return NextResponse.json({ error: "not_configured" }, { status: 500 });
-  }
-  if (req.headers.get("authorization") !== `Bearer ${secret}`) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
+  const denied = requireCronSecret(req);
+  if (denied) return denied;
 
   try {
     const totals = await dispatchDue();
