@@ -3,7 +3,10 @@ import { z } from "zod";
 import { requireHmac } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { encrypt, __resetOrgCache } from "@/lib/orgs";
-import { clearIdentityCache } from "@/lib/identity";
+import {
+  clearNegativeIdentityCache,
+  clearIdentityCacheForOrg,
+} from "@/lib/identity";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -67,9 +70,12 @@ export async function POST(req: NextRequest) {
   __resetOrgCache();
 
   // Org nova (ou reativada) muda quem a varredura de identidade acharia: um
-  // número cacheado como "desconhecido" pode ser usuário DELA. O cache é
-  // compartilhado (banco), então esta limpeza vale para todas as instâncias.
-  await clearIdentityCache();
+  // número cacheado como "desconhecido" pode ser usuário DELA. Só os
+  // NEGATIVOS: o upsert é retentado pelo Contractmaker e roda em rotação de
+  // token — um wipe completo aqui apagava os greeted de todo mundo a cada
+  // provisionamento. O cache é compartilhado (banco), vale para todas as
+  // instâncias.
+  await clearNegativeIdentityCache();
 
   return NextResponse.json({ ok: true, orgId: p.orgId, active: p.active });
 }
@@ -108,8 +114,8 @@ export async function DELETE(req: NextRequest) {
     [parsed.data.orgId]
   );
   __resetOrgCache();
-  // Vínculos cacheados com esta org caducaram junto.
-  await clearIdentityCache();
+  // Caducam só os vínculos positivos que apontavam para ESTA org.
+  await clearIdentityCacheForOrg(parsed.data.orgId);
 
   // 200 mesmo quando não havia nada: desativar o que já não existe é o estado
   // desejado, e um 404 faria o lado de lá tratar sucesso como falha.

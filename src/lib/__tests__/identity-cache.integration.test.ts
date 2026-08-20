@@ -118,6 +118,24 @@ d("identity_cache", () => {
     expect(fetchMock.mock.calls.length).toBe(chamadas); // o mock foi trocado; só confere que o antigo parou
   });
 
+  /**
+   * O achado mais sério do code review: outage do ImobPro fazia a varredura
+   * voltar vazia, o vazio virava negativo de 24h, e o usuário legítimo ficava
+   * mudo por um dia mesmo depois de o ImobPro voltar.
+   */
+  it("varredura degradada (org fora do ar) NÃO grava cache negativo", async () => {
+    const caiu = vi.fn().mockRejectedValue(new Error("timeout de 8000ms"));
+    vi.stubGlobal("fetch", caiu);
+
+    const durante = await resolveIdentity(PHONE);
+    expect(durante.kind).toBe("unknown");
+
+    // O ImobPro volta: a PRÓXIMA mensagem re-varre e resolve — sem esperar TTL.
+    mockScan({ userId: "u1", name: "Marcia" });
+    const depois = await resolveIdentity(PHONE);
+    expect(depois.kind).toBe("resolved");
+  });
+
   it("escolha salva tem precedência: nem cache, nem varredura", async () => {
     const fetchMock = mockScan({ userId: "u1", name: "Marcia" });
     await query(

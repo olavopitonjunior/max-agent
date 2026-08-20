@@ -151,7 +151,9 @@ d("resolveIdentity", () => {
 
   it("telefone inválido nem chega a varrer as orgs", async () => {
     const f = mockByPhone([TRIO.orgId]);
-    expect(await resolveIdentity("123")).toEqual({ kind: "unknown" });
+    // alreadyGreeted true: número que nem normaliza NUNCA recebe apresentação
+    // (não entra no cache/greeted, que são indexados por E.164).
+    expect(await resolveIdentity("123")).toEqual({ kind: "unknown", alreadyGreeted: true });
     expect(f).not.toHaveBeenCalled();
   });
 });

@@ -129,9 +129,11 @@ export async function markGreeted(rawPhone: string): Promise<void> {
 }
 
 /**
- * Invalidação: provisionamento/rotação de tenant muda quem a varredura acharia.
- * Sem argumento limpa tudo (org nova pode reconhecer qualquer número cacheado
- * como negativo).
+ * Invalidação total — reservada para operações administrativas (ex.: direito
+ * ao esquecimento com telefone, manutenção sem). O provisionamento de org usa
+ * as variantes SELETIVAS abaixo: o wipe completo a cada upsert/rotação apagava
+ * os `greeted` de todo mundo e reinstalava o custo que o cache existe para
+ * evitar (achado do code review do PR #5).
  */
 export async function clearIdentityCache(rawPhone?: string): Promise<void> {
   if (!rawPhone) {
@@ -141,6 +143,23 @@ export async function clearIdentityCache(rawPhone?: string): Promise<void> {
   const e164 = normalizeBrPhone(rawPhone);
   if (!e164) return;
   await query(`DELETE FROM identity_cache WHERE phone = $1`, [e164]);
+}
+
+/**
+ * Org NOVA (ou reativada, ou token rotacionado): só os NEGATIVOS caducaram —
+ * um número que "não era de ninguém" pode ser usuário dela. Os positivos
+ * continuam válidos (apontam para outras orgs) e os `greeted` sobrevivem.
+ */
+export async function clearNegativeIdentityCache(): Promise<void> {
+  await query(`DELETE FROM identity_cache WHERE negative`);
+}
+
+/** Org DESATIVADA: caducam só os vínculos positivos que apontavam para ela. */
+export async function clearIdentityCacheForOrg(orgId: string): Promise<void> {
+  await query(
+    `DELETE FROM identity_cache WHERE NOT negative AND payload->>'orgId' = $1`,
+    [orgId]
+  );
 }
 
 /**
@@ -154,8 +173,20 @@ export async function clearIdentityCache(rawPhone?: string): Promise<void> {
  * do token, então cada acerto aqui é um vínculo REAL — antes, qualquer token
  * achava qualquer pessoa e a varredura devolveria todas as orgs sempre.
  */
-async function scanOrgs(e164: string): Promise<Candidate[]> {
+interface ScanResult {
+  candidates: Candidate[];
+  /**
+   * Alguma org não respondeu (timeout, 5xx, exceção). O resultado ainda serve
+   * para SEGUIR a conversa — mas não para o cache: "não achei porque o ImobPro
+   * caiu" gravado como negativo de 24h silenciaria um usuário legítimo por um
+   * dia inteiro (achado do code review do PR #5).
+   */
+  degraded: boolean;
+}
+
+async function scanOrgs(e164: string): Promise<ScanResult> {
   const found: Candidate[] = [];
+  let degraded = false;
 
   for (const org of await listOrgs()) {
     try {
@@ -170,11 +201,13 @@ async function scanOrgs(e164: string): Promise<Candidate[]> {
       // não tem login.
       if (res.status === 404) {
         const broker = await scanBroker(org, e164);
-        if (broker) found.push(broker);
+        if (broker.degraded) degraded = true;
+        if (broker.candidate) found.push(broker.candidate);
         continue;
       }
       if (!res.ok) {
         console.warn(`[identity] by-phone ${res.status} na org ${org.orgId}`);
+        degraded = true;
         continue;
       }
       const r = (await res.json()) as { userId?: string; name?: string | null };
@@ -198,10 +231,11 @@ async function scanOrgs(e164: string): Promise<Candidate[]> {
         `[identity] falha na org ${org.orgId}:`,
         err instanceof Error ? err.message : String(err)
       );
+      degraded = true;
     }
   }
 
-  return found;
+  return { candidates: found, degraded };
 }
 
 /**
@@ -215,28 +249,32 @@ async function scanOrgs(e164: string): Promise<Candidate[]> {
 async function scanBroker(
   org: OrgConfig,
   e164: string
-): Promise<BrokerCandidate | null> {
+): Promise<{ candidate: BrokerCandidate | null; degraded: boolean }> {
   const res = await fetchWithTimeout(
     `${BASE()}/api/agents/broker-scope?phone=${encodeURIComponent(e164)}`,
     { headers: { Authorization: `Bearer ${org.apiToken}` } },
     IMOBPRO_TIMEOUT_MS
   );
-  if (res.status === 404) return null;
+  if (res.status === 404) return { candidate: null, degraded: false };
   if (!res.ok) {
     console.warn(`[identity] broker-scope ${res.status} na org ${org.orgId}`);
-    return null;
+    // "Não consegui perguntar" não é "não é candidato" — ver ScanResult.
+    return { candidate: null, degraded: true };
   }
   const r = (await res.json()) as {
     splitRecipientId?: string;
     label?: string;
   };
-  if (!r.splitRecipientId) return null;
+  if (!r.splitRecipientId) return { candidate: null, degraded: false };
   return {
-    orgId: org.orgId,
-    orgName: org.orgName,
-    kind: "broker",
-    splitRecipientId: r.splitRecipientId,
-    label: r.label ?? "",
+    candidate: {
+      orgId: org.orgId,
+      orgName: org.orgName,
+      kind: "broker",
+      splitRecipientId: r.splitRecipientId,
+      label: r.label ?? "",
+    },
+    degraded: false,
   };
 }
 
@@ -274,7 +312,12 @@ interface ChoiceRow extends Record<string, unknown> {
 
 export async function resolveIdentity(rawPhone: string): Promise<Identity> {
   const e164 = normalizeBrPhone(rawPhone);
-  if (!e164) return { kind: "unknown" };
+  // Número que nem normaliza (internacional, formato estranho) não pode ser
+  // cliente das imobiliárias — e também não entra no cache/greeted, que são
+  // indexados por E.164. `alreadyGreeted: true` para NUNCA responder: sem
+  // isso, cada mensagem de spam internacional ganhava a apresentação de novo
+  // (achado do code review do PR #5).
+  if (!e164) return { kind: "unknown", alreadyGreeted: true };
 
   // Escolha anterior tem precedência: quem já disse de qual imobiliária fala
   // não é perguntado de novo a cada mensagem.
@@ -296,8 +339,16 @@ export async function resolveIdentity(rawPhone: string): Promise<Identity> {
   }
 
   // Cache da varredura — depois da escolha salva (que é decisão da pessoa e
-  // tem precedência), antes dos fetches.
-  const cached = await readCache(e164);
+  // tem precedência), antes dos fetches. FAIL-OPEN em tudo que é cache: uma
+  // falha aqui não pode abortar um turn que a varredura resolveria — cache
+  // quebrado degrada para o custo antigo, nunca para silêncio.
+  const cached = await readCache(e164).catch((err) => {
+    console.warn(
+      "[identity] cache ilegível — segue sem ele:",
+      err instanceof Error ? err.message : String(err)
+    );
+    return null;
+  });
   if (cached) {
     if (cached.negative) {
       return { kind: "unknown", alreadyGreeted: cached.greeted };
@@ -306,15 +357,18 @@ export async function resolveIdentity(rawPhone: string): Promise<Identity> {
       const org = await orgById(cached.payload.orgId);
       if (org) return { kind: "resolved", org, candidate: cached.payload };
       // Org do cache sumiu: invalida e cai na varredura.
-      await clearIdentityCache(e164);
+      await clearIdentityCache(e164).catch(() => undefined);
     }
   }
 
-  const candidates = await scanOrgs(e164);
+  const { candidates, degraded } = await scanOrgs(e164);
 
   if (candidates.length === 0) {
     if (saved) await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [e164]);
-    await writeCache(e164, { negative: true });
+    // Só cacheia o negativo de uma varredura COMPLETA: "não achei porque uma
+    // org estava fora" gravado por 24h silenciaria um usuário legítimo até o
+    // TTL vencer. Degradada, a próxima mensagem re-varre.
+    if (!degraded) await writeCache(e164, { negative: true }).catch(() => undefined);
     return { kind: "unknown", alreadyGreeted: false };
   }
 
@@ -322,12 +376,15 @@ export async function resolveIdentity(rawPhone: string): Promise<Identity> {
     const org = await orgById(candidates[0].orgId);
     if (!org) return { kind: "unknown" };
     if (saved) await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [e164]);
-    await writeCache(e164, { candidate: candidates[0] });
+    // Mesmo raciocínio: com uma org fora do ar, o "candidato único" pode ser
+    // um de dois — resolver AGORA está certo (é o comportamento pré-cache),
+    // mas congelar isso por 15min esconderia a ambiguidade.
+    if (!degraded) await writeCache(e164, { candidate: candidates[0] }).catch(() => undefined);
     return { kind: "resolved", org, candidate: candidates[0] };
   }
 
   // Dois ou mais: qualquer cache antigo deste telefone está desatualizado.
-  await clearIdentityCache(e164);
+  await clearIdentityCache(e164).catch(() => undefined);
 
   // Dois ou mais: registra as opções e devolve `pending` (já perguntamos antes)
   // ou `ambiguous` (é a primeira vez).
