@@ -2,9 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { waitUntil } from "@vercel/functions";
 import { parseInbound, isExpectedInstance } from "@/lib/zapi";
 import { enqueueInbound, processInboundNow } from "@/lib/inbound";
+import { maskPhone } from "@/lib/phone";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+/**
+ * O `waitUntil` roda um turn COMPLETO (identidade, transcrição, RAG, modelo,
+ * envio) depois da resposta. Sem isto a rota ficava no default da Vercel
+ * (10–15s) e a function era morta no meio do turn — a linha virava órfã e a
+ * pessoa esperava 10+ minutos por uma resposta que já estava quase pronta.
+ * Mesmo valor dos crons; o orçamento interno (`EXECUTION_BUDGET_MS`) para de
+ * reivindicar linhas antes daqui.
+ */
+export const maxDuration = 60;
 
 /**
  * Webhook de recebimento da Z-API.
@@ -39,8 +49,11 @@ export async function POST(
 ) {
   const expected = process.env.ZAPI_WEBHOOK_SECRET;
   if (!expected) {
+    // 500, não 200: responder ok sem a env configurada descartava TODA
+    // mensagem em silêncio — um deploy com env faltando parecia saudável. O
+    // 5xx faz a Z-API reentregar, e quando a env voltar nada se perdeu.
     console.error("[zapi-webhook] ZAPI_WEBHOOK_SECRET não configurada");
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ error: "not_configured" }, { status: 500 });
   }
   if (params.secret !== expected) {
     // 404, não 401: para quem sonda a URL, o endpoint não deve nem existir.
@@ -80,7 +93,7 @@ export async function POST(
   }
 
   console.log(
-    `[zapi-webhook] aceito ${msg.kind} de ${msg.fromPhone} (${enfileirado.id})`
+    `[zapi-webhook] aceito ${msg.kind} de ${maskPhone(msg.fromPhone)} (${enfileirado.id})`
   );
 
   // Fire-and-forget de verdade: sem `waitUntil` a Vercel congela a function no
