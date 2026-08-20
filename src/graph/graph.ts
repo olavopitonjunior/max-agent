@@ -209,6 +209,32 @@ export function threadIdFor(orgId: string, phone: string): string {
 }
 
 /**
+ * Semeia o thread com uma notificação PROATIVA enviada.
+ *
+ * Obrigação escrita em `contractmaker/docs/max.md` (§ superfície do serviço)
+ * e nunca implementada: quem respondia "o que é isso?" a um aviso chegava a
+ * um grafo que não sabia de aviso nenhum. A notificação vira um turno do
+ * assistente no checkpoint — o `answer` passa a enxergá-la no histórico como
+ * qualquer outra fala do Max.
+ *
+ * Chamado DEPOIS do envio bem-sucedido (nunca no aceite do `/notify`): uma
+ * mensagem represada pela janela 7h–22h não pode aparecer no thread antes de
+ * existir no WhatsApp. Falha aqui não desfaz envio — quem chama cerca com
+ * catch próprio.
+ */
+export async function seedNotification(
+  orgId: string,
+  phone: string,
+  texto: string
+): Promise<void> {
+  const app = buildGraph().compile({ checkpointer: await getCheckpointer() });
+  await app.updateState(
+    { configurable: { thread_id: threadIdFor(orgId, phone) } },
+    { messages: [{ role: "assistant", content: texto }] }
+  );
+}
+
+/**
  * Kill switch, modelo e persona — do console do ImobPro, então desligar o Max
  * lá tem efeito aqui sem redeploy.
  *

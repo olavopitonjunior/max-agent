@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
 import { sendText, connectionStatus } from "./zapi";
+import { seedNotification } from "@/graph/graph";
+import { resolveIdentity } from "./identity";
 
 /**
  * Fila de saída das notificações proativas.
@@ -109,6 +111,8 @@ export interface DispatchTotals {
 
 interface OutboxRow extends Record<string, unknown> {
   id: string;
+  org_id: string;
+  audience: string;
   phone: string;
   title: string;
   body: string;
@@ -222,13 +226,63 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
          LIMIT $1
          FOR UPDATE SKIP LOCKED
       )
-      RETURNING id, phone, title, body, link_url, org_name, recipient_name,
-                attempts, send_started_at`,
+      RETURNING id, org_id, audience, phone, title, body, link_url, org_name,
+                recipient_name, attempts, send_started_at`,
     [limit, String(SENDING_ORPHAN_MINUTES)]
   );
   totals.claimed = rows.length;
 
+  /**
+   * Prazo do trabalho OPCIONAL do loop (a semeadura de thread): os envios em
+   * si seguem até o fim, mas seed depois do orçamento é pulado — o contexto
+   * perdido custa menos que a function morta com linhas presas em `sending`.
+   */
+  const seedDeadline = Date.now() + 40_000;
+
   for (const row of rows) {
+    /**
+     * O que saiu no WhatsApp vira turno do assistente no thread — para que
+     * "o que é isso?" tenha contexto. DEPOIS do envio, com catch próprio, e
+     * SÓ quando o thread certo existe (achados do code review):
+     *
+     *  - `deal_party` nunca conversa com o Max (identidade `unknown` não abre
+     *    thread) — semear criaria checkpoint com PII que nenhum caminho lê,
+     *    compacta ou expira.
+     *  - Corretor em DUAS orgs com escolha salva na org A: notificação da org
+     *    B semeada em `B:fone` nunca seria lida (a conversa dele vive em
+     *    `A:fone`) — e semear em `A:fone` misturaria dado da org B no thread
+     *    da A, furando o isolamento por construção do thread_id. Só semeia
+     *    quando a identidade RESOLVIDA aponta para a MESMA org da notificação.
+     *  - Turn em voo no mesmo telefone: o `updateState` é read-copy-write sem
+     *    lock — concorrer com um `invoke` pode perder o turno de alguém. O
+     *    check de `processing` estreita a janela de ~15s para milissegundos;
+     *    o residual é aceito e está documentado aqui.
+     */
+    const semear = async () => {
+      try {
+        if (Date.now() > seedDeadline) return;
+        if (row.audience === "deal_party") return;
+
+        const identity = await resolveIdentity(row.phone);
+        if (identity.kind !== "resolved") return;
+        if (identity.candidate.orgId !== row.org_id) return;
+
+        const emVoo = await query<{ um: number }>(
+          `SELECT 1 AS um FROM inbound_queue
+            WHERE from_phone = $1 AND status = 'processing' LIMIT 1`,
+          [row.phone]
+        );
+        if (emVoo.length > 0) return;
+
+        await seedNotification(row.org_id, row.phone, renderMessage(row));
+      } catch (err) {
+        console.warn(
+          `[outbox] thread não semeado (${row.id}) — o envio ficou de pé:`,
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    };
+
     /**
      * Órfã COM envio iniciado: a execução anterior morreu entre o `send-text`
      * e o UPDATE final (falha de envio limpa o marcador). Reenviar duplicaria
@@ -243,6 +297,10 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
           WHERE id = $1`,
         [row.id]
       );
+      // SEM semear aqui, de propósito: o caminho normal pode ter semeado antes
+      // de a liquidação falhar (seria o segundo turno idêntico no thread), e no
+      // caso "falha não registrada" a mensagem nem chegou — semear afirmaria
+      // contexto de uma mensagem que não existe. (achado do code review)
       totals.sent += 1;
       continue;
     }
@@ -278,6 +336,7 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
           )
         );
       });
+      await semear();
       totals.sent += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

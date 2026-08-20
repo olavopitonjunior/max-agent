@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth";
 import { sweepInbound } from "@/lib/inbound";
+import { pruneOldFacts } from "@/lib/memory";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -27,6 +28,20 @@ export async function GET(req: NextRequest) {
 
   try {
     const totals = await sweepInbound();
+    // Carona no cron que já existe, mas UMA vez por hora (minuto 0): o TTL é
+    // de meio ano — varrer a tabela sem índice de updated_at a cada minuto
+    // eram 1440 seq scans/dia por nada (achado do code review). Falha não
+    // atrapalha a varredura — memória é opcional, resposta não.
+    if (new Date().getMinutes() === 0) {
+      const podados = await pruneOldFacts().catch((err) => {
+        console.warn(
+          "[cron/inbound] poda de memória falhou:",
+          err instanceof Error ? err.message : String(err)
+        );
+        return 0;
+      });
+      if (podados > 0) console.log(`[cron/inbound] ${podados} fato(s) vencidos podados`);
+    }
     if (totals.blocked > 0) {
       console.error(
         `[cron/inbound] ${totals.blocked} sem resposta — instância desemparelhada`

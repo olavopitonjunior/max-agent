@@ -222,3 +222,41 @@ export function renderFacts(facts: Facts): string {
     entries.map(([k, v]) => `- ${k}: ${v}`).join("\n")
   );
 }
+
+/**
+ * TTL da memória: fato que ninguém atualiza há MEMORY_TTL_DAYS sai.
+ *
+ * Sem isto, um "trabalha com locação" de dois anos atrás continuava no prompt
+ * para sempre — e a tabela, indexada por telefone, acumulava dado pessoal sem
+ * prazo (a poda por teto de 20 só age em quem CONVERSA; quem sumiu ficava
+ * congelado). Varredura global barata, chamada pelo cron da fila de entrada;
+ * quem quiser prazo diferente ajusta a env sem deploy.
+ */
+export async function pruneOldFacts(): Promise<number> {
+  const raw = process.env.MEMORY_TTL_DAYS;
+  let days = 180;
+  if (raw !== undefined && raw !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) {
+      days = n;
+    } else {
+      // Env presente mas inválida ("180d", vazio com espaço) NÃO desliga a
+      // retenção em silêncio — cai no default com barulho. Desligar de
+      // propósito é MEMORY_TTL_DAYS=off.
+      if (raw === "off") return 0;
+      console.error(
+        `[memory] MEMORY_TTL_DAYS inválida ("${raw}") — usando default 180. ` +
+          `Para desligar a poda, use MEMORY_TTL_DAYS=off.`
+      );
+    }
+  }
+  const rows = await query<{ count: string }>(
+    `WITH apagados AS (
+       DELETE FROM memory_facts
+        WHERE updated_at < now() - ($1 || ' days')::interval
+        RETURNING 1
+     ) SELECT count(*)::text AS count FROM apagados`,
+    [String(days)]
+  );
+  return Number(rows[0]?.count ?? 0);
+}
