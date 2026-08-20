@@ -1,6 +1,7 @@
 import { listOrgs, orgById, type OrgConfig } from "./orgs";
 import { query } from "./db";
 import { normalizeBrPhone } from "./phone";
+import { fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS } from "./http";
 
 /**
  * Quem está falando — e, principalmente, POR QUAL imobiliária.
@@ -54,9 +55,93 @@ export type Identity =
   | { kind: "resolved"; org: OrgConfig; candidate: Candidate }
   | { kind: "ambiguous"; candidates: Candidate[] }
   | { kind: "pending"; candidates: Candidate[] }
-  | { kind: "unknown" };
+  /** `alreadyGreeted`: este número desconhecido JÁ recebeu a apresentação —
+   * a partir daí é silêncio até o cache negativo expirar. */
+  | { kind: "unknown"; alreadyGreeted?: boolean };
 
-const BASE = () => process.env.CONTRACTMAKER_API_URL ?? "https://imobpro.ia.br";
+const BASE = imobproBase;
+
+// ── Cache da varredura ───────────────────────────────────────────────────
+//
+// A migration 003 dropou a `phone_org_cache` porque guardar UMA org escondia
+// ambiguidade — mas saiu sem repor nada, e desde então TODA mensagem pagava a
+// varredura completa (2 fetches ao ImobPro por org). O pior caso é o número
+// desconhecido: spam virava amplificador de custo, com o Max ainda respondendo
+// ao estranho a cada mensagem.
+//
+// Este cache guarda só o que não é decisão de ninguém: o RESULTADO da varredura
+// quando ele é inequívoco (zero ou um candidato). Dois ou mais continua na
+// `phone_org_choice`, que registra a escolha da PESSOA e tem precedência.
+
+/** Vínculo confirmado: TTL curto — desativação precisa valer logo. */
+const POSITIVE_TTL_MIN = 15;
+/** Não achou ninguém: TTL longo — cadastro novo pode esperar o cache vencer. */
+const NEGATIVE_TTL_HOURS = 24;
+
+interface IdentityCacheRow extends Record<string, unknown> {
+  payload: Candidate | null;
+  negative: boolean;
+  greeted: boolean;
+}
+
+async function readCache(e164: string): Promise<IdentityCacheRow | null> {
+  const rows = await query<IdentityCacheRow>(
+    `SELECT payload, negative, greeted FROM identity_cache
+      WHERE phone = $1 AND expires_at > now()`,
+    [e164]
+  );
+  return rows[0] ?? null;
+}
+
+async function writeCache(
+  e164: string,
+  entry: { candidate: Candidate } | { negative: true }
+): Promise<void> {
+  const negative = !("candidate" in entry);
+  await query(
+    `INSERT INTO identity_cache (phone, payload, negative, greeted, expires_at)
+     VALUES ($1, $2::jsonb, $3, false,
+             now() + ($4 || ' minutes')::interval)
+     ON CONFLICT (phone) DO UPDATE
+       SET payload = EXCLUDED.payload,
+           negative = EXCLUDED.negative,
+           -- Preserva o greeted: renovar o cache não reapresenta o Max.
+           greeted = identity_cache.greeted AND EXCLUDED.negative,
+           expires_at = EXCLUDED.expires_at,
+           updated_at = now()`,
+    [
+      e164,
+      negative ? null : JSON.stringify(entry.candidate),
+      negative,
+      String(negative ? NEGATIVE_TTL_HOURS * 60 : POSITIVE_TTL_MIN),
+    ]
+  );
+}
+
+/** O número desconhecido recebeu a apresentação — não repetir até expirar. */
+export async function markGreeted(rawPhone: string): Promise<void> {
+  const e164 = normalizeBrPhone(rawPhone);
+  if (!e164) return;
+  await query(
+    `UPDATE identity_cache SET greeted = true, updated_at = now() WHERE phone = $1`,
+    [e164]
+  );
+}
+
+/**
+ * Invalidação: provisionamento/rotação de tenant muda quem a varredura acharia.
+ * Sem argumento limpa tudo (org nova pode reconhecer qualquer número cacheado
+ * como negativo).
+ */
+export async function clearIdentityCache(rawPhone?: string): Promise<void> {
+  if (!rawPhone) {
+    await query(`DELETE FROM identity_cache`);
+    return;
+  }
+  const e164 = normalizeBrPhone(rawPhone);
+  if (!e164) return;
+  await query(`DELETE FROM identity_cache WHERE phone = $1`, [e164]);
+}
 
 /**
  * Varre TODAS as orgs e coleta todos os acertos.
@@ -74,9 +159,10 @@ async function scanOrgs(e164: string): Promise<Candidate[]> {
 
   for (const org of await listOrgs()) {
     try {
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `${BASE()}/api/users/by-phone?phone=${encodeURIComponent(e164)}`,
-        { headers: { Authorization: `Bearer ${org.apiToken}` } }
+        { headers: { Authorization: `Bearer ${org.apiToken}` } },
+        IMOBPRO_TIMEOUT_MS
       );
 
       // 404 não encerra a org: quem não é USUÁRIO da plataforma ainda pode ser
@@ -130,9 +216,10 @@ async function scanBroker(
   org: OrgConfig,
   e164: string
 ): Promise<BrokerCandidate | null> {
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `${BASE()}/api/agents/broker-scope?phone=${encodeURIComponent(e164)}`,
-    { headers: { Authorization: `Bearer ${org.apiToken}` } }
+    { headers: { Authorization: `Bearer ${org.apiToken}` } },
+    IMOBPRO_TIMEOUT_MS
   );
   if (res.status === 404) return null;
   if (!res.ok) {
@@ -167,9 +254,10 @@ export async function brokerDealIds(
   const e164 = normalizeBrPhone(rawPhone);
   if (!e164) return null;
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `${BASE()}/api/agents/broker-scope?phone=${encodeURIComponent(e164)}`,
-      { headers: { Authorization: `Bearer ${org.apiToken}` } }
+      { headers: { Authorization: `Bearer ${org.apiToken}` } },
+      IMOBPRO_TIMEOUT_MS
     );
     if (!res.ok) return null;
     const r = (await res.json()) as { dealIds?: string[] };
@@ -207,19 +295,39 @@ export async function resolveIdentity(rawPhone: string): Promise<Identity> {
     await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [e164]);
   }
 
+  // Cache da varredura — depois da escolha salva (que é decisão da pessoa e
+  // tem precedência), antes dos fetches.
+  const cached = await readCache(e164);
+  if (cached) {
+    if (cached.negative) {
+      return { kind: "unknown", alreadyGreeted: cached.greeted };
+    }
+    if (cached.payload) {
+      const org = await orgById(cached.payload.orgId);
+      if (org) return { kind: "resolved", org, candidate: cached.payload };
+      // Org do cache sumiu: invalida e cai na varredura.
+      await clearIdentityCache(e164);
+    }
+  }
+
   const candidates = await scanOrgs(e164);
 
   if (candidates.length === 0) {
     if (saved) await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [e164]);
-    return { kind: "unknown" };
+    await writeCache(e164, { negative: true });
+    return { kind: "unknown", alreadyGreeted: false };
   }
 
   if (candidates.length === 1) {
     const org = await orgById(candidates[0].orgId);
     if (!org) return { kind: "unknown" };
     if (saved) await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [e164]);
+    await writeCache(e164, { candidate: candidates[0] });
     return { kind: "resolved", org, candidate: candidates[0] };
   }
+
+  // Dois ou mais: qualquer cache antigo deste telefone está desatualizado.
+  await clearIdentityCache(e164);
 
   // Dois ou mais: registra as opções e devolve `pending` (já perguntamos antes)
   // ou `ambiguous` (é a primeira vez).

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { verifySignature } from "@/lib/hmac";
 import { query } from "@/lib/db";
 import { encrypt, __resetOrgCache } from "@/lib/orgs";
+import { clearIdentityCache } from "@/lib/identity";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -83,6 +84,11 @@ export async function POST(req: NextRequest) {
   // (ver o incidente 202/403 narrado em lib/orgs.ts).
   __resetOrgCache();
 
+  // Org nova (ou reativada) muda quem a varredura de identidade acharia: um
+  // número cacheado como "desconhecido" pode ser usuário DELA. O cache é
+  // compartilhado (banco), então esta limpeza vale para todas as instâncias.
+  await clearIdentityCache();
+
   return NextResponse.json({ ok: true, orgId: p.orgId, active: p.active });
 }
 
@@ -133,6 +139,8 @@ export async function DELETE(req: NextRequest) {
     [parsed.data.orgId]
   );
   __resetOrgCache();
+  // Vínculos cacheados com esta org caducaram junto.
+  await clearIdentityCache();
 
   // 200 mesmo quando não havia nada: desativar o que já não existe é o estado
   // desejado, e um 404 faria o lado de lá tratar sucesso como falha.
