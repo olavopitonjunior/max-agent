@@ -1,6 +1,12 @@
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import { query } from "./db";
+import {
+  fetchWithTimeout,
+  imobproBase,
+  IMOBPRO_TIMEOUT_MS,
+  IMOBPRO_TRANSCRIBE_TIMEOUT_MS,
+} from "./http";
 
 /**
  * Cliente das APIs do ImobPro.
@@ -11,12 +17,14 @@ import { query } from "./db";
  * banco inteiro.
  */
 
-const BASE = () => process.env.CONTRACTMAKER_API_URL ?? "https://imobpro.ia.br";
+const BASE = imobproBase;
 
 async function get<T>(path: string, token: string): Promise<T | null> {
-  const res = await fetch(`${BASE()}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithTimeout(
+    `${BASE()}${path}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+    IMOBPRO_TIMEOUT_MS
+  );
   if (res.status === 404) return null;
   if (!res.ok) {
     throw new Error(`ImobPro ${path} ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -66,14 +74,19 @@ export async function searchKnowledge(
 ): Promise<KnowledgeHit[]> {
   const org = await orgById(orgId);
   if (!org) return [];
-  const res = await fetch(`${BASE()}/api/agents/knowledge/search`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${org.apiToken}`,
-      "Content-Type": "application/json",
+  const res = await fetchWithTimeout(
+    `${BASE()}/api/agents/knowledge/search`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${org.apiToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ agentKey: "max", query: query_, topK }),
     },
-    body: JSON.stringify({ agentKey: "max", query: query_, topK }),
-  });
+    IMOBPRO_TIMEOUT_MS
+  ).catch(() => null);
+  if (!res) return [];
   if (!res.ok) return [];
   const data = (await res.json()) as { results?: KnowledgeHit[] };
   return data.results ?? [];
@@ -102,19 +115,25 @@ export async function transcribeMedia(
   const org = await orgById(orgId);
   if (!org) return null;
   try {
-    const res = await fetch(`${BASE()}/api/agents/media/transcribe`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${org.apiToken}`,
-        "Content-Type": "application/json",
+    // Prazo próprio, maior que o padrão: sobe até 3 MB de mídia e espera a
+    // transcrição do outro lado.
+    const res = await fetchWithTimeout(
+      `${BASE()}/api/agents/media/transcribe`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${org.apiToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          agentKey: "max",
+          kind: media.kind,
+          mimeType: media.mimeType,
+          data: media.data.toString("base64"),
+        }),
       },
-      body: JSON.stringify({
-        agentKey: "max",
-        kind: media.kind,
-        mimeType: media.mimeType,
-        data: media.data.toString("base64"),
-      }),
-    });
+      IMOBPRO_TRANSCRIBE_TIMEOUT_MS
+    );
     if (!res.ok) {
       console.warn(
         `[cm] transcrição recusada (${res.status}): ${(await res.text()).slice(0, 200)}`
@@ -192,9 +211,10 @@ export async function brokerRecipientId(
   const e164 = normalizeBrPhone(rawPhone);
   if (!e164) return null;
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `${BASE()}/api/agents/broker-scope?phone=${encodeURIComponent(e164)}`,
-      { headers: { Authorization: `Bearer ${org.apiToken}` } }
+      { headers: { Authorization: `Bearer ${org.apiToken}` } },
+      IMOBPRO_TIMEOUT_MS
     );
     if (!res.ok) return null;
     const r = (await res.json()) as { splitRecipientId?: string };
@@ -215,18 +235,22 @@ export async function criarFormularioVenda(
   const org = await orgById(orgId);
   if (!org) throw new Error(`org ${orgId} não configurada`);
 
-  const res = await fetch(`${BASE()}/api/forms`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${org.apiToken}`,
-      "Content-Type": "application/json",
-      "X-Idempotency-Key": params.idempotencyKey,
+  const res = await fetchWithTimeout(
+    `${BASE()}/api/forms`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${org.apiToken}`,
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": params.idempotencyKey,
+      },
+      body: JSON.stringify({
+        ...(params.title ? { title: params.title } : {}),
+        ...(params.corretorIds?.length ? { corretorIds: params.corretorIds } : {}),
+      }),
     },
-    body: JSON.stringify({
-      ...(params.title ? { title: params.title } : {}),
-      ...(params.corretorIds?.length ? { corretorIds: params.corretorIds } : {}),
-    }),
-  });
+    IMOBPRO_TIMEOUT_MS
+  );
 
   if (!res.ok) {
     throw new Error(
@@ -285,18 +309,22 @@ export async function criarFormularioLocacao(
   const org = await orgById(orgId);
   if (!org) throw new Error(`org ${orgId} não configurada`);
 
-  const res = await fetch(`${BASE()}/api/locacao/forms`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${org.apiToken}`,
-      "Content-Type": "application/json",
-      "X-Idempotency-Key": params.idempotencyKey,
+  const res = await fetchWithTimeout(
+    `${BASE()}/api/locacao/forms`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${org.apiToken}`,
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": params.idempotencyKey,
+      },
+      body: JSON.stringify({
+        finalidade: params.finalidade ?? "residencial",
+        ...(params.title ? { title: params.title } : {}),
+      }),
     },
-    body: JSON.stringify({
-      finalidade: params.finalidade ?? "residencial",
-      ...(params.title ? { title: params.title } : {}),
-    }),
-  });
+    IMOBPRO_TIMEOUT_MS
+  );
 
   if (!res.ok) {
     const corpo = await res.text();
@@ -352,19 +380,23 @@ export async function criarRascunhoProposta(
   const org = await orgById(orgId);
   if (!org) throw new Error(`org ${orgId} não configurada`);
 
-  const res = await fetch(`${BASE()}/api/proposals`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${org.apiToken}`,
-      "Content-Type": "application/json",
-      "X-Idempotency-Key": params.idempotencyKey,
+  const res = await fetchWithTimeout(
+    `${BASE()}/api/proposals`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${org.apiToken}`,
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": params.idempotencyKey,
+      },
+      body: JSON.stringify({
+        title: params.title,
+        schemaType: params.schemaType,
+        dataJson: {},
+      }),
     },
-    body: JSON.stringify({
-      title: params.title,
-      schemaType: params.schemaType,
-      dataJson: {},
-    }),
-  });
+    IMOBPRO_TIMEOUT_MS
+  );
 
   if (!res.ok) {
     const corpo = await res.text();
@@ -403,14 +435,18 @@ export async function reportUsage(
   const org = await orgById(orgId);
   if (!org) return;
   try {
-    await fetch(`${BASE()}/api/agents/usage`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${org.apiToken}`,
-        "Content-Type": "application/json",
+    await fetchWithTimeout(
+      `${BASE()}/api/agents/usage`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${org.apiToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ agentKey: "max", provider: "openrouter", ...usage }),
       },
-      body: JSON.stringify({ agentKey: "max", provider: "openrouter", ...usage }),
-    });
+      IMOBPRO_TIMEOUT_MS
+    );
   } catch (err) {
     // Fire-and-forget: perder a contabilidade de um turn é ruim, não responder
     // ao usuário por causa disso é pior.

@@ -16,6 +16,8 @@
  * alimenta o teto mensal por agente.
  */
 
+import { fetchWithTimeout, LLM_TIMEOUT_MS } from "./http";
+
 const BASE_URL = "https://openrouter.ai/api/v1";
 
 /**
@@ -83,6 +85,13 @@ export interface CompleteParams {
    * oportunidade de chamar sem motivo.
    */
   tools?: LlmTool[];
+  /**
+   * Prazo da chamada. Default `LLM_TIMEOUT_MS` (o teto do `answer`); as
+   * chamadas curtas (compactação, extração de memória) passam
+   * `LLM_SHORT_TIMEOUT_MS` — esperar 45s por um resumo de 5 linhas seguraria
+   * a function pelo triplo do necessário.
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -168,7 +177,7 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
 
   let data: OpenRouterResponse;
   try {
-    const res = await fetch(`${BASE_URL}/chat/completions`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/chat/completions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -200,7 +209,7 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
             }
           : {}),
       }),
-    });
+    }, p.timeoutMs ?? LLM_TIMEOUT_MS);
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
