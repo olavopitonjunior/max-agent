@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
 import { sendText, connectionStatus } from "./zapi";
+import { seedNotification } from "@/graph/graph";
 
 /**
  * Fila de saída das notificações proativas.
@@ -109,6 +110,7 @@ export interface DispatchTotals {
 
 interface OutboxRow extends Record<string, unknown> {
   id: string;
+  org_id: string;
   phone: string;
   title: string;
   body: string;
@@ -222,13 +224,26 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
          LIMIT $1
          FOR UPDATE SKIP LOCKED
       )
-      RETURNING id, phone, title, body, link_url, org_name, recipient_name,
+      RETURNING id, org_id, phone, title, body, link_url, org_name, recipient_name,
                 attempts, send_started_at`,
     [limit, String(SENDING_ORPHAN_MINUTES)]
   );
   totals.claimed = rows.length;
 
   for (const row of rows) {
+    /**
+     * O que saiu no WhatsApp vira turno do assistente no thread — para que
+     * "o que é isso?" tenha contexto. DEPOIS do envio, com catch próprio:
+     * semear não pode desfazer nem atrasar envio.
+     */
+    const semear = () =>
+      seedNotification(row.org_id, row.phone, renderMessage(row)).catch((err) =>
+        console.warn(
+          `[outbox] thread não semeado (${row.id}) — o envio ficou de pé:`,
+          err instanceof Error ? err.message : String(err)
+        )
+      );
+
     /**
      * Órfã COM envio iniciado: a execução anterior morreu entre o `send-text`
      * e o UPDATE final (falha de envio limpa o marcador). Reenviar duplicaria
@@ -243,6 +258,7 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
           WHERE id = $1`,
         [row.id]
       );
+      await semear(); // provavelmente chegou — o contexto vale mais que o raro falso positivo
       totals.sent += 1;
       continue;
     }
@@ -278,6 +294,7 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
           )
         );
       });
+      await semear();
       totals.sent += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
