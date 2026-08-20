@@ -17,6 +17,8 @@
  * template: texto livre a qualquer hora, e grupo funciona também no envio.
  */
 
+import { fetchWithTimeout, ZAPI_TIMEOUT_MS } from "./http";
+
 const BASE_URL = "https://api.z-api.io";
 
 function env(name: string): string {
@@ -49,11 +51,15 @@ export function isGroupJid(to: string): boolean {
 }
 
 async function post(path: string, body: unknown): Promise<ZApiSendResponse> {
-  const res = await fetch(`${instanceBase()}${path}`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify(body),
-  });
+  const res = await fetchWithTimeout(
+    `${instanceBase()}${path}`,
+    {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify(body),
+    },
+    ZAPI_TIMEOUT_MS
+  );
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Z-API ${path} ${res.status}: ${text.slice(0, 500)}`);
@@ -118,7 +124,7 @@ export async function downloadMedia(
   url: string
 ): Promise<{ data: Buffer; contentType: string | null } | null> {
   try {
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url, {}, ZAPI_TIMEOUT_MS);
     if (!res.ok) {
       console.warn(`[zapi] download de mídia ${res.status}`);
       return null;
@@ -159,10 +165,11 @@ export async function connectionStatus(): Promise<{
   session?: string;
   raw: unknown;
 }> {
-  const res = await fetch(`${instanceBase()}/status`, {
-    method: "GET",
-    headers: headers(),
-  });
+  const res = await fetchWithTimeout(
+    `${instanceBase()}/status`,
+    { method: "GET", headers: headers() },
+    ZAPI_TIMEOUT_MS
+  );
 
   /**
    * Resposta não-2xx LANÇA. Antes não checava `res.ok`, e isso produzia um
@@ -222,9 +229,10 @@ export async function connectionStatus(): Promise<{
 export async function getGroupMetadata(
   groupId: string
 ): Promise<{ participants: Array<{ phone: string; isAdmin?: boolean }> }> {
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `${instanceBase()}/group-metadata/${encodeURIComponent(groupId)}`,
-    { method: "GET", headers: headers() }
+    { method: "GET", headers: headers() },
+    ZAPI_TIMEOUT_MS
   );
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -267,7 +275,21 @@ export function parseInbound(payload: unknown): InboundMessage | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as Record<string, any>;
 
+  /**
+   * A MESMA URL pode receber outros callbacks da Z-API (status de entrega,
+   * presença, conexão) se alguém apontar os campos errados no painel. Eles têm
+   * `phone` e `messageId` e passariam pelo resto do parse — virando um turn de
+   * LLM pago sobre um evento que não é mensagem. Só `ReceivedCallback` (ou
+   * payload sem `type`, formato antigo de teste) segue.
+   */
+  if (typeof p.type === "string" && p.type !== "ReceivedCallback") return null;
+
   if (p.fromMe === true) return null;
+
+  // Reação (👍 numa mensagem) e sticker não são turn: responder a uma reação
+  // é ruído, e sticker não tem conteúdo transcritível. Descartados antes da
+  // fila — nem linha, nem modelo.
+  if (p.reaction || p.sticker) return null;
 
   const messageId: string | undefined = p.messageId ?? p.id;
   const rawPhone: string | undefined = p.phone;
@@ -314,6 +336,42 @@ export function parseInbound(payload: unknown): InboundMessage | null {
     timestampMs: typeof p.momment === "number" ? p.momment : null,
     senderName: p.senderName ?? p.chatName ?? null,
     replyToMessageId: p.referenceMessageId ?? null,
+  };
+}
+
+// ── Status de entrega ────────────────────────────────────────────────────
+
+/**
+ * Callback de status de mensagem ENVIADA (`MessageStatusCallback`): SENT,
+ * RECEIVED (entregue), READ, PLAYED. É o único canal que distingue "a Z-API
+ * aceitou" de "chegou no aparelho" — a reconciliação de entrega da Fase 4
+ * consome isto. Parser separado do `parseInbound` de propósito: status não é
+ * mensagem e nunca deve virar turn.
+ */
+export interface StatusCallback {
+  /** SENT | RECEIVED | READ | PLAYED (como a Z-API mandar, sem normalizar). */
+  status: string;
+  /** Ids das mensagens a que o status se refere. */
+  messageIds: string[];
+  phone: string | null;
+  momment: number | null;
+}
+
+export function parseStatusCallback(payload: unknown): StatusCallback | null {
+  if (!payload || typeof payload !== "object") return null;
+  const p = payload as Record<string, any>;
+  if (p.type !== "MessageStatusCallback") return null;
+  if (typeof p.status !== "string" || !p.status) return null;
+
+  const ids = (Array.isArray(p.ids) ? p.ids : [p.messageId])
+    .filter((id: unknown): id is string => typeof id === "string" && id.length > 0);
+  if (ids.length === 0) return null;
+
+  return {
+    status: p.status,
+    messageIds: ids,
+    phone: typeof p.phone === "string" ? p.phone : null,
+    momment: typeof p.momment === "number" ? p.momment : null,
   };
 }
 
