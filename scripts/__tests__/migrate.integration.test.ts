@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "pg";
-import { SENTINELA } from "../sentinela";
+import { BASE, EM_DIA } from "../sentinela";
 
 /**
  * O runner de migrações, sob teste porque ele destruiu dado em produção.
@@ -28,7 +28,7 @@ const RAIZ = join(__dirname, "..", "..");
 /**
  * A trava que impede o sentinela de envelhecer em silêncio.
  *
- * O sentinela (`SENTINELA` em `scripts/sentinela.ts`) precisa apontar para o
+ * O sentinela (`EM_DIA` em `scripts/sentinela.ts`) precisa apontar para o
  * artefato da ÚLTIMA migração com DDL. Se alguém adicionar uma migração nova
  * que mexe em schema e não atualizar a constante, um banco parado nessa
  * migração passa a ser adotado como completo — reintroduzindo, um passo à
@@ -49,13 +49,13 @@ describe("sentinela de adoção", () => {
         )
       );
 
-    expect(comDdl.at(-1)).toBe(SENTINELA.migracao);
+    expect(comDdl.at(-1)).toBe(EM_DIA.migracao);
   });
 
   it("o artefato apontado existe mesmo na migração declarada", () => {
-    const sql = readFileSync(join(RAIZ, "migrations", SENTINELA.migracao), "utf8");
-    expect(sql).toContain(SENTINELA.tabela);
-    expect(sql).toContain(SENTINELA.coluna);
+    const sql = readFileSync(join(RAIZ, "migrations", EM_DIA.migracao), "utf8");
+    expect(sql).toContain(EM_DIA.tabela);
+    expect(sql).toContain(EM_DIA.coluna);
   });
 });
 
@@ -169,8 +169,11 @@ d("scripts/migrate.ts (Postgres real)", () => {
     migrar(urlAlvo!.toString());
     await comCliente(urlAlvo!.toString(), async (c) => {
       await c.query(`DROP TABLE schema_migrations`);
-      // Desfaz a 009: o banco passa a parecer parado antes dela.
-      await c.query(`ALTER TABLE outbox DROP COLUMN report_attempts`);
+      // Desfaz a última migração com DDL: o banco passa a parecer parado
+      // antes dela. Escrito a partir do `EM_DIA` para não envelhecer junto.
+      await c.query(
+        `ALTER TABLE "${EM_DIA.tabela}" DROP COLUMN "${EM_DIA.coluna}"`
+      );
     });
 
     expect(() => migrar(urlAlvo!.toString())).toThrow();

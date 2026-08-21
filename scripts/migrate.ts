@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { config as loadEnv } from "dotenv";
-import { SENTINELA } from "./sentinela";
+import { BASE, EM_DIA } from "./sentinela";
 
 // `.env.test` primeiro só quando pedido — migrar produção é o default.
 loadEnv({ path: process.env.MIGRATE_ENV ?? ".env.local" });
@@ -121,25 +121,26 @@ async function main() {
      * passaria a AFIRMAR que está tudo aplicado enquanto o schema fica atrás do
      * código, em silêncio. Perda silenciosa de estado, de novo.
      *
-     * `outbox.report_attempts` nasce na 009, a última que mexe em schema.
-     * Presente = as anteriores rodaram. Ausente com `outbox` presente = banco
-     * incompleto, e aí o script NÃO adivinha: aborta e diz o que fazer.
+     * São DOIS artefatos, e a distinção é o que faz isto funcionar (ver
+     * `scripts/sentinela.ts`): `BASE` diz se o banco já existe, `EM_DIA` diz
+     * se está completo. Existe sem estar em dia = incompleto, e aí o script
+     * NÃO adivinha: aborta e diz o que fazer.
      */
-    const sentinela = await pool.query<{ tem_outbox: boolean; em_dia: boolean }>(
-      `SELECT to_regclass('public.' || $1) IS NOT NULL AS tem_outbox,
+    const sentinela = await pool.query<{ existe: boolean; em_dia: boolean }>(
+      `SELECT to_regclass('public.' || $1) IS NOT NULL AS existe,
               EXISTS (SELECT 1 FROM information_schema.columns
-                       WHERE table_name = $1 AND column_name = $2) AS em_dia`,
-      [SENTINELA.tabela, SENTINELA.coluna]
+                       WHERE table_name = $2 AND column_name = $3) AS em_dia`,
+      [BASE.tabela, EM_DIA.tabela, EM_DIA.coluna]
     );
-    const { tem_outbox, em_dia } = sentinela.rows[0];
+    const { existe: tem_outbox, em_dia } = sentinela.rows[0];
     const bancoNovo = registro.size === 0 && !tem_outbox;
     const forcarExecucao = process.env.MIGRATE_ADOPT === "off";
 
     if (registro.size === 0 && tem_outbox && !em_dia && !forcarExecucao) {
       console.error(
-        `banco INCOMPLETO: tem \`${SENTINELA.tabela}\` mas não tem ` +
-          `\`${SENTINELA.tabela}.${SENTINELA.coluna}\`\n` +
-          `(da ${SENTINELA.migracao}). Adotar aqui registraria como aplicadas\n` +
+        `banco INCOMPLETO: tem \`${BASE.tabela}\` mas não tem ` +
+          `\`${EM_DIA.tabela}.${EM_DIA.coluna}\`\n` +
+          `(da ${EM_DIA.migracao}). Adotar aqui registraria como aplicadas\n` +
           "migrações que nunca rodaram — exatamente o silêncio que o registro\n" +
           "existe para evitar.\n\n" +
           "Se as migrações realmente precisam rodar neste banco:\n" +
