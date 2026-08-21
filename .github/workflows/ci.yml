@@ -1,6 +1,17 @@
-# CI mínimo: typecheck + lint + testes SEM DATABASE_URL.
-# Os testes de integração pulam sem banco (gate hasDb) — 0 failed é o contrato.
-# Testes com banco rodam localmente contra o branch Neon de teste (ver README).
+# CI: typecheck + lint + testes, COM banco.
+#
+# Rodava sem `DATABASE_URL`, e o gate `hasDb` fazia os testes de integração
+# pularem — ~90 dos 267, incluindo TUDO que toca Postgres: filas, claim
+# concorrente, reconciliação de entrega, memória, esquecimento e auditoria.
+# Ou seja: a rede de proteção da metade mais delicada do serviço existia só na
+# máquina de quem escreveu, e sumia no merge.
+#
+# O que motivou fechar isso: em 21/08 o runner de migrações destruiu desfecho
+# de entrega em produção, e a suíte que teria pego o problema era justamente a
+# que o CI não rodava.
+#
+# Postgres como serviço do job (não Neon): efêmero, isolado por execução, sem
+# credencial no workflow e sem risco de dois PRs disputarem o mesmo banco.
 name: ci
 
 on:
@@ -11,6 +22,26 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: maxtest
+        ports:
+          - 5432:5432
+        # Sem o healthcheck o job corre para o `npm test` antes de o Postgres
+        # aceitar conexão, e a falha aparece como teste quebrado.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/maxtest
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,4 +51,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
+      # O schema precisa existir antes dos testes. `DATABASE_URL` do env vence
+      # o `.env.local` (dotenv não sobrescreve o que já está no ambiente), e
+      # num banco vazio o runner aplica tudo em vez de adotar.
+      - run: npm run db:migrate
       - run: npm test
