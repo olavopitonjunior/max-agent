@@ -23,6 +23,11 @@ const REPLY_MID = "REPLY-MSG-1";
  * roubariam a única tentativa que o `break` permite. Envelhecer as próprias
  * linhas vence a ordenação sem TOCAR nas alheias — mexer nelas disputaria
  * lock com o teste de claim concorrente do outbox.
+ *
+ * Envelhecer resolve a ORDEM, não a contagem: linha alheia elegível ainda
+ * entra no lote DEPOIS das daqui e infla os totais. Por isso as asserções
+ * abaixo olham o ESTADO das próprias linhas (reported_at, report_attempts),
+ * e só usam `totals` onde o número é do próprio lote por construção.
  */
 async function outboxRow(over: Record<string, unknown> = {}) {
   const id = crypto.randomUUID();
@@ -151,8 +156,9 @@ d("entrega", () => {
     await applyStatusCallback({ status: "SENT", messageIds: [MID], phone: null, momment: null });
     expect((await outboxDe(id)).delivery_status).toBe("sent");
 
-    const totals = await reconcile();
-    expect(totals.unconfirmed).toBe(1);
+    await reconcile();
+    // Estado da PRÓPRIA linha: `totals.unconfirmed` conta a tabela toda e
+    // linha alheia de outro arquivo somaria junto.
     expect((await outboxDe(id)).delivery_status).toBe("unconfirmed");
   });
 
@@ -175,10 +181,12 @@ d("entrega", () => {
     ].sort();
     expect(attempts).toEqual([0, 1]);
 
-    // Integração volta: as DUAS são reportadas.
+    // Integração volta: as DUAS são reportadas — conferido nas próprias
+    // linhas, porque `totals.reported` inclui linha de outro arquivo.
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) }));
-    const depois = await reconcile();
-    expect(depois.reported).toBe(2);
+    await reconcile();
+    expect((await outboxDe(idA)).reported_at).not.toBeNull();
+    expect((await outboxDe(idB)).reported_at).not.toBeNull();
   });
 
   it("report que o Contractmaker rejeita não monopoliza o lote (teto de tentativas)", async () => {
@@ -188,15 +196,14 @@ d("entrega", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 422, text: async () => "" }));
 
     // 422 é recusa de payload: conta tentativa e o lote SEGUE (sem break).
-    let totals = await reconcile();
-    expect(totals.reportFailed).toBe(1);
+    await reconcile();
     expect((await outboxDe(id)).report_attempts).toBe(1);
 
     // No teto (60), a linha condenada sai do lote de vez.
     await query(`UPDATE outbox SET report_attempts = 59 WHERE id = $1`, [id]);
     await reconcile(); // 60ª tentativa — desiste com log
-    totals = await reconcile();
-    expect(totals.reported + totals.reportFailed).toBe(0);
+    await reconcile();
+    // No teto, a linha sai do lote: o contador não anda mais.
     expect((await outboxDe(id)).report_attempts).toBe(60);
   });
 
@@ -205,8 +212,9 @@ d("entrega", () => {
       sent_at: new Date(Date.now() - 20 * 60_000),
     });
 
-    const totals = await reconcile();
-    expect(totals.unconfirmed).toBe(1);
+    await reconcile();
+    // Estado da PRÓPRIA linha: `totals.unconfirmed` conta a tabela toda e
+    // linha alheia de outro arquivo somaria junto.
     expect((await outboxDe(id)).delivery_status).toBe("unconfirmed");
 
     // A notícia atrasada tem razão sobre o "sem notícia".
@@ -224,9 +232,7 @@ d("entrega", () => {
     // pode consumir o teto da linha).
     const fail = vi.fn().mockResolvedValue({ ok: false, status: 404, text: async () => "" });
     vi.stubGlobal("fetch", fail);
-    let totals = await reconcile();
-    expect(totals.reportUnavailable).toBe(1);
-    expect(totals.reportFailed).toBe(0);
+    await reconcile();
     expect((await outboxDe(id)).reported_at).toBeNull();
     // A tentativa CONTA (é o que rotaciona a fila), mas o teto de 60 e o
     // break impedem a perda do desfecho no pré-deploy.
@@ -235,8 +241,7 @@ d("entrega", () => {
     // 2ª passada: rota no ar → reporta com HMAC e carimba.
     const ok = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
     vi.stubGlobal("fetch", ok);
-    totals = await reconcile();
-    expect(totals.reported).toBe(1);
+    await reconcile();
     expect((await outboxDe(id)).reported_at).not.toBeNull();
 
     const [url, init] = ok.mock.calls[0];
@@ -255,6 +260,7 @@ d("entrega", () => {
     await outboxRow();
     await applyStatusCallback({ status: "READ", messageIds: [MID], phone: null, momment: null });
 
+    // Aqui `totals` é seguro: sem secret o reconcile nem chega ao lote.
     const totals = await reconcile();
     expect(totals.reported).toBe(0);
     expect(totals.reportFailed).toBe(0);

@@ -217,6 +217,9 @@ describe("POST /api/notify", () => {
     // O VALOR entregue à fila, não só a chamada: telefone cru no gateway já
     // custou perda silenciosa em produção (#189 e o ramo de corretor do
     // Newton em 2026-08). A Z-API quer E.164 SEM "+".
+    // Valor E arity: sem a segunda, um /notify que enfileirasse duas vezes
+    // (retry mal fechado) passaria neste teste e no de baixo.
+    expect(enfileiraOut).toHaveBeenCalledOnce();
     expect(enfileiraOut).toHaveBeenCalledWith(
       expect.objectContaining({ phone: "5511987654321" })
     );
