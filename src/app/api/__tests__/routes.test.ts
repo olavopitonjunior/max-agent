@@ -214,7 +214,34 @@ describe("POST /api/notify", () => {
       })
     );
     expect(res.status).toBe(202);
-    expect(enfileiraOut).toHaveBeenCalledOnce();
+    // O VALOR entregue à fila, não só a chamada: telefone cru no gateway já
+    // custou perda silenciosa em produção (#189 e o ramo de corretor do
+    // Newton em 2026-08). A Z-API quer E.164 SEM "+".
+    expect(enfileiraOut).toHaveBeenCalledWith(
+      expect.objectContaining({ phone: "5511987654321" })
+    );
+  });
+
+  it("telefone formatado chega à fila no formato da Z-API", async () => {
+    // O caso que distingue o helper do replace inline: com "+5511..." os dois
+    // coincidem; com telefone sujo, só a normalização acerta.
+    const body = JSON.stringify({
+      orgId: "org1",
+      audience: "platform_user",
+      phone: "(11) 98765-4321",
+      dedupeKey: "n:2",
+    });
+    const ts = String(Date.now());
+    const res = await notifyPost(
+      notifyReq(body, {
+        "x-max-timestamp": ts,
+        "x-max-signature": sign(ts, body, SECRET),
+      })
+    );
+    expect(res.status).toBe(202);
+    expect(enfileiraOut).toHaveBeenCalledWith(
+      expect.objectContaining({ phone: "5511987654321" })
+    );
   });
 
   it("duplicata é 409 — o contrato que o ImobPro lê como 'já assumido'", async () => {
