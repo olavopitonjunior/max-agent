@@ -25,7 +25,24 @@ async function limpar() {
   await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
   await query(`DELETE FROM conversation_turn WHERE phone = $1`, [PHONE]);
   await query(`DELETE FROM outbox WHERE phone = $1`, [PHONE]);
+  /**
+   * As tabelas do checkpointer não vêm de migration: o `setup()` do LangGraph
+   * as cria no primeiro `invoke`. Em banco NOVO elas ainda não existem, e o
+   * `DELETE` aqui derrubava a suíte inteira com `relation "checkpoints" does
+   * not exist`.
+   *
+   * Passava local porque o banco de teste já tinha as tabelas de execuções
+   * anteriores — ou seja, era um teste que só funcionava em banco SUJO. Só
+   * apareceu quando o CI passou a rodar integração contra um Postgres limpo a
+   * cada execução, que é exatamente o tipo de defeito que motivou aquela
+   * mudança. Mesmo guard `to_regclass` que a rota `/admin/forget` usa.
+   */
   for (const t of ["checkpoints", "checkpoint_writes", "checkpoint_blobs"]) {
+    const existe = await query<{ r: string | null }>(
+      `SELECT to_regclass($1) AS r`,
+      [`public.${t}`]
+    );
+    if (!existe[0]?.r) continue;
     await query(`DELETE FROM ${t} WHERE thread_id LIKE '%:' || $1`, [PHONE]);
   }
 }
