@@ -3,6 +3,7 @@ import { query } from "./db";
 import { nextDeliveryTime } from "./window";
 import { sendText, connectionStatus } from "./zapi";
 import { seedNotification } from "@/graph/graph";
+import { log } from "./log";
 import { resolveIdentity } from "./identity";
 
 /**
@@ -311,6 +312,13 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
         row.id,
       ]);
       const res = await sendText({ to: row.phone, body: renderMessage(row) });
+      log.info("outbox.enviado", {
+        rowId: row.id,
+        orgId: row.org_id,
+        phone: row.phone,
+        sentMessageId: res.messageId ?? res.id ?? null,
+        audience: row.audience,
+      });
       /**
        * O UPDATE final ganha um retry local: falhar AQUI (blip do Neon) com a
        * mensagem já entregue deixaria a linha órfã — e era o reenvio duplicado.

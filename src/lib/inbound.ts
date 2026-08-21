@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, type InboundMessage } from "./zapi";
-import { maskPhone } from "./phone";
+import { log } from "./log";
 import { runTurn } from "@/graph/graph";
 
 /**
@@ -386,6 +386,16 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
       [row.id, replyMessageId]
     );
 
+    // Fecha o laço no log: quem buscar pelo messageId vê a conversa inteira,
+    // do aceite no webhook até o id da resposta que saiu.
+    log.info("inbound.respondido", {
+      messageId: row.message_id,
+      rowId: row.id,
+      phone: row.from_phone,
+      sentMessageId: replyMessageId,
+      respondeu: Boolean(reply),
+    });
+
     /**
      * Só agora. A pessoa já recebeu a resposta e a linha já está liquidada —
      * daqui pra frente nada do que acontecer pode atrasar a conversa nem
@@ -418,7 +428,14 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
         WHERE id = $1`,
       [row.id, exhausted ? "failed" : "pending", message.slice(0, 500)]
     );
-    console.error(`[inbound] turn falhou (${row.message_id}): ${message}`);
+    log.error("inbound.turn_falhou", {
+      messageId: row.message_id,
+      rowId: row.id,
+      phone: row.from_phone,
+      attempts: row.attempts,
+      terminal: exhausted,
+      erro: message.slice(0, 200),
+    });
     return exhausted ? "failed" : "retry";
   }
 }
@@ -517,9 +534,7 @@ async function drenarTelefone(phone: string, deadline: number): Promise<void> {
     if (!row) return; // o cron pegou, ou outro turn deste telefone começou
     await runQueued(row);
   }
-  console.warn(
-    `[inbound] ${maskPhone(phone)} tinha mais de ${DRENO_MAX} mensagens represadas — o cron termina`
-  );
+  log.warn("inbound.dreno_estourou", { phone, limite: DRENO_MAX });
 }
 
 export interface InboundTotals {
