@@ -58,6 +58,33 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   adopted    boolean NOT NULL DEFAULT false
 )`;
 
+/**
+ * Artefato de schema da ÚLTIMA migração com DDL — o sentinela que diz se um
+ * banco preexistente está em dia (ver `adotar`).
+ *
+ * **Precisa acompanhar cada migração nova que mexa em schema.** Não é
+ * disciplina: `scripts/__tests__/migrate.integration.test.ts` falha se um
+ * arquivo posterior a `migracao` contiver DDL e isto não for atualizado —
+ * porque esquecer aqui faria um banco parado na migração seguinte ser adotado
+ * como completo, que é exatamente a perda silenciosa que este runner mata.
+ */
+export const SENTINELA = {
+  migracao: "009_reconcile_hardening.sql",
+  tabela: "outbox",
+  coluna: "report_attempts",
+} as const;
+
+/**
+ * Serializa execuções concorrentes.
+ *
+ * `max: 1` no Pool limita conexões DENTRO de um processo e não impede dois
+ * processos (CI e gente, ou duas abas) de lerem o registro antes de escrever,
+ * executarem o mesmo arquivo em paralelo e o `ON CONFLICT DO UPDATE` engolir a
+ * dupla execução sem erro. Para DDL idempotente é inofensivo; para migração de
+ * DADO é a mesma perda silenciosa que motivou este arquivo, só que por corrida.
+ */
+const LOCK_ID = 8_142_073; // arbitrário e fixo: só precisa ser exclusivo nosso
+
 function checksum(sql: string): string {
   return createHash("sha256").update(sql).digest("hex").slice(0, 16);
 }
@@ -77,9 +104,20 @@ async function main() {
   }
 
   const replay = process.env.MIGRATE_REPLAY;
-  const pool = new Pool({ connectionString: url, max: 1 });
+  /**
+   * `max: 2`, e o segundo slot não é folga: é a conexão que segura o advisory
+   * lock do começo ao fim. Com `max: 1` — como era antes de o lock existir — a
+   * trava tomava a única conexão e todo o resto ficava esperando por ela:
+   * deadlock imediato, e silencioso (o script simplesmente pendura).
+   */
+  const pool = new Pool({ connectionString: url, max: 2 });
+
+  // Conexão dedicada: advisory lock de sessão morre junto com a sessão, e uma
+  // conexão devolvida ao pool poderia soltá-lo cedo demais.
+  const trava = await pool.connect();
 
   try {
+    await trava.query(`SELECT pg_advisory_lock($1)`, [LOCK_ID]);
     await pool.query(LEDGER);
 
     const { rows } = await pool.query<{ filename: string; checksum: string }>(
@@ -102,10 +140,10 @@ async function main() {
      * incompleto, e aí o script NÃO adivinha: aborta e diz o que fazer.
      */
     const sentinela = await pool.query<{ tem_outbox: boolean; em_dia: boolean }>(
-      `SELECT to_regclass('public.outbox') IS NOT NULL AS tem_outbox,
+      `SELECT to_regclass('public.' || $1) IS NOT NULL AS tem_outbox,
               EXISTS (SELECT 1 FROM information_schema.columns
-                       WHERE table_name = 'outbox'
-                         AND column_name = 'report_attempts') AS em_dia`
+                       WHERE table_name = $1 AND column_name = $2) AS em_dia`,
+      [SENTINELA.tabela, SENTINELA.coluna]
     );
     const { tem_outbox, em_dia } = sentinela.rows[0];
     const bancoNovo = registro.size === 0 && !tem_outbox;
@@ -113,10 +151,11 @@ async function main() {
 
     if (registro.size === 0 && tem_outbox && !em_dia && !forcarExecucao) {
       console.error(
-        "banco INCOMPLETO: tem `outbox` mas não tem `outbox.report_attempts`\n" +
-          "(coluna da 009). Adotar aqui registraria como aplicadas migrações\n" +
-          "que nunca rodaram — exatamente o silêncio que o registro existe\n" +
-          "para evitar.\n\n" +
+        `banco INCOMPLETO: tem \`${SENTINELA.tabela}\` mas não tem ` +
+          `\`${SENTINELA.tabela}.${SENTINELA.coluna}\`\n` +
+          `(da ${SENTINELA.migracao}). Adotar aqui registraria como aplicadas\n` +
+          "migrações que nunca rodaram — exatamente o silêncio que o registro\n" +
+          "existe para evitar.\n\n" +
           "Se as migrações realmente precisam rodar neste banco:\n" +
           "  MIGRATE_ADOPT=off npm run db:migrate\n\n" +
           "Antes, leia a 006: o UPDATE dela devolve a `pending` linha em\n" +
@@ -151,7 +190,13 @@ async function main() {
         continue;
       }
 
-      if (adotar) {
+      /**
+       * `forcada` vence a adoção. Sem esta checagem, um `MIGRATE_REPLAY=` numa
+       * primeira execução (banco em dia, registro vazio — exatamente o cenário
+       * de estrear este script) adotava o arquivo em silêncio em vez de
+       * reaplicá-lo: o operador pedia uma coisa e recebia outra, sem log.
+       */
+      if (adotar && !forcada) {
         await pool.query(
           `INSERT INTO schema_migrations (filename, checksum, adopted)
            VALUES ($1, $2, true)
@@ -209,6 +254,11 @@ async function main() {
       );
     }
   } finally {
+    // Ordem importa: soltar o lock antes de fechar o pool. `pool.end()` mata a
+    // sessão e o Postgres liberaria sozinho, mas soltar explicitamente deixa o
+    // rastro correto em `pg_locks` se alguém estiver investigando um travamento.
+    await trava.query(`SELECT pg_advisory_unlock($1)`, [LOCK_ID]).catch(() => undefined);
+    trava.release();
     await pool.end();
   }
 }

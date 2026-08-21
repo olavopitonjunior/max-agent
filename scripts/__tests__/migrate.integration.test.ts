@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "pg";
+import { SENTINELA } from "../migrate";
 
 /**
  * O runner de migrações, sob teste porque ele destruiu dado em produção.
@@ -22,6 +24,40 @@ const hasDb = Boolean(process.env.DATABASE_URL);
 const d = hasDb ? describe : describe.skip;
 
 const RAIZ = join(__dirname, "..", "..");
+
+/**
+ * A trava que impede o sentinela de envelhecer em silêncio.
+ *
+ * O sentinela (`SENTINELA` em `scripts/migrate.ts`) precisa apontar para o
+ * artefato da ÚLTIMA migração com DDL. Se alguém adicionar uma migração nova
+ * que mexe em schema e não atualizar a constante, um banco parado nessa
+ * migração passa a ser adotado como completo — reintroduzindo, um passo à
+ * frente, a perda silenciosa que este runner existe para matar.
+ *
+ * "Lembrar de atualizar" não é garantia. Este teste é. E não precisa de banco:
+ * é leitura de arquivo, então roda no CI também.
+ */
+describe("sentinela de adoção", () => {
+  it("aponta para a última migração com DDL", () => {
+    const dir = join(RAIZ, "migrations");
+    const comDdl = readdirSync(dir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort()
+      .filter((f) =>
+        /\b(CREATE\s+TABLE|ALTER\s+TABLE[\s\S]*?ADD\s+COLUMN)\b/i.test(
+          readFileSync(join(dir, f), "utf8")
+        )
+      );
+
+    expect(comDdl.at(-1)).toBe(SENTINELA.migracao);
+  });
+
+  it("o artefato apontado existe mesmo na migração declarada", () => {
+    const sql = readFileSync(join(RAIZ, "migrations", SENTINELA.migracao), "utf8");
+    expect(sql).toContain(SENTINELA.tabela);
+    expect(sql).toContain(SENTINELA.coluna);
+  });
+});
 
 /** Roda o script contra um banco específico e devolve a saída. */
 function migrar(dbUrl: string, extra: Record<string, string> = {}): string {
