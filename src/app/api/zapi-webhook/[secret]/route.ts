@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { waitUntil } from "@vercel/functions";
 import { parseInbound, isExpectedInstance } from "@/lib/zapi";
 import { enqueueInbound, processInboundNow } from "@/lib/inbound";
-import { maskPhone } from "@/lib/phone";
+import { log } from "@/lib/log";
 import { requireZapiSecret } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -83,9 +83,12 @@ export async function POST(
     return NextResponse.json({ ok: true, duplicate: true });
   }
 
-  console.log(
-    `[zapi-webhook] aceito ${msg.kind} de ${maskPhone(msg.fromPhone)} (${enfileirado.id})`
-  );
+  log.info("inbound.aceito", {
+    messageId: msg.messageId,
+    rowId: enfileirado.id,
+    phone: msg.fromPhone,
+    kind: msg.kind,
+  });
 
   // Fire-and-forget de verdade: sem `waitUntil` a Vercel congela a function no
   // instante da resposta e o processamento morreria no meio.
