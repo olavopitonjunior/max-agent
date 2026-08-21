@@ -79,14 +79,33 @@ export async function GET(req: NextRequest) {
     : 50;
 
   /**
-   * Paginação por `created_at`, não por offset: o offset anda sozinho quando
-   * chega turn novo durante a navegação, e o operador acabaria pulando linhas
-   * justamente enquanto investiga.
+   * Paginação por `(created_at, id)`, não por offset e não só por tempo.
+   *
+   * Offset anda sozinho quando chega turn novo durante a navegação, e o
+   * operador pularia linhas justamente enquanto investiga. Mas só o tempo não
+   * basta: `timestamptz` empata, e dois turns gravados no mesmo instante
+   * (instâncias diferentes, ou um backfill) podem cair um de cada lado da
+   * fronteira da página. Aí `created_at < cursor` exclui TODAS as linhas
+   * daquele instante — inclusive a que nunca foi mostrada.
+   *
+   * Numa tabela de auditoria isso é "linha some da investigação sem erro
+   * nenhum": exatamente a classe de defeito que esta tabela existe para matar.
+   * O `id` é UUID e não repete, então o par ordenado desempata sempre.
+   *
+   * Formato do cursor: `<iso>|<uuid>` — o mesmo que a resposta devolve.
    */
   const cursorBruto = sp.get("cursor");
-  const cursor = cursorBruto && !Number.isNaN(Date.parse(cursorBruto)) ? cursorBruto : null;
-  if (cursorBruto && !cursor) {
-    return NextResponse.json({ error: "cursor_invalido" }, { status: 400 });
+  let cursorTs: string | null = null;
+  let cursorId: string | null = null;
+  if (cursorBruto) {
+    const [ts, id] = cursorBruto.split("|");
+    const tsValido = ts && !Number.isNaN(Date.parse(ts));
+    const idValido = /^[0-9a-f-]{36}$/i.test(id ?? "");
+    if (!tsValido || !idValido) {
+      return NextResponse.json({ error: "cursor_invalido" }, { status: 400 });
+    }
+    cursorTs = ts;
+    cursorId = id;
   }
 
   const linhas = await query<Linha>(
@@ -95,10 +114,11 @@ export async function GET(req: NextRequest) {
             created_at::text AS created_at
        FROM conversation_turn
       WHERE ($1::text IS NULL OR org_id = $1)
-        AND ($2::timestamptz IS NULL OR created_at < $2::timestamptz)
-      ORDER BY created_at DESC
-      LIMIT $3`,
-    [orgId, cursor, limite]
+        AND ($2::timestamptz IS NULL
+             OR (created_at, id) < ($2::timestamptz, $3::uuid))
+      ORDER BY created_at DESC, id DESC
+      LIMIT $4`,
+    [orgId, cursorTs, cursorId, limite]
   ).catch((err) => {
     /**
      * Só a tabela AUSENTE (42P01) degrada em silêncio, e só porque a janela
@@ -146,6 +166,9 @@ export async function GET(req: NextRequest) {
       createdAt: l.created_at,
     })),
     // `null` quando a página não encheu: não há mais o que buscar.
-    nextCursor: linhas.length === limite ? linhas[linhas.length - 1].created_at : null,
+    nextCursor:
+      linhas.length === limite
+        ? `${linhas[linhas.length - 1].created_at}|${linhas[linhas.length - 1].id}`
+        : null,
   });
 }

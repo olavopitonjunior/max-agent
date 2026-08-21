@@ -202,8 +202,14 @@ d("fase 4B", () => {
    * porque nenhum enumerava as superfícies.
    *
    * Este enumera: pergunta ao BANCO quais tabelas têm coluna de telefone e
-   * exige que o código da rota cite cada uma. Tabela nova com telefone que
-   * ninguém cobriu quebra o teste no dia em que é criada, não meses depois.
+   * exige um `DELETE FROM` de verdade para cada uma. Tabela nova com telefone
+   * que ninguém cobriu quebra o teste no dia em que é criada, não meses depois.
+   *
+   * **Extrai os alvos de `DELETE FROM`, não faz `includes` do nome.** A
+   * primeira versão fazia `rota.includes(tabela)` no fonte inteiro, e isso
+   * passava com a tabela citada num comentário — inclusive num `// TODO: o
+   * forget ainda não cobre X`, que é exatamente a situação que o teste deveria
+   * denunciar (achado do code review).
    */
   it("nenhuma tabela com telefone fica de fora do esquecimento", async () => {
     const { readFileSync } = await import("node:fs");
@@ -211,6 +217,16 @@ d("fase 4B", () => {
       "src/app/api/admin/forget/route.ts",
       "utf8"
     );
+
+    // Alvos REAIS de deleção, do SQL — não menções no texto.
+    const apagadas = new Set(
+      [...rota.matchAll(/DELETE\s+FROM\s+"?(\w+)"?/gi)].map((m) => m[1])
+    );
+    // O laço das tabelas do checkpointer monta o DELETE por interpolação de
+    // nome (`DELETE FROM ${t}`), então elas entram pela lista literal.
+    for (const t of ["checkpoints", "checkpoint_writes", "checkpoint_blobs"]) {
+      if (rota.includes(`"${t}"`) || rota.includes(`'${t}'`)) apagadas.add(t);
+    }
 
     const comTelefone = await query<{ table_name: string }>(
       `SELECT DISTINCT table_name FROM information_schema.columns
@@ -222,7 +238,7 @@ d("fase 4B", () => {
 
     const descobertas = comTelefone
       .map((r) => r.table_name)
-      .filter((t) => !rota.includes(t));
+      .filter((t) => !apagadas.has(t));
 
     expect(descobertas).toEqual([]);
   });

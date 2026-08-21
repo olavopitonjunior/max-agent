@@ -615,7 +615,13 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     ],
     reply: result.text,
     usage: usageDoTurn,
-    toolLog: trilha,
+    // Mesma proteção do `usage` acima: `trilha` é `[]` quando não houve
+    // chamada, e `[]` é o sinal de reset do reducer. Hoje seria inofensivo
+    // porque `confirm` e `answer` nunca rodam no mesmo turn — mas isso é
+    // invariante de topologia, não garantia estrutural, e no dia em que
+    // alguém quebrar a topologia este `[]` apagaria em silêncio o que o
+    // `confirm` acabou de gravar.
+    ...(trilha.length > 0 ? { toolLog: trilha } : {}),
   };
 }
 
@@ -784,7 +790,38 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
       });
     },
   });
-  const identity = await resolveIdentity(inbound.fromPhone);
+  /**
+   * Falha AQUI também precisa deixar rastro.
+   *
+   * `resolveIdentity` e o `invoke` do grafo são os dois pontos que podem
+   * lançar sem passar por nenhum `sair()` nem pelo `afterReply` — instabilidade
+   * do Postgres, falha do checkpointer ao persistir. Sem isto, esse turn não
+   * gera linha nenhuma em `conversation_turn`, e a falha mais provável de se
+   * repetir some justamente da ferramenta construída para investigá-la. O
+   * `runQueued` ainda marca `inbound_queue.last_error`, mas quem abre o painel
+   * de conversa não vê nada.
+   *
+   * Registra e RE-LANÇA: o turn continua falhando, e a fila continua tratando
+   * a falha como sempre tratou.
+   */
+  const comRastro = async <T>(fn: () => Promise<T>, orgId?: string): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err) {
+      await registrarTurn({
+        orgId: orgId ?? "(sem org)",
+        phone: inbound.fromPhone,
+        messageId: inbound.messageId,
+        kind: inbound.kind,
+        inboundText: texto || null,
+        latencyMs: Date.now() - iniciadoEm,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  };
+
+  const identity = await comRastro(() => resolveIdentity(inbound.fromPhone));
 
   // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
   // respondeu a um aviso, engano ou spam.
@@ -892,7 +929,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   const facts = await loadFacts(orgId, phone);
 
   const app = buildGraph().compile({ checkpointer: await getCheckpointer() });
-  const result = await app.invoke(
+  const result = await comRastro(() => app.invoke(
     {
       inbound: { ...inbound, text: turnText },
       identity: identity.candidate,
@@ -925,7 +962,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         thread_id: threadIdFor(orgId, phone),
       },
     }
-  );
+  ), orgId);
 
   const reply = result.reply ?? null;
   const usage = result.usage ?? [];
