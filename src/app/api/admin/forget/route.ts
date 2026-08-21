@@ -92,6 +92,27 @@ export async function POST(req: NextRequest) {
     await del("inbound_queue", `DELETE FROM inbound_queue WHERE from_phone = ANY($1)`, [bare]);
     await del("outbox", `DELETE FROM outbox WHERE phone = ANY($1)`, [bare]);
 
+    /**
+     * A auditoria de conversa guarda o que a pessoa DISSE — e por isso o
+     * esquecimento a apaga por inteiro, em vez de anonimizar como faz o TTL.
+     *
+     * A diferença entre os dois é deliberada: a poda por idade preserva as
+     * métricas porque quer o custo sem o conteúdo; o esquecimento não pode
+     * deixar linha nenhuma chaveada pelo telefone da pessoa, senão o "apaguei
+     * tudo" é falso. E não se perde contabilidade: o consumo já vive no
+     * `AIUsage` do ImobPro, que é outro sistema, com outra retenção e sem o
+     * telefone.
+     *
+     * `bare` porque o `registrarTurn` grava pela `conversationKey` (E.164 sem
+     * "+"), a mesma chave do `thread_id` — e a lista já cobre as variantes do
+     * 9º dígito.
+     */
+    await del(
+      "conversation_turn",
+      `DELETE FROM conversation_turn WHERE phone = ANY($1)`,
+      [bare]
+    );
+
     // As tabelas do checkpointer são criadas pelo `setup()` do LangGraph, não
     // pelas migrations — num banco onde o grafo nunca rodou elas não existem,
     // e um 42P01 aqui não pode abortar o apagamento das demais.

@@ -36,6 +36,21 @@ const RAIZ = join(__dirname, "..", "..");
  *
  * "Lembrar de atualizar" não é garantia. Este teste é. E não precisa de banco:
  * é leitura de arquivo, então roda no CI também.
+ *
+ * ── O que conta como DDL aqui, e por quê ─────────────────────────────────
+ *
+ * Só tabela e coluna novas. Migração que só mexe em ÍNDICE (a 012, por
+ * exemplo) fica de fora **de propósito**, por dois motivos que se somam:
+ *
+ *  · o mecanismo do sentinela consulta `information_schema.columns` — um
+ *    índice não é uma coluna, então não haveria o que apontar;
+ *  · banco sem um índice é mais LENTO, não errado. O sentinela existe para
+ *    impedir que um schema incompleto seja adotado como completo, e "faltando
+ *    um índice" não é a classe de incompletude que causa perda de dado.
+ *
+ * Se um dia uma migração de índice for pré-requisito de correção (um UNIQUE
+ * que impede duplicata, por exemplo), aí ela precisa de outro guard — e este
+ * comentário é o aviso de que este teste não cobre esse caso.
  */
 describe("sentinela de adoção", () => {
   it("aponta para a última migração com DDL", () => {

@@ -50,6 +50,7 @@ import { complete, DEFAULT_MODEL, type LlmUsage } from "@/lib/llm";
 import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
 import { checkpointerPool } from "@/lib/db";
 import { conversationKey, maskPhone } from "@/lib/phone";
+import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
 import { buildSystemPrompt, shouldSearch } from "./prompt";
 import type { InboundMessage } from "@/lib/zapi";
 
@@ -176,6 +177,39 @@ export const MaxState = Annotation.Root({
   pendingAction: Annotation<PendingAction | null>({
     reducer: (_prev, next) => next,
     default: () => null,
+  }),
+
+  /**
+   * Consumo do turn — uma entrada por CHAMADA de modelo, nunca somado.
+   *
+   * Um turn faz duas ou mais: resposta, compactação, extração de memória. Um
+   * único número esconderia qual delas pesa, que é exatamente a pergunta de
+   * quem olha o painel. Mesmo motivo pelo qual o `AIUsage` do ImobPro grava
+   * uma linha por modelo.
+   *
+   * Acumula porque os nós contribuem em momentos diferentes do mesmo turn —
+   * mas **lista vazia ZERA**, e isso não é detalhe: o checkpointer restaura o
+   * estado inteiro, então sem um jeito de reiniciar, o consumo do turn passado
+   * voltaria somado ao deste e o painel cobraria a mesma chamada para sempre.
+   * É o mesmo defeito que o comentário do `reply` descreve, aplicado a número.
+   * `runTurn` zera os dois na entrada, junto de `reply` e `halt`.
+   */
+  usage: Annotation<LlmUsage[]>({
+    reducer: (prev, next) => (next.length === 0 ? [] : [...prev, ...next]),
+    default: () => [],
+  }),
+
+  /**
+   * Trilha do que o modelo PEDIU e do que aconteceu.
+   *
+   * Vai para a auditoria (`conversation_turn`), nunca para o prompt: nome de
+   * ferramenta e argumento em JSON são encanamento, e encanamento não entra na
+   * conversa. Registrar a chamada DESCARTADA é metade do valor — hoje um `tipo`
+   * fora do enum só existe como um `console.warn` que ninguém correlaciona.
+   */
+  toolLog: Annotation<ToolLogEntry[]>({
+    reducer: (prev, next) => (next.length === 0 ? [] : [...prev, ...next]),
+    default: () => [],
   }),
 
   /**
@@ -315,17 +349,27 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
   if (resposta === "nenhum") {
     // Descarta e deixa o fluxo normal responder. O `answer` recebe o aviso e
     // reconhece numa frase que deixou a criação de lado.
-    return { pendingAction: null, propostaDescartada: true };
+    return {
+      pendingAction: null,
+      propostaDescartada: true,
+      toolLog: [
+        { name: TOOL_PROPOR_FORM, args: { ...pending.args }, outcome: "descartada" },
+      ],
+    };
   }
 
-  // Confirmado. A partir daqui há escrita de verdade.
-  const responder = (texto: string): MaxUpdate => ({
+  // Confirmado. A partir daqui há escrita de verdade — e é o evento mais
+  // importante da trilha: é o único ponto em que o Max muda dado do tenant.
+  const responder = (texto: string, outcome: string): MaxUpdate => ({
     pendingAction: null,
     messages: [
       { role: "user", content: userText },
       { role: "assistant", content: texto },
     ],
     reply: texto,
+    toolLog: [
+      { name: TOOL_PROPOR_FORM, args: { ...pending.args }, outcome },
+    ],
   });
 
   try {
@@ -336,13 +380,13 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
       // devolver o mesmo documento em vez de criar um segundo.
       state.inbound.messageId
     );
-    return responder(textoCriado({ url, args: pending.args }));
+    return responder(textoCriado({ url, args: pending.args }), "criado");
   } catch (err) {
     // Módulo desligado não é falha transitória: retentar não resolve, e quem
     // resolve não é quem pediu.
     if (err instanceof ModuloDesligadoError) {
       console.warn(`[confirm] ${err.message} em ${state.identity.orgId}`);
-      return responder(textoModuloDesligado(pending.args));
+      return responder(textoModuloDesligado(pending.args), "modulo_desligado");
     }
     console.error(
       "[confirm] criação falhou:",
@@ -350,7 +394,7 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
     );
     // Limpa a pendência mesmo na falha: mantê-la faria a próxima mensagem da
     // pessoa ser lida como confirmação de novo, e ela não confirmou duas vezes.
-    return responder(TEXTO_FALHOU);
+    return responder(TEXTO_FALHOU, "falhou");
   }
 }
 
@@ -483,6 +527,15 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     console.error("[graph] modelo falhou:", err instanceof Error ? err.message : err);
     return {
       messages: [{ role: "user", content: userText }],
+      // O turn que falhou também custou, e a auditoria precisa mostrar isso —
+      // um agente que só erra não pode aparecer como um agente que não gasta.
+      //
+      // Espalhado condicionalmente, e não `usage ? [usage] : []`: lista vazia
+      // é o SINAL DE RESET do reducer, então mandar `[]` para dizer "não tenho
+      // dado" e para dizer "zera tudo" seria o mesmo valor com dois
+      // significados. Hoje seria inofensivo (nada contribui `usage` antes do
+      // `answer`), e é exatamente por isso que precisa ser corrigido agora.
+      ...(usage ? { usage: [usage] } : {}),
       reply:
         "Tive um problema pra responder agora. Tenta de novo em instantes, " +
         "ou fala com seu corretor se for urgente.",
@@ -492,6 +545,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   // Fire-and-forget: perder a contabilidade de um turn é ruim; não responder
   // ao usuário por causa dela é pior.
   void reportUsage(state.identity.orgId, result.usage);
+  const usageDoTurn: LlmUsage[] = [result.usage];
 
   /**
    * O modelo pediu para propor uma escrita.
@@ -512,8 +566,12 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    * ela leria "formulário de venda" e teria dito "aluguel". Sem tipo, o turn
    * cai no caminho de texto e ela repete o pedido.
    */
+  const trilha: ToolLogEntry[] = [];
   if (chamada && !tipo) {
     console.warn(`[answer] tipo inválido na chamada: ${JSON.stringify(chamada.args)}`);
+    // Chamada DESCARTADA vale tanto quanto a aceita: hoje isto só existe como
+    // um console.warn que ninguém correlaciona com a conversa.
+    trilha.push({ name: chamada.name, args: chamada.args, outcome: "tipo_invalido" });
   }
 
   if (chamada && tipo) {
@@ -542,6 +600,11 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
         { role: "assistant", content: texto },
       ],
       reply: texto,
+      usage: usageDoTurn,
+      toolLog: [
+        ...trilha,
+        { name: chamada.name, args: chamada.args, outcome: "proposta" },
+      ],
     };
   }
 
@@ -551,6 +614,8 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       { role: "assistant", content: result.text },
     ],
     reply: result.text,
+    usage: usageDoTurn,
+    toolLog: trilha,
   };
 }
 
@@ -591,7 +656,11 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
     });
 
     void reportUsage(state.identity.orgId, result.usage);
-    return { summary: result.text, messages: { replace: keep } };
+    return {
+      summary: result.text,
+      messages: { replace: keep },
+      usage: [result.usage],
+    };
   } catch (err) {
     // Falhar aqui só significa contexto mais longo no próximo turn — nunca
     // vale descartar histórico sem ter conseguido resumi-lo.
@@ -667,19 +736,54 @@ export async function getCheckpointer(): Promise<PostgresSaver> {
 export interface TurnResult {
   reply: string | null;
   /**
-   * Trabalho que só pode acontecer DEPOIS de a resposta sair — hoje, a extração
-   * de memória.
+   * Trabalho que só pode acontecer DEPOIS de a resposta sair: o registro de
+   * auditoria (`conversation_turn`) e a extração de memória.
    *
    * É um thunk e não uma chamada direta de propósito: a promessa "fora do
    * caminho crítico" vira estrutura em vez de comentário. Quem chama não
    * consegue rodar isto antes de enviar sem escrever a linha errada de
    * propósito. Nunca lança.
+   *
+   * Deixou de ser opcional quando a auditoria entrou: ANTES ele só existia
+   * quando havia o que aprender, e um turn sem resposta — justamente o que
+   * alguém iria investigar — não deixava rastro nenhum.
    */
-  afterReply?: () => Promise<void>;
+  afterReply: () => Promise<void>;
 }
 
 export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
+  // Latência do TURN, não do modelo: inclui identidade, transcrição, RAG e
+  // checkpoint. É esse número que a pessoa sente, e é o que o painel mostra.
+  const iniciadoEm = Date.now();
   const texto = inbound.text?.trim() ?? "";
+
+  /**
+   * Saída antecipada COM rastro.
+   *
+   * Os caminhos que não chegam ao grafo — número desconhecido, telefone em
+   * duas imobiliárias, mídia que não transcreveu — eram justamente os que não
+   * deixavam registro nenhum, e são os que alguém investiga primeiro quando
+   * pergunta "por que fulano não foi atendido?". `orgId` é opcional porque
+   * nesses casos ele pode nem existir ainda.
+   */
+  const sair = (
+    reply: string | null,
+    extra: { orgId?: string; error?: string } = {}
+  ): TurnResult => ({
+    reply,
+    afterReply: async () => {
+      await registrarTurn({
+        orgId: extra.orgId ?? "(sem org)",
+        phone: inbound.fromPhone,
+        messageId: inbound.messageId,
+        kind: inbound.kind,
+        inboundText: texto || null,
+        replyText: reply,
+        latencyMs: Date.now() - iniciadoEm,
+        error: extra.error ?? null,
+      });
+    },
+  });
   const identity = await resolveIdentity(inbound.fromPhone);
 
   // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
@@ -688,20 +792,20 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     // Uma apresentação por ciclo do cache negativo, e depois silêncio:
     // responder cada mensagem de um número estranho consome cota da Z-API e
     // confirma ao spammer que o número é vivo.
-    if (identity.alreadyGreeted) return { reply: null };
+    if (identity.alreadyGreeted) return sair(null, { error: "desconhecido_silenciado" });
     // Falhar em marcar só significa reapresentar na próxima — nunca vale
     // derrubar a resposta por isso.
     await markGreeted(inbound.fromPhone).catch(() => undefined);
-    return {
-      reply:
-        "Oi! Sou o Max, assistente das imobiliárias parceiras. Não reconheci " +
+    return sair(
+      "Oi! Sou o Max, assistente das imobiliárias parceiras. Não reconheci " +
         "este número — fale com seu corretor para liberar o acesso.",
-    };
+      { error: "desconhecido_apresentado" }
+    );
   }
 
   // Primeira vez com o telefone em mais de uma imobiliária: pergunta e para.
   if (identity.kind === "ambiguous") {
-    return { reply: askWhichOrg(identity.candidates) };
+    return sair(askWhichOrg(identity.candidates), { error: "ambiguo" });
   }
 
   // Já perguntamos: esta mensagem PODE ser a resposta.
@@ -711,25 +815,25 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     // primeira candidata entregaria o conteúdo de alguém a uma imobiliária que
     // pode não ser a dele.
     if (!texto && inbound.kind !== "text") {
-      return {
-        reply:
-          "Antes de continuar preciso saber de qual imobiliária você fala. " +
+      return sair(
+        "Antes de continuar preciso saber de qual imobiliária você fala. " +
           "Responde por escrito, por favor:\n\n" +
           askWhichOrg(identity.candidates),
-      };
+        { error: "ambiguo_com_midia" }
+      );
     }
     const escolhido = matchChoice(texto, identity.candidates);
     if (!escolhido) {
       // Não insistir com o texto igual seria pior — repetir a lista deixa claro
       // que o Max ainda está esperando, em vez de parecer que ignorou.
-      return { reply: askWhichOrg(identity.candidates) };
+      return sair(askWhichOrg(identity.candidates), { error: "escolha_nao_casou" });
     }
     await saveChoice(inbound.fromPhone, escolhido.orgId);
-    return {
-      reply:
-        `Certo, ${escolhido.orgName}. Pode mandar sua pergunta que eu respondo ` +
+    return sair(
+      `Certo, ${escolhido.orgName}. Pode mandar sua pergunta que eu respondo ` +
         "com o material dessa imobiliária.",
-    };
+      { orgId: escolhido.orgId }
+    );
   }
 
   /**
@@ -750,13 +854,13 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   // silêncio é pior, e passar pelo modelo com "(mensagem sem texto)" pagava um
   // turn por uma resposta genérica. Template, sem LLM.
   if (!turnText && (inbound.kind === "document" || inbound.kind === "unknown")) {
-    return {
-      reply:
-        inbound.kind === "document"
-          ? "Ainda não consigo ler documentos por aqui. Me conta por escrito o " +
-            "que você precisa?"
-          : "Não consegui entender esse tipo de mensagem. Pode mandar por escrito?",
-    };
+    return sair(
+      inbound.kind === "document"
+        ? "Ainda não consigo ler documentos por aqui. Me conta por escrito o " +
+          "que você precisa?"
+        : "Não consegui entender esse tipo de mensagem. Pode mandar por escrito?",
+      { orgId: identity.candidate.orgId, error: `sem_texto_${inbound.kind}` }
+    );
   }
 
   if (!turnText && (inbound.kind === "audio" || inbound.kind === "image")) {
@@ -769,12 +873,12 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
       // Dizer que não deu, sempre. Silêncio faria a pessoa esperar resposta de
       // uma coisa que o agente nunca recebeu — e no WhatsApp ela não tem como
       // saber a diferença entre "ignorou" e "não chegou".
-      return {
-        reply:
-          fromMedia === "audio"
-            ? "Não consegui ouvir esse áudio. Pode me mandar por escrito?"
-            : "Não consegui ver essa imagem. Pode me contar por escrito?",
-      };
+      return sair(
+        fromMedia === "audio"
+          ? "Não consegui ouvir esse áudio. Pode me mandar por escrito?"
+          : "Não consegui ver essa imagem. Pode me contar por escrito?",
+        { orgId: identity.candidate.orgId, error: `transcricao_falhou_${fromMedia}` }
+      );
     }
     turnText = transcrito;
   }
@@ -809,6 +913,12 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
       reply: null,
       halt: null,
       propostaDescartada: false,
+      // Zerados como `reply`, e pelo mesmo motivo: o checkpointer restaura o
+      // estado inteiro, então sem isto o consumo e a trilha do turn passado
+      // voltariam somados ao deste. Lista vazia é o sinal de reset (ver o
+      // reducer).
+      usage: [],
+      toolLog: [],
     },
     {
       configurable: {
@@ -818,15 +928,41 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   );
 
   const reply = result.reply ?? null;
+  const usage = result.usage ?? [];
+  const tools = result.toolLog ?? [];
+  const latencyMs = Date.now() - iniciadoEm;
 
   return {
     reply,
     // Só vale extrair de um turn que teve as duas pontas: sem resposta não há
     // conversa da qual aprender, e um turn que falhou no modelo ensinaria o
     // erro.
-    afterReply:
-      reply && turnText
-        ? async () => {
+    /**
+     * Auditoria + memória, nesta ordem e as duas fora do caminho crítico.
+     *
+     * O registro vem PRIMEIRO porque é o que permite investigar quando a
+     * extração falha — se a memória lançasse antes, o turn ficaria sem
+     * rastro justamente no caso em que alguém iria procurá-lo. `registrarTurn`
+     * nunca lança, então não há risco de inverter o problema.
+     */
+    afterReply: async () => {
+      await registrarTurn({
+        orgId,
+        phone,
+        messageId: inbound.messageId,
+        kind: inbound.kind,
+        inboundText: turnText || null,
+        // Só quando houve mídia: repetir o texto digitado nas duas colunas
+        // encheria a tabela sem acrescentar informação.
+        transcript: fromMedia ? turnText : null,
+        replyText: reply,
+        tools,
+        usage,
+        latencyMs,
+      });
+
+      if (!(reply && turnText)) return;
+      await (async () => {
             const novos = await extractFacts({
               orgId,
               phone,
@@ -838,8 +974,8 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
             if (gravados > 0) {
               console.log(`[memory] ${gravados} fato(s) de ${maskPhone(phone)} em ${orgId}`);
             }
-          }
-        : undefined,
+      })();
+    },
   };
 }
 

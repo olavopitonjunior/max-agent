@@ -92,6 +92,7 @@ de `deal-events` de lá não tem cron de reconciliação.
 | `POST\|DELETE /api/orgs` | HMAC (mesmo do `/notify`) | Provisiona/desativa tenant (token cifrado em `org_config`) |
 | `POST /api/admin/forget` | HMAC (mesmo do `/notify`) | Direito ao esquecimento: apaga tudo sobre um telefone |
 | `GET /api/admin/status` | HMAC (`method.path?query` assinados) | Alimenta o Mission Control no admin do ImobPro |
+| `GET /api/admin/conversations` | HMAC (method+path+query) | auditoria de conversa por tenant — o que o agente disse, quanto custou e quais ferramentas acionou. Exige `?orgId=` ou `?scope=all`. |
 | `GET /api/health` | — | Liveness |
 
 O `/api/cron/outbox` também roda a **reconciliação** na mesma passada: marca
