@@ -100,12 +100,21 @@ function limpar(key: unknown, value: unknown): [string, string] | null {
    * documento acima.
    */
   const vazio =
-    /^(n[ãa]o (informad[oa]|dit[oa]|mencionad[oa]|especificad[oa]|sei|informou|declarad[oa])|sem informa[çc][ãa]o|desconhecid[oa]|indefinid[oa]|n\/?a|nulo|null|none|-+|\?+)$/i;
+    /^(n[ãa]o (informad[oa]|dit[oa]|mencionad[oa]|especificad[oa]|sei|informou|declarad[oa])|sem informa[çc][ãa]o|desconhecid[oa]|n\/?a|nulo|null|none|-+|\?+)$/i;
   if (vazio.test(v)) return null;
-  // `nenhum` fica FORA da lista de propósito: "filhos: nenhum" é fato genuíno,
-  // e apagar um fato verdadeiro é pior que guardar um pouco útil. A cerca
-  // existe contra o que o extrator de fato produziu ("não informado"), não
-  // contra tudo que parece negativo.
+  /**
+   * DUAS palavras ficam FORA desta lista de propósito, e o critério é o mesmo:
+   * no vocabulário deste negócio elas são FATO, não ausência.
+   *
+   *  - `nenhum` — "filhos: nenhum" é informação durável sobre a pessoa.
+   *  - `indefinido` — "prazo indefinido" é termo corrente de contrato de
+   *    locação, o oposto de prazo determinado. Apagar isso jogaria fora um
+   *    fato central do negócio de alguém.
+   *
+   * A cerca existe contra o que o extrator produziu de verdade ("não
+   * informado"), não contra tudo que soa negativo — e apagar um fato
+   * verdadeiro é pior que guardar um pouco útil.
+   */
 
   return [k, v];
 }

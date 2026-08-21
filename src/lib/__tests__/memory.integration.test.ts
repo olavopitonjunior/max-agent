@@ -137,6 +137,20 @@ d("memory_facts (Postgres real)", () => {
       expect(await loadFacts(ORG, PHONE)).toEqual({ filhos: "nenhum" });
     });
 
+    /**
+     * O mesmo critério, num caso que só aparece a quem conhece o negócio:
+     * "prazo indefinido" é termo corrente de contrato de locação — o oposto de
+     * prazo determinado. A primeira versão da cerca apagava isso junto com
+     * "não informado", jogando fora um fato central do negócio de alguém.
+     */
+    it("`indefinido` é prazo de contrato, não ausência", async () => {
+      await saveFacts(ORG, PHONE, { prazo_contrato: "indefinido" });
+
+      expect(await loadFacts(ORG, PHONE)).toEqual({
+        prazo_contrato: "indefinido",
+      });
+    });
+
     it("mas não confunde negativa COM conteúdo com ausência", async () => {
       // "não trabalha com locação" é um fato durável e útil; a cerca não pode
       // ser um `includes("não")`.
