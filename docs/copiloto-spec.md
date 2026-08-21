@@ -283,6 +283,26 @@ export interface LlmUsage {
 
 `costUsd: null` quando o campo não vier — e aí o ImobPro cai na tabela de preços, como hoje. Nunca zero: zero é um número, e um número errado é pior que a ausência.
 
+#### Medido em produção, 21/08 — o tamanho do erro
+
+Três chamadas com prefixo de sistema idêntico (1956 tokens de prompt), contra o `gpt-5.4-nano`:
+
+| turno | prompt | **cacheado** | custo REAL | estimado pela tabela | erro |
+|---|---|---|---|---|---|
+| 1 | 1956 | 0 | $0,00042870 | $0,00042870 | **0,0%** |
+| 2 | 1956 | **1792** | **$0,00010614** | $0,00042870 | **+304%** |
+| 3 | 1956 | 0 | $0,00042870 | $0,00042870 | **0,0%** |
+
+Três conclusões, e nenhuma era óbvia antes de medir:
+
+1. **A tabela de preços do `calcCostUsd` está exata** quando não há cache — erro de 0,0%, não "próximo". O problema nunca foi o preço.
+2. **O cache de prefixo funciona, e o ganho é grande**: 1792 de 1956 tokens reaproveitados, custo caindo **4×**. O "BLOCO ESTÁVEL" do prompt está pagando o que prometia.
+3. **E é invisível.** Como o Max não propaga `cached_tokens`, o painel cobra o turno cacheado a preço cheio e **superestima em 304%**. O tenant vê uma conta que não existe, e a otimização que mais economiza é justamente a que não aparece.
+
+O cache do provedor só entra acima de ~1024 tokens de prefixo. Os turns reais de hoje ficaram entre 255 e 1358 tokens, então quase nenhum qualificou — e a conferência bate: o gasto real da chave hoje (US$ 0,00207885) é igual à soma do `AIUsage` (US$ 0,001066) mais o spike de TTS (US$ 0,0010122), que não passou pelo Max. **Sem cache, estimativa e realidade coincidem.**
+
+Isso muda de figura no copiloto: com catálogo de tools e resultado de `scope-query` no prompt, todo turn passa de 1024 tokens com folga, e o cache deixa de ser exceção para virar o caso comum. Propagar `cached_tokens` sai de "correção de contabilidade" para **pré-requisito de a conta fazer sentido**.
+
 ### 4.2 `POST /api/agents/usage` — o contrato muda
 
 Passa a aceitar `costUsd`, `cacheReadTokens`, `cacheWriteTokens` **quando `provider === "openrouter"`**.
@@ -565,6 +585,25 @@ Além de manter os 243 verdes:
 **Validação de ponta a ponta**, depois de staging: as jornadas J1, J3, J4, J6 por WhatsApp real, o aviso manual (J5), e áudio ida e volta — com `/admin/max` aberto conferindo que cada turn apareceu com custo, tokens e trilha de tools.
 
 ---
+
+## 10.1 Latência — medida em produção, e uma correção de rumo
+
+Durante a validação de 21/08 eu observei turns de 15 s e cheguei a tratar isso como problema de produto, apontando o dedo para o TTL de 15 minutos do cache de identidade. **Estava errado, e o erro foi de método**: eu media da minha máquina, no Brasil, contra um Neon em `us-east-2` e o ImobPro atrás da rede pública. As functions do Max rodam em `iad1`, ao lado dos dois.
+
+Os números reais, da fila de produção:
+
+| mensagem | desfecho | latência |
+|---|---|---|
+| "Oi" (número desconhecido) | apresentação, sem modelo | **0,62 s** |
+| "Ol" (identidade resolvida) | turn completo com LLM | **2,67 s** |
+
+**O alvo de 6 s do PRD já está cumprido**, com folga de mais que o dobro. E a decomposição fecha: as linhas de `AIUsage` mostram o modelo levando 815 ms–1,4 s, então o resto é fila, checkpoint e rede — não há gordura escondida.
+
+O que a medição local realmente expôs foi outra coisa, e vale registrar sem inflar: a varredura de identidade faz **7 round-trips SERIAIS** ao ImobPro (1 por org que acha usuário, 2 por org que devolve 404 e cai no `broker-scope`). Com 4 tenants em `iad1` isso é ruído. O custo cresce linearmente com o número de tenants, e o comentário do `identity.ts` já previa o desfecho: *"com poucos tenants é barato, e a partir de algumas dezenas isto vira um endpoint de plataforma."*
+
+**Decisão: não otimizar agora.** Paralelizar o laço seria barato, mas seria otimização contra um problema que a medição diz não existir — e cada mudança no caminho de identidade é uma chance de reintroduzir a ambiguidade cross-tenant que aquele módulo custou a resolver. O gatilho para revisitar é **número de orgs**, não latência percebida: por volta de 15–20 tenants, ou quando o p50 do turn passar de 4 s em produção, o que vier primeiro.
+
+**Ficando o aviso de método**: nenhuma decisão de latência deste projeto deve sair de medição local. Brasil→`us-east-2` adiciona ~150 ms por round-trip, e o grafo faz muitos — o suficiente para inventar um problema que produção não tem.
 
 ## 11. Pendências que bloqueiam partes desta spec
 
