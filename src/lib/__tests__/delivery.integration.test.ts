@@ -46,6 +46,15 @@ d("entrega", () => {
     vi.unstubAllEnvs();
     await query(`DELETE FROM outbox WHERE org_id = 'org-d'`);
     await query(`DELETE FROM inbound_queue WHERE from_phone = '5511900000088'`);
+    // `reconcile` varre a tabela INTEIRA: linha deixada por outro arquivo de
+    // teste (outbox.integration usa org-test) entraria no lote antes das
+    // daqui — `ORDER BY report_attempts, created_at` favorece as mais
+    // antigas — e roubaria a única tentativa que o `break` permite. Carimbar
+    // como já reportadas as tira do lote sem apagá-las.
+    await query(
+      `UPDATE outbox SET reported_at = now()
+        WHERE reported_at IS NULL AND org_id <> 'org-d'`
+    );
   });
   afterEach(() => {
     vi.unstubAllGlobals();

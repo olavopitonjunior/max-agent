@@ -376,6 +376,87 @@ describe("locação e proposta", () => {
   });
 
   /**
+   * Proposta de LOCAÇÃO por conversa: a natureza escolhe o schema que a rota
+   * já aceitava — o hardcode de compra_venda_v1 era o que a deixava
+   * inexistente. E o texto de confirmação precisa DIZER que é de locação:
+   * a pessoa confirmaria "rascunho de proposta" achando que é de venda.
+   */
+  it("proposta de locação usa o schema de locação (residencial por padrão)", async () => {
+    const s = await run(
+      "sim",
+      {
+        pendingAction: pendenciaDe("Bia", Date.now(), {
+          tipo: "proposta",
+          natureza: "locacao",
+        }),
+      },
+      usuario,
+      "m-prop-loc"
+    );
+
+    expect(criarProposta).toHaveBeenCalledWith("org1", {
+      title: "Proposta — Bia",
+      schemaType: "locacao_residencial_v1",
+      idempotencyKey: "m-prop-loc",
+    });
+    expect(s.reply).toContain("RASCUNHO");
+  });
+
+  it("proposta de locação comercial usa o schema comercial e se descreve inteira", async () => {
+    const { textoProposta } = await import("../tools");
+    const args = {
+      tipo: "proposta",
+      natureza: "locacao",
+      finalidade: "comercial",
+    } as const;
+    expect(textoProposta(args)).toContain("rascunho de proposta de locação comercial");
+
+    await run("sim", { pendingAction: pendenciaDe(undefined, Date.now(), args) }, usuario, "m-plc");
+    expect(criarProposta).toHaveBeenCalledWith(
+      "org1",
+      expect.objectContaining({ schemaType: "locacao_comercial_v1" })
+    );
+  });
+
+  /**
+   * Duas bordas que o campo novo cria, ambas com resposta silenciosa (nada
+   * falha, o documento é que nasce errado) — por isso teste explícito:
+   *  - pendência gravada no checkpoint ANTES do deploy não tem `natureza`;
+   *    confirmada depois, tem que continuar sendo proposta de VENDA;
+   *  - `finalidade` sem `natureza: locacao` é órfã (a pessoa disse
+   *    "comercial" numa proposta de venda) e não pode escolher schema.
+   */
+  it("pendência sem natureza (pré-deploy) e finalidade órfã continuam em compra_venda_v1", async () => {
+    await run(
+      "sim",
+      { pendingAction: pendenciaDe("Zé", Date.now(), { tipo: "proposta" }) },
+      usuario,
+      "m-compat"
+    );
+    expect(criarProposta).toHaveBeenCalledWith(
+      "org1",
+      expect.objectContaining({ schemaType: "compra_venda_v1" })
+    );
+
+    criarProposta.mockClear();
+    await run(
+      "sim",
+      {
+        pendingAction: pendenciaDe("Zé", Date.now(), {
+          tipo: "proposta",
+          finalidade: "comercial",
+        }),
+      },
+      usuario,
+      "m-orfa"
+    );
+    expect(criarProposta).toHaveBeenCalledWith(
+      "org1",
+      expect.objectContaining({ schemaType: "compra_venda_v1" })
+    );
+  });
+
+  /**
    * Módulo desligado não é falha transitória: retentar não resolve e quem
    * resolve não é quem pediu. "Tenta de novo em instantes" mandaria a pessoa
    * bater na mesma parede.
