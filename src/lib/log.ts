@@ -22,6 +22,15 @@ import { maskPhone } from "./phone";
  *  - `messageId` = a mensagem que ORIGINOU o evento (a recebida, no inbound).
  *  - `sentMessageId` = o id que o provedor devolveu do que SAIU. Vale para
  *    resposta e para notificação proativa — por isso não se chama "reply".
+ *
+ * Duas garantias que o call-site não precisa lembrar:
+ *  - **emitir nunca lança.** Estes logs ficam DENTRO de blocos onde uma
+ *    exceção reverteria trabalho já feito (entre o `sendText` e a
+ *    liquidação, por exemplo, o catch limparia o marcador e reenviaria uma
+ *    mensagem que o provedor já aceitou). Log não pode ter esse poder.
+ *  - **telefone é mascarado em qualquer campo**, não só no `phone`: texto
+ *    livre de erro do provedor costuma ecoar o número do destinatário
+ *    ("Z-API /send-text 400: invalid phone 5511...").
  */
 
 export interface LogFields {
@@ -38,13 +47,35 @@ export interface LogFields {
   [k: string]: unknown;
 }
 
+/** Sequência longa de dígitos em texto livre é telefone até prova em
+ * contrário — 10 a 13 dígitos cobre E.164 do BR com e sem "+"/9º dígito. */
+const DIGITOS_DE_TELEFONE = /\b\d{10,13}\b/g;
+
+function scrub(valor: unknown): unknown {
+  return typeof valor === "string"
+    ? valor.replace(DIGITOS_DE_TELEFONE, (d) => maskPhone(d))
+    : valor;
+}
+
 function emit(level: "info" | "warn" | "error", event: string, f: LogFields): void {
-  const { phone, ...rest } = f;
-  const linha = JSON.stringify({
-    event,
-    ...(phone ? { phone: maskPhone(phone) } : {}),
-    ...rest,
-  });
+  let linha: string;
+  try {
+    const { phone, ...rest } = f;
+    const limpos = Object.fromEntries(
+      Object.entries(rest).map(([k, v]) => [k, scrub(v)])
+    );
+    linha = JSON.stringify({
+      event,
+      ...(phone ? { phone: maskPhone(phone) } : {}),
+      ...limpos,
+    });
+  } catch (err) {
+    // Valor circular, BigInt, getter que lança: o log degrada, o turn segue.
+    linha = JSON.stringify({
+      event,
+      logError: err instanceof Error ? err.message : String(err),
+    });
+  }
   if (level === "error") console.error(linha);
   else if (level === "warn") console.warn(linha);
   else console.log(linha);
