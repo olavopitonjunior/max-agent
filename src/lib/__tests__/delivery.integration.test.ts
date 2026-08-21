@@ -16,15 +16,23 @@ const { query, db } = await import("../db");
 const MID = "PROV-MSG-1";
 const REPLY_MID = "REPLY-MSG-1";
 
+/**
+ * Linha do outbox com `created_at` ANTIGO de propósito: o `reconcile` varre a
+ * tabela inteira e ordena por `report_attempts, created_at`, então linhas
+ * deixadas por outros arquivos de teste entrariam no lote antes destas e
+ * roubariam a única tentativa que o `break` permite. Envelhecer as próprias
+ * linhas vence a ordenação sem TOCAR nas alheias — mexer nelas disputaria
+ * lock com o teste de claim concorrente do outbox.
+ */
 async function outboxRow(over: Record<string, unknown> = {}) {
   const id = crypto.randomUUID();
   await query(
     `INSERT INTO outbox (id, org_id, dedupe_key, audience, phone, recipient_name,
                          title, body, link_url, deal_id, org_name, deliver_after,
-                         status, sent_at, provider_message_id)
+                         status, sent_at, provider_message_id, created_at)
      VALUES ($1, 'org-d', $2, 'platform_user', '5511900000088', 'Teste',
              't', 'b', NULL, NULL, 'Org', now(),
-             'sent', COALESCE($4, now()), $3)`,
+             'sent', COALESCE($4, now()), $3, now() - interval '365 days')`,
     [id, `dk-${id}`, over.provider_message_id ?? MID, over.sent_at ?? null]
   );
   return id;
@@ -46,15 +54,6 @@ d("entrega", () => {
     vi.unstubAllEnvs();
     await query(`DELETE FROM outbox WHERE org_id = 'org-d'`);
     await query(`DELETE FROM inbound_queue WHERE from_phone = '5511900000088'`);
-    // `reconcile` varre a tabela INTEIRA: linha deixada por outro arquivo de
-    // teste (outbox.integration usa org-test) entraria no lote antes das
-    // daqui — `ORDER BY report_attempts, created_at` favorece as mais
-    // antigas — e roubaria a única tentativa que o `break` permite. Carimbar
-    // como já reportadas as tira do lote sem apagá-las.
-    await query(
-      `UPDATE outbox SET reported_at = now()
-        WHERE reported_at IS NULL AND org_id <> 'org-d'`
-    );
   });
   afterEach(() => {
     vi.unstubAllGlobals();
