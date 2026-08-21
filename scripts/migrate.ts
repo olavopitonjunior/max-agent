@@ -197,8 +197,18 @@ async function main() {
       process.stdout.write(`→ ${file} ${forcada ? "(REPLAY) " : ""}... `);
       const client = await pool.connect();
       try {
-        // A migração e o registro dela entram juntos: falha no meio não deixa
-        // um arquivo marcado como aplicado sem ter aplicado.
+        /**
+         * A migração e o registro dela entram juntos: falha no meio não deixa
+         * um arquivo marcado como aplicado sem ter aplicado.
+         *
+         * **Efeito colateral que vale saber**: dentro de transação o Postgres
+         * recusa `CREATE INDEX CONCURRENTLY`. Hoje é irrelevante — as tabelas
+         * são pequenas e o lock dura milissegundos —, mas quem um dia precisar
+         * indexar `outbox` ou `inbound_queue` cheias vai bater aqui, e um
+         * `CREATE INDEX` comum nessas tabelas trava ESCRITA em produção pelo
+         * tempo da construção. Nesse dia, a saída é rodar o índice fora deste
+         * runner, à mão, e registrar o arquivo com `MIGRATE_REPLAY`.
+         */
         await client.query("BEGIN");
         await client.query(sql);
         await client.query(

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth";
 import { sweepInbound } from "@/lib/inbound";
 import { pruneOldFacts } from "@/lib/memory";
+import { pruneOldTurns } from "@/lib/turnlog";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -41,6 +42,20 @@ export async function GET(req: NextRequest) {
         return 0;
       });
       if (podados > 0) console.log(`[cron/inbound] ${podados} fato(s) vencidos podados`);
+
+      // Mesma carona, mesmo motivo: a poda da auditoria apaga TEXTO de turns
+      // antigos e preserva as métricas. O que a plataforma precisa para
+      // entender custo não é o que a pessoa disse.
+      const anonimizados = await pruneOldTurns().catch((err) => {
+        console.warn(
+          "[cron/inbound] poda de auditoria falhou:",
+          err instanceof Error ? err.message : String(err)
+        );
+        return 0;
+      });
+      if (anonimizados > 0) {
+        console.log(`[cron/inbound] ${anonimizados} turn(s) anonimizados por idade`);
+      }
     }
     if (totals.blocked > 0) {
       console.error(

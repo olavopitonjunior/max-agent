@@ -35,7 +35,7 @@ export const BASE = { tabela: "outbox" } as const;
 
 /** Artefato da última migração com DDL. Diz: o schema está completo. */
 export const EM_DIA = {
-  migracao: "009_reconcile_hardening.sql",
-  tabela: "outbox",
-  coluna: "report_attempts",
+  migracao: "011_conversation_turn.sql",
+  tabela: "conversation_turn",
+  coluna: "org_id",
 } as const;

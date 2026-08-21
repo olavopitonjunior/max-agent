@@ -23,8 +23,26 @@ async function limpar() {
   await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [E164]);
   await query(`DELETE FROM identity_cache WHERE phone = $1`, [E164]);
   await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
+  await query(`DELETE FROM conversation_turn WHERE phone = $1`, [PHONE]);
   await query(`DELETE FROM outbox WHERE phone = $1`, [PHONE]);
+  /**
+   * As tabelas do checkpointer não vêm de migration: o `setup()` do LangGraph
+   * as cria no primeiro `invoke`. Em banco NOVO elas ainda não existem, e o
+   * `DELETE` aqui derrubava a suíte inteira com `relation "checkpoints" does
+   * not exist`.
+   *
+   * Passava local porque o banco de teste já tinha as tabelas de execuções
+   * anteriores — ou seja, era um teste que só funcionava em banco SUJO. Só
+   * apareceu quando o CI passou a rodar integração contra um Postgres limpo a
+   * cada execução, que é exatamente o tipo de defeito que motivou aquela
+   * mudança. Mesmo guard `to_regclass` que a rota `/admin/forget` usa.
+   */
   for (const t of ["checkpoints", "checkpoint_writes", "checkpoint_blobs"]) {
+    const existe = await query<{ r: string | null }>(
+      `SELECT to_regclass($1) AS r`,
+      [`public.${t}`]
+    );
+    if (!existe[0]?.r) continue;
     await query(`DELETE FROM ${t} WHERE thread_id LIKE '%:' || $1`, [PHONE]);
   }
 }
@@ -150,5 +168,95 @@ d("fase 4B", () => {
     expect(
       ((state.values as { messages?: unknown[] }).messages ?? []).length
     ).toBe(0);
+  });
+
+  /**
+   * A auditoria de conversa é apagada por INTEIRO, e não anonimizada como faz
+   * a poda por TTL. A diferença é deliberada: o TTL quer o custo sem o
+   * conteúdo; o esquecimento não pode deixar linha chaveada pelo telefone da
+   * pessoa, senão o "apaguei tudo" é falso. A contabilidade não se perde — ela
+   * vive no `AIUsage` do ImobPro, outro sistema, sem o telefone.
+   */
+  it("forget apaga a auditoria de conversa por inteiro", async () => {
+    vi.stubEnv("MAX_NOTIFY_SECRET", "s-forget");
+    const { POST } = await import("@/app/api/admin/forget/route");
+    const { registrarTurn } = await import("../turnlog");
+
+    await registrarTurn({
+      orgId: ORG,
+      phone: PHONE,
+      inboundText: "coisa que a pessoa disse",
+      replyText: "coisa que o Max respondeu",
+    });
+
+    const rawBody = JSON.stringify({ phone: PHONE });
+    const ts = String(Date.now());
+    const res = await POST(
+      new NextRequest("http://max.test/api/admin/forget", {
+        method: "POST",
+        body: rawBody,
+        headers: {
+          "x-max-timestamp": ts,
+          "x-max-signature": sign(ts, rawBody, "s-forget"),
+        },
+      })
+    );
+
+    expect((await res.json()).deleted.conversation_turn).toBe(1);
+    const sobrou = await query(
+      `SELECT id FROM conversation_turn WHERE phone = $1`,
+      [PHONE]
+    );
+    expect(sobrou).toHaveLength(0);
+  });
+
+  /**
+   * A trava que teria pego a lacuna sozinha.
+   *
+   * Quando a `conversation_turn` nasceu, o `forget` — que o repo vende como
+   * "apaga tudo sobre um telefone" — passou a mentir em silêncio sobre a
+   * tabela que guarda literalmente a conversa. Nenhum dos 265 testes pegou,
+   * porque nenhum enumerava as superfícies.
+   *
+   * Este enumera: pergunta ao BANCO quais tabelas têm coluna de telefone e
+   * exige um `DELETE FROM` de verdade para cada uma. Tabela nova com telefone
+   * que ninguém cobriu quebra o teste no dia em que é criada, não meses depois.
+   *
+   * **Extrai os alvos de `DELETE FROM`, não faz `includes` do nome.** A
+   * primeira versão fazia `rota.includes(tabela)` no fonte inteiro, e isso
+   * passava com a tabela citada num comentário — inclusive num `// TODO: o
+   * forget ainda não cobre X`, que é exatamente a situação que o teste deveria
+   * denunciar (achado do code review).
+   */
+  it("nenhuma tabela com telefone fica de fora do esquecimento", async () => {
+    const { readFileSync } = await import("node:fs");
+    const rota = readFileSync(
+      "src/app/api/admin/forget/route.ts",
+      "utf8"
+    );
+
+    // Alvos REAIS de deleção, do SQL — não menções no texto.
+    const apagadas = new Set(
+      [...rota.matchAll(/DELETE\s+FROM\s+"?(\w+)"?/gi)].map((m) => m[1])
+    );
+    // O laço das tabelas do checkpointer monta o DELETE por interpolação de
+    // nome (`DELETE FROM ${t}`), então elas entram pela lista literal.
+    for (const t of ["checkpoints", "checkpoint_writes", "checkpoint_blobs"]) {
+      if (rota.includes(`"${t}"`) || rota.includes(`'${t}'`)) apagadas.add(t);
+    }
+
+    const comTelefone = await query<{ table_name: string }>(
+      `SELECT DISTINCT table_name FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND column_name IN ('phone', 'from_phone')
+        ORDER BY table_name`
+    );
+    expect(comTelefone.length).toBeGreaterThan(0);
+
+    const descobertas = comTelefone
+      .map((r) => r.table_name)
+      .filter((t) => !apagadas.has(t));
+
+    expect(descobertas).toEqual([]);
   });
 });
