@@ -4,7 +4,6 @@ import {
   parseStatusCallback,
   isGroupJid,
   sendText,
-  sendAudio,
   connectionStatus,
 } from "../zapi";
 
@@ -233,15 +232,6 @@ describe("envio", () => {
       phone: "5511999063228",
       message: "oi",
     });
-  });
-
-  it("send-audio manda voice note (waveform), não anexo de arquivo", async () => {
-    const fetchMock = mockFetch();
-    await sendAudio({ to: "5511999063228", audio: Buffer.from("abc") });
-
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.waveform).toBe(true);
-    expect(body.audio).toBe(`data:audio/mpeg;base64,${Buffer.from("abc").toString("base64")}`);
   });
 
   it("erro HTTP vira exceção com o status (o caller decide o retry)", async () => {

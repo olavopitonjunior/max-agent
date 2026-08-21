@@ -36,7 +36,7 @@ export interface UserCandidate extends CandidateBase {
  * **Não guarda `dealIds`.** A lista muda quando alguém entra ou sai da comissão
  * de um negócio, e um candidato congelado numa linha de `phone_org_choice`
  * continuaria dando acesso a negócio do qual o corretor já saiu. Os negócios
- * são buscados na hora, por `brokerDealIds`.
+ * seriam buscados na hora, quando houver caso de uso.
  */
 export interface BrokerCandidate extends CandidateBase {
   kind: "broker";
@@ -276,33 +276,6 @@ async function scanBroker(
     },
     degraded: false,
   };
-}
-
-/**
- * Os negócios do corretor, buscados na hora.
- *
- * Fora do `Candidate` de propósito — ver `BrokerCandidate`. Uma lista vazia é
- * resposta válida ("não participa de nenhum"); `null` é falha de leitura, e o
- * chamador tem que tratar diferente: com `null`, não falar de negócio nenhum.
- */
-export async function brokerDealIds(
-  org: OrgConfig,
-  rawPhone: string
-): Promise<string[] | null> {
-  const e164 = normalizeBrPhone(rawPhone);
-  if (!e164) return null;
-  try {
-    const res = await fetchWithTimeout(
-      `${BASE()}/api/agents/broker-scope?phone=${encodeURIComponent(e164)}`,
-      { headers: { Authorization: `Bearer ${org.apiToken}` } },
-      IMOBPRO_TIMEOUT_MS
-    );
-    if (!res.ok) return null;
-    const r = (await res.json()) as { dealIds?: string[] };
-    return Array.isArray(r.dealIds) ? r.dealIds : null;
-  } catch {
-    return null;
-  }
 }
 
 interface ChoiceRow extends Record<string, unknown> {
