@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "pg";
-import { SENTINELA } from "../migrate";
+import { SENTINELA } from "../sentinela";
 
 /**
  * O runner de migrações, sob teste porque ele destruiu dado em produção.
@@ -28,7 +28,7 @@ const RAIZ = join(__dirname, "..", "..");
 /**
  * A trava que impede o sentinela de envelhecer em silêncio.
  *
- * O sentinela (`SENTINELA` em `scripts/migrate.ts`) precisa apontar para o
+ * O sentinela (`SENTINELA` em `scripts/sentinela.ts`) precisa apontar para o
  * artefato da ÚLTIMA migração com DDL. Se alguém adicionar uma migração nova
  * que mexe em schema e não atualizar a constante, um banco parado nessa
  * migração passa a ser adotado como completo — reintroduzindo, um passo à

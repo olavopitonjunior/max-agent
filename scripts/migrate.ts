@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { config as loadEnv } from "dotenv";
+import { SENTINELA } from "./sentinela";
 
 // `.env.test` primeiro só quando pedido — migrar produção é o default.
 loadEnv({ path: process.env.MIGRATE_ENV ?? ".env.local" });
@@ -35,11 +36,12 @@ loadEnv({ path: process.env.MIGRATE_ENV ?? ".env.local" });
  *
  * ── Adoção do que já existe ───────────────────────────────────────────────
  *
- * Num banco que já tem `outbox`, as migrações antigas obviamente já rodaram —
- * seria absurdo (e, pelo item 2, perigoso) reaplicá-las só para popular o
- * registro. Nesse caso elas são ADOTADAS: entram no registro sem executar,
- * com aviso na saída dizendo exatamente quais. Banco novo roda tudo
- * normalmente. `MIGRATE_ADOPT=off` força a execução, se algum dia for preciso.
+ * Num banco que já está EM DIA (ver `SENTINELA`), as migrações antigas
+ * obviamente já rodaram — seria absurdo (e, pelo item 2, perigoso) reaplicá-las
+ * só para popular o registro. Nesse caso elas são ADOTADAS: entram no registro
+ * sem executar, com aviso na saída dizendo exatamente quais. Banco novo roda
+ * tudo normalmente; banco INCOMPLETO aborta em vez de adivinhar.
+ * `MIGRATE_ADOPT=off` força a execução, se algum dia for preciso.
  *
  * ── Arquivo que muda depois de aplicado ───────────────────────────────────
  *
@@ -57,22 +59,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   applied_at timestamptz NOT NULL DEFAULT now(),
   adopted    boolean NOT NULL DEFAULT false
 )`;
-
-/**
- * Artefato de schema da ÚLTIMA migração com DDL — o sentinela que diz se um
- * banco preexistente está em dia (ver `adotar`).
- *
- * **Precisa acompanhar cada migração nova que mexa em schema.** Não é
- * disciplina: `scripts/__tests__/migrate.integration.test.ts` falha se um
- * arquivo posterior a `migracao` contiver DDL e isto não for atualizado —
- * porque esquecer aqui faria um banco parado na migração seguinte ser adotado
- * como completo, que é exatamente a perda silenciosa que este runner mata.
- */
-export const SENTINELA = {
-  migracao: "009_reconcile_hardening.sql",
-  tabela: "outbox",
-  coluna: "report_attempts",
-} as const;
 
 /**
  * Serializa execuções concorrentes.
