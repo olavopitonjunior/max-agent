@@ -100,6 +100,84 @@ d("memory_facts (Postgres real)", () => {
       expect(facts.vazio).toBeUndefined();
       expect(facts.longo.length).toBe(200);
     });
+
+    /**
+     * Achado no primeiro turno real de produção: o extrator gravou
+     * `area_atuacao: "não informado"`. Ausência de fato ocupa uma das 20 vagas
+     * E entra no prompt seguinte com cara de informação — num modelo pequeno,
+     * que trata o que está no prompt como verdade.
+     */
+    it("recusa AUSÊNCIA de fato disfarçada de fato", async () => {
+      await saveFacts(ORG, PHONE, {
+        area_atuacao: "não informado",
+        cidade: "não sei",
+        origem: "sem informação",
+        perfil: "desconhecido",
+        obs: "n/a",
+        outro: "-",
+        real: "prefere ser chamado de Neto",
+      });
+
+      // Só o fato de verdade sobrevive.
+      expect(await loadFacts(ORG, PHONE)).toEqual({
+        real: "prefere ser chamado de Neto",
+      });
+    });
+
+    /**
+     * `nenhum` fica de fora da cerca de propósito. É a fronteira mais frágil da
+     * lista: "filhos: nenhum" é fato durável e útil, e apagar um fato
+     * verdadeiro é pior que guardar um pouco útil. A cerca existe contra o que
+     * o extrator produziu de verdade ("não informado"), não contra tudo que
+     * soa negativo.
+     */
+    it("`nenhum` é fato, não ausência — e continua gravado", async () => {
+      await saveFacts(ORG, PHONE, { filhos: "nenhum" });
+
+      expect(await loadFacts(ORG, PHONE)).toEqual({ filhos: "nenhum" });
+    });
+
+    /**
+     * O mesmo critério, num caso que só aparece a quem conhece o negócio:
+     * "prazo indefinido" é termo corrente de contrato de locação — o oposto de
+     * prazo determinado. A primeira versão da cerca apagava isso junto com
+     * "não informado", jogando fora um fato central do negócio de alguém.
+     */
+    it("`indefinido` é prazo de contrato, não ausência", async () => {
+      await saveFacts(ORG, PHONE, { prazo_contrato: "indefinido" });
+
+      expect(await loadFacts(ORG, PHONE)).toEqual({
+        prazo_contrato: "indefinido",
+      });
+    });
+
+    it("mas não confunde negativa COM conteúdo com ausência", async () => {
+      // "não trabalha com locação" é um fato durável e útil; a cerca não pode
+      // ser um `includes("não")`.
+      await saveFacts(ORG, PHONE, { area: "não trabalha com locação" });
+
+      expect(await loadFacts(ORG, PHONE)).toEqual({
+        area: "não trabalha com locação",
+      });
+    });
+  });
+
+  /**
+   * O outro bug de 21/08: memória gravada por um caminho e lida por outro.
+   * `saveFacts` e `loadFacts` normalizam pela `conversationKey`, então a forma
+   * do telefone deixa de importar — que é exatamente o que faltava quando a
+   * mesma pessoa acabou com duas memórias.
+   */
+  it("a forma do telefone não cria uma segunda pessoa", async () => {
+    await saveFacts(ORG, "5511900000009", { area: "vendas" });
+
+    for (const forma of ["+5511900000009", "11900000009", "(11) 90000-0009"]) {
+      expect(await loadFacts(ORG, forma)).toEqual({ area: "vendas" });
+    }
+
+    // E gravar pela outra forma ATUALIZA, não duplica.
+    await saveFacts(ORG, "+5511900000009", { area: "locação" });
+    expect(await loadFacts(ORG, "5511900000009")).toEqual({ area: "locação" });
   });
 
   it("poda no teto: memória não cresce sem limite", async () => {

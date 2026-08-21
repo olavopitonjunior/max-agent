@@ -49,7 +49,7 @@ import {
 import { complete, DEFAULT_MODEL, type LlmUsage } from "@/lib/llm";
 import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
 import { checkpointerPool } from "@/lib/db";
-import { maskPhone } from "@/lib/phone";
+import { conversationKey, maskPhone } from "@/lib/phone";
 import { buildSystemPrompt, shouldSearch } from "./prompt";
 import type { InboundMessage } from "@/lib/zapi";
 
@@ -204,9 +204,15 @@ export type MaxUpdate = typeof MaxState.Update;
  * O orgId primeiro isola a memória por tenant por CONSTRUÇÃO: se o mesmo número
  * um dia pertencer a outra imobiliária, é outra thread e nada do contexto
  * antigo vaza.
+ *
+ * O telefone passa por `conversationKey` e NÃO entra cru. Antes entrava, e a
+ * mesma pessoa ganhava uma thread por formato de entrada — `5511…` pelo webhook
+ * da Z-API, `+5511…` por qualquer chamador que normalizasse antes. Duas
+ * conversas paralelas, duas memórias, nenhum erro. Normalizar AQUI, e não em
+ * cada call-site, é o que impede o próximo caminho de entrada de reabrir o bug.
  */
 export function threadIdFor(orgId: string, phone: string): string {
-  return `${orgId}:${phone}`;
+  return `${orgId}:${conversationKey(phone)}`;
 }
 
 /**
