@@ -1,4 +1,5 @@
 import { query } from "./db";
+import { conversationKey } from "./phone";
 import { LLM_SHORT_TIMEOUT_MS } from "./http";
 import { complete } from "./llm";
 import { reportUsage } from "./cm";
@@ -51,7 +52,7 @@ export async function loadFacts(orgId: string, phone: string): Promise<Facts> {
         WHERE org_id = $1 AND phone = $2
         ORDER BY updated_at DESC
         LIMIT $3`,
-      [orgId, phone, MAX_FACTS_PER_PERSON]
+      [orgId, conversationKey(phone), MAX_FACTS_PER_PERSON]
     );
     return Object.fromEntries(rows.map((r) => [r.key, r.value]));
   } catch (err) {
@@ -87,6 +88,25 @@ function limpar(key: unknown, value: unknown): [string, string] | null {
   // "fato operacional" e todos têm dono melhor no ImobPro.
   if (/\d[\d.\-/\s]{8,}/.test(v)) return null;
 
+  /**
+   * AUSÊNCIA de fato não é fato.
+   *
+   * Achado no primeiro turno real de produção (21/08): o extrator gravou
+   * `area_atuacao: "não informado"`. Isso é pior que inútil — ocupa uma das 20
+   * vagas da pessoa E entra no prompt das conversas seguintes com cara de
+   * informação, num modelo pequeno que trata o que está no prompt como
+   * verdade. O prompt de extração já pede para não fazer isso; esta é a cerca
+   * que não depende de o modelo ter obedecido, no mesmo espírito da cerca de
+   * documento acima.
+   */
+  const vazio =
+    /^(n[ãa]o (informad[oa]|dit[oa]|mencionad[oa]|especificad[oa]|sei|informou|declarad[oa])|sem informa[çc][ãa]o|desconhecid[oa]|indefinid[oa]|n\/?a|nulo|null|none|-+|\?+)$/i;
+  if (vazio.test(v)) return null;
+  // `nenhum` fica FORA da lista de propósito: "filhos: nenhum" é fato genuíno,
+  // e apagar um fato verdadeiro é pior que guardar um pouco útil. A cerca
+  // existe contra o que o extrator de fato produziu ("não informado"), não
+  // contra tudo que parece negativo.
+
   return [k, v];
 }
 
@@ -105,6 +125,10 @@ export async function saveFacts(
     .slice(0, MAX_FACTS_PER_PERSON);
 
   if (limpos.length === 0) return 0;
+
+  // Mesma chave do `thread_id`: memória gravada num formato e lida noutro é
+  // memória perdida em silêncio. Ver `conversationKey`.
+  phone = conversationKey(phone);
 
   try {
     for (const [key, value] of limpos) {

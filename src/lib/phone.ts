@@ -32,6 +32,38 @@ export function toZapiPhone(raw: string): string | null {
 }
 
 /**
+ * Chave de CONVERSA: o telefone que identifica a mesma pessoa no `thread_id` e
+ * na memória durável.
+ *
+ * Existe porque a ausência dela causou um bug real, encontrado no primeiro dia
+ * de conversa em produção (21/08): `threadIdFor` e as funções de memória
+ * recebiam o telefone CRU do chamador, e o formato varia por porta de entrada —
+ * a Z-API entrega sem "+", o `normalizeBrPhone` devolve com. Resultado: a mesma
+ * pessoa ganhou DUAS threads e DUAS memórias, sem erro, sem log, sem nada que
+ * apontasse para o problema. Só se percebe olhando a tabela.
+ *
+ * **Por que sem "+" e não E.164 canônico**, já que `identity_cache` e
+ * `phone_org_choice` usam com "+":
+ *
+ *  - `inbound_queue.from_phone` e `outbox.phone` já são sem "+" — as duas
+ *    portas por onde uma conversa nasce. Escolher esta forma faz a semeadura da
+ *    notificação (`seedNotification`, que recebe `outbox.phone`) cair na MESMA
+ *    thread da conversa por construção, e não por coincidência de formato.
+ *  - Nenhuma linha de conversa viva precisa migrar.
+ *
+ * As tabelas de identidade continuam em E.164 com "+" e isso está certo: elas
+ * são consultadas POR telefone e nunca casadas com `thread_id`. O que não pode
+ * existir é ambiguidade dentro de um mesmo eixo.
+ *
+ * Fallback para os dígitos crus quando não normaliza (número estrangeiro):
+ * determinístico é o que importa aqui, e um número que não normaliza nunca
+ * resolve identidade, então não chega a abrir thread.
+ */
+export function conversationKey(raw: string): string {
+  return toZapiPhone(raw) ?? onlyDigits(raw ?? "");
+}
+
+/**
  * Telefone para LOG: DDI+DDD e os 4 finais, o meio mascarado.
  *
  * Log da Vercel é retido e pesquisável fora do nosso controle de acesso —
