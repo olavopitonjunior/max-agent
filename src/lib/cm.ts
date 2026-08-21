@@ -44,7 +44,6 @@ export interface AgentProfile {
   enabled: boolean;
   model: string;
   instructions: { composed?: string } | null;
-  budget?: { pct?: number } | null;
 }
 
 /**

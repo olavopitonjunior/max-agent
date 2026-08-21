@@ -80,26 +80,6 @@ export async function sendText(params: {
 }
 
 /**
- * Manda como VOICE NOTE (`waveform: true` — a bolinha com onda, igual a áudio
- * gravado por gente), não como anexo de arquivo. A Z-API aceita data-URI
- * base64, então não é preciso hospedar o arquivo em lugar nenhum.
- */
-export async function sendAudio(params: {
-  to: string;
-  audio: Buffer;
-  mime?: string;
-  quoteMessageId?: string;
-}): Promise<ZApiSendResponse> {
-  const mime = params.mime ?? "audio/mpeg";
-  return post("/send-audio", {
-    phone: params.to,
-    audio: `data:${mime};base64,${params.audio.toString("base64")}`,
-    waveform: true,
-    ...(params.quoteMessageId ? { messageId: params.quoteMessageId } : {}),
-  });
-}
-
-/**
  * Teto do que aceitamos baixar.
  *
  * Amarrado ao limite do outro lado: o `/api/agents/media/transcribe` do ImobPro
@@ -223,23 +203,6 @@ export async function connectionStatus(): Promise<{
     session: p.session,
     raw,
   };
-}
-
-/** Roster COMPLETO do grupo — inclusive quem nunca falou. */
-export async function getGroupMetadata(
-  groupId: string
-): Promise<{ participants: Array<{ phone: string; isAdmin?: boolean }> }> {
-  const res = await fetchWithTimeout(
-    `${instanceBase()}/group-metadata/${encodeURIComponent(groupId)}`,
-    { method: "GET", headers: headers() },
-    ZAPI_TIMEOUT_MS
-  );
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Z-API group-metadata ${res.status}: ${text.slice(0, 300)}`);
-  }
-  const data = (await res.json()) as { participants?: Array<{ phone: string; isAdmin?: boolean }> };
-  return { participants: Array.isArray(data.participants) ? data.participants : [] };
 }
 
 // ── Inbound ──────────────────────────────────────────────────────────────
