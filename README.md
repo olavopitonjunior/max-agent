@@ -104,7 +104,7 @@ desta direção; sem ele o report fica desligado, que é o default seguro).
 ```bash
 npm install
 cp .env.example .env.local     # preencher
-npm run db:migrate             # cria as tabelas (idempotente)
+npm run db:migrate             # cria as tabelas (ver Migrations)
 npm run dev
 ```
 
@@ -183,6 +183,45 @@ Projeto na Vercel: `max-agent` (`prj_yaG4UFnvaRnLjRCGLKtLKv43cSRl`). Push na
 ANTES do merge quando a migration é lida no caminho quente (foi o caso da 007 e
 da 008): a Vercel deploya sozinha no merge, e código novo contra schema velho
 derruba o inbound inteiro.
+
+### Migrations
+
+**Arquivo aplicado não roda de novo.** O `scripts/migrate.ts` guarda o que já
+aplicou em `schema_migrations` (nome, checksum, quando).
+
+Isso não era assim, e a mudança nasceu de um incidente: até 21/08 o script
+reaplicava TODOS os arquivos a cada execução, apostando em `IF NOT EXISTS`.
+Essa aposta cobre DDL e não cobre migração de dados — o backfill da 009
+carimbava `reported_at` em toda linha pendente de report, e como o `reconcile()`
+só olha `WHERE reported_at IS NULL`, cada rodada descartava em silêncio os
+desfechos de entrega que ainda não tinham chegado ao Contractmaker. Atingiu 2
+de 2 linhas com desfecho.
+
+O que esperar em cada situação:
+
+| Situação | O que acontece |
+|---|---|
+| Banco novo | aplica tudo e registra |
+| Banco em dia, registro vazio (1ª vez nesta versão) | **adota** — registra sem executar, listando o que adotou |
+| Banco incompleto (tem `outbox`, falta `outbox.report_attempts`) | **aborta** com instrução; adotar aqui faria o registro mentir sobre o schema |
+| Arquivo mudou depois de aplicado | avisa e **não** executa |
+| Nada novo | "0 aplicada(s)" |
+
+Duas saídas de emergência, verbosas de propósito:
+
+```bash
+MIGRATE_REPLAY=009_reconcile_hardening.sql npm run db:migrate  # reaplica UM arquivo
+MIGRATE_ADOPT=off npm run db:migrate                           # executa em vez de adotar
+```
+
+Antes de qualquer replay, leia o arquivo. Reaplicar migração de **dado** pode
+destruir estado — foi exatamente assim que a 009 apagou desfechos de entrega. E
+a 006 devolve a `pending` toda linha em `processing`: com a fila viva, isso pode
+fazer uma conversa ser processada duas vezes.
+
+**Migration de dados nova precisa ser idempotente em DADO**, não só em DDL. O
+registro protege contra reexecução acidental, mas o `MIGRATE_REPLAY` existe — e
+uma migration segura é a que sobrevive aos dois.
 
 **Domínio de produção: `https://max-agent-olive.vercel.app`.**
 

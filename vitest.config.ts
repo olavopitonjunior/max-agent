@@ -18,6 +18,12 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/__tests__/**/*.test.ts"],
+    // `scripts/` entrou depois do incidente de 21/08: o runner de migrações
+    // destruiu dado em produção e não tinha uma linha de teste. Código que
+    // toca o banco precisa de cobertura mesmo quando mora fora de `src/`.
+    include: [
+      "src/**/__tests__/**/*.test.ts",
+      "scripts/**/__tests__/**/*.test.ts",
+    ],
   },
 });
