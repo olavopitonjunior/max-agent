@@ -8,12 +8,25 @@ no repositório do Contractmaker.
 
 ## O que ele faz
 
+As quatro fases estão **em produção** (a 4 fechou em 2026-08-21):
+
 1. **Canal de notificações** — recebe do ImobPro os avisos já configurados no
-   sistema (`POST /notify`) e entrega no WhatsApp. É o objetivo nº 1 e o único
-   que está implementado.
-2. *(Fase 2)* Responde dúvidas de processo com o RAG do tenant.
-3. *(Fase 3)* Cria formulários e propostas por conversa, com confirmação humana.
-4. *(Fase 4)* Memória cross-sessão e reconciliação de entrega.
+   sistema (`POST /notify`) e entrega no WhatsApp, respeitando a janela
+   7h–22h. É o objetivo nº 1.
+2. **Responde dúvidas de processo** com o RAG do tenant (a busca e o escopo
+   vivem no ImobPro; aqui só entra o material, cercado contra injeção).
+3. **Cria formulários e propostas por conversa**, com confirmação humana:
+   formulário de venda, de locação, e proposta — de compra e venda ou de
+   locação (residencial/comercial). O modelo só PROPÕE; quem executa é o `sim`
+   da pessoa, no turno seguinte, por caminho determinístico.
+4. **Memória cross-sessão e reconciliação de entrega** — fatos por pessoa com
+   TTL, notificação enviada semeada no thread (para "o que é isso?" ter
+   contexto), e o desfecho de cada notificação (entregue / lida / sem
+   confirmação) reconciliado a partir dos callbacks de status da Z-API e
+   reportado de volta ao ImobPro.
+
+Também entende **áudio e imagem** (transcritos no ImobPro, com o token da org)
+e responde por template quando não consegue — silêncio nunca.
 
 ## Por que Vercel, e não VPS
 
@@ -29,13 +42,33 @@ Postgres, não na memória do processo.
 ## Arquitetura
 
 ```
-ImobPro ──POST /notify (HMAC)──► outbox ──cron 1/min──► Z-API ──► WhatsApp
-                                    │
-                          adia fora de 7h–22h SP
+                                                      ┌─ semeia o thread
+ImobPro ──POST /notify (HMAC)──► outbox ──cron 1/min──┴─► Z-API ──► WhatsApp
+                                    │                                  │
+                          adia fora de 7h–22h SP                       │
+                                    ▲                                  ▼
+       POST /api/webhooks/max ◄── reconcile ◄── /api/zapi-status ◄── callback
+       (desfecho, pela dedupeKey)   (cron)      (SENT/RECEIVED/READ)
 
-WhatsApp ──webhook──► dedupe(messageId) ──► grafo LangGraph ──► resposta
-                                              (checkpointer Postgres)
+WhatsApp ──webhook──► inbound_queue ──► grafo LangGraph ──► resposta
+                      (dedupe messageId)   (checkpointer Postgres)
+                             ▲                     │
+                      cron 1/min (rede de segurança)
 ```
+
+**Duas filas, não uma.** A de saída (`outbox`) existe porque o ImobPro entrega
+a qualquer hora; a de entrada (`inbound_queue`) existe porque o turn ficou mais
+lento que o timeout do webhook quando o grafo passou a chamar modelo — sem ela,
+a Z-API reentregava, o dedupe já tinha consumido o `messageId`, e a pessoa
+ficava sem resposta e sem rastro. Em ambas o claim MUDA O ESTADO (não é só
+`SKIP LOCKED`), e um marcador de "envio iniciado" impede que uma execução
+morta entre o envio e a liquidação vire mensagem repetida.
+
+**`sent` não é entregue.** Instância desemparelhada aceita `send-text` com HTTP
+200 e um `messageId` que não chega a ninguém — foi assim que quatro mensagens
+reais se perderam em 2026-08-04. Por isso a Fase 4: os callbacks de status
+alimentam `delivery_status` (upgrade monotônico, `read` nunca regride), o que
+fica sem notícia por 15 min vira `unconfirmed`, e o desfecho volta ao ImobPro.
 
 **Notificação proativa não passa por LLM.** O texto já vem pronto do motor de
 notificações do ImobPro; pôr um modelo para retransmiti-lo custa token e abre
@@ -53,9 +86,18 @@ de `deal-events` de lá não tem cron de reconciliação.
 |---|---|---|
 | `POST /api/notify` | HMAC (`MAX_NOTIFY_SECRET`) | ImobPro enfileira uma notificação. 202 = assumi; 409 = duplicata |
 | `GET /api/cron/outbox` | `Bearer $CRON_SECRET` | Despacha o que venceu. Cron da Vercel, 1×/min |
-| `POST /api/zapi-webhook/[secret]` | segredo no path + `instanceId` | Inbound do WhatsApp |
-| `GET /api/admin/status` | HMAC (mesmo do `/notify`) | Alimenta o Mission Control no admin do ImobPro |
+| `GET /api/cron/inbound` | `Bearer $CRON_SECRET` | Rede de segurança do turn: retoma o que o `waitUntil` não fechou. 1×/min |
+| `POST /api/zapi-webhook/[secret]` | segredo no path + `instanceId` | Inbound do WhatsApp — só aceita e enfileira |
+| `POST /api/zapi-status/[secret]` | idem | Callbacks de status (SENT/RECEIVED/READ) → reconciliação |
+| `POST\|DELETE /api/orgs` | HMAC (mesmo do `/notify`) | Provisiona/desativa tenant (token cifrado em `org_config`) |
+| `POST /api/admin/forget` | HMAC (mesmo do `/notify`) | Direito ao esquecimento: apaga tudo sobre um telefone |
+| `GET /api/admin/status` | HMAC (`method.path?query` assinados) | Alimenta o Mission Control no admin do ImobPro |
 | `GET /api/health` | — | Liveness |
+
+O `/api/cron/outbox` também roda a **reconciliação** na mesma passada: marca
+`unconfirmed` o que ficou sem callback e reporta os desfechos ao ImobPro
+(`POST /api/webhooks/max`, HMAC com `MAX_WEBHOOK_SECRET` — secret próprio
+desta direção; sem ele o report fica desligado, que é o default seguro).
 
 ## Setup
 
@@ -74,18 +116,20 @@ openssl rand -base64 32   # MAX_ENCRYPTION_KEY (32 bytes)
 openssl rand -hex 24      # ZAPI_WEBHOOK_SECRET
 ```
 
-Cadastrar um tenant (o token vem de `imobpro.ia.br/settings/api-tokens`, no
-service-user daquela org):
+Cadastrar um tenant é `POST /api/orgs` (o ImobPro faz isso sozinho ao ligar
+`vendas.max` na org — o token nasce lá, cifrado aqui). Não há INSERT à mão.
 
-```sql
-INSERT INTO org_config (org_id, org_name, api_token_enc)
-VALUES ('cm...', 'RE/MAX Trio', '<saída de encrypt()>');
-```
+Na Z-API, dois callbacks — o segundo é o que fecha a Fase 4:
 
-No painel da Z-API: webhook "Ao receber" →
-`https://max-agent-olive.vercel.app/api/zapi-webhook/<ZAPI_WEBHOOK_SECRET>`, e
-**"notificar mensagens enviadas por mim" DESLIGADO** — senão cada resposta
-volta como mensagem nova e o bot conversa sozinho.
+| Campo no painel | URL |
+|---|---|
+| Ao receber | `.../api/zapi-webhook/<ZAPI_WEBHOOK_SECRET>` |
+| Ao alterar status da mensagem | `.../api/zapi-status/<ZAPI_WEBHOOK_SECRET>` |
+
+Ambos aceitam configuração por API (`PUT /update-webhook-received` e
+`PUT /update-webhook-message-status`). E **"notificar mensagens enviadas por
+mim" fica DESLIGADO** — senão cada resposta volta como mensagem nova e o bot
+conversa sozinho.
 
 ## Armadilhas já pagas (não redescobrir)
 
@@ -98,6 +142,13 @@ volta como mensagem nova e o bot conversa sozinho.
    a do Newton exigiria desemparelhá-lo.
 4. **O `phone` do webhook é do GRUPO quando `isGroup`** — quem falou está em
    `participantPhone`.
+5. **O JID da Z-API varia no 9º dígito.** O mesmo aparelho pode chegar como
+   `5511987654321` ou `551187654321`; quem apaga ou busca por telefone tem que
+   cobrir as duas formas (ver `/api/admin/forget`).
+6. **Log estruturado, telefone mascarado.** Use o helper `lib/log.ts`: a
+   máscara mora nele, inclusive para telefone que apareça no meio de texto de
+   erro do provedor. O `messageId` é a costura — busca por ele devolve a
+   conversa inteira, do aceite ao id da resposta enviada.
 
 ## Testes
 
@@ -125,12 +176,13 @@ repositórios quebra sozinho.
 
 ## Deploy
 
-Projeto na Vercel: `max-agent` (`prj_yaG4UFnvaRnLjRCGLKtLKv43cSRl`).
+Projeto na Vercel: `max-agent` (`prj_yaG4UFnvaRnLjRCGLKtLKv43cSRl`). Push na
+`master` dispara deploy de produção.
 
-Deploy de produção feito em 2026-08-02; banco Neon (`quiet-sunset-47581096`)
-criado e migrado; env de produção preenchidas — menos as da Z-API.
-
-**Passos manuais pendentes**, nesta ordem:
+**Migrations não rodam no deploy** — `npm run db:migrate` é manual e tem que ir
+ANTES do merge quando a migration é lida no caminho quente (foi o caso da 007 e
+da 008): a Vercel deploya sozinha no merge, e código novo contra schema velho
+derruba o inbound inteiro.
 
 **Domínio de produção: `https://max-agent-olive.vercel.app`.**
 
@@ -141,20 +193,8 @@ gerada dá 302 e leva a concluir, errado, que a proteção precisa ser desligada
 Ela não precisa: o alias de produção responde 200 com ela ligada, e é por ele
 que o webhook da Z-API e o `/notify` do Contractmaker entram.
 
-1. ~~Conectar o GitHub à conta Vercel~~ — **feito** em 2026-08-02. Push na
-   `master` dispara deploy.
-2. **Contratar a instância Z-API e parear o número do Max** por QR. Uma
-   instância atende um número; a instância atual (`3F2F70D1…`) está no chip do
-   Newton e não pode ser dividida.
-3. **Criar o database do Max no Neon** e rodar `npm run db:migrate`.
-4. **Preencher as env** na Vercel (ver `.env.example`). `MAX_NOTIFY_SECRET`
-   precisa ser **idêntico** ao do Contractmaker, senão toda notificação é
-   recusada com 401.
-5. **Cadastrar as orgs** em `org_config`, com um token de API por tenant.
-6. **Apontar o webhook** no painel da Z-API e desligar "notificar mensagens
-   enviadas por mim".
-7. No Contractmaker, setar `MAX_NOTIFY_URL`/`MAX_NOTIFY_SECRET` e ligar
-   `vendas.max` no primeiro tenant.
-
-Até o passo 4, `/admin/max` no ImobPro mostra "serviço não configurado" — que é
-o estado correto, não um erro.
+O rollout foi concluído: instância Z-API pareada (número próprio), banco Neon
+migrado, envs preenchidas, tenants provisionados e os dois callbacks
+apontados. Os dois interruptores que restam são de PRODUTO, no ImobPro: a
+feature `vendas.max`/`locacao.max` por org e o `AgentProfile.enabled` — nenhum
+exige deploy daqui.

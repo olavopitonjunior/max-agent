@@ -1,3 +1,21 @@
+> **ARQUIVADO — a Fase 3 foi entregue (PRs #1, #2, #3, e a proposta de locação
+> no #9).** Este briefing fica como registro do RACIOCÍNIO de origem; onde ele
+> diverge do que existe hoje, o código venceu. Os três desvios deliberados:
+>
+> 1. **`interrupt()` foi RECUSADO.** A pendência mora em `pendingAction`, campo
+>    comum do estado, porque conversa de WhatsApp não é "grafo bloqueado
+>    esperando um valor" — a pessoa muda de assunto, e um grafo pausado
+>    obrigaria todo turn a perguntar "esta thread está pausada?", criando a
+>    segunda verdade que a `inbound_seen` ensinou a não criar.
+> 2. **Uma ferramenta com enum, não três ferramentas.** Medido: três descrições
+>    vizinhas confundem o nano mais que um enum. O eval está em
+>    `scripts/eval-tool-choice.ts`.
+> 3. **`POST /api/forms` já existia** e serviu para venda — nenhuma rota nova
+>    foi criada do lado da plataforma.
+>
+> A frase "por enquanto isso é pelo sistema", que este briefing mandava remover
+> ao ligar as ferramentas, foi removida no mesmo commit — como combinado aqui.
+
 # Fase 3 do Max — criar formulário e proposta por conversa
 
 Briefing para a sessão que vai atacar isto. Escrito em 2026-08-04, no fim da
