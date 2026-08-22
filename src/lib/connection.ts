@@ -86,11 +86,12 @@ type Estado = {
   connected: boolean;
   down_since: Date | null;
   alerted_down: boolean;
+  queda_pendente: boolean;
   notified_at: Date | null;
   miss_streak: number;
 };
 
-const COLUNAS = `connected, down_since, alerted_down, notified_at, miss_streak`;
+const COLUNAS = `connected, down_since, alerted_down, queda_pendente, notified_at, miss_streak`;
 
 /**
  * Observa o estado da instância e, se for o caso, alerta.
@@ -159,6 +160,7 @@ export async function observeConnection(params: {
 
     let estado = antes;
     let transicao = false;
+    let aguardando = false;
 
     if (connected !== antes.connected) {
       if (fonte === "cron") {
@@ -169,33 +171,52 @@ export async function observeConnection(params: {
         RETURNING miss_streak`
         );
         if (miss_streak < CRON_CONFIRMACOES) {
-          // Ainda não acreditamos. Nada a alertar: o estado gravado não mudou.
+          /**
+           * Ainda não acreditamos: o estado gravado NÃO muda, e nenhuma
+           * transição é commitada.
+           *
+           * Mas seguimos para o bloco de alerta em vez de retornar aqui. O
+           * retry deste desenho é o ramo derivado-do-estado, e retornar cedo
+           * faria um hiccup isolado do `/status` adiar em uma passada inteira
+           * o reenvio de um alerta que falhou antes — atrasando justamente o
+           * mecanismo que substitui a fila de retry.
+           */
           console.warn(
             `[connection] cron discorda do gravado (${miss_streak}/${CRON_CONFIRMACOES}) — ` +
               `observado ${connected ? "conectada" : "DESCONECTADA"}`
           );
-          return nada({ connected: antes.connected, aguardandoConfirmacao: true });
+          aguardando = true;
         }
       }
 
-      const [depois] = await query<Estado>(
-        `UPDATE connection_state
-            SET connected = $1,
-                changed_at = now(),
-                -- Preserva down_since na volta: é dele que sai o "ficou fora
-                -- por 2h13m", e changed_at já terá virado a hora da VOLTA.
-                down_since = CASE WHEN $1 THEN down_since ELSE now() END,
-                miss_streak = 0,
-                updated_at = now()
-          WHERE id
-      RETURNING ${COLUNAS}`,
-        [connected]
-      );
-      estado = depois;
-      transicao = true;
-      console.warn(
-        `[connection] TRANSIÇÃO (${fonte}): instância ${connected ? "RECONECTADA" : "DESCONECTADA"}`
-      );
+      if (!aguardando) {
+        const [depois] = await query<Estado>(
+          `UPDATE connection_state
+              SET connected = $1,
+                  changed_at = now(),
+                  -- Preserva down_since na volta: é dele que sai o "ficou fora
+                  -- por 2h13m", e changed_at já terá virado a hora da VOLTA.
+                  down_since = CASE WHEN $1 THEN down_since ELSE now() END,
+                  -- QUEDA NOVA ZERA A ESCRITURAÇÃO DO INCIDENTE ANTERIOR.
+                  -- Sem isto, um alerta de volta que falha para sempre trava
+                  -- alerted_down = true, e a cerca do alertarQueda passa a
+                  -- suprimir TODA queda futura — o operador receberia só um
+                  -- "reconectada" de uma queda que nunca lhe foi anunciada,
+                  -- que é o inverso exato do invariante.
+                  alerted_down   = CASE WHEN $1 THEN alerted_down   ELSE false END,
+                  queda_pendente = CASE WHEN $1 THEN queda_pendente ELSE false END,
+                  miss_streak = 0,
+                  updated_at = now()
+            WHERE id
+        RETURNING ${COLUNAS}`,
+          [connected]
+        );
+        estado = depois;
+        transicao = true;
+        console.warn(
+          `[connection] TRANSIÇÃO (${fonte}): instância ${connected ? "RECONECTADA" : "DESCONECTADA"}`
+        );
+      }
     } else if (antes.miss_streak !== 0) {
       // Voltou a concordar: a discordância anterior era ruído.
       const [depois] = await query<Estado>(
@@ -215,7 +236,12 @@ export async function observeConnection(params: {
       ? await alertarVolta()
       : await alertarQueda();
 
-    return nada({ connected: estado.connected, transicao, alertou });
+    return nada({
+      connected: estado.connected,
+      transicao,
+      aguardandoConfirmacao: aguardando,
+      alertou,
+    });
   } catch (err) {
     console.error(
       "[connection] observação falhou:",
@@ -255,7 +281,25 @@ async function alertarQueda(): Promise<"queda" | null> {
   RETURNING antes.notified_at AS anterior, antes.down_since AS down_since`,
     [String(DEBOUNCE_MS)]
   );
-  if (claim.length === 0) return null;
+  if (claim.length === 0) {
+    /**
+     * Não reivindicamos. Duas razões possíveis, e uma delas precisa deixar
+     * marca: **a queda foi segurada pelo debounce e ninguém soube dela**.
+     *
+     * O `WHERE` abaixo só casa esse caso — `NOT alerted_down` exclui a queda
+     * que JÁ virou e-mail, e `NOT connected` exclui a chamada em estado
+     * conectado. Sem esta marca existia um buraco de silêncio total: queda →
+     * volta → queda de novo dentro da hora (segurada) → volta de novo, e como
+     * `alerted_down` nunca chegou a ser marcado, nem o alerta de reconexão
+     * saía. Uma queda inteira, com fila represada e inbound morto, não era
+     * anunciada a ninguém — o oposto do que este arquivo existe para garantir.
+     */
+    await query(
+      `UPDATE connection_state SET queda_pendente = true, updated_at = now()
+        WHERE id AND NOT connected AND NOT alerted_down AND NOT queda_pendente`
+    );
+    return null;
+  }
 
   const represadas = await contarVencidas().catch((err) => {
     // O e-mail sai mesmo sem o número: dizer "não sei quantas" é infinitamente
@@ -312,29 +356,41 @@ async function alertarQueda(): Promise<"queda" | null> {
 }
 
 /**
- * Alerta de VOLTA. Só sai se a queda correspondente FOI anunciada — senão o
- * e-mail celebraria o fim de um problema que ninguém soube que existiu, o que
- * confunde mais do que informa. É o outro lado do invariante de
- * `alerted_down`.
+ * Alerta de VOLTA. Sai quando há uma queda a encerrar — anunciada
+ * (`alerted_down`) **ou** segurada pelo debounce sem nunca ter sido anunciada
+ * (`queda_pendente`).
+ *
+ * A segunda condição não estava aqui e o buraco era sério: queda → volta →
+ * queda dentro da hora (segurada) → volta, e o operador não recebia nada sobre
+ * a segunda queda. Este e-mail já carrega `foraPorMs`, então ele sozinho conta
+ * a história inteira — "ficou fora por 35 min" é infinitamente melhor que
+ * silêncio, e é uma mensagem em vez de duas, que era o ponto do debounce.
+ *
+ * O que continua valendo: sem queda nenhuma pendente, nada sai. Celebrar o fim
+ * de um problema que nunca existiu confunde mais do que informa.
  */
 async function alertarVolta(): Promise<"volta" | null> {
   const claim = await query<{
     anterior: Date | null;
     down_since: Date | null;
     voltou_em: Date;
+    era_anunciada: boolean;
   }>(
-    `WITH antes AS (SELECT notified_at, down_since, changed_at FROM connection_state WHERE id)
+    `WITH antes AS (SELECT notified_at, down_since, changed_at, alerted_down
+                      FROM connection_state WHERE id)
      UPDATE connection_state cs
-        SET alerted_down = false, notified_at = now(), updated_at = now()
+        SET alerted_down = false, queda_pendente = false,
+            notified_at = now(), updated_at = now()
        FROM antes
-      WHERE cs.id AND cs.connected AND cs.alerted_down
+      WHERE cs.id AND cs.connected AND (cs.alerted_down OR cs.queda_pendente)
   RETURNING antes.notified_at AS anterior,
+            antes.alerted_down AS era_anunciada,
             antes.down_since AS down_since,
             antes.changed_at AS voltou_em`
   );
   if (claim.length === 0) return null;
 
-  const { anterior, down_since, voltou_em } = claim[0];
+  const { anterior, down_since, voltou_em, era_anunciada } = claim[0];
   if (!down_since) {
     // Não deveria acontecer (a transição de queda sempre carimba), mas um NULL
     // aqui não pode virar NaN no corpo do e-mail.
@@ -357,17 +413,25 @@ async function alertarVolta(): Promise<"volta" | null> {
 
   if (!ok) {
     // Mesma cerca do rollback da queda, pela mesma razão: só desfaz se o
-    // estado ainda for aquele que este envio reivindicou.
+    // estado ainda for aquele que este envio reivindicou. Devolve a marca ao
+    // campo de onde ela veio — trocar `queda_pendente` por `alerted_down`
+    // faria o reenvio afirmar que a queda tinha sido anunciada.
     await query(
       `UPDATE connection_state
-          SET alerted_down = true, notified_at = $1, updated_at = now()
-        WHERE id AND connected AND NOT alerted_down`,
-      [anterior]
+          SET alerted_down   = $2,
+              queda_pendente = NOT $2,
+              notified_at = $1,
+              updated_at = now()
+        WHERE id AND connected AND NOT alerted_down AND NOT queda_pendente`,
+      [anterior, era_anunciada]
     );
     console.error("[connection] alerta de volta NÃO entregue — reenvia na próxima passada");
     return null;
   }
 
-  console.log(`[connection] alerta de reconexão enviado (fora por ${foraPorMs} ms)`);
+  console.log(
+    `[connection] alerta de reconexão enviado (fora por ${foraPorMs} ms` +
+      `${era_anunciada ? "" : "; a queda tinha sido segurada pelo debounce"})`
+  );
   return "volta";
 }

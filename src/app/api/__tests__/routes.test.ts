@@ -302,7 +302,12 @@ describe("crons", () => {
     await cronOutbox(comAuth);
     expect(observa).toHaveBeenCalledWith({ connected: true, fonte: "cron" });
     expect(checaConexao).toHaveBeenCalledTimes(1);
-    expect(dispatchDueMock).toHaveBeenCalledWith(50, { connected: true, raw: {} });
+    // O 3º argumento é a âncora do orçamento da passada (`iniciadoEm`).
+    expect(dispatchDueMock).toHaveBeenCalledWith(
+      50,
+      { connected: true, raw: {} },
+      expect.any(Number)
+    );
   });
 
   /**
@@ -314,7 +319,7 @@ describe("crons", () => {
     checaConexao.mockRejectedValueOnce(new Error("401 — credencial"));
     expect((await cronOutbox(comAuth)).status).toBe(200);
     expect(observa).not.toHaveBeenCalled();
-    expect(dispatchDueMock).toHaveBeenCalledWith(50, null);
+    expect(dispatchDueMock).toHaveBeenCalledWith(50, null, expect.any(Number));
   });
 });
 

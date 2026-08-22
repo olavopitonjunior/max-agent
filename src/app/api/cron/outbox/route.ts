@@ -23,6 +23,10 @@ export async function GET(req: NextRequest) {
   const denied = requireCronSecret(req);
   if (denied) return denied;
 
+  // Âncora do orçamento da passada: o prazo do seed no `dispatchDue` é
+  // medido daqui, e não do início do despacho — ver o doc de `seedDeadline`.
+  const iniciadoEm = Date.now();
+
   try {
     /**
      * ── Pergunta SEMPRE, uma vez por passada (F7) ────────────────────────
@@ -55,7 +59,7 @@ export async function GET(req: NextRequest) {
       await observeConnection({ connected: status.connected, fonte: "cron" });
     }
 
-    const totals = await dispatchDue(50, status);
+    const totals = await dispatchDue(50, status, iniciadoEm);
     // Reconciliação na MESMA passada, depois do despacho (sem cron novo):
     // marca `unconfirmed` o que ficou sem callback e reporta desfechos ao
     // Contractmaker. Falha aqui não desfaz envio nenhum.

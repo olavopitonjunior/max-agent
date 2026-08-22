@@ -116,6 +116,14 @@ callback que se perde na rede, e exige **duas** passadas discordando antes de
 acreditar. Antes da F7 esta checagem só acontecia com fila vencida, e por isso
 uma queda com a fila vazia era invisível — mas o inbound para do mesmo jeito.
 
+**A regra que vale sobre todas as outras: nenhuma queda fica sem notícia.** O
+debounce de 1h evita spam de flapping, mas não pode virar silêncio — uma queda
+que ele segura fica marcada (`queda_pendente`) e é anunciada pelo e-mail de
+reconexão, com o tempo que durou. E uma queda NOVA zera a escrituração do
+incidente anterior, senão um alerta de volta que nunca entrega travaria
+`alerted_down` e suprimiria toda queda futura. Os dois buracos existiram e cada
+correção tem um teste que falha se ela sumir.
+
 ## Setup
 
 ```bash

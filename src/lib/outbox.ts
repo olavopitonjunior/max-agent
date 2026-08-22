@@ -189,7 +189,9 @@ export async function contarVencidas(): Promise<number> {
  */
 export async function dispatchDue(
   limit = 50,
-  statusConhecido?: { connected: boolean; raw?: unknown } | null
+  statusConhecido?: { connected: boolean; raw?: unknown } | null,
+  /** `Date.now()` do início da requisição — âncora do prazo de seed. */
+  iniciadoEm?: number
 ): Promise<DispatchTotals> {
   const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0 };
 
@@ -274,8 +276,16 @@ export async function dispatchDue(
    * Prazo do trabalho OPCIONAL do loop (a semeadura de thread): os envios em
    * si seguem até o fim, mas seed depois do orçamento é pulado — o contexto
    * perdido custa menos que a function morta com linhas presas em `sending`.
+   *
+   * **Medido do início da REQUISIÇÃO, não daqui**, quando o chamador informa
+   * `iniciadoEm`. Desde a F7 o cron gasta tempo antes de chamar esta função —
+   * `connectionStatus()` (até 10s) e, na passada da reconexão, um alerta com
+   * teto de 25s. Ancorar o prazo no início do despacho ignorava esses 35s e
+   * podia somar 75s num `maxDuration` de 60: a function morre no meio do laço
+   * e deixa linhas presas em `sending` por 10 minutos, com uma tentativa já
+   * queimada — justamente na passada com a maior fila represada.
    */
-  const seedDeadline = Date.now() + 40_000;
+  const seedDeadline = (iniciadoEm ?? Date.now()) + 40_000;
 
   for (const row of rows) {
     /**

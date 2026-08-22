@@ -538,6 +538,7 @@ connection_state (
   connected bool, changed_at timestamptz,
   down_since timestamptz,   -- de onde sai o "ficou fora por 2h13m"
   alerted_down bool,        -- "já anunciei uma queda cuja volta não anunciei"
+  queda_pendente bool,      -- "o debounce segurou uma queda e ninguém soube"
   notified_at timestamptz, miss_streak int, updated_at timestamptz)
 ```
 
@@ -552,9 +553,17 @@ se estado_atual ≠ estado_gravado:
 
 se caiu E !alerted_down E (agora - notified_at) > 1h:
     claim, POST { evento: "zapi_desconectada", at, represadas: N }, solta o claim se falhar
-se voltou E alerted_down:
+senão se caiu E !alerted_down:          # segurada pelo debounce
+    queda_pendente = true               # para a reconexão contar a história
+se voltou E (alerted_down OU queda_pendente):
     POST { evento: "zapi_reconectada", at, foraPorMs }
 ```
+
+**Nenhuma queda fica sem notícia** é a regra que manda em todas as outras. Sem
+`queda_pendente` havia silêncio total em queda→volta→queda(segurada)→volta; e
+sem zerar `alerted_down` na transição de queda, um alerta de volta que nunca
+entrega travava o latch e suprimia toda queda futura. Os dois foram achados em
+code review e cada correção tem teste que falha se ela sumir.
 
 A rota é **`POST /api/webhooks/max/alert`**, não `/api/agents/alert`: `/api/agents/*` é Bearer por ORG e este evento é da instância inteira, compartilhada pelos três tenants — não existe org de onde tirar o token. `/api/webhooks/max` já é a direção Max→plataforma com HMAC de serviço (`MAX_WEBHOOK_SECRET`), que é o que este alerta é.
 

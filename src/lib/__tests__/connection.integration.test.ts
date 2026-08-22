@@ -33,9 +33,11 @@ async function estado() {
     connected: boolean;
     down_since: Date | null;
     alerted_down: boolean;
+    queda_pendente: boolean;
     notified_at: Date | null;
     miss_streak: number;
-  }>(`SELECT connected, down_since, alerted_down, notified_at, miss_streak
+  }>(`SELECT connected, down_since, alerted_down, queda_pendente,
+             notified_at, miss_streak
         FROM connection_state WHERE id`);
   return r;
 }
@@ -338,6 +340,92 @@ d("observeConnection", () => {
     expect(r.transicao).toBe(false); // sem transição nova: o estado já era esse
     expect(r.alertou).toBe("queda");
     expect(alerta).toHaveBeenCalledTimes(3);
+  });
+
+  /**
+   * O BURACO DE SILÊNCIO TOTAL, achado no code review.
+   *
+   * Queda → volta → queda de novo dentro da hora (segurada pelo debounce) →
+   * volta de novo. Como `alerted_down` nunca chegou a ser marcado na segunda
+   * queda, o alerta de reconexão também não saía: uma queda inteira, com a
+   * fila represada e o inbound morto, não era anunciada a NINGUÉM. É o oposto
+   * do que este arquivo existe para garantir, e contradizia a promessa
+   * "atrasada, nunca perdida".
+   *
+   * Com `queda_pendente`, a reconexão conta a história inteira — uma mensagem
+   * em vez de duas (que era o ponto do debounce), nunca zero.
+   */
+  it("queda segurada e recuperada dentro da janela AINDA é anunciada", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    await observeConnection({ connected: false, fonte: "push" }); // e-mail 1
+    await observeConnection({ connected: true, fonte: "push" }); // e-mail 2
+
+    // Segunda queda, dentro da janela de 1h: o debounce segura o e-mail.
+    const caiu = await observeConnection({ connected: false, fonte: "push" });
+    expect(caiu.alertou).toBeNull();
+    expect((await estado()).queda_pendente).toBe(true);
+
+    // E a instância volta ANTES de a janela expirar.
+    await query(
+      `UPDATE connection_state SET down_since = now() - interval '35 minutes' WHERE id`
+    );
+    const voltou = await observeConnection({ connected: true, fonte: "push" });
+
+    expect(voltou.alertou).toBe("volta");
+    expect(alerta).toHaveBeenCalledTimes(3);
+    const payload = alerta.mock.calls[2][0];
+    expect(payload.evento).toBe("zapi_reconectada");
+    expect(payload.foraPorMs).toBeGreaterThan(34 * 60_000);
+
+    const fim = await estado();
+    expect(fim.queda_pendente).toBe(false);
+    expect(fim.alerted_down).toBe(false);
+  });
+
+  /**
+   * O LATCH, também do code review. Um alerta de volta que falha para sempre
+   * deixava `alerted_down = true` travado, e a cerca do `alertarQueda` passava
+   * a suprimir TODA queda futura — o operador só receberia "reconectada" de
+   * uma queda que nunca lhe foi anunciada. Queda nova zera a escrituração do
+   * incidente anterior.
+   */
+  it("volta que nunca entrega não trava as quedas seguintes", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    await observeConnection({ connected: false, fonte: "push" }); // e-mail 1
+    await envelhecerNotificacao();
+
+    alerta.mockResolvedValue(false); // a volta nunca entrega
+    await observeConnection({ connected: true, fonte: "push" });
+    expect((await estado()).alerted_down).toBe(true); // latch armado
+
+    // Nova queda: tem que ser anunciada, não engolida pelo latch.
+    alerta.mockResolvedValue(true);
+    const r = await observeConnection({ connected: false, fonte: "push" });
+
+    expect(r.alertou).toBe("queda");
+    expect(alerta.mock.calls.at(-1)![0].evento).toBe("zapi_desconectada");
+  });
+
+  /**
+   * Achado 4: com o cron ainda juntando confirmações, o retry derivado do
+   * estado tem que rodar assim mesmo — ele é o substituto da fila de retry, e
+   * pular uma passada por causa de um hiccup do `/status` atrasaria justamente
+   * o mecanismo que garante a entrega.
+   */
+  it("aguardando confirmação do cron NÃO adia o reenvio pendente", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    await envelhecerNotificacao();
+
+    alerta.mockResolvedValueOnce(false);
+    await observeConnection({ connected: false, fonte: "push" }); // falhou
+    expect((await estado()).alerted_down).toBe(false);
+
+    // Agora o `/status` dá um hiccup e diz "conectada" (discorda do gravado).
+    const r = await observeConnection({ connected: true, fonte: "cron" });
+
+    expect(r.aguardandoConfirmacao).toBe(true);
+    expect(r.transicao).toBe(false); // nada commitado
+    expect(r.alertou).toBe("queda"); // mas o reenvio saiu
   });
 
   /** A tabela é de linha única, e isso é estrutural — não convenção. */

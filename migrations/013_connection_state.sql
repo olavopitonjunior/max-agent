@@ -40,6 +40,15 @@ CREATE TABLE IF NOT EXISTS connection_state (
   -- fila nova e sem código de retry. E é o que impede o e-mail de reconexão
   -- de anunciar a volta de uma queda que ninguém soube que houve.
   alerted_down bool        NOT NULL DEFAULT false,
+  -- "Houve uma queda que o debounce segurou e que ninguém ainda soube."
+  --
+  -- Sem isto existe um buraco: queda → volta → queda de novo dentro da janela
+  -- de 1h (segurada pelo debounce) → volta de novo. Como `alerted_down` nunca
+  -- chegou a ser marcado, o alerta de reconexão também não sai — e uma queda
+  -- inteira, com a fila represada e o inbound morto, não é anunciada a
+  -- ninguém. Com a marca, a reconexão avisa que houve queda e quanto tempo
+  -- durou: uma mensagem em vez de duas, mas nunca zero.
+  queda_pendente bool      NOT NULL DEFAULT false,
   -- Último e-mail que SAIU (qualquer um dos dois). Base do debounce de 1h
   -- contra flapping: cai/volta/cai em dez minutos manda um e-mail, não três.
   notified_at  timestamptz,
