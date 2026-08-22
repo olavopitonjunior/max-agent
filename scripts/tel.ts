@@ -8,19 +8,28 @@
  * alguém reclamando que não recebeu.
  *
  * Uso:
- *   op run -- npx tsx scripts/tel.ts +5511999999999
- *   op run -- npx tsx scripts/tel.ts 5511999999999 11999999999   # várias de uma vez
+ *   npx tsx scripts/tel.ts +5511999999999
+ *   npx tsx scripts/tel.ts 5511999999999 11999999999    # várias de uma vez
+ *   TEL_ENV=.env.staging npx tsx scripts/tel.ts +5511999999999
  *
  * Depois é só buscar o rótulo no painel da Vercel: ele costura webhook, fila,
  * turn e envio da mesma pessoa.
  *
- * **O `op run --` não é opcional.** Este script não carrega `.env` (ao
- * contrário do `migrate.ts`), e o rótulo depende do `MAX_NOTIFY_SECRET` do
- * ambiente que gerou o log: rodar sem ele devolve um rótulo que não existe em
- * produção, e o modo de falha é silencioso — busca vazia parece "nenhum
- * evento", que é a resposta menos confiável que existe. Daí o prefixo `telx_`
- * na saída sem segredo, e o aviso abaixo.
+ * **Carrega o `.env.local` sozinho**, mesma convenção do `migrate.ts` — e pelo
+ * mesmo motivo dele: o rótulo depende do `MAX_NOTIFY_SECRET` do ambiente que
+ * gerou o log, e rodar sem ele devolve um rótulo que não existe em produção. O
+ * modo de falha é silencioso: busca vazia parece "nenhum evento", que é a
+ * resposta menos confiável que existe.
+ *
+ * A primeira versão deste arquivo mandava usar `op run --`, e estava errada:
+ * `op run` só injeta variável cujo valor já é uma referência `op://`, então ele
+ * rodava sem segredo nenhum. Quem pegou foi o próprio prefixo `telx_` — a rede
+ * de segurança funcionou antes de a documentação estar certa.
  */
+
+import { config as loadEnv } from "dotenv";
+
+loadEnv({ path: process.env.TEL_ENV ?? ".env.local" });
 
 import { conversationKey, maskPhone, phoneTag } from "../src/lib/phone";
 
@@ -35,7 +44,8 @@ if (!process.env.MAX_NOTIFY_SECRET) {
   console.error(
     "AVISO: MAX_NOTIFY_SECRET ausente — os rótulos abaixo saem como `telx_`,\n" +
       "       são de desenvolvimento e NÃO batem com os do log de produção.\n" +
-      "       Rode com `op run -- npx tsx scripts/tel.ts <telefone>`.\n"
+      "       Confira se o .env.local existe e tem MAX_NOTIFY_SECRET, ou aponte\n" +
+      "       outro arquivo com TEL_ENV=<caminho>.\n"
   );
 }
 

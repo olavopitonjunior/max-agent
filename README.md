@@ -150,8 +150,9 @@ conversa sozinho.
    ele troca o telefone por um pseudônimo estável (`tel_9f3a1c4d2e77`), inclusive
    quando o número aparece no meio de texto de erro do provedor. Log da Vercel é
    retido fora do nosso controle de acesso, então lá não sai dígito nenhum —
-   para achar alguém, rode `npx tsx scripts/tel.ts <telefone>` e busque o rótulo
-   que ele imprime. A tela do super-admin continua com máscara legível
+   para achar alguém, rode `npx tsx scripts/tel.ts <telefone>` (ele carrega o
+   `.env.local` sozinho) e busque o rótulo que ele imprime. Se a saída vier como
+   `telx_`, é sinal de que faltou o segredo — o rótulo não vai bater com o log. A tela do super-admin continua com máscara legível
    (`5511***4321`), e a diferença é deliberada: `maskPhone` explica o porquê.
    O `messageId` é a costura — busca por ele devolve a conversa inteira, do
    aceite ao id da resposta enviada.
