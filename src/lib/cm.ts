@@ -480,9 +480,23 @@ export async function reportUsage(
  *                    conta tentativa; após o teto, desiste dela.
  *  - `"unavailable"` → a INTEGRAÇÃO está fora (secret ausente, rota ainda não
  *                    deployada = 404, 503, 5xx, rede/timeout). Não é culpa da
- *                    linha: NÃO conta tentativa — senão o período entre ligar
- *                    o secret aqui e o deploy da rota lá queimaria as 10
- *                    tentativas de todo desfecho e o perderia para sempre.
+ *                    linha, mas **conta tentativa assim mesmo** — ver abaixo.
+ *
+ * ── Correção de um comentário que MENTIA aqui (22/08) ────────────────────
+ *
+ * Este bloco afirmava que `unavailable` NÃO contava tentativa. Não é o que o
+ * consumidor faz: `reconcile()` (`delivery.ts`) chama `contarTentativa()` nos
+ * três desfechos, e foi decisão de code review — é o que faz o
+ * `ORDER BY report_attempts` rodiziar a fila e impede uma linha envenenada de
+ * monopolizar o lote. `MAX_REPORT_ATTEMPTS` subiu de 10 para 60 exatamente
+ * para absorver isso.
+ *
+ * O comentário errado tem custo real: em 22/08 ele me fez planejar uma
+ * rotação de segredo com deploy dos dois lados defasado, calculando a janela
+ * como gratuita. Não é — com `break` por passada, uma indisponibilidade
+ * contínua gasta ~1 tentativa por minuto rodiziada pelo backlog, e com
+ * backlog de uma linha são 60 minutos até PERDER aquele desfecho.
+ * Comentário que descreve o chamador precisa ser conferido contra ele.
  *
  * O lado de lá é idempotente pela dedupeKey; reportar duas vezes é inofensivo.
  */

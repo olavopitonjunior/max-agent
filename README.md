@@ -154,11 +154,20 @@ fecham a F7 (alerta de queda):
 | Ao desconectar | `.../api/zapi-connection/<ZAPI_WEBHOOK_SECRET>` |
 | Ao conectar | `.../api/zapi-connection/<ZAPI_WEBHOOK_SECRET>` |
 
-Os dois primeiros aceitam configuração por API (`PUT /update-webhook-received` e
-`PUT /update-webhook-message-status`); os de conexão aparecem no `GET /me` como
-`disconnectedCallbackUrl` e `connectedCallbackUrl`. E **"notificar mensagens
-enviadas por mim" fica DESLIGADO** — senão cada resposta volta como mensagem
-nova e o bot conversa sozinho.
+Os quatro aceitam configuração por API — um `PUT` por callback, com
+`Client-Token` no header e `{"value": "<url>"}` no corpo:
+
+```
+PUT .../update-webhook-received            PUT .../update-webhook-connected
+PUT .../update-webhook-message-status      PUT .../update-webhook-disconnected
+```
+
+**Nunca use `update-every-webhooks`.** Ele aceita o mesmo corpo e aponta TODOS
+os callbacks para a mesma URL — o que mataria o inbound e a reconciliação da
+Fase 4 de uma vez só. Confira o resultado no `GET /me`, que lista os quatro.
+
+E **"notificar mensagens enviadas por mim" fica DESLIGADO** — senão cada
+resposta volta como mensagem nova e o bot conversa sozinho.
 
 Os dois de conexão apontam para a MESMA rota de propósito: ela não lê o corpo
 do callback. O POST é gatilho, e o estado de verdade vem do `/status` — o que a
