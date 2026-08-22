@@ -1,4 +1,4 @@
-import { maskPhone } from "./phone";
+import { phoneTag } from "./phone";
 
 /**
  * Log estruturado dos pontos quentes.
@@ -28,9 +28,18 @@ import { maskPhone } from "./phone";
  *    exceção reverteria trabalho já feito (entre o `sendText` e a
  *    liquidação, por exemplo, o catch limparia o marcador e reenviaria uma
  *    mensagem que o provedor já aceitou). Log não pode ter esse poder.
- *  - **telefone é mascarado em qualquer campo**, não só no `phone`: texto
+ *  - **telefone vira pseudônimo em qualquer campo**, não só no `phone`: texto
  *    livre de erro do provedor costuma ecoar o número do destinatário
  *    ("Z-API /send-text 400: invalid phone 5511...").
+ *
+ * **Por que pseudônimo (`tel_9f3a1c4d2e`) e não máscara (`5511***4321`)**:
+ * a máscara escondia 5 dígitos, mas em celular BR o primeiro é sempre `9` —
+ * sobravam ~10 mil combinações, e dentro da carteira de uma imobiliária os 4
+ * finais já identificam a pessoa. O log da Vercel é retido e pesquisável fora
+ * do nosso controle de acesso, então aqui o alvo é **não vazar dígito nenhum**.
+ * O pseudônimo correlaciona igual (é estável por pessoa) e é irreversível sem a
+ * chave. A tela do super-admin continua com a máscara, e isso é deliberado —
+ * `maskPhone` em `phone.ts` explica por quê.
  */
 
 export interface LogFields {
@@ -39,7 +48,7 @@ export interface LogFields {
   /** Id da linha da fila (inbound_queue.id ou outbox.id). */
   rowId?: string | null;
   orgId?: string | null;
-  /** Cru: a máscara é aplicada aqui, para não depender de disciplina no chamador. */
+  /** Cru: o pseudônimo é derivado aqui, para não depender de disciplina no chamador. */
   phone?: string | null;
   /** Id devolvido pelo provedor no que SAIU (resposta ou notificação). */
   sentMessageId?: string | null;
@@ -53,7 +62,7 @@ const DIGITOS_DE_TELEFONE = /\b\d{10,13}\b/g;
 
 function scrub(valor: unknown): unknown {
   return typeof valor === "string"
-    ? valor.replace(DIGITOS_DE_TELEFONE, (d) => maskPhone(d))
+    ? valor.replace(DIGITOS_DE_TELEFONE, (d) => phoneTag(d))
     : valor;
 }
 
@@ -66,7 +75,7 @@ function emit(level: "info" | "warn" | "error", event: string, f: LogFields): vo
     );
     linha = JSON.stringify({
       event,
-      ...(phone ? { phone: maskPhone(phone) } : {}),
+      ...(phone ? { phone: phoneTag(phone) } : {}),
       ...limpos,
     });
   } catch (err) {

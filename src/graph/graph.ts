@@ -49,7 +49,7 @@ import {
 import { complete, DEFAULT_MODEL, type LlmUsage } from "@/lib/llm";
 import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
 import { checkpointerPool } from "@/lib/db";
-import { conversationKey, maskPhone } from "@/lib/phone";
+import { conversationKey, phoneTag } from "@/lib/phone";
 import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
 import { buildSystemPrompt, shouldSearch } from "./prompt";
 import type { InboundMessage } from "@/lib/zapi";
@@ -1009,7 +1009,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
             });
             const gravados = await saveFacts(orgId, phone, novos);
             if (gravados > 0) {
-              console.log(`[memory] ${gravados} fato(s) de ${maskPhone(phone)} em ${orgId}`);
+              console.log(`[memory] ${gravados} fato(s) de ${phoneTag(phone)} em ${orgId}`);
             }
       })();
     },
