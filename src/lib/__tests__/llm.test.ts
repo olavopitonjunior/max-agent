@@ -119,6 +119,102 @@ describe("complete (OpenRouter)", () => {
     expect(err.usage?.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
+  /**
+   * O `usage` inline do OpenRouter já traz custo e cache, e até 22/08 este
+   * módulo descartava os dois na porta de entrada. É o que fazia o painel do
+   * ImobPro superestimar em 304% um turn com cache de prefixo.
+   */
+  describe("custo real e cache do provedor", () => {
+    // Os números medidos em produção em 21/08, turno 2.
+    const COM_CACHE = {
+      id: "gen-abc123",
+      model: "openai/gpt-5.4-nano",
+      choices: [{ message: { content: "resposta" } }],
+      usage: {
+        prompt_tokens: 1956,
+        completion_tokens: 18,
+        cost: 0.00010614,
+        prompt_tokens_details: { cached_tokens: 1792, cache_write_tokens: 0 },
+      },
+    };
+
+    it("propaga custo, tokens de cache e o id da geração", async () => {
+      mockFetch(COM_CACHE);
+      const r = await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      expect(r.usage.costUsd).toBeCloseTo(0.00010614, 8);
+      expect(r.usage.cacheReadTokens).toBe(1792);
+      expect(r.usage.cacheWriteTokens).toBe(0);
+      expect(r.usage.generationId).toBe("gen-abc123");
+    });
+
+    /**
+     * A CONVERSÃO DE CONVENÇÃO, achada em code review cruzado (22/08).
+     *
+     * OpenAI/OpenRouter conta `cached_tokens` DENTRO de `prompt_tokens`;
+     * Anthropic conta separado, e é a convenção que o ImobPro adota — lá o
+     * `calcCostUsd` SOMA as parcelas. Mandar 1956 e 1792 faria os cacheados
+     * serem contados duas vezes.
+     *
+     * Hoje não muda o custo (o nano não tem `cacheRead` na tabela de preços,
+     * e a parcela zera), mas é bomba armada: cadastrado aquele preço, a
+     * estimativa viraria pior que os 304% que este trabalho veio corrigir.
+     */
+    it("desconta os cacheados do prompt — as duas parcelas ficam DISJUNTAS", async () => {
+      mockFetch(COM_CACHE);
+      const r = await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      // 1956 no fio, 1792 cacheados → 164 de prompt não-cacheado.
+      expect(r.usage.promptTokens).toBe(164);
+      expect(r.usage.cacheReadTokens).toBe(1792);
+      expect(r.usage.promptTokens + r.usage.cacheReadTokens).toBe(1956);
+    });
+
+    it("sem cache, o prompt passa inteiro", async () => {
+      mockFetch(OK);
+      const r = await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      expect(r.usage.promptTokens).toBe(120);
+      expect(r.usage.cacheReadTokens).toBe(0);
+    });
+
+    /** Provedor contraditório não pode virar prompt negativo numa coluna de budget. */
+    it("mais cacheados que prompt não gera número negativo", async () => {
+      mockFetch({ ...OK, usage: { prompt_tokens: 100, completion_tokens: 5,
+                                  prompt_tokens_details: { cached_tokens: 999 } } });
+      const r = await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      expect(r.usage.promptTokens).toBe(0);
+      expect(r.usage.cacheReadTokens).toBe(100);
+    });
+
+    /**
+     * A regra que sustenta o outro lado: ausência vira `null`, NUNCA 0. Um
+     * custo ausente carimbado como zero seria indistinguível de um turn de
+     * graça, e o receptor perderia a chance de cair na tabela de preços.
+     */
+    it("provedor sem `cost` devolve null, não zero", async () => {
+      mockFetch(OK);
+      const r = await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      expect(r.usage.costUsd).toBeNull();
+      expect(r.usage.cacheReadTokens).toBe(0);
+      expect(r.usage.generationId).toBeNull();
+    });
+
+    it("custo malformado (NaN, negativo, string) também vira null", async () => {
+      for (const cost of [Number.NaN, -1, "0.5" as unknown as number]) {
+        mockFetch({ ...OK, usage: { ...OK.usage, cost } });
+        const r = await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+        expect(r.usage.costUsd).toBeNull();
+      }
+    });
+
+    it("a falha também carrega os campos novos, com null", async () => {
+      mockFetch({ error: { message: "rate limited" } });
+      await expect(
+        complete({ system: "s", messages: [{ role: "user", content: "oi" }] })
+      ).rejects.toMatchObject({
+        usage: { costUsd: null, generationId: null, cacheReadTokens: 0, success: false },
+      });
+    });
+  });
+
   it("sem chave falha claro, sem chamar a rede", async () => {
     vi.stubEnv("OPENROUTER_API_KEY", "");
     const f = mockFetch(OK);

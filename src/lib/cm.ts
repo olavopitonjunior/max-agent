@@ -424,6 +424,19 @@ export async function criarRascunhoProposta(
  * Reporta o custo do turn. Uma linha POR MODELO: um turn multi-modelo somado
  * num bucket só cobraria Sonnet a preço de Haiku, e esse número alimenta o teto
  * mensal por agente e o painel.
+ *
+ * ── O que passou a viajar em 22/08 ───────────────────────────────────────
+ *
+ * `costUsd` e os tokens de cache. Antes o ImobPro só recebia contagem de token
+ * e calculava o dólar pela tabela de preços — que é exata quando não há cache
+ * (erro de 0,0%, medido) e erra feio quando há: num turn com 1792 de 1956
+ * tokens vindos do cache de prefixo, a tabela dizia US$ 0,00042870 contra
+ * US$ 0,00010614 reais, **superestimando em 304%**.
+ *
+ * Do outro lado, `costUsd` SOBREPÕE a estimativa e a linha nasce marcada como
+ * `reported`. Isso é exceção declarada à regra de lá ("custo informado por
+ * quem gasta não é medição"), e ela se sustenta porque o número não é nosso:
+ * vem do `usage.cost` do OpenRouter. Nós só transportamos.
  */
 export async function reportUsage(
   orgId: string,
@@ -431,6 +444,10 @@ export async function reportUsage(
     model: string;
     promptTokens: number;
     completionTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    /** `null` = o provedor não informou. NUNCA 0 — ver `LlmUsage.costUsd`. */
+    costUsd?: number | null;
     latencyMs: number;
     success?: boolean;
     dealId?: string | null;
@@ -439,7 +456,7 @@ export async function reportUsage(
   const org = await orgById(orgId);
   if (!org) return;
   try {
-    await fetchWithTimeout(
+    const res = await fetchWithTimeout(
       `${BASE()}/api/agents/usage`,
       {
         method: "POST",
@@ -447,10 +464,52 @@ export async function reportUsage(
           Authorization: `Bearer ${org.apiToken}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ agentKey: "max", provider: "openrouter", ...usage }),
+        /**
+         * Corpo montado campo a campo, e não `...usage`, de propósito: o
+         * `LlmUsage` carrega coisas que o contrato NÃO declara (hoje
+         * `generationId`, que serve para reconciliar contra o `/v1/generation`
+         * do OpenRouter e vive no `conversation_turn` daqui). O zod de lá não
+         * é `.strict()`, então um spread mandaria campo desconhecido que é
+         * descartado em silêncio — o tipo de descasamento que ninguém vê até
+         * precisar dele.
+         */
+        body: JSON.stringify({
+          agentKey: "max",
+          provider: "openrouter",
+          model: usage.model,
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          cacheReadTokens: usage.cacheReadTokens,
+          cacheWriteTokens: usage.cacheWriteTokens,
+          costUsd: usage.costUsd,
+          latencyMs: usage.latencyMs,
+          success: usage.success,
+          dealId: usage.dealId,
+        }),
       },
       IMOBPRO_TIMEOUT_MS
     );
+
+    /**
+     * O status É lido, e não deveria ter sido opcional.
+     *
+     * Sem esta checagem, um 400 do zod de lá descartava a linha de custo em
+     * SILÊNCIO — o `fetch` resolve normalmente com `ok: false` e o `catch`
+     * abaixo nunca via nada. É a mesma classe de falha que o `sendEmail`
+     * (`ok:false` sem exceção) e que o "202 não prova gravação": o caminho
+     * feliz e o caminho perdido tinham exatamente a mesma aparência.
+     *
+     * Continua fire-and-forget — não retentamos e não lançamos, porque perder
+     * a contabilidade de um turn é menos grave que não responder à pessoa. O
+     * que muda é que agora aparece no log, com o motivo.
+     */
+    if (!res.ok) {
+      const corpo = await res.text().catch(() => "");
+      console.error(
+        `[cm] reportUsage recusado (${res.status}) — linha de custo PERDIDA ` +
+          `para ${usage.model}: ${corpo.slice(0, 200)}`
+      );
+    }
   } catch (err) {
     // Fire-and-forget: perder a contabilidade de um turn é ruim, não responder
     // ao usuário por causa disso é pior.

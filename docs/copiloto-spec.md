@@ -309,7 +309,9 @@ Passa a aceitar `costUsd`, `cacheReadTokens`, `cacheWriteTokens` **quando `provi
 
 Isso contraria a regra escrita hoje na própria rota ("custo informado por quem gasta não é medição"), e a exceção precisa estar documentada lá, não só aqui: **o número não é auto-declarado pelo agente, é o que a fatura do provedor diz.** O que continua valendo sem exceção: teto de sanidade por turn, `orgId`/`userId` vindos do token, `operation` vinda do registry.
 
-Quando `costUsd` vier, ele **sobrepõe** o `calcCostUsd`. Quando não vier, o cálculo local entra e a linha é marcada (`detail.costSource = "estimated"`), para o painel poder mostrar o que é medido e o que é chute.
+Quando `costUsd` vier, ele **sobrepõe** o `calcCostUsd`. Quando não vier, o cálculo local entra e a linha é marcada como `"estimated"`, para o painel poder mostrar o que é medido e o que é chute.
+
+**Entregue em 22/08, com um desvio do desenho.** A spec dizia `detail.costSource`; virou **coluna** `AIUsage.costSource`, e o valor do custo continua em `estimatedCostUsd` — que passa a significar *o melhor número que temos*. O motivo é aritmético: ~60 pontos do produto somam `estimatedCostUsd` (budget por contrato, teto mensal por agente, `/settings/ai-usage`, métricas de admin). Um campo paralelo obrigaria todos a fazer COALESCE, e o primeiro esquecido daria um total errado **em silêncio** — o pior modo de falha desta tabela. Assim, todo agregado existente fica mais correto sem uma linha de mudança, e a procedência fica consultável em vez de enterrada em JSON.
 
 ### 4.3 Seletor de modelo
 
@@ -490,7 +492,7 @@ O sanitizador do `compose` é **o mesmo ponto por onde o TTS passa** — a vers�
 | `src/graph/compose.ts` | **novo** — sanitizador, TTS, montagem das mensagens |
 | `src/graph/policy.ts` | **novo** — resolução de capabilities |
 | `src/lib/scope.ts` | **novo** — cliente do `scope-query` |
-| `src/lib/llm.ts` | propaga `cost`, cache tokens, `generationId` |
+| `src/lib/llm.ts` | **entregue** — propaga `cost`, cache tokens, `generationId` |
 | `src/lib/tts.ts` | **novo** — chamada de áudio em streaming |
 | `src/lib/zapi.ts` | restaura `sendAudio` |
 | `src/lib/turnlog.ts` | **novo** — escrita em `conversation_turn` |
@@ -505,9 +507,9 @@ O sanitizador do `compose` é **o mesmo ponto por onde o TTS passa** — a vers�
 | `src/app/api/agents/scope-query/route.ts` | **novo** — o endpoint de leitura |
 | `src/lib/max/scope-projection.ts` | **novo** — projeção por tipo de sujeito |
 | `src/lib/max/policy.ts` | **novo** — leitura/escrita da política |
-| `src/app/api/agents/usage/route.ts` | aceita `costUsd` + cache tokens de `openrouter` |
+| `src/app/api/agents/usage/route.ts` | **entregue** — aceita `costUsd` de `openrouter`; cache tokens já eram aceitos |
 | `src/app/api/agents/profile/route.ts` | devolve política + modelos |
-| `src/lib/ai/usage.ts` | `costUsd` sobrepõe estimativa; `costSource` |
+| `src/lib/ai/usage.ts` | **entregue** — `costUsd` sobrepõe a estimativa; `costSource` diz qual venceu |
 | `src/lib/ai/agents/registry.ts` | operação `max_tts` |
 | `src/app/admin/max/` | abas Conversas, Custos, Política |
 | `src/components/pipeline/DealDetail.tsx` | botão de aviso manual |
@@ -582,7 +584,7 @@ Cada linha é um PR, com gate do agente `orchestrator` antes de commit/merge, co
 | PR | Entrega | Depende |
 |---|---|---|
 | 1 | `conversation_turn` + `turnlog` + rota admin + aba Conversas — **auditoria antes de haver o que auditar** | — |
-| 2 | `llm.ts` propaga custo real + contrato do `/api/agents/usage` + `costSource` no painel | — |
+| 2 | `llm.ts` propaga custo real + contrato do `/api/agents/usage` + `costSource` no painel | — · **ENTREGUE 22/08** |
 | 3 | Prompt global (remove `instructions`) + deny-list + sanitizador do `compose` | — |
 | 4 | `MaxCapabilityPolicy` + resolução no `gate` + UI da política | 3 |
 | 5 | `scope-query` + projeção por sujeito (ImobPro, sem consumidor ainda) | 4 |
