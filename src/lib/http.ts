@@ -21,6 +21,20 @@ export const ZAPI_TIMEOUT_MS = 10_000;
 export const IMOBPRO_TIMEOUT_MS = 8_000;
 export const IMOBPRO_TRANSCRIBE_TIMEOUT_MS = 45_000;
 
+/**
+ * Alerta de canal: o receptor manda o E-MAIL antes de responder, e um SMTP em
+ * cold start (boot da function + `import("nodemailer")` + TLS + AUTH + envio,
+ * mais uma conexão Prisma quando o destinatário vem do banco) passa dos 8s com
+ * facilidade.
+ *
+ * O estrago de errar isto para baixo é específico e feio: o e-mail SAI, nós
+ * desistimos por timeout, o claim é desfeito e o cron manda tudo de novo um
+ * minuto depois — alerta duplicado em série, justamente durante o incidente.
+ * O alerta é raro (só na transição), então esperar não custa nada; o cron tem
+ * `maxDuration = 60`, e 25s deixa folga para o despacho da fila depois.
+ */
+export const IMOBPRO_ALERT_TIMEOUT_MS = 25_000;
+
 /** LLM: a resposta longa de um modelo lento. O `answer` usa o teto cheio;
  * compactação e extração de memória são curtas e não merecem esperar tanto. */
 export const LLM_TIMEOUT_MS = 45_000;

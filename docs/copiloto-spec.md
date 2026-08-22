@@ -481,7 +481,9 @@ O sanitizador do `compose` é **o mesmo ponto por onde o TTS passa** — a vers�
 | Arquivo | O quê |
 |---|---|
 | `migrations/010_conversation_turn.sql` | tabela de auditoria (§4.4) |
-| `migrations/011_connection_state.sql` | estado da conexão Z-API p/ detectar transição (§8) |
+| `migrations/013_connection_state.sql` | estado da conexão Z-API p/ detectar transição (§8) — **entregue** |
+| `src/lib/connection.ts` | **entregue** — a máquina de transição e os dois alertas (§8) |
+| `src/app/api/zapi-connection/[secret]/route.ts` | **entregue** — callback de conexão da Z-API (§8) |
 | `src/graph/graph.ts` | nós `tools` e `compose`; estado novo; remove `instructions` |
 | `src/graph/tools.ts` | `ToolDef`, catálogo, seleção por capability, teto de 5 |
 | `src/graph/prompt.ts` | remove `<instrucoes_da_imobiliaria>`; cerca `<dados_do_sistema>`; deny-list |
@@ -493,7 +495,7 @@ O sanitizador do `compose` é **o mesmo ponto por onde o TTS passa** — a vers�
 | `src/lib/zapi.ts` | restaura `sendAudio` |
 | `src/lib/turnlog.ts` | **novo** — escrita em `conversation_turn` |
 | `src/app/api/admin/conversations/route.ts` | **novo** |
-| `src/lib/outbox.ts` | transição de conexão → alerta |
+| `src/lib/outbox.ts` | **entregue** — `contarVencidas()` exportada (o número de represadas do e-mail) e `dispatchDue` aceita o status já checado pelo cron |
 
 ### contractmaker
 
@@ -510,7 +512,8 @@ O sanitizador do `compose` é **o mesmo ponto por onde o TTS passa** — a vers�
 | `src/app/admin/max/` | abas Conversas, Custos, Política |
 | `src/components/pipeline/DealDetail.tsx` | botão de aviso manual |
 | `src/app/api/deals/[dealId]/max-notify/route.ts` | **novo** — aviso manual |
-| `src/app/api/agents/alert/route.ts` | **novo** — alerta de desconexão → e-mail |
+| `src/app/api/webhooks/max/alert/route.ts` | **entregue** — alerta de canal → e-mail (§8; a spec dizia `/api/agents/alert`, que é Bearer por org) |
+| `src/lib/max/alert-webhook.ts` | **entregue** — schema, corpo do e-mail e destinatários |
 | `docs/max.md` | contrato atualizado (§6 do PRD: normativo) |
 | `CLAUDE.md` | checklist de governança |
 
@@ -525,20 +528,39 @@ O desenho passa a ser push com rede de segurança:
 - **Primário — push.** Rota nova `POST /api/zapi-connection/[secret]` (mesmo padrão de segredo no path das outras duas), apontada nos dois callbacks. Latência de segundos em vez de até um minuto.
 - **Secundário — o cron continua conferindo.** Não como fonte do alerta, mas como detector de callback perdido: se o estado gravado diz "conectado" e o `connectionStatus()` diz o contrário por duas passadas seguidas, alerta assim mesmo. Callback é entrega pela rede, e entrega pela rede falha.
 
-`migrations/011` cria `connection_state (id bool PRIMARY KEY DEFAULT true, connected bool, changed_at timestamptz, notified_at timestamptz)` — linha única, porque a instância é uma. Serve aos dois caminhos e é o que torna a transição detectável (hoje cada execução de cron é amnésica).
+**ENTREGUE em 2026-08-22.** O que está abaixo foi atualizado para o que existe; as três divergências entre o desenho e a implementação estão marcadas.
 
-Lógica, comum ao push e ao cron:
+`migrations/013_connection_state.sql` (a spec dizia 011 — a numeração envelheceu: 010 é `chave_de_conversa`, 011 é `conversation_turn`, 012 é o índice da poda) cria `connection_state` — linha única, porque a instância é uma. Serve aos dois caminhos e é o que torna a transição detectável (cada execução de cron é amnésica).
+
+```sql
+connection_state (
+  id bool PRIMARY KEY DEFAULT true CHECK (id),
+  connected bool, changed_at timestamptz,
+  down_since timestamptz,   -- de onde sai o "ficou fora por 2h13m"
+  alerted_down bool,        -- "já anunciei uma queda cuja volta não anunciei"
+  notified_at timestamptz, miss_streak int, updated_at timestamptz)
+```
+
+`alerted_down`, `down_since` e `miss_streak` não estavam no desenho e cada um paga uma conta: o primeiro é o que dá **retry de graça** (o carimbo só acontece quando o e-mail sai) e o que impede o e-mail de volta de celebrar uma queda que ninguém soube que houve; o segundo sobrevive à transição de volta, que sobrescreve `changed_at`; o terceiro implementa as duas passadas do cron.
+
+Lógica, comum ao push e ao cron (`src/lib/connection.ts`) — o alerta é derivado do **estado**, não do evento, e é daí que sai o retry:
 
 ```
 se estado_atual ≠ estado_gravado:
-    grava transição
-    se caiu E (agora - notified_at) > 1h:
-        POST /api/agents/alert { evento: "zapi_desconectada", represadas: N }
-    se voltou:
-        POST /api/agents/alert { evento: "zapi_reconectada", forapor: "2h13m" }
+    se fonte = cron e ++miss_streak < 2: grava e retorna
+    grava transição (down_since = now quando cai)
+
+se caiu E !alerted_down E (agora - notified_at) > 1h:
+    claim, POST { evento: "zapi_desconectada", at, represadas: N }, solta o claim se falhar
+se voltou E alerted_down:
+    POST { evento: "zapi_reconectada", at, foraPorMs }
 ```
 
-No ImobPro, `sendEmail` para `MAX_ALERT_EMAIL` (default `olavo.piton@gmail.com`). O corpo diz **quantas mensagens estão represadas** — é isso que decide a urgência. A fila não se perde (o outbox represa e volta a sair), mas 4 mensagens reais foram perdidas em 04/08 justamente porque ninguém soube que a instância tinha caído.
+A rota é **`POST /api/webhooks/max/alert`**, não `/api/agents/alert`: `/api/agents/*` é Bearer por ORG e este evento é da instância inteira, compartilhada pelos três tenants — não existe org de onde tirar o token. `/api/webhooks/max` já é a direção Max→plataforma com HMAC de serviço (`MAX_WEBHOOK_SECRET`), que é o que este alerta é.
+
+`foraPorMs` vai como número, não como a string `"2h13m"`: formato humano atravessando o contrato criaria um segundo formatador para divergir do primeiro.
+
+No ImobPro, `sendEmail` para `MAX_ALERT_EMAIL` — **ausente cai nos `super_admin` do banco**, nunca em lista vazia. O corpo diz **quantas mensagens estão represadas** — é isso que decide a urgência. A fila não se perde (o outbox represa e volta a sair), mas 4 mensagens reais foram perdidas em 04/08 justamente porque ninguém soube que a instância tinha caído.
 
 Não usa o padrão de issue do GitHub (`alerta-deploy-prod.yml`) porque o sinal nasce num cron, não num evento do GitHub — e o e-mail foi o canal pedido.
 
@@ -558,7 +580,7 @@ Cada linha é um PR, com gate do agente `orchestrator` antes de commit/merge, co
 | 6 | Nó `tools` + laço + tools de leitura + cerca `<dados_do_sistema>` | 5 |
 | 7 | Eval de tool-choice estendida + seleção de modelo por config | 6 |
 | 8 | Aviso manual (botão + capability + confirmação) | 4 |
-| 9 | Alerta de desconexão | — |
+| 9 | Alerta de desconexão | — · **ENTREGUE 22/08** |
 | 10 | Áudio: spike, TTS, `sendAudio`, dupla mensagem | 1, 3 |
 
 **PR 1 primeiro, de propósito.** Sem a trilha de auditoria, os PRs seguintes são desenvolvidos às cegas — e o primeiro sintoma de guardrail furado é uma resposta esquisita que ninguém consegue reproduzir. PR 2 vem logo atrás pelo mesmo motivo aplicado a dinheiro.

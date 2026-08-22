@@ -140,6 +140,29 @@ const MAX_ATTEMPTS = 3;
 const SENDING_ORPHAN_MINUTES = 10;
 
 /**
+ * Quantas mensagens estão ESPERANDO agora — vencidas e não despachadas.
+ *
+ * Uma função só, em vez de duas cópias da mesma query: este número aparece em
+ * dois lugares que precisam concordar sempre — o `blocked` do despacho e o
+ * `represadas` do e-mail de alerta (`lib/connection.ts`). Duas cópias
+ * divergiriam no primeiro ajuste de predicado, e o e-mail passaria a dizer um
+ * número que o log não confirma.
+ *
+ * Inclui o órfão em `sending` (execução que morreu entre o claim e o envio)
+ * porque ele também está parado esperando, não sendo entregue.
+ */
+export async function contarVencidas(): Promise<number> {
+  const [{ due }] = await query<{ due: number }>(
+    `SELECT count(*)::int AS due FROM outbox
+      WHERE (status = 'pending' AND deliver_after <= now())
+         OR (status = 'sending'
+             AND last_attempt_at < now() - ($1 || ' minutes')::interval)`,
+    [String(SENDING_ORPHAN_MINUTES)]
+  );
+  return due;
+}
+
+/**
  * Despacha o que está vencido. Chamado pelo cron.
  *
  * **O claim MUDA O ESTADO para `sending`, e é isso que impede o envio duplo.**
@@ -152,8 +175,22 @@ const SENDING_ORPHAN_MINUTES = 10;
  * `sending` é transitório. Quem morrer entre o claim e o envio deixa a linha
  * presa nele — daí a recuperação por `last_attempt_at`, que devolve o órfão ao
  * conjunto reivindicável depois de `SENDING_ORPHAN_MINUTES`.
+ *
+ * `statusConhecido`: o chamador JÁ perguntou o estado da instância e passa a
+ * resposta adiante, para não perguntar duas vezes no mesmo minuto. É o caso do
+ * cron, que desde a F7 pergunta SEMPRE (antes só perguntava com fila vencida,
+ * e por isso uma queda com a fila vazia era invisível para ele).
+ *
+ *  - objeto  → usa esta resposta, não chama a Z-API.
+ *  - `null`  → o chamador perguntou e a chamada FALHOU. Segue (fail-open),
+ *              sem perguntar de novo: repetir a pergunta que acabou de falhar
+ *              só gasta o orçamento da function.
+ *  - ausente → comportamento antigo, pergunta por conta própria.
  */
-export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
+export async function dispatchDue(
+  limit = 50,
+  statusConhecido?: { connected: boolean; raw?: unknown } | null
+): Promise<DispatchTotals> {
   const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0 };
 
   /**
@@ -173,27 +210,27 @@ export async function dispatchDue(limit = 50): Promise<DispatchTotals> {
    * instância fora do ar por vinte minutos queimaria as três tentativas de toda
    * a fila e marcaria como `failed` mensagens que não têm defeito nenhum.
    *
-   * Só custa quando há o que enviar — a maioria das execuções não acha nada e
-   * nem chega aqui.
+   * Quando o chamador passa `statusConhecido`, esta pergunta já foi feita lá
+   * fora e não se repete — ver o doc do parâmetro.
    */
-  const [{ due }] = await query<{ due: number }>(
-    `SELECT count(*)::int AS due FROM outbox
-      WHERE (status = 'pending' AND deliver_after <= now())
-         OR (status = 'sending'
-             AND last_attempt_at < now() - ($1 || ' minutes')::interval)`,
-    [String(SENDING_ORPHAN_MINUTES)]
-  );
+  const due = await contarVencidas();
 
   if (due > 0) {
-    const status = await connectionStatus().catch((err) => {
-      // Não conseguir PERGUNTAR não é o mesmo que estar desconectado. Seguir é
-      // o comportamento antigo, que ao menos entrega quando está tudo bem.
-      console.warn(
-        "[outbox] não deu pra checar a instância:",
-        err instanceof Error ? err.message : String(err)
-      );
-      return { connected: true, raw: null };
-    });
+    const status =
+      statusConhecido !== undefined
+        ? // `null` = o chamador perguntou e falhou. Fail-open, igual ao catch
+          // abaixo: não conseguir PERGUNTAR não é estar desconectado.
+          (statusConhecido ?? { connected: true, raw: null })
+        : await connectionStatus().catch((err) => {
+            // Não conseguir PERGUNTAR não é o mesmo que estar desconectado.
+            // Seguir é o comportamento antigo, que ao menos entrega quando
+            // está tudo bem.
+            console.warn(
+              "[outbox] não deu pra checar a instância:",
+              err instanceof Error ? err.message : String(err)
+            );
+            return { connected: true, raw: null };
+          });
 
     if (!status.connected) {
       totals.blocked = due;

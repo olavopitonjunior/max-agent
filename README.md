@@ -89,6 +89,7 @@ de `deal-events` de lá não tem cron de reconciliação.
 | `GET /api/cron/inbound` | `Bearer $CRON_SECRET` | Rede de segurança do turn: retoma o que o `waitUntil` não fechou. 1×/min |
 | `POST /api/zapi-webhook/[secret]` | segredo no path + `instanceId` | Inbound do WhatsApp — só aceita e enfileira |
 | `POST /api/zapi-status/[secret]` | idem | Callbacks de status (SENT/RECEIVED/READ) → reconciliação |
+| `POST/GET /api/zapi-connection/[secret]` | idem | Callbacks de conexão (caiu/voltou) → alerta por e-mail. **Não lê o corpo**: o POST é gatilho e o estado vem do `/status` |
 | `POST\|DELETE /api/orgs` | HMAC (mesmo do `/notify`) | Provisiona/desativa tenant (token cifrado em `org_config`) |
 | `POST /api/admin/forget` | HMAC (mesmo do `/notify`) | Direito ao esquecimento: apaga tudo sobre um telefone |
 | `GET /api/admin/status` | HMAC (`method.path?query` assinados) | Alimenta o Mission Control no admin do ImobPro |
@@ -99,6 +100,21 @@ O `/api/cron/outbox` também roda a **reconciliação** na mesma passada: marca
 `unconfirmed` o que ficou sem callback e reporta os desfechos ao ImobPro
 (`POST /api/webhooks/max`, HMAC com `MAX_WEBHOOK_SECRET` — secret próprio
 desta direção; sem ele o report fica desligado, que é o default seguro).
+
+E **confere o estado da instância em TODA passada** (`connection_state`,
+migration 013): na transição conectada→desconectada manda um alerta por e-mail
+pelo `POST /api/webhooks/max/alert` do ImobPro, e outro na volta, com o tempo
+que ficou fora. O corpo diz **quantas mensagens estão represadas** — é o número
+que decide a urgência de quem lê às 3 da manhã.
+
+**Transição, nunca estado**: por estado seriam 1.440 e-mails por dia. O carimbo
+de "já avisei" só acontece quando o e-mail SAI, então um POST que falha é
+reenviado na passada seguinte — sem fila nova e sem código de retry (é por isso
+que o receptor devolve 500 quando o e-mail não sai). O caminho rápido é o
+callback de conexão da Z-API, em segundos; o cron é a rede de segurança para o
+callback que se perde na rede, e exige **duas** passadas discordando antes de
+acreditar. Antes da F7 esta checagem só acontecia com fila vencida, e por isso
+uma queda com a fila vazia era invisível — mas o inbound para do mesmo jeito.
 
 ## Setup
 
@@ -120,17 +136,27 @@ openssl rand -hex 24      # ZAPI_WEBHOOK_SECRET
 Cadastrar um tenant é `POST /api/orgs` (o ImobPro faz isso sozinho ao ligar
 `vendas.max` na org — o token nasce lá, cifrado aqui). Não há INSERT à mão.
 
-Na Z-API, dois callbacks — o segundo é o que fecha a Fase 4:
+Na Z-API, quatro callbacks — o segundo fecha a Fase 4, o terceiro e o quarto
+fecham a F7 (alerta de queda):
 
 | Campo no painel | URL |
 |---|---|
 | Ao receber | `.../api/zapi-webhook/<ZAPI_WEBHOOK_SECRET>` |
 | Ao alterar status da mensagem | `.../api/zapi-status/<ZAPI_WEBHOOK_SECRET>` |
+| Ao desconectar | `.../api/zapi-connection/<ZAPI_WEBHOOK_SECRET>` |
+| Ao conectar | `.../api/zapi-connection/<ZAPI_WEBHOOK_SECRET>` |
 
-Ambos aceitam configuração por API (`PUT /update-webhook-received` e
-`PUT /update-webhook-message-status`). E **"notificar mensagens enviadas por
-mim" fica DESLIGADO** — senão cada resposta volta como mensagem nova e o bot
-conversa sozinho.
+Os dois primeiros aceitam configuração por API (`PUT /update-webhook-received` e
+`PUT /update-webhook-message-status`); os de conexão aparecem no `GET /me` como
+`disconnectedCallbackUrl` e `connectedCallbackUrl`. E **"notificar mensagens
+enviadas por mim" fica DESLIGADO** — senão cada resposta volta como mensagem
+nova e o bot conversa sozinho.
+
+Os dois de conexão apontam para a MESMA rota de propósito: ela não lê o corpo
+do callback. O POST é gatilho, e o estado de verdade vem do `/status` — o que a
+torna imune ao formato do payload, a reentrega e a callback fora de ordem.
+**Sem eles o alerta continua funcionando**, só que pela rede de segurança do
+cron (até dois minutos em vez de segundos).
 
 ## Armadilhas já pagas (não redescobrir)
 
