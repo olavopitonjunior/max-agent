@@ -276,6 +276,36 @@ describe("renderMessage", () => {
 const d2 = hasDb ? describe : describe.skip;
 
 d2("instância fora do ar (Postgres real)", () => {
+  /**
+   * Enfileira e **vence** a linha.
+   *
+   * `enqueue` agenda por `nextDeliveryTime()`, que respeita a janela 7h–22h de
+   * São Paulo: uma linha criada às 22h01 só vence às 7h do dia seguinte, e aí
+   * `dispatchDue` não a enxerga — nada é enviado nem bloqueado, e os quatro
+   * testes deste bloco falham por um motivo que não tem nada a ver com o que
+   * eles testam.
+   *
+   * Isso não é hipótese: aconteceu em 21/08 às 22h07, e o CI vinha passando
+   * porque calhava de rodar dentro da janela. É a pior espécie de teste — o que
+   * dá o veredito certo pelo motivo errado, até a hora virar.
+   *
+   * O bloco de cima já fazia isto linha a linha; aqui faltava. A janela em si
+   * tem cobertura própria em `window.test.ts` e não é o assunto daqui.
+   */
+  async function enfileirarVencido(over: Parameters<typeof args>[0] = {}) {
+    const r = await enqueue(args(over));
+    // Vence a linha RECÉM-criada, não a org inteira: hoje cada teste enfileira
+    // uma só e os dois seriam equivalentes, mas o dia em que alguém enfileirar
+    // duas querendo que apenas uma vença, o `WHERE org_id` mentiria em silêncio.
+    if (r.status === "queued") {
+      await query(
+        `UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE id = $1`,
+        [r.id]
+      );
+    }
+    return r;
+  }
+
   beforeEach(async () => {
     vi.clearAllMocks();
     sent.mockResolvedValue({ messageId: "MID" });
@@ -288,7 +318,7 @@ d2("instância fora do ar (Postgres real)", () => {
   });
 
   it("desconectada: não envia nada e reporta represado", async () => {
-    await enqueue(args());
+    await enfileirarVencido();
     status.mockResolvedValue({ connected: false, raw: { connected: false } });
 
     const totals = await dispatchDue();
@@ -305,7 +335,7 @@ d2("instância fora do ar (Postgres real)", () => {
    * de um problema de canal, temporário por natureza.
    */
   it("não queima tentativa: a linha continua pending com attempts em zero", async () => {
-    const r = await enqueue(args());
+    const r = await enfileirarVencido();
     if (r.status !== "queued") throw new Error("esperava queued");
     status.mockResolvedValue({ connected: false, raw: {} });
 
@@ -324,7 +354,7 @@ d2("instância fora do ar (Postgres real)", () => {
   });
 
   it("reconectou: a mesma fila sai, nada se perdeu", async () => {
-    const r = await enqueue(args());
+    const r = await enfileirarVencido();
     if (r.status !== "queued") throw new Error("esperava queued");
 
     status.mockResolvedValue({ connected: false, raw: {} });
@@ -348,7 +378,7 @@ d2("instância fora do ar (Postgres real)", () => {
    * canal que estava funcionando.
    */
   it("status indisponível → segue enviando (falha aberta)", async () => {
-    await enqueue(args());
+    await enfileirarVencido();
     status.mockRejectedValue(new Error("timeout"));
 
     const totals = await dispatchDue();
