@@ -147,7 +147,7 @@ conversa sozinho.
    `5511987654321` ou `551187654321`; quem apaga ou busca por telefone tem que
    cobrir as duas formas (ver `/api/admin/forget`).
 6. **Log estruturado, telefone despersonalizado.** Use o helper `lib/log.ts`:
-   ele troca o telefone por um pseudônimo estável (`tel_9f3a1c4d2e`), inclusive
+   ele troca o telefone por um pseudônimo estável (`tel_9f3a1c4d2e77`), inclusive
    quando o número aparece no meio de texto de erro do provedor. Log da Vercel é
    retido fora do nosso controle de acesso, então lá não sai dígito nenhum —
    para achar alguém, rode `npx tsx scripts/tel.ts <telefone>` e busque o rótulo

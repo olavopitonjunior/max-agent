@@ -2,7 +2,7 @@
  * Traduz um telefone no rótulo com que ele aparece no log.
  *
  * O log não mostra mais dígito nenhum: `phoneTag` grava um pseudônimo derivado
- * por HMAC (`tel_9f3a1c4d2e`), estável por pessoa e irreversível sem a chave.
+ * por HMAC (`tel_9f3a1c4d2e77`), estável por pessoa e irreversível sem a chave.
  * Isso resolve o vazamento, mas quebraria a investigação se não houvesse o
  * caminho de ida — e a investigação SEMPRE começa do número, porque começa de
  * alguém reclamando que não recebeu.

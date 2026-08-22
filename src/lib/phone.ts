@@ -115,8 +115,12 @@ export function maskPhone(raw: string): string {
  * a retenção do log é curta e a rotação é rara — mas quem rotacionar tem que
  * saber.
  *
- * 10 hex = 40 bits: com 100 mil telefones distintos, a chance de dois
- * colidirem é ~0,5%. Suficiente, e curto o bastante para caber no olho.
+ * 12 hex = 48 bits. Com 100 mil telefones distintos a chance de dois colidirem
+ * é ~0,002%; com 40 bits seria ~0,5%. Colisão aqui não vaza nada — só juntaria
+ * duas pessoas sob o mesmo rótulo numa investigação —, mas dois caracteres a
+ * mais custam zero e tiram a pergunta da mesa. O volume também é maior do que
+ * "carteira de corretores" sugere: o `outbox` fala com `deal_party` também,
+ * ou seja clientes.
  */
 export function phoneTag(raw: string): string {
   const chave = conversationKey(raw ?? "");
@@ -125,7 +129,7 @@ export function phoneTag(raw: string): string {
   const derivada = createHmac("sha256", segredo || SEM_SEGREDO)
     .update("phone-tag-v1")
     .digest();
-  const hash = createHmac("sha256", derivada).update(chave).digest("hex").slice(0, 10);
+  const hash = createHmac("sha256", derivada).update(chave).digest("hex").slice(0, 12);
   // Prefixo diferente sem segredo: ver SEM_SEGREDO.
   return `${segredo ? "tel" : "telx"}_${hash}`;
 }

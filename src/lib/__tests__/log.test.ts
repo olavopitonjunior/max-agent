@@ -55,6 +55,78 @@ describe("log estruturado", () => {
   });
 
   /**
+   * O furo que a code review encontrou, e o motivo de a regex ter mudado.
+   *
+   * A versão anterior era `\b\d{10,13}\b` — só dígito contíguo. Mas o texto que
+   * o `scrub` existe para tratar é corpo bruto de erro de provedor, e validação
+   * de telefone costuma FORMATAR o número na mensagem. Cada uma destas formas
+   * passava inteira, sem nada, pelo caminho que promete não vazar dígito.
+   */
+  it.each([
+    "Z-API /send-text 400: invalid phone +55 (11) 98765-4321",
+    "Z-API /send-text 400: invalid phone 5511 98765-4321",
+    "numero recusado: (11)98765-4321",
+    "numero recusado: 11-98765-4321",
+    "numero recusado: +55 11 98765 4321",
+  ])("telefone com separador não escapa: %s", (detail) => {
+    const spy = capturar("error");
+    log.error("outbox.falhou", { detail });
+
+    const linha = spy.mock.calls[0][0] as string;
+    expect(linha).not.toContain("98765");
+    expect(linha).not.toContain("4321");
+    expect(linha).toContain(phoneTag("5511987654321"));
+  });
+
+  /**
+   * O segundo furo da review. O contrato deste módulo diz "telefone em QUALQUER
+   * campo, sem depender de disciplina no chamador" — e isso era falso para
+   * qualquer coisa que não fosse string de primeiro nível. Hoje nenhum
+   * call-site passa objeto, mas `LogFields` permite, e o dia em que alguém
+   * logar o corpo de uma resposta de provedor é o dia em que vaza, sem ninguém
+   * ter tocado neste arquivo.
+   */
+  it("desce em objeto e array aninhados", () => {
+    const spy = capturar("error");
+    log.error("zapi.recusou", {
+      resposta: { erro: { texto: "invalid phone 5511987654321" } },
+      tentativas: ["falhou para 5511987654321"],
+    });
+
+    const linha = spy.mock.calls[0][0] as string;
+    expect(linha).not.toContain("5511987654321");
+    expect(linha.match(/tel_[0-9a-f]{12}/g)).toHaveLength(2);
+  });
+
+  /**
+   * Data ISO tem 8 dígitos e sequência longa de separadores — é o falso
+   * positivo óbvio da regex nova. O corte é por contagem de dígitos justamente
+   * para ela sobreviver: um log de auditoria sem timestamp legível não serve.
+   */
+  it("data ISO não vira rótulo", () => {
+    const spy = capturar("log");
+    log.info("turn.ok", { quando: "2026-08-21T22:07:00Z", venceEm: "2026-08-22" });
+
+    const linha = spy.mock.calls[0][0] as string;
+    expect(linha).toContain("2026-08-21T22:07:00Z");
+    expect(linha).toContain("2026-08-22");
+  });
+
+  /**
+   * Emitir nunca lança — é a promessa que permite estes logs viverem dentro de
+   * blocos onde uma exceção reverteria trabalho já feito. Estrutura circular é
+   * o caso que a recursão nova poderia ter quebrado.
+   */
+  it("estrutura circular não derruba o log", () => {
+    const spy = capturar("warn");
+    const circular: Record<string, unknown> = { nome: "a" };
+    circular.eu = circular;
+
+    expect(() => log.warn("qualquer", { circular })).not.toThrow();
+    expect(spy).toHaveBeenCalled();
+  });
+
+  /**
    * A costura só funciona se o rótulo for o mesmo entre eventos — é assim que
    * uma busca devolve a conversa inteira. Como as portas de entrada entregam
    * formatos diferentes (a Z-API sem "+", quem normaliza antes com "+"), o

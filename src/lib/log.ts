@@ -32,7 +32,7 @@ import { phoneTag } from "./phone";
  *    livre de erro do provedor costuma ecoar o número do destinatário
  *    ("Z-API /send-text 400: invalid phone 5511...").
  *
- * **Por que pseudônimo (`tel_9f3a1c4d2e`) e não máscara (`5511***4321`)**:
+ * **Por que pseudônimo (`tel_9f3a1c4d2e77`) e não máscara (`5511***4321`)**:
  * a máscara escondia 5 dígitos, mas em celular BR o primeiro é sempre `9` —
  * sobravam ~10 mil combinações, e dentro da carteira de uma imobiliária os 4
  * finais já identificam a pessoa. O log da Vercel é retido e pesquisável fora
@@ -56,14 +56,81 @@ export interface LogFields {
   [k: string]: unknown;
 }
 
-/** Sequência longa de dígitos em texto livre é telefone até prova em
- * contrário — 10 a 13 dígitos cobre E.164 do BR com e sem "+"/9º dígito. */
-const DIGITOS_DE_TELEFONE = /\b\d{10,13}\b/g;
+/**
+ * Telefone em texto livre, **com ou sem separador**.
+ *
+ * A versão anterior era `\b\d{10,13}\b`, que só casa dígito contíguo — e por
+ * isso não cobria a razão de o `scrub` existir. O texto de erro que a Z-API
+ * devolve é corpo bruto de um provedor externo, e validação de telefone
+ * costuma formatar o número na mensagem: `+55 (11) 98765-4321` passava
+ * INTEIRO, sem nada, justamente pelo caminho que promete não vazar dígito.
+ *
+ * Casa uma sequência de 10 a 15 dígitos com até dois caracteres de separação
+ * entre eles (`) ` conta como dois). O corte final é por CONTAGEM DE DÍGITOS,
+ * feita depois, e não pela regex — é o que impede data ISO de virar rótulo.
+ *
+ * O `(?<!\w)` na frente não é detalhe de estilo: sem ele, o próprio rótulo
+ * `tel_9f3a1c4d2e77` seria varrido de novo nas ~1% das vezes em que o hash sai
+ * só com dígitos — e aí a MESMA pessoa teria dois rótulos, que é exatamente o
+ * defeito que o pseudônimo veio impedir. Ele também evita casar dígito no meio
+ * de um identificador.
+ */
+const TELEFONE_EM_TEXTO = /(?<!\w)\+?\d(?:[\s().-]{0,2}\d){9,14}/g;
 
-function scrub(valor: unknown): unknown {
-  return typeof valor === "string"
-    ? valor.replace(DIGITOS_DE_TELEFONE, (d) => phoneTag(d))
-    : valor;
+/**
+ * Faixa E.164 do BR, com e sem DDI e com e sem o 9º dígito.
+ *
+ * O trade-off está escolhido de propósito e é assimétrico: sobra-redigir um
+ * número que não era telefone estraga uma linha de log; sub-redigir vaza PII
+ * para um log retido fora do nosso controle de acesso. Quando a dúvida existe,
+ * ela se resolve a favor de esconder.
+ *
+ * Consequência conhecida: epoch em milissegundos tem 13 dígitos e vira rótulo.
+ * Já era assim com a máscara; o que muda é que antes saía reconhecível
+ * (`1755***0000`) e agora sai indistinguível de pessoa. Vale saber antes de
+ * investigar algo que tenha timestamp no corpo do erro.
+ */
+function pareceTelefone(trecho: string): boolean {
+  const digitos = trecho.replace(/\D/g, "").length;
+  return digitos >= 10 && digitos <= 13;
+}
+
+/**
+ * Profundidade máxima da varredura.
+ *
+ * O `scrub` precisa descer em objeto e array — o contrato deste módulo diz
+ * "telefone em QUALQUER campo, sem depender de disciplina no chamador", e
+ * tratar só string de primeiro nível tornava isso falso: `{ resposta: { erro:
+ * "…5511987654321" } }` saía limpo. Hoje nenhum call-site passa objeto, mas
+ * `LogFields` permite, e o dia em que alguém logar o corpo de uma resposta de
+ * provedor é o dia em que o vazamento aparece sem ninguém tocar neste arquivo.
+ *
+ * O teto existe porque estrutura circular faria a recursão não terminar, e
+ * este módulo tem a promessa mais dura de todas: **emitir nunca lança**. Abaixo
+ * do teto o valor é substituído em vez de percorrido — deixar passar seria
+ * exatamente o buraco que a recursão veio fechar.
+ */
+const PROFUNDIDADE_MAXIMA = 6;
+
+function ehObjetoSimples(valor: object): boolean {
+  const proto = Object.getPrototypeOf(valor);
+  return proto === Object.prototype || proto === null;
+}
+
+function scrub(valor: unknown, profundidade = 0): unknown {
+  if (typeof valor === "string") {
+    return valor.replace(TELEFONE_EM_TEXTO, (t) => (pareceTelefone(t) ? phoneTag(t) : t));
+  }
+  if (profundidade >= PROFUNDIDADE_MAXIMA) return "[profundo demais]";
+  if (Array.isArray(valor)) return valor.map((v) => scrub(v, profundidade + 1));
+  // Só objeto simples: `Date`, `Error` e afins não são percorríveis por
+  // `entries` sem virar `{}` — passam direto e o `JSON.stringify` os resolve.
+  if (valor !== null && typeof valor === "object" && ehObjetoSimples(valor)) {
+    return Object.fromEntries(
+      Object.entries(valor).map(([k, v]) => [k, scrub(v, profundidade + 1)])
+    );
+  }
+  return valor;
 }
 
 function emit(level: "info" | "warn" | "error", event: string, f: LogFields): void {

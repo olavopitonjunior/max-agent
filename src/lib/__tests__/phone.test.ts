@@ -44,7 +44,7 @@ describe("phoneTag", () => {
     for (const pedaco of ["5511987654321", "987654321", "87654321", "4321", "5511"]) {
       expect(rotulo).not.toContain(pedaco);
     }
-    expect(rotulo).toMatch(/^tel_[0-9a-f]{10}$/);
+    expect(rotulo).toMatch(/^tel_[0-9a-f]{12}$/);
   });
 
   /**
@@ -96,7 +96,7 @@ describe("phoneTag", () => {
    */
   it("sem segredo o rótulo se declara: telx_, não tel_", () => {
     vi.stubEnv("MAX_NOTIFY_SECRET", "");
-    expect(phoneTag("+5511987654321")).toMatch(/^telx_[0-9a-f]{10}$/);
+    expect(phoneTag("+5511987654321")).toMatch(/^telx_[0-9a-f]{12}$/);
   });
 });
 
