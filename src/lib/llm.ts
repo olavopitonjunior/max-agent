@@ -42,6 +42,29 @@ export interface LlmUsage {
    * cacheados custou US$ 0,00010614 enquanto a tabela de preços do ImobPro
    * dizia US$ 0,00042870 — **superestimativa de 304%**, porque a tabela não
    * tem como saber quanto do prompt foi reaproveitado.
+   *
+   * ── DISJUNTO de `promptTokens`, e isso é conversão nossa ─────────────────
+   *
+   * As duas famílias de provedor contam de jeitos opostos:
+   *
+   *  · **OpenAI/OpenRouter**: `prompt_tokens_details.cached_tokens` está DENTRO
+   *    de `prompt_tokens` (1956 de prompt, dos quais 1792 cacheados);
+   *  · **Anthropic**: `cache_read_input_tokens` é SEPARADO de `input_tokens`.
+   *
+   * O ImobPro adota a convenção da Anthropic — `calcCostUsd` soma as parcelas
+   * (`promptTokens*input + cacheReadTokens*cacheRead`) e todo produtor de lá
+   * popula assim. Mandar a contagem sobreposta faria os cacheados serem
+   * contados DUAS vezes.
+   *
+   * Hoje isso não muda o custo, porque o `gpt-5.4-nano` não tem `cacheRead` na
+   * tabela de preços e a parcela zera — mas é bomba armada: no dia em que
+   * alguém cadastrar aquele preço, a estimativa vira `1956*input +
+   * 1792*cacheRead` em vez de `164*input + 1792*cacheRead`. Pior que os 304%
+   * que este trabalho veio corrigir.
+   *
+   * Por isso `promptTokens` sai daqui **já descontado**. Quem reconcilia com a
+   * fatura do OpenRouter é o `generationId`, não a contagem de token — é
+   * exatamente para isso que ele existe.
    */
   cacheReadTokens: number;
   cacheWriteTokens: number;
@@ -163,6 +186,29 @@ interface OpenRouterResponse {
  */
 function custoDoProvedor(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/** Contador de token do provedor → inteiro não-negativo. */
+function contador(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/**
+ * Converte a contagem SOBREPOSTA do OpenAI/OpenRouter para a convenção
+ * DISJUNTA que o ImobPro usa — ver o doc de `LlmUsage.cacheReadTokens`.
+ *
+ * `Math.max(0, ...)` porque um provedor que reportasse mais cacheados que
+ * prompt (contraditório, mas nada garante que não aconteça) viraria um
+ * `promptTokens` negativo — e negativo numa coluna que alimenta budget é pior
+ * que impreciso.
+ */
+function separarCache(promptBruto: unknown, cacheadoBruto: unknown): {
+  promptTokens: number;
+  cacheReadTokens: number;
+} {
+  const prompt = contador(promptBruto);
+  const cacheado = Math.min(contador(cacheadoBruto), prompt);
+  return { promptTokens: Math.max(0, prompt - cacheado), cacheReadTokens: cacheado };
 }
 
 /**
@@ -305,9 +351,13 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
       // O provedor pode ter roteado pra outra variante; o custo é do que ELE
       // diz ter usado, não do que pedimos.
       model: data.model ?? model,
-      promptTokens: data.usage?.prompt_tokens ?? 0,
+      // Descontado: o `cached_tokens` do OpenRouter vem DENTRO do
+      // `prompt_tokens`, e o ImobPro conta as duas parcelas separadas.
+      ...separarCache(
+        data.usage?.prompt_tokens,
+        data.usage?.prompt_tokens_details?.cached_tokens
+      ),
       completionTokens: data.usage?.completion_tokens ?? 0,
-      cacheReadTokens: data.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       cacheWriteTokens: data.usage?.prompt_tokens_details?.cache_write_tokens ?? 0,
       // O crédito que ELE cobrou, não o que a tabela de preços do ImobPro
       // acha que custou. `null` quando não vier — ver `custoDoProvedor`.

@@ -148,6 +148,43 @@ describe("complete (OpenRouter)", () => {
     });
 
     /**
+     * A CONVERSÃO DE CONVENÇÃO, achada em code review cruzado (22/08).
+     *
+     * OpenAI/OpenRouter conta `cached_tokens` DENTRO de `prompt_tokens`;
+     * Anthropic conta separado, e é a convenção que o ImobPro adota — lá o
+     * `calcCostUsd` SOMA as parcelas. Mandar 1956 e 1792 faria os cacheados
+     * serem contados duas vezes.
+     *
+     * Hoje não muda o custo (o nano não tem `cacheRead` na tabela de preços,
+     * e a parcela zera), mas é bomba armada: cadastrado aquele preço, a
+     * estimativa viraria pior que os 304% que este trabalho veio corrigir.
+     */
+    it("desconta os cacheados do prompt — as duas parcelas ficam DISJUNTAS", async () => {
+      mockFetch(COM_CACHE);
+      const r = await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      // 1956 no fio, 1792 cacheados → 164 de prompt não-cacheado.
+      expect(r.usage.promptTokens).toBe(164);
+      expect(r.usage.cacheReadTokens).toBe(1792);
+      expect(r.usage.promptTokens + r.usage.cacheReadTokens).toBe(1956);
+    });
+
+    it("sem cache, o prompt passa inteiro", async () => {
+      mockFetch(OK);
+      const r = await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      expect(r.usage.promptTokens).toBe(120);
+      expect(r.usage.cacheReadTokens).toBe(0);
+    });
+
+    /** Provedor contraditório não pode virar prompt negativo numa coluna de budget. */
+    it("mais cacheados que prompt não gera número negativo", async () => {
+      mockFetch({ ...OK, usage: { prompt_tokens: 100, completion_tokens: 5,
+                                  prompt_tokens_details: { cached_tokens: 999 } } });
+      const r = await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      expect(r.usage.promptTokens).toBe(0);
+      expect(r.usage.cacheReadTokens).toBe(100);
+    });
+
+    /**
      * A regra que sustenta o outro lado: ausência vira `null`, NUNCA 0. Um
      * custo ausente carimbado como zero seria indistinguível de um turn de
      * graça, e o receptor perderia a chance de cair na tabela de preços.

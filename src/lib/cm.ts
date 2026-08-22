@@ -456,7 +456,7 @@ export async function reportUsage(
   const org = await orgById(orgId);
   if (!org) return;
   try {
-    await fetchWithTimeout(
+    const res = await fetchWithTimeout(
       `${BASE()}/api/agents/usage`,
       {
         method: "POST",
@@ -489,6 +489,27 @@ export async function reportUsage(
       },
       IMOBPRO_TIMEOUT_MS
     );
+
+    /**
+     * O status É lido, e não deveria ter sido opcional.
+     *
+     * Sem esta checagem, um 400 do zod de lá descartava a linha de custo em
+     * SILÊNCIO — o `fetch` resolve normalmente com `ok: false` e o `catch`
+     * abaixo nunca via nada. É a mesma classe de falha que o `sendEmail`
+     * (`ok:false` sem exceção) e que o "202 não prova gravação": o caminho
+     * feliz e o caminho perdido tinham exatamente a mesma aparência.
+     *
+     * Continua fire-and-forget — não retentamos e não lançamos, porque perder
+     * a contabilidade de um turn é menos grave que não responder à pessoa. O
+     * que muda é que agora aparece no log, com o motivo.
+     */
+    if (!res.ok) {
+      const corpo = await res.text().catch(() => "");
+      console.error(
+        `[cm] reportUsage recusado (${res.status}) — linha de custo PERDIDA ` +
+          `para ${usage.model}: ${corpo.slice(0, 200)}`
+      );
+    }
   } catch (err) {
     // Fire-and-forget: perder a contabilidade de um turn é ruim, não responder
     // ao usuário por causa disso é pior.
