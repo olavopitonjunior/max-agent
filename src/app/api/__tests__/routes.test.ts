@@ -42,18 +42,35 @@ vi.mock("@/lib/zapi", async (orig) => ({
   ...(await orig<typeof import("@/lib/zapi")>()),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
+vi.mock("@/lib/connection", () => ({
+  observeConnection: vi.fn().mockResolvedValue({
+    connected: true,
+    seeded: false,
+    transicao: false,
+    aguardandoConfirmacao: false,
+    alertou: null,
+  }),
+}));
 
 const { POST: webhookPost } = await import("../zapi-webhook/[secret]/route");
 const { POST: statusPost } = await import("../zapi-status/[secret]/route");
+const { POST: connPost, GET: connGet } = await import(
+  "../zapi-connection/[secret]/route"
+);
 const { POST: notifyPost } = await import("../notify/route");
 const { GET: cronInbound } = await import("../cron/inbound/route");
 const { GET: cronOutbox } = await import("../cron/outbox/route");
 const { GET: adminStatus } = await import("../admin/status/route");
 const { sign } = await import("@/lib/hmac");
+const { observeConnection } = await import("@/lib/connection");
+const { connectionStatus } = await import("@/lib/zapi");
 const { enqueueInbound } = await import("@/lib/inbound");
 const { applyStatusCallback } = await import("@/lib/delivery");
-const { enqueue: enqueueOutbox } = await import("@/lib/outbox");
+const { enqueue: enqueueOutbox, dispatchDue } = await import("@/lib/outbox");
+const dispatchDueMock = dispatchDue as unknown as ReturnType<typeof vi.fn>;
 
+const observa = observeConnection as unknown as ReturnType<typeof vi.fn>;
+const checaConexao = connectionStatus as unknown as ReturnType<typeof vi.fn>;
 const enfileira = enqueueInbound as unknown as ReturnType<typeof vi.fn>;
 const aplicaStatus = applyStatusCallback as unknown as ReturnType<typeof vi.fn>;
 const enfileiraOut = enqueueOutbox as unknown as ReturnType<typeof vi.fn>;
@@ -274,6 +291,82 @@ describe("crons", () => {
   it("com Bearer responde os totais", async () => {
     expect((await cronInbound(comAuth)).status).toBe(200);
     expect((await cronOutbox(comAuth)).status).toBe(200);
+  });
+
+  /**
+   * Antes da F7 o estado da instância só era checado com fila vencida — e com
+   * a fila vazia uma queda era invisível para o cron. Agora pergunta sempre,
+   * uma vez, e repassa a resposta ao despacho.
+   */
+  it("o cron do outbox observa a conexão em TODA passada", async () => {
+    await cronOutbox(comAuth);
+    expect(observa).toHaveBeenCalledWith({ connected: true, fonte: "cron" });
+    expect(checaConexao).toHaveBeenCalledTimes(1);
+    // O 3º argumento é a âncora do orçamento da passada (`iniciadoEm`).
+    expect(dispatchDueMock).toHaveBeenCalledWith(
+      50,
+      { connected: true, raw: {} },
+      expect.any(Number)
+    );
+  });
+
+  /**
+   * Não conseguir PERGUNTAR não é estar desconectado — é a lição do 401 de
+   * credencial que virou "instância desemparelhada" em 21/08. Sem boolean
+   * conhecido, nada é observado, e o despacho segue (fail-open).
+   */
+  it("falha ao checar a instância não observa nada e não derruba o cron", async () => {
+    checaConexao.mockRejectedValueOnce(new Error("401 — credencial"));
+    expect((await cronOutbox(comAuth)).status).toBe(200);
+    expect(observa).not.toHaveBeenCalled();
+    expect(dispatchDueMock).toHaveBeenCalledWith(50, null, expect.any(Number));
+  });
+});
+
+describe("POST /api/zapi-connection/[secret]", () => {
+  function req(secret: string) {
+    return [
+      new NextRequest(`http://max.test/api/zapi-connection/${secret}`, {
+        method: "POST",
+        body: JSON.stringify({ instanceId: "INST", connected: false }),
+        headers: { "content-type": "application/json" },
+      }),
+      { params: { secret } },
+    ] as const;
+  }
+
+  it("segredo errado é 404 — para quem sonda, a rota não existe", async () => {
+    const res = await connPost(...req("errado"));
+    expect(res.status).toBe(404);
+    expect(observa).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A rota NÃO confia no corpo: o POST é gatilho, e o estado vem de
+   * `connectionStatus()`. O payload acima diz `connected: false` e o que vale
+   * é o `true` da checagem — é o que a torna imune ao formato do callback, a
+   * reentrega e a callback fora de ordem.
+   */
+  it("ignora o corpo e observa o que a checagem disser", async () => {
+    const res = await connPost(...req("hook-secret"));
+    expect(res.status).toBe(200);
+    expect(checaConexao).toHaveBeenCalledTimes(1);
+    expect(observa).toHaveBeenCalledWith({ connected: true, fonte: "push" });
+  });
+
+  it("checagem falhando responde 200 sem observar — o cron cobre depois", async () => {
+    checaConexao.mockRejectedValueOnce(new Error("timeout"));
+    const res = await connPost(...req("hook-secret"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, checked: false });
+    expect(observa).not.toHaveBeenCalled();
+  });
+
+  it("o GET confere a URL do painel sem mandar evento", async () => {
+    const res = await connGet(...req("hook-secret"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ handler: "connection" });
+    expect(observa).not.toHaveBeenCalled();
   });
 });
 

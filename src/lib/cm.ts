@@ -6,6 +6,7 @@ import {
   fetchWithTimeout,
   imobproBase,
   IMOBPRO_TIMEOUT_MS,
+  IMOBPRO_ALERT_TIMEOUT_MS,
   IMOBPRO_TRANSCRIBE_TIMEOUT_MS,
 } from "./http";
 
@@ -479,9 +480,23 @@ export async function reportUsage(
  *                    conta tentativa; após o teto, desiste dela.
  *  - `"unavailable"` → a INTEGRAÇÃO está fora (secret ausente, rota ainda não
  *                    deployada = 404, 503, 5xx, rede/timeout). Não é culpa da
- *                    linha: NÃO conta tentativa — senão o período entre ligar
- *                    o secret aqui e o deploy da rota lá queimaria as 10
- *                    tentativas de todo desfecho e o perderia para sempre.
+ *                    linha, mas **conta tentativa assim mesmo** — ver abaixo.
+ *
+ * ── Correção de um comentário que MENTIA aqui (22/08) ────────────────────
+ *
+ * Este bloco afirmava que `unavailable` NÃO contava tentativa. Não é o que o
+ * consumidor faz: `reconcile()` (`delivery.ts`) chama `contarTentativa()` nos
+ * três desfechos, e foi decisão de code review — é o que faz o
+ * `ORDER BY report_attempts` rodiziar a fila e impede uma linha envenenada de
+ * monopolizar o lote. `MAX_REPORT_ATTEMPTS` subiu de 10 para 60 exatamente
+ * para absorver isso.
+ *
+ * O comentário errado tem custo real: em 22/08 ele me fez planejar uma
+ * rotação de segredo com deploy dos dois lados defasado, calculando a janela
+ * como gratuita. Não é — com `break` por passada, uma indisponibilidade
+ * contínua gasta ~1 tentativa por minuto rodiziada pelo backlog, e com
+ * backlog de uma linha são 60 minutos até PERDER aquele desfecho.
+ * Comentário que descreve o chamador precisa ser conferido contra ele.
  *
  * O lado de lá é idempotente pela dedupeKey; reportar duas vezes é inofensivo.
  */
@@ -536,5 +551,91 @@ export async function reportDeliveryOutcome(outcome: {
       err instanceof Error ? err.message : String(err)
     );
     return "unavailable";
+  }
+}
+
+/**
+ * Alerta de canal: a instância Z-API caiu, ou voltou. Vira e-mail no ImobPro.
+ *
+ * Mesma direção e MESMO secret do `reportDeliveryOutcome` acima
+ * (`MAX_WEBHOOK_SECRET`) — é o Max falando com o Contractmaker, e o segredo é
+ * de SERVIÇO, não de tenant. Rota irmã: `POST /api/webhooks/max/alert`.
+ *
+ * A spec previa `/api/agents/alert`. Aquela família de lá é Bearer por ORG, e
+ * este evento é da instância inteira — uma só, compartilhada pelos três
+ * tenants. Não existe org de onde tirar o token, e escolher uma seria mentir
+ * sobre o escopo.
+ *
+ * **A ORDEM das chaves faz parte do contrato.** A assinatura é sobre a string
+ * crua, e `JSON.stringify` preserva ordem de inserção — trocar `at` e `evento`
+ * de lugar muda o byte e, com ele, o hex. Travado por vetor fixo nos dois
+ * repos (`hmac-parity.test.ts`).
+ *
+ * Devolve boolean, não o tri-estado do report de entrega: aqui não existe fila
+ * com contador de tentativas para proteger. **Falso = não carimba**, e a
+ * passada seguinte do cron reenvia — é assim que o retry acontece, sem código
+ * de retry. Por isso o receptor devolve 500 quando o e-mail não sai: um 200
+ * mentiroso perderia o alerta para sempre.
+ */
+export type AlertaDeCanal =
+  | { evento: "zapi_desconectada"; at: string; represadas: number }
+  | { evento: "zapi_reconectada"; at: string; foraPorMs: number };
+
+export async function reportAlert(alerta: AlertaDeCanal): Promise<boolean> {
+  const secret = process.env.MAX_WEBHOOK_SECRET;
+  if (!secret) {
+    // Mesmo default seguro do report de entrega: sem secret a integração está
+    // desligada. Ruidoso porque aqui o silêncio é o defeito — quem ligou o
+    // alerta e não viu e-mail precisa achar a explicação no log.
+    console.error(
+      "[cm] MAX_WEBHOOK_SECRET ausente — alerta de canal NÃO enviado " +
+        `(${alerta.evento})`
+    );
+    return false;
+  }
+
+  const rawBody = JSON.stringify(alerta);
+  const timestamp = String(Date.now());
+  try {
+    const res = await fetchWithTimeout(
+      `${BASE()}/api/webhooks/max/alert`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-max-timestamp": timestamp,
+          "x-max-signature": sign(timestamp, rawBody, secret),
+        },
+        body: rawBody,
+      },
+      // Teto PRÓPRIO, e maior: o receptor manda o e-mail antes de responder.
+      // Ver o comentário de IMOBPRO_ALERT_TIMEOUT_MS — errar para baixo aqui
+      // produz alerta duplicado em série, não alerta perdido.
+      IMOBPRO_ALERT_TIMEOUT_MS
+    );
+    if (!res.ok) {
+      /**
+       * QUALQUER não-2xx devolve false, e false significa RETENTAR na próxima
+       * passada — inclusive 400. É diferente do `reportDeliveryOutcome` acima,
+       * que classifica 4xx como "recusado" e desiste, e a diferença é
+       * deliberada: lá o pior caso é um desfecho de entrega perdido, aqui é
+       * ninguém saber que o canal caiu.
+       *
+       * O custo assumido: um 400 por divergência de contrato (campo
+       * renomeado num lado só) vira laço de uma tentativa por minuto até
+       * alguém consertar. Ruidoso, e ruidoso é o lado certo de errar — mas a
+       * defesa de verdade contra isso é o vetor fixo de paridade, que quebra
+       * no CI antes de qualquer deploy.
+       */
+      console.error(`[cm] alerta de canal recusado (${res.status}): ${alerta.evento}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(
+      "[cm] alerta de canal falhou:",
+      err instanceof Error ? err.message : String(err)
+    );
+    return false;
   }
 }

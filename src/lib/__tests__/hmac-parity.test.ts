@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { sign, verifySignature } from "../hmac";
+import { reportAlert } from "../cm";
 
 /**
  * Vetor fixo do HMAC do `/notify` — a metade daqui de um contrato de DOIS repos.
@@ -36,6 +37,19 @@ const ASSINATURA =
 const ADMIN_PAYLOAD = "GET./api/admin/conversations?orgId=org-1&limit=20";
 const ADMIN_ASSINATURA =
   "2878ff9c3bee22542de0e4a6a26e9f27f83e1e48a0afc5936be41d5afd578ac8";
+
+/** Vetor do alerta de canal (F7) — a outra metade está no Contractmaker, em
+ *  `apps/web/src/lib/max/__tests__/hmac-parity.test.ts`, com este literal. */
+const ALERTA_RAW_BODY =
+  '{"evento":"zapi_desconectada","at":"2026-08-22T03:14:00.000Z","represadas":4}';
+const ALERTA_ASSINATURA =
+  "456c4fc09a08ab9f57ad5e33b6c792dea0bd1d71b4d39103153664b9c0492f34";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe("paridade do HMAC com o ImobPro", () => {
   it("o vetor fixo bate — não mudar sem mudar o outro repo junto", () => {
@@ -75,7 +89,51 @@ describe("paridade do HMAC com o ImobPro", () => {
     ).toEqual({ ok: true });
   });
 
+  /**
+   * Terceiro vetor: o corpo do ALERTA DE CANAL
+   * (`POST /api/webhooks/max/alert`, F7).
+   *
+   * O algoritmo é o mesmo dos anteriores; o que este trava é o **corpo**. A
+   * assinatura é sobre a string crua e `JSON.stringify` preserva ordem de
+   * inserção, então a ORDEM das chaves é parte do contrato quer se queira ou
+   * não — melhor que esteja escrita num lugar que quebra.
+   */
+  it("o vetor do alerta de canal bate", () => {
+    expect(sign(TIMESTAMP, ALERTA_RAW_BODY, SECRET)).toBe(ALERTA_ASSINATURA);
+  });
+
+  /**
+   * E a prova que fecha: quem monta o corpo em produção é `reportAlert()`, e é
+   * ELE que produz este byte. Reafirmar o literal contra uma cópia à mão
+   * provaria só que a cópia bate com ela mesma — e a ordem das chaves, que é
+   * o que este vetor existe para travar, mora justamente no objeto que aquela
+   * função monta.
+   */
+  it("é `reportAlert()` que produz este corpo e esta assinatura", async () => {
+    vi.stubEnv("MAX_WEBHOOK_SECRET", SECRET);
+    vi.stubEnv("CONTRACTMAKER_API_URL", "https://cm.test");
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // O timestamp entra na assinatura; sem congelá-lo o hex seria outro a cada
+    // execução, e o vetor deixaria de ser comparável com o do outro repo.
+    vi.setSystemTime(Number(TIMESTAMP));
+
+    const ok = await reportAlert({
+      evento: "zapi_desconectada",
+      at: "2026-08-22T03:14:00.000Z",
+      represadas: 4,
+    });
+
+    expect(ok).toBe(true);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toBe("https://cm.test/api/webhooks/max/alert");
+    expect(init.body).toBe(ALERTA_RAW_BODY);
+    expect(init.headers["x-max-timestamp"]).toBe(TIMESTAMP);
+    expect(init.headers["x-max-signature"]).toBe(ALERTA_ASSINATURA);
+  });
+
   it("é hex minúsculo de 64 caracteres (sha256)", () => {
     expect(ASSINATURA).toMatch(/^[0-9a-f]{64}$/);
+    expect(ALERTA_ASSINATURA).toMatch(/^[0-9a-f]{64}$/);
   });
 });
