@@ -36,6 +36,30 @@ export interface LlmUsage {
   model: string;
   promptTokens: number;
   completionTokens: number;
+  /**
+   * Tokens do prompt que vieram do CACHE DE PREFIXO do provedor. É o campo que
+   * torna a conta honesta: medido em 21/08, um turn com 1792 de 1956 tokens
+   * cacheados custou US$ 0,00010614 enquanto a tabela de preços do ImobPro
+   * dizia US$ 0,00042870 — **superestimativa de 304%**, porque a tabela não
+   * tem como saber quanto do prompt foi reaproveitado.
+   */
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /**
+   * Crédito REAL cobrado, direto do `usage.cost` do OpenRouter.
+   *
+   * **`null` quando o campo não vier — nunca 0.** Zero é um número, e um turn
+   * que custou zero de verdade tem que ser distinguível de um que ninguém
+   * mediu; o segundo precisa cair na tabela de preços do outro lado. O
+   * receptor trata `null` como ausência e marca a linha como `estimated`.
+   */
+  costUsd: number | null;
+  /**
+   * `id` da resposta do OpenRouter. Não é usado hoje: existe para reconciliar
+   * uma linha contra o `/v1/generation` deles quando alguém contestar a conta.
+   * Sem ele, "por que este turn custou isso?" não tem resposta possível.
+   */
+  generationId: string | null;
   latencyMs: number;
   success: boolean;
 }
@@ -108,12 +132,37 @@ interface OpenRouterToolCall {
 }
 
 interface OpenRouterResponse {
+  /** Id da geração, para reconciliação via `/v1/generation`. */
+  id?: string;
   model?: string;
   choices?: Array<{
     message?: { content?: string | null; tool_calls?: OpenRouterToolCall[] };
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  /**
+   * O `usage` inline do OpenRouter já traz custo e cache — não exige nenhum
+   * parâmetro no request. Até 22/08 este tipo declarava só os dois contadores
+   * de token, e o resto era descartado na porta de entrada.
+   */
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    /** Crédito real cobrado, em USD. */
+    cost?: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+      cache_write_tokens?: number;
+    };
+  };
   error?: { message?: string };
+}
+
+/**
+ * Número do provedor → número nosso, com uma regra só: **o que não veio vira
+ * `null`, nunca 0.** Um custo ausente carimbado como zero seria indistinguível
+ * de um turn de graça, e o receptor perderia a chance de cair na estimativa.
+ */
+function custoDoProvedor(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
 /**
@@ -169,6 +218,12 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
         model,
         promptTokens: 0,
         completionTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        // Não houve cobrança conhecida — e `null` diz isso sem afirmar que
+        // foi de graça.
+        costUsd: null,
+        generationId: null,
         latencyMs: Date.now() - startedAt,
         success: false,
       } satisfies LlmUsage,
@@ -252,6 +307,12 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
       model: data.model ?? model,
       promptTokens: data.usage?.prompt_tokens ?? 0,
       completionTokens: data.usage?.completion_tokens ?? 0,
+      cacheReadTokens: data.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      cacheWriteTokens: data.usage?.prompt_tokens_details?.cache_write_tokens ?? 0,
+      // O crédito que ELE cobrou, não o que a tabela de preços do ImobPro
+      // acha que custou. `null` quando não vier — ver `custoDoProvedor`.
+      costUsd: custoDoProvedor(data.usage?.cost),
+      generationId: data.id ?? null,
       latencyMs: Date.now() - startedAt,
       success: true,
     },
