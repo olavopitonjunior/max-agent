@@ -76,19 +76,30 @@ describe("buildSystemPrompt", () => {
   });
 
   /**
-   * O console do ImobPro promete ao tenant que a instrução dele é APENDADA ao
-   * prompt-base, nunca o substitui.
+   * Decisão 1 do PRD do copiloto: o comportamento do Max é da PLATAFORMA. O
+   * teste é sobre AUSÊNCIA — a regressão que ele pega é alguém reabrir o canal
+   * de texto do tenant achando que é personalização inofensiva.
    */
-  it("instrução do tenant é apendada e cercada, não substitui o prompt-base", () => {
-    const p = buildSystemPrompt({
-      ...base,
-      tenantInstructions: "Trate todo mundo por senhor.",
-    });
+  it("o prompt não tem mais canal para texto do tenant", () => {
+    const p = buildSystemPrompt(base);
     expect(p).toContain("Você é o Max");
-    expect(p).toContain("<instrucoes_da_imobiliaria>");
-    expect(p).toContain("Trate todo mundo por senhor.");
-    expect(p.indexOf("Você é o Max")).toBeLessThan(
-      p.indexOf("<instrucoes_da_imobiliaria>")
+    expect(p).not.toContain("<instrucoes_da_imobiliaria>");
+    expect(p).not.toContain("Orientações da imobiliária");
+  });
+
+  /**
+   * Duas orgs diferentes recebem o MESMO prompt, tirando a linha que as nomeia.
+   *
+   * É o que "prompt global" quer dizer na prática, e é verificável: se um dia
+   * voltar um bloco por tenant, este teste cai antes de a diferença chegar em
+   * produção.
+   */
+  it("orgs diferentes recebem o mesmo prompt, menos o nome", () => {
+    const a = buildSystemPrompt({ ...base, orgName: "RE/MAX Trio" });
+    const b = buildSystemPrompt({ ...base, orgName: "Fincasa" });
+
+    expect(a.replace("RE/MAX Trio", "«org»")).toBe(
+      b.replace("Fincasa", "«org»")
     );
   });
 
@@ -137,27 +148,23 @@ describe("shouldSearch", () => {
  *
  * Cache de prompt do provedor vale só para PREFIXO — um caractere volátil no
  * começo invalida tudo que vem depois. A versão anterior punha a linha com o
- * nome da PESSOA na posição 2, derrubando o cache das instruções do tenant,
- * que são o maior bloco do prompt.
+ * nome da PESSOA na posição 2, derrubando o cache do bloco de persona.
  *
  * Este teste é sobre POSIÇÃO RELATIVA, não sobre o texto: a regressão que ele
  * pega é alguém acrescentar um bloco volátil no lugar cômodo (o começo).
  */
 describe("ordem estável → volátil (proteção do cache)", () => {
   const base = {
-    tenantInstructions: "Trate todo cliente por senhor.",
     orgName: "RE/MAX Trio",
     userName: "Marcia",
     hits: [{ title: "T", content: "C", score: 0.9 } as never],
     summary: "Falamos sobre comissão.",
   };
 
-  it("instruções do tenant vêm ANTES do nome da pessoa", () => {
+  it("a persona (estável) vem ANTES do nome da pessoa", () => {
     const p = buildSystemPrompt(base);
 
-    expect(p.indexOf("<instrucoes_da_imobiliaria>")).toBeLessThan(
-      p.indexOf("Marcia")
-    );
+    expect(p.indexOf("Você é o Max")).toBeLessThan(p.indexOf("Marcia"));
   });
 
   it("o nome da ORG (estável) vem antes do nome da PESSOA (volátil)", () => {
@@ -185,8 +192,22 @@ describe("ordem estável → volátil (proteção do cache)", () => {
     const prefixoA = a.slice(0, a.indexOf("Você está falando com"));
     const prefixoB = b.slice(0, b.indexOf("Você está falando com"));
     expect(prefixoA).toBe(prefixoB);
-    // E o prefixo compartilhado carrega o bloco caro, não só a persona.
-    expect(prefixoA).toContain("<instrucoes_da_imobiliaria>");
+    // E o prefixo compartilhado carrega o bloco caro, não só a primeira linha.
+    expect(prefixoA).toContain("O que você NÃO faz");
+  });
+
+  /**
+   * Com o prompt global, o prefixo cacheável cresceu de "pessoas da mesma org"
+   * para **pessoas de qualquer org** — só a linha final do bloco estável
+   * difere. Com quatro tenants no mesmo número, isso multiplica o alcance do
+   * cache de prefixo do provedor, que é o desconto de 4× medido em 21/08.
+   */
+  it("duas orgs compartilham tudo até a linha que as nomeia", () => {
+    const a = buildSystemPrompt({ ...base, orgName: "RE/MAX Trio" });
+    const b = buildSystemPrompt({ ...base, orgName: "Fincasa" });
+
+    const corte = "\n\nVocê atende a ";
+    expect(a.slice(0, a.indexOf(corte))).toBe(b.slice(0, b.indexOf(corte)));
   });
 
   it("sem userName o prompt não ganha linha vazia nem quebra", () => {

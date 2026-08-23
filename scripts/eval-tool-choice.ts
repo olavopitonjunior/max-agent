@@ -89,7 +89,6 @@ async function main() {
     orgName: "RE/MAX Trio",
     userName: "Marcia Gerente",
     hits: [],
-    tenantInstructions: null,
   });
 
   console.log(`modelo: ${model}\ncasos:  ${CASOS.length}\n`);
