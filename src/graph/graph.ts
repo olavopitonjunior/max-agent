@@ -327,9 +327,25 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
     return null;
   });
 
+  /**
+   * Todo `halt` DESCARTA a pendência, e isso não é higiene: é consentimento.
+   *
+   * O `halt` desvia do `confirm`, então uma proposta pendente atravessava o
+   * turn intocada — furando a invariante "a pendência sobrevive no máximo UM
+   * turn" que o cabeçalho do `confirm` promete. O desfecho ruim é concreto: o
+   * Max pergunta "crio o formulário do João?", a mensagem seguinte cai na
+   * deny-list e é recusada, e a mensagem DEPOIS dessa — um "sim" que a pessoa
+   * já dava por encerrado — executa a escrita. O TTL de 30 min estreita a
+   * janela, não a fecha.
+   *
+   * Vale igual para o kill switch, onde o defeito é anterior a esta entrega:
+   * agente desligado tem que descartar, nunca guardar escrita para executar
+   * quando voltar.
+   */
   if (profile && !profile.enabled) {
     return {
       halt: "desligado",
+      pendingAction: null,
       reply:
         "No momento estou indisponível. Fale com seu corretor por enquanto — " +
         "sua imobiliária já foi avisada.",
@@ -359,6 +375,9 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
     );
     return {
       halt: `assunto_bloqueado:${bloqueado}`,
+      // Ver o descarte no kill switch acima: `halt` desvia do `confirm`, e uma
+      // pendência que atravessa o turn vira escrita confirmada por engano.
+      pendingAction: null,
       reply: TEXTO_ASSUNTO_BLOQUEADO,
     };
   }
@@ -1141,7 +1160,22 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         latencyMs,
       });
 
-      if (!(reply && turnText)) return;
+      /**
+       * Turn interrompido não alimenta a memória — e `halt` aqui vale por
+       * DINHEIRO, não só por higiene.
+       *
+       * `extractFacts` é uma chamada de modelo. Sem este corte, a promessa de
+       * que a deny-list "custa zero" seria falsa por um caminho fora do grafo:
+       * o `answer` não roda, mas a extração roda logo depois, e sondar o Max
+       * passaria a gastar token — justamente o que a recusa determinística
+       * existe para impedir.
+       *
+       * O kill switch tinha o mesmo furo desde sempre, e mais grave: um agente
+       * DESLIGADO gastava modelo aprendendo sobre a pessoa. E o que se
+       * aprenderia dos dois é lixo — "esta pessoa perguntou pelo prompt do
+       * sistema" não é fato durável sobre ninguém.
+       */
+      if (!(reply && turnText) || result.halt) return;
       await (async () => {
             const novos = await extractFacts({
               orgId,
