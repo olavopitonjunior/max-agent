@@ -51,7 +51,13 @@ import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
 import { checkpointerPool } from "@/lib/db";
 import { conversationKey, phoneTag } from "@/lib/phone";
 import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
-import { buildSystemPrompt, shouldSearch } from "./prompt";
+import {
+  assuntoBloqueado,
+  buildSystemPrompt,
+  shouldSearch,
+  TEXTO_ASSUNTO_BLOQUEADO,
+} from "./prompt";
+import { sanitizar } from "./compose";
 import type { InboundMessage } from "@/lib/zapi";
 
 /**
@@ -108,20 +114,49 @@ export const MaxState = Annotation.Root({
     default: () => null,
   }),
 
-  /** Instruções do tenant, lidas uma vez por turn no `gate`. */
-  instructions: Annotation<string | null>({
-    reducer: (_prev, next) => next,
-    default: () => null,
-  }),
-
   hits: Annotation<KnowledgeHit[]>({
     reducer: (_prev, next) => next,
     default: () => [],
   }),
+  /**
+   * A resposta PRONTA para sair. Quem escreve aqui é template ou o `compose`.
+   *
+   * Texto do modelo nunca chega direto: ele entra por `draft` e só vira `reply`
+   * depois do sanitizador. Ver o cabeçalho de `compose.ts`.
+   */
   reply: Annotation<string | null>({
     reducer: (_prev, next) => next,
     default: () => null,
   }),
+
+  /**
+   * Texto CRU do modelo, ainda não sanitizado. **O único caminho de saída de
+   * texto gerado.**
+   *
+   * Existe para que "só se sanitiza o que o modelo escreveu" seja uma
+   * propriedade do GRAFO e não uma regra que alguém precise lembrar: o `answer`
+   * não tem como publicar texto gerado sem passar pelo `compose`, porque não
+   * escreve em `reply` no caminho de texto livre. O inverso também vale — o
+   * link de formulário, que sai de template, não corre risco de ser comido pelo
+   * padrão de id interno do sanitizador.
+   */
+  draft: Annotation<string | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+
+  /**
+   * Padrões que o sanitizador derrubou neste turn. Auditoria, nunca prompt.
+   *
+   * Reducer de SUBSTITUIÇÃO (não acumula): é medida de um turn. E, ao contrário
+   * de `usage`/`toolLog`, lista vazia aqui significa "passou limpo" e não
+   * "zera" — por isso o reducer é `(_p, n) => n` e não tem sentinela.
+   */
+  bloqueios: Annotation<string[]>({
+    reducer: (_prev, next) => next,
+    default: () => [],
+  }),
+
   halt: Annotation<string | null>({
     reducer: (_prev, next) => next,
     default: () => null,
@@ -292,12 +327,58 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
     return null;
   });
 
+  /**
+   * Todo `halt` DESCARTA a pendência, e isso não é higiene: é consentimento.
+   *
+   * O `halt` desvia do `confirm`, então uma proposta pendente atravessava o
+   * turn intocada — furando a invariante "a pendência sobrevive no máximo UM
+   * turn" que o cabeçalho do `confirm` promete. O desfecho ruim é concreto: o
+   * Max pergunta "crio o formulário do João?", a mensagem seguinte cai na
+   * deny-list e é recusada, e a mensagem DEPOIS dessa — um "sim" que a pessoa
+   * já dava por encerrado — executa a escrita. O TTL de 30 min estreita a
+   * janela, não a fecha.
+   *
+   * Vale igual para o kill switch, onde o defeito é anterior a esta entrega:
+   * agente desligado tem que descartar, nunca guardar escrita para executar
+   * quando voltar.
+   */
   if (profile && !profile.enabled) {
     return {
       halt: "desligado",
+      pendingAction: null,
       reply:
         "No momento estou indisponível. Fale com seu corretor por enquanto — " +
         "sua imobiliária já foi avisada.",
+    };
+  }
+
+  /**
+   * Deny-list de assunto — DEPOIS do kill switch, de propósito.
+   *
+   * Um agente desligado que respondesse "não falo da minha configuração"
+   * mentiria sobre o próprio estado: quem está desligado está indisponível, e é
+   * isso que a pessoa precisa ouvir. A ordem inversa economizaria uma chamada
+   * HTTP e trocaria a resposta certa pela barata.
+   *
+   * Daqui pra frente é que vale o "custo zero": o corte acontece antes do RAG e
+   * antes do modelo. Sondar o Max não gasta token nem embedding, e a resposta é
+   * a mesma em toda tentativa — determinismo é metade do valor de uma recusa.
+   *
+   * Não entra no histórico (o `halt` corta antes do `compact` e nenhum nó
+   * acrescenta `messages`): a pergunta bloqueada não vira contexto do turno
+   * seguinte, o que é exatamente o que se quer de uma tentativa de sondagem.
+   */
+  const bloqueado = assuntoBloqueado(state.inbound.text ?? "");
+  if (bloqueado) {
+    console.warn(
+      `[gate] assunto bloqueado (${bloqueado}) em ${state.identity.orgId}`
+    );
+    return {
+      halt: `assunto_bloqueado:${bloqueado}`,
+      // Ver o descarte no kill switch acima: `halt` desvia do `confirm`, e uma
+      // pendência que atravessa o turn vira escrita confirmada por engano.
+      pendingAction: null,
+      reply: TEXTO_ASSUNTO_BLOQUEADO,
     };
   }
 
@@ -305,7 +386,11 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
   // Anthropic e este runtime fala com o OpenRouter. O registry do ImobPro já
   // declara `supports.model: false` pro Max — a tela não oferece o controle
   // justamente porque ele não valeria nada aqui.
-  return { instructions: profile?.instructions?.composed ?? null };
+  //
+  // `profile.instructions` também não é mais lido: o prompt do Max é GLOBAL da
+  // plataforma (decisão 1 do PRD do copiloto). O perfil continua sendo buscado
+  // porque dele vêm `enabled` e, no PR 7, a seleção de modelo.
+  return {};
 }
 
 /**
@@ -483,7 +568,6 @@ async function retrieve(state: MaxStateType): Promise<MaxUpdate> {
 
 async function answer(state: MaxStateType): Promise<MaxUpdate> {
   const system = buildSystemPrompt({
-    tenantInstructions: state.instructions,
     orgName: state.identity.orgName,
     userName: displayName(state.identity),
     hits: state.hits,
@@ -608,12 +692,17 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     };
   }
 
+  /**
+   * Texto livre do modelo. Vai para `draft`, **não** para `reply`.
+   *
+   * E o turno do assistente NÃO é acrescentado aqui: quem acrescenta é o
+   * `compose`, com o texto já sanitizado. Gravar o cru no histórico deixaria o
+   * encanamento no contexto do turno seguinte — o modelo leria o próprio JSON
+   * vazado como exemplo do que fazer.
+   */
   return {
-    messages: [
-      { role: "user", content: userText },
-      { role: "assistant", content: result.text },
-    ],
-    reply: result.text,
+    messages: [{ role: "user", content: userText }],
+    draft: result.text,
     usage: usageDoTurn,
     // Mesma proteção do `usage` acima: `trilha` é `[]` quando não houve
     // chamada, e `[]` é o sinal de reset do reducer. Hoje seria inofensivo
@@ -622,6 +711,45 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     // alguém quebrar a topologia este `[]` apagaria em silêncio o que o
     // `confirm` acabou de gravar.
     ...(trilha.length > 0 ? { toolLog: trilha } : {}),
+  };
+}
+
+/**
+ * O ÚNICO ponto por onde a resposta sai.
+ *
+ * Hoje faz uma coisa só — sanitizar o texto do modelo —, e mesmo assim é um nó
+ * em vez de duas linhas dentro do `answer`. A razão é o que vem depois: o áudio
+ * (PR 10) precisa vocalizar **a string final**, não uma segunda geração, e o
+ * `<dados_do_sistema>` (PR 6) traz mais uma fonte de texto para o mesmo funil.
+ * Três lugares que compõem a resposta viram três lugares que esquecem coisas
+ * diferentes; um lugar só é o desenho.
+ *
+ * Passagem franca quando não há `draft`: os caminhos de template (confirmação,
+ * kill switch, deny-list, falha do modelo) já produziram a resposta final e
+ * atravessam sem serem tocados — o link de formulário sai byte a byte como o
+ * template escreveu.
+ */
+async function compose(state: MaxStateType): Promise<MaxUpdate> {
+  if (state.draft === null) return {};
+
+  const { texto, bloqueios } = sanitizar(state.draft);
+
+  if (bloqueios.length > 0) {
+    // Nível de aviso e não de erro: o turno saiu, e o que se quer é o padrão
+    // aparecendo no log para alguém correlacionar com a linha da auditoria.
+    console.warn(
+      `[compose] saída sanitizada (${bloqueios.join(",")}) em ${state.identity.orgId}`
+    );
+  }
+
+  return {
+    reply: texto,
+    // Consumido: se sobrasse no checkpoint, o turno seguinte que respondesse
+    // por template encontraria um `draft` velho e o `compose` publicaria a
+    // resposta do turno passado por cima.
+    draft: null,
+    bloqueios,
+    messages: [{ role: "assistant", content: texto }],
   };
 }
 
@@ -678,8 +806,17 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
   }
 }
 
-function afterGate(state: MaxStateType): "confirm" | typeof END {
-  return state.halt ? END : "confirm";
+/**
+ * `halt` corta o turn, mas a resposta ainda tem que SAIR — e sair pelo mesmo
+ * lugar que todas as outras.
+ *
+ * Antes ia direto pro END. Passa pelo `compose` porque é lá que a mensagem vai
+ * ser montada quando houver áudio e segunda linha de outbox: um caminho que
+ * escapasse dessa montagem entregaria o kill switch por um formato e o resto
+ * por outro.
+ */
+function afterGate(state: MaxStateType): "confirm" | "compose" {
+  return state.halt ? "compose" : "confirm";
 }
 
 /**
@@ -687,11 +824,23 @@ function afterGate(state: MaxStateType): "confirm" | typeof END {
  *
  * Ele responde quando executou, cancelou ou falhou — nos três casos o turn está
  * resolvido e passar pelo modelo seria pagar por uma resposta que já existe.
- * Vai direto pro `compact`, que ainda precisa rodar: o `confirm` acrescentou
- * turnos ao histórico como qualquer outro nó.
+ * Vai pro `compose`, e de lá pro `compact`, que ainda precisa rodar: o `confirm`
+ * acrescentou turnos ao histórico como qualquer outro nó.
  */
-function afterConfirm(state: MaxStateType): "retrieve" | "compact" {
-  return state.reply ? "compact" : "retrieve";
+function afterConfirm(state: MaxStateType): "retrieve" | "compose" {
+  return state.reply ? "compose" : "retrieve";
+}
+
+/**
+ * Turn interrompido não compacta.
+ *
+ * `halt` é kill switch ou deny-list: dois caminhos cujo valor é custar ZERO
+ * token. Deixar o `compact` rodar depois deles gastaria uma chamada de modelo
+ * numa thread comprida — justamente no turno que existe para não gastar
+ * nenhuma.
+ */
+function afterCompose(state: MaxStateType): "compact" | typeof END {
+  return state.halt ? END : "compact";
 }
 
 export function buildGraph() {
@@ -700,15 +849,23 @@ export function buildGraph() {
     .addNode("confirm", confirm)
     .addNode("retrieve", retrieve)
     .addNode("answer", answer)
+    .addNode("compose", compose)
     .addNode("compact", compact)
     .addEdge(START, "gate")
-    .addConditionalEdges("gate", afterGate, { confirm: "confirm", [END]: END })
+    .addConditionalEdges("gate", afterGate, {
+      confirm: "confirm",
+      compose: "compose",
+    })
     .addConditionalEdges("confirm", afterConfirm, {
       retrieve: "retrieve",
-      compact: "compact",
+      compose: "compose",
     })
     .addEdge("retrieve", "answer")
-    .addEdge("answer", "compact")
+    .addEdge("answer", "compose")
+    .addConditionalEdges("compose", afterCompose, {
+      compact: "compact",
+      [END]: END,
+    })
     .addEdge("compact", END);
 }
 
@@ -950,6 +1107,10 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
       reply: null,
       halt: null,
       propostaDescartada: false,
+      // `draft` restaurado seria o pior dos dois: o `compose` publicaria a
+      // resposta do turno PASSADO por cima de uma resposta de template deste.
+      draft: null,
+      bloqueios: [],
       // Zerados como `reply`, e pelo mesmo motivo: o checkpointer restaura o
       // estado inteiro, então sem isto o consumo e a trilha do turn passado
       // voltariam somados ao deste. Lista vazia é o sinal de reset (ver o
@@ -968,6 +1129,23 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   const usage = result.usage ?? [];
   const tools = result.toolLog ?? [];
   const latencyMs = Date.now() - iniciadoEm;
+
+  /**
+   * O DESFECHO do turn, na mesma coluna que os desfechos das saídas
+   * antecipadas (`sair()` já grava "ambiguo", "desconhecido_silenciado" e
+   * afins ali). `error` nesta tabela sempre significou "por que este turn não
+   * foi um turn normal", não "houve exceção".
+   *
+   * Os dois casos que passam a aparecer nunca coexistem: `halt` corta antes do
+   * `answer`, então não há `draft` para sanitizar quando ele está setado. E os
+   * dois eram invisíveis até agora — inclusive o kill switch, que desligava o
+   * agente sem deixar rastro nenhum na auditoria de conversa.
+   */
+  const desfecho =
+    result.halt ??
+    (result.bloqueios?.length
+      ? `sanitizado:${result.bloqueios.join(",")}`
+      : null);
 
   return {
     reply,
@@ -996,9 +1174,25 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         tools,
         usage,
         latencyMs,
+        error: desfecho,
       });
 
-      if (!(reply && turnText)) return;
+      /**
+       * Turn interrompido não alimenta a memória — e `halt` aqui vale por
+       * DINHEIRO, não só por higiene.
+       *
+       * `extractFacts` é uma chamada de modelo. Sem este corte, a promessa de
+       * que a deny-list "custa zero" seria falsa por um caminho fora do grafo:
+       * o `answer` não roda, mas a extração roda logo depois, e sondar o Max
+       * passaria a gastar token — justamente o que a recusa determinística
+       * existe para impedir.
+       *
+       * O kill switch tinha o mesmo furo desde sempre, e mais grave: um agente
+       * DESLIGADO gastava modelo aprendendo sobre a pessoa. E o que se
+       * aprenderia dos dois é lixo — "esta pessoa perguntou pelo prompt do
+       * sistema" não é fato durável sobre ninguém.
+       */
+      if (!(reply && turnText) || result.halt) return;
       await (async () => {
             const novos = await extractFacts({
               orgId,

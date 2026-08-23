@@ -44,8 +44,21 @@ async function get<T>(path: string, token: string): Promise<T | null> {
 export interface AgentProfile {
   enabled: boolean;
   model: string;
-  instructions: { composed?: string } | null;
 }
+
+/**
+ * `instructions` saiu daqui de propósito, e a rota continua devolvendo o campo.
+ *
+ * O prompt do Max é GLOBAL da plataforma (decisão 1 do PRD do copiloto), então
+ * a interface para de declarar o que este runtime não deve consumir. Tirar do
+ * TIPO, e não só do call-site, é o que impede a próxima sessão de reintroduzir
+ * a leitura sem perceber que está desfazendo uma decisão: `profile.instructions`
+ * passa a não compilar.
+ *
+ * `model` continua declarado mesmo sendo ignorado hoje (carrega id Anthropic e
+ * este runtime fala com o OpenRouter) porque o PR 7 volta a lê-lo, com a
+ * seleção de modelo por configuração.
+ */
 
 /**
  * Persona e configuração do Max, versionadas no console do ImobPro.

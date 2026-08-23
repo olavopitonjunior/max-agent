@@ -104,6 +104,18 @@ inboundTranscript: Annotation<string | null>({ reducer: (_p, n) => n, default: (
 
 **Campo removido:** `instructions`. O `AgentProfile.instructions` deixa de ser lido (decisão 1 do PRD). O `gate` continua chamando `fetchProfile`, porque de lá vêm `enabled`, `ragScope` e agora a seleção de modelo — só para de ler o texto.
 
+> **ENTREGUE no PR 3 (22/08).** A remoção foi além do call-site: o campo saiu da
+> interface `AgentProfile` em `src/lib/cm.ts`, então `profile.instructions`
+> **não compila** — é o que impede a próxima sessão de reintroduzir a leitura
+> sem perceber que está desfazendo uma decisão. A rota do ImobPro continua
+> devolvendo `instructions.composed`; quem parou foi o consumidor, e por isso
+> não houve mudança cross-repo. Conferido em produção antes de remover: as
+> quatro orgs respondem `{ platform: null, tenant: null, composed: "" }` — a
+> remoção é no-op de comportamento e o que ela impede é o texto de amanhã.
+>
+> Dois campos novos no estado, que a §1.2 acima não previa e que o sanitizador
+> exigiu — `draft` e `bloqueios`. Ver §6.1.
+
 ### 1.3 O laço de ferramenta
 
 ```ts
@@ -465,7 +477,84 @@ Ordem: **áudio primeiro, texto depois**. Quem está de fone escuta e segue; que
 
 O sanitizador do `compose` é **o mesmo ponto por onde o TTS passa** — a versão falada herda a garantia por construção, não por disciplina.
 
-### 6.1 Eval de escolha de ferramenta
+### 6.1 O que o PR 3 entregou, e as três divergências do desenho
+
+**ENTREGUE em 22/08.** Prompt global, deny-list e sanitizador. Três coisas
+saíram diferentes do que está escrito acima, e cada uma paga uma conta:
+
+1. **O sanitizador não alcança texto de template — e isso é por CAMINHO, não
+   por disciplina.** A tabela do §6 diz "sanitizador único no `compose`", o que
+   lido ao pé da letra passaria `textoCriado()` pelo filtro — e o link do
+   formulário carrega um token que **é um cuid**, exatamente o que o padrão
+   `id_interno` derruba. A saída seria matar o link que é a razão do turno.
+   Então o texto do modelo deixou de virar `state.reply` diretamente: ele cai em
+   **`state.draft`**, e o único consumidor de `draft` é o `compose`. Não existe
+   atalho de `complete().text` para `reply`. O teste afirma as duas coisas
+   juntas — que o link sai byte a byte, **e** que aquele mesmo texto seria
+   derrubado se tivesse vindo do modelo.
+2. **O corte é por LINHA, não por trecho.** Remover só o casamento deixaria
+   "Vou chamar  pra você" — pior que a linha ausente, porque parece resposta.
+   Se nada de pé sobrar, entra texto humano de contingência. O critério de
+   "sobrou resposta" **não é comprimento**: a primeira versão exigia 12
+   caracteres e reprovava "Tudo certo.", que é resposta perfeita num canal cujo
+   prompt manda escrever em duas ou três frases. Virou "tem palavra e não
+   termina em dois-pontos".
+3. **Desfecho do turn vai para `conversation_turn.error`.** `halt` (kill switch,
+   deny-list) e `sanitizado:<padrões>` gravam ali, na mesma coluna onde
+   `runTurn` já registra "ambiguo" e "desconhecido_silenciado". Sem migration: a
+   coluna sempre significou "por que este turn não foi um turn normal". Efeito
+   colateral desejado — o **kill switch**, que até aqui desligava o agente sem
+   deixar rastro nenhum na auditoria, passou a aparecer.
+
+4. **`halt` passou a cortar a extração de memória — e isso vale por DINHEIRO.**
+   `extractFacts` é chamada de modelo e roda no `afterReply`, **fora do grafo**,
+   então o `halt` não a alcançava: o `answer` não rodava, mas a extração rodava
+   logo depois. Sondar o Max custaria token por um caminho lateral, desmentindo
+   a única coisa que a recusa determinística promete. O kill switch tinha o
+   mesmo furo desde sempre, e mais grave — agente **desligado** gastava modelo
+   aprendendo sobre quem falou com ele. Achado revendo o próprio diff, com a
+   suíte já verde; tem teste que falha se o corte sumir.
+
+**A deny-list mora no `gate` e roda DEPOIS do kill switch.** Um agente desligado
+que respondesse "não falo da minha configuração" mentiria sobre o próprio
+estado. Daí pra frente é que vale o custo zero: corta antes do RAG e antes do
+modelo, e a resposta é idêntica em toda tentativa.
+
+**A regra que governa cada padrão da deny-list**, e que vale para quem for
+mexer: falso positivo aqui é caro — recusa a pergunta legítima de um corretor e
+o Max parece quebrado. Por isso `modelo`, `chave`, `banco`, `servidor`,
+`infraestrutura`, `banco de dados` e `instruções` **sozinhos nunca disparam**, e
+`modelo de <qualquer coisa>` é do mercado por **allowlist**, não por uma lista
+de exceções a manter.
+
+**Como isso foi descoberto é a parte que interessa.** Os casos que eu mesmo
+escolhi passavam todos — eu escolhi os que o meu padrão já cobria. Os falsos
+positivos vieram, em três rodadas independentes, de fora: uma varredura de 26
+frases reais de corretor ("qual o modelo do apartamento"), o code review ("o
+bairro tem boa infraestrutura?", "modelo de laudo de vistoria", "quais suas
+regras de comissão?") e o `orchestrator` ("vocês têm um banco de dados de
+imóveis?", e **"Que terror esse trânsito"**, que o `\w*error` sob `/i` comia).
+Que a terceira rodada ainda achasse três diz o essencial: **allowlist de
+vocabulário do mercado não se fecha por inspeção de quem escreveu o padrão.**
+A suíte guarda 29 casos de não-bloqueio por isso.
+
+**Decisão registrada — nome de modelo ambíguo.** `claude`, `gemini`, `llama`,
+`grok` e `mistral` **não disparam sozinhos**, nos dois lados: existem prédios
+chamados Gemini no Brasil, e "o imóvel fica no Edifício Gemini" recebia a recusa
+de configuração (deny-list) e virava texto de contingência (sanitizador). Na
+deny-list eles exigem uma palavra de máquina na mesma mensagem; no sanitizador,
+a forma com barra (`openai/gpt-5.4-nano`), a versionada (`claude-3`) ou a
+auto-apresentação ("sou o Claude") — que é o vazamento que de fato importa.
+Isto está escrito aqui para a próxima sessão não "consertar" o que foi
+deliberado.
+
+`compose` também passou a receber o caminho de `halt`, que antes ia direto ao
+`END` — é lá que a montagem de áudio do PR 10 vai morar, e um caminho que
+escapasse dela entregaria o kill switch por um formato e o resto por outro. O
+`compact` continua sem rodar em turn interrompido (`afterCompose`), senão o
+turno feito para não gastar token gastaria uma chamada de modelo.
+
+### 6.2 Eval de escolha de ferramenta
 
 `scripts/eval-tool-choice.ts` (existe) é estendido para a matriz completa e vira **gate de merge**:
 
@@ -486,13 +575,15 @@ O sanitizador do `compose` é **o mesmo ponto por onde o TTS passa** — a vers�
 | `migrations/013_connection_state.sql` | estado da conexão Z-API p/ detectar transição (§8) — **entregue** |
 | `src/lib/connection.ts` | **entregue** — a máquina de transição e os dois alertas (§8) |
 | `src/app/api/zapi-connection/[secret]/route.ts` | **entregue** — callback de conexão da Z-API (§8) |
-| `src/graph/graph.ts` | nós `tools` e `compose`; estado novo; remove `instructions` |
+| `src/graph/graph.ts` | nó `compose` + `draft`/`bloqueios` + deny-list no `gate`, remove `instructions` — **entregue (PR 3)**; nó `tools` e o laço ficam para o PR 6 |
 | `src/graph/tools.ts` | `ToolDef`, catálogo, seleção por capability, teto de 5 |
-| `src/graph/prompt.ts` | remove `<instrucoes_da_imobiliaria>`; cerca `<dados_do_sistema>`; deny-list |
-| `src/graph/compose.ts` | **novo** — sanitizador, TTS, montagem das mensagens |
+| `src/graph/tools.ts` (nomes) | **entregue (PR 3)** — `NOMES_DE_TOOL` mora no catálogo para a tool do PR 6 nascer bloqueada no sanitizador sem editar dois arquivos |
+| `src/graph/prompt.ts` | **entregue (PR 3)** — removeu `<instrucoes_da_imobiliaria>` e trouxe a deny-list; a cerca `<dados_do_sistema>` fica para o PR 6 |
+| `src/graph/compose.ts` | **entregue (PR 3)** — o sanitizador (`sanitizar()`); TTS e montagem das mensagens entram no PR 10. O NÓ mora em `graph.ts`, junto dos outros seis, e não aqui |
 | `src/graph/policy.ts` | **novo** — resolução de capabilities |
 | `src/lib/scope.ts` | **novo** — cliente do `scope-query` |
 | `src/lib/llm.ts` | **entregue** — propaga `cost`, cache tokens, `generationId` |
+| `src/lib/cm.ts` | **entregue (PR 3)** — `instructions` sai da interface `AgentProfile`, então voltar a lê-lo não compila |
 | `src/lib/tts.ts` | **novo** — chamada de áudio em streaming |
 | `src/lib/zapi.ts` | restaura `sendAudio` |
 | `src/lib/turnlog.ts` | **novo** — escrita em `conversation_turn` |
@@ -585,7 +676,7 @@ Cada linha é um PR, com gate do agente `orchestrator` antes de commit/merge, co
 |---|---|---|
 | 1 | `conversation_turn` + `turnlog` + rota admin + aba Conversas — **auditoria antes de haver o que auditar** | — |
 | 2 | `llm.ts` propaga custo real + contrato do `/api/agents/usage` + `costSource` no painel | — · **ENTREGUE 22/08** |
-| 3 | Prompt global (remove `instructions`) + deny-list + sanitizador do `compose` | — |
+| 3 | Prompt global (remove `instructions`) + deny-list + sanitizador do `compose` | — · **ENTREGUE 22/08** |
 | 4 | `MaxCapabilityPolicy` + resolução no `gate` + UI da política | 3 |
 | 5 | `scope-query` + projeção por sujeito (ImobPro, sem consumidor ainda) | 4 |
 | 6 | Nó `tools` + laço + tools de leitura + cerca `<dados_do_sistema>` | 5 |
@@ -602,7 +693,9 @@ Cada linha é um PR, com gate do agente `orchestrator` antes de commit/merge, co
 
 ## 10. Testes que a spec exige
 
-Além de manter os 243 verdes:
+Além de manter a suíte verde — o número envelheceu duas vezes: eram 243 quando
+esta spec foi escrita, eram **333** ao começar o PR 3 e são **394** ao fechá-lo.
+Confira o número do dia em vez de confiar nesta linha:
 
 1. **Política × RBAC** — para cada capability: permitido e negado, por `user` amplo / `user` restrito (`gerente`) / `broker`. Mais **um teste que prova que a política não consegue alargar**: org com `deal.list` ligada para um gerente cujo `dealScopeWhere` não alcança o negócio → lista vazia.
 2. **Projeção do broker** — afirma **ausência** de `cliente`, `valor`, `titulo`, contatos. Ausência, não presença: presença passa quando alguém adiciona um campo novo.

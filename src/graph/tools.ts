@@ -48,6 +48,15 @@ export interface PendingAction {
 export const TOOL_PROPOR_FORM = "propor_criacao";
 
 /**
+ * O catálogo, por NOME.
+ *
+ * Existe para o sanitizador da saída (`compose.ts`) saber o que nunca pode
+ * aparecer na conversa. Manter aqui, e não lá, é o que faz a tool que o PR 6
+ * acrescentar nascer bloqueada sem ninguém lembrar de editar dois arquivos.
+ */
+export const NOMES_DE_TOOL: string[] = [TOOL_PROPOR_FORM];
+
+/**
  * UMA ferramenta com um parâmetro, e não três ferramentas parecidas.
  *
  * Modelo pequeno erra mais escolhendo entre ferramentas de descrição vizinha

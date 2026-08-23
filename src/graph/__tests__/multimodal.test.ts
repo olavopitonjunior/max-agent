@@ -192,12 +192,7 @@ describe("prompt de turn vindo de mídia", () => {
    * org, que é o fim do prefixo estável que o cache do provedor reaproveita.
    */
   it("entra depois do bloco estável, pra não derrubar o cache", () => {
-    const p = buildSystemPrompt({
-      ...base,
-      tenantInstructions: "Fale sempre em tom formal.",
-      fromMedia: "audio",
-    });
-    expect(p.indexOf("tom formal")).toBeLessThan(p.indexOf("ÁUDIO"));
+    const p = buildSystemPrompt({ ...base, fromMedia: "audio" });
     expect(p.indexOf("Você atende a")).toBeLessThan(p.indexOf("ÁUDIO"));
   });
 });
