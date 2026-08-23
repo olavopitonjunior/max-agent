@@ -559,6 +559,11 @@ describe("compose no grafo", () => {
 
     expect(extrair).not.toHaveBeenCalled();
     expect(llm).not.toHaveBeenCalled();
+    // Mas a auditoria REGISTRA: o desfecho vai na coluna `error`, que sempre
+    // significou "por que este turn não foi um turn normal".
+    expect(registrar).toHaveBeenCalledWith(
+      expect.objectContaining({ error: "assunto_bloqueado:instrucoes_proprias" })
+    );
   });
 
   /**

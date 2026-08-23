@@ -1130,6 +1130,22 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   const tools = result.toolLog ?? [];
   const latencyMs = Date.now() - iniciadoEm;
 
+  /**
+   * O DESFECHO do turn, na mesma coluna que os desfechos das saídas
+   * antecipadas (`sair()` já grava "ambiguo", "desconhecido_silenciado" e
+   * afins ali). `error` nesta tabela sempre significou "por que este turn não
+   * foi um turn normal", não "houve exceção".
+   *
+   * Os dois casos que passam a aparecer nunca coexistem: `halt` corta antes do
+   * `answer`, então não há `draft` para sanitizar quando ele está setado. E os
+   * dois eram invisíveis até agora — inclusive o kill switch, que desligava o
+   * agente sem deixar rastro nenhum na auditoria de conversa.
+   */
+  const desfecho =
+    result.halt ??
+    (result.bloqueios?.length
+      ? `sanitizado:${result.bloqueios.join(",")}`
+      : null);
 
   return {
     reply,
@@ -1158,6 +1174,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         tools,
         usage,
         latencyMs,
+        error: desfecho,
       });
 
       /**
