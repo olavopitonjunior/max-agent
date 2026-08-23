@@ -58,6 +58,7 @@ import {
   TEXTO_ASSUNTO_BLOQUEADO,
 } from "./prompt";
 import { sanitizar } from "./compose";
+import { resolverPolitica, type Capability } from "./policy";
 import type { InboundMessage } from "@/lib/zapi";
 
 /**
@@ -153,6 +154,19 @@ export const MaxState = Annotation.Root({
    * "zera" — por isso o reducer é `(_p, n) => n` e não tem sentinela.
    */
   bloqueios: Annotation<string[]>({
+    reducer: (_prev, next) => next,
+    default: () => [],
+  }),
+
+  /**
+   * Capabilities efetivas deste sujeito nesta org. Calculada no `gate`, uma vez.
+   *
+   * **Ninguém consome este campo ainda**, e isso é desenho, não pendência: o
+   * consumo entra no PR 6, com as tools de leitura. Ligar a oferta de tool à
+   * política agora derrubaria `propor_criacao` em produção durante a janela em
+   * que o ImobPro ainda não emite a política — ver o cabeçalho de `policy.ts`.
+   */
+  policy: Annotation<Capability[]>({
     reducer: (_prev, next) => next,
     default: () => [],
   }),
@@ -382,6 +396,41 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
     };
   }
 
+  /**
+   * Política efetiva, resolvida UMA vez por turn e guardada no estado.
+   *
+   * Resolver aqui, e não por chamada de tool, é o que evita multiplicar
+   * round-trips dentro do laço do PR 6. E resolver mesmo sem consumidor é o
+   * que permite VER a política em produção — pela auditoria — antes de ela
+   * passar a decidir alguma coisa.
+   *
+   * Perfil indisponível cai em `null`, que resolve para nenhuma capability.
+   * Isso é fail-closed (regra 3) e é seguro justamente porque nada filtra tool
+   * por política ainda.
+   */
+  const policy = resolverPolitica({
+    politica: profile?.maxPolicy,
+    sujeito: state.identity,
+  });
+
+  /**
+   * A política resolvida vai para o LOG, e isto não é enfeite.
+   *
+   * O comentário acima afirma que resolver sem consumidor "permite VER a
+   * política em produção" — e, sem esta linha, a afirmação era falsa: nada em
+   * `conversation_turn` guarda a política, nenhum campo do `TurnLog` a carrega,
+   * e no smoke de staging não haveria como distinguir "resolveu [] porque o
+   * ImobPro ainda não emite" de "resolveu 3 capabilities". A promessa do PR 4
+   * inteiro é ser observável enquanto é inerte; um comentário não entrega isso.
+   *
+   * Conta e nomes, não o objeto: são no máximo 9 strings de catálogo, nenhuma
+   * é dado de pessoa, e é exatamente o que se quer ler no smoke.
+   */
+  console.info(
+    `[gate] política de ${state.identity.orgId}: ${policy.length} capability(ies)` +
+      (policy.length ? ` — ${policy.join(",")}` : " (fail-closed)")
+  );
+
   // `profile.model` é IGNORADO de propósito: aquele campo carrega id de modelo
   // Anthropic e este runtime fala com o OpenRouter. O registry do ImobPro já
   // declara `supports.model: false` pro Max — a tela não oferece o controle
@@ -390,7 +439,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
   // `profile.instructions` também não é mais lido: o prompt do Max é GLOBAL da
   // plataforma (decisão 1 do PRD do copiloto). O perfil continua sendo buscado
   // porque dele vêm `enabled` e, no PR 7, a seleção de modelo.
-  return {};
+  return { policy };
 }
 
 /**

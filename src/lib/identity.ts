@@ -28,6 +28,38 @@ export interface UserCandidate extends CandidateBase {
   kind: "user";
   userId: string;
   userName: string | null;
+  /**
+   * Papel na org (`membership.role`), como o `by-phone` já devolvia e este
+   * módulo descartava. Entra porque a política de capabilities é indexada por
+   * ele (`byRole`).
+   *
+   * ⚠️ **Ele pode estar ARBITRARIAMENTE velho, e não só 15 minutos.** Uma
+   * versão anterior deste comentário dizia "até `POSITIVE_TTL_MIN`", e estava
+   * errada: quem já desambiguou de qual imobiliária fala é resolvido pela
+   * `phone_org_choice`, que devolve o candidato GRAVADO na hora da escolha e
+   * nunca revarre — e aquela tabela **não tem TTL**, por decisão (é escolha da
+   * pessoa, não cache; ver a migration 007).
+   *
+   * Duas consequências reais, achadas em code review:
+   *  - candidato gravado ANTES desta entrega não tem `role`, e isso é
+   *    permanente para aquele telefone: resolve para nenhuma capability;
+   *  - papel rebaixado fica congelado, então revogar o papel na plataforma não
+   *    revoga o que o Max oferece.
+   *
+   * **Por que ainda assim entra, hoje:** nada consome `state.policy` (PR 4 é
+   * receptor inerte), e para `kind: "user"` o servidor do ImobPro ainda
+   * estreita no `where` — papel velho muda o que se OFERECE, não o que se LÊ.
+   * Não vale para `kind: "broker"`, que não tem RBAC — mas broker não tem
+   * `role`, então este campo não o afeta.
+   *
+   * **Isto NÃO é aceitável quando o PR 6 ligar as leituras.** A dívida está
+   * nomeada na §6.3 da spec: ou a escolha passa a revalidar o papel, ou a
+   * resolução migra para o servidor, que é quem sabe papel e RBAC juntos.
+   *
+   * `null` quando a resposta não trouxe — e papel desconhecido resolve para
+   * NENHUMA capability, nunca para um default.
+   */
+  role: string | null;
 }
 
 /**
@@ -210,7 +242,11 @@ async function scanOrgs(e164: string): Promise<ScanResult> {
         degraded = true;
         continue;
       }
-      const r = (await res.json()) as { userId?: string; name?: string | null };
+      const r = (await res.json()) as {
+        userId?: string;
+        name?: string | null;
+        role?: string | null;
+      };
       if (r.userId) {
         // Quem é usuário E corretor na mesma casa entra como usuário: o escopo
         // do RBAC é o mais específico dos dois, e não seria correto estreitá-lo
@@ -221,6 +257,7 @@ async function scanOrgs(e164: string): Promise<ScanResult> {
           kind: "user",
           userId: r.userId,
           userName: r.name ?? null,
+          role: r.role ?? null,
         });
       }
     } catch (err) {

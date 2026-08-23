@@ -55,6 +55,7 @@ const usuario = {
   kind: "user" as const,
   userId: "u1",
   userName: "Marcia Gerente",
+  role: "sales",
 };
 
 /** Corretor comissionado: existe no `SplitRecipient`, não tem `User`. */

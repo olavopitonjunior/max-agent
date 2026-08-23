@@ -25,6 +25,7 @@ const identity = {
   kind: "user" as const,
   userId: "u1",
   userName: "Marcia Gerente",
+  role: "sales",
 };
 
 function inbound(text: string) {

@@ -129,6 +129,62 @@ d("resolveIdentity", () => {
     if (r.kind === "resolved") expect(r.org.orgId).toBe(TRIO.orgId);
   });
 
+  /**
+   * **O `role` do `by-phone` chega ao candidato.**
+   *
+   * Este teste faltava, e a falta era do tipo perigoso: o `role` é a chave da
+   * política de capabilities (`byRole`), e se o ImobPro renomear ou parar de
+   * devolver o campo, TODO usuário resolve para zero capabilities — em
+   * silêncio, com a suíte inteira verde, porque fail-closed não quebra nada.
+   * É o mesmo modo de falha que o vetor de paridade mata do outro lado do
+   * contrato; esta metade estava sem cobertura nenhuma.
+   */
+  it("o role do by-phone chega ao candidato", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_u: string, init: { headers: Record<string, string> }) => {
+        if (init.headers.Authorization.includes("t-trio")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ userId: "u-trio", name: "Marcia", role: "sales" }),
+          } as unknown as Response;
+        }
+        return { ok: true, status: 404, json: async () => ({}) } as unknown as Response;
+      })
+    );
+
+    const r = await resolveIdentity(PHONE);
+
+    expect(r.kind).toBe("resolved");
+    if (r.kind === "resolved" && r.candidate.kind === "user") {
+      expect(r.candidate.role).toBe("sales");
+    }
+  });
+
+  /** Resposta SEM `role` não inventa papel — vira `null`, que é fail-closed. */
+  it("by-phone sem role produz candidato com role null", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_u: string, init: { headers: Record<string, string> }) => {
+        if (init.headers.Authorization.includes("t-trio")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ userId: "u-trio", name: "Marcia" }),
+          } as unknown as Response;
+        }
+        return { ok: true, status: 404, json: async () => ({}) } as unknown as Response;
+      })
+    );
+
+    const r = await resolveIdentity(PHONE);
+
+    if (r.kind === "resolved" && r.candidate.kind === "user") {
+      expect(r.candidate.role).toBeNull();
+    }
+  });
+
   /** Uma org fora do ar não pode virar "não achei" nas outras. */
   it("org que erra não impede as demais de responderem", async () => {
     vi.stubGlobal(
@@ -160,9 +216,9 @@ d("resolveIdentity", () => {
 
 describe("matchChoice", () => {
   const cands = [
-    { orgId: "a", orgName: "RE/MAX Trio", kind: "user" as const, userId: "1", userName: null },
-    { orgId: "b", orgName: "RE/MAX Ativa", kind: "user" as const, userId: "2", userName: null },
-    { orgId: "c", orgName: "Fincasa", kind: "user" as const, userId: "3", userName: null },
+    { orgId: "a", orgName: "RE/MAX Trio", kind: "user" as const, userId: "1", userName: null, role: "sales" },
+    { orgId: "b", orgName: "RE/MAX Ativa", kind: "user" as const, userId: "2", userName: null, role: "sales" },
+    { orgId: "c", orgName: "Fincasa", kind: "user" as const, userId: "3", userName: null, role: "sales" },
   ];
 
   it("aceita o número da lista", () => {
@@ -198,8 +254,8 @@ describe("matchChoice", () => {
 describe("askWhichOrg", () => {
   it("numera as opções e só oferece as orgs vinculadas", () => {
     const texto = askWhichOrg([
-      { orgId: "a", orgName: "RE/MAX Trio", kind: "user", userId: "1", userName: null },
-      { orgId: "b", orgName: "Fincasa", kind: "user", userId: "2", userName: null },
+      { orgId: "a", orgName: "RE/MAX Trio", kind: "user", userId: "1", userName: null, role: "sales" },
+      { orgId: "b", orgName: "Fincasa", kind: "user", userId: "2", userName: null, role: "sales" },
     ]);
     expect(texto).toContain("1. RE/MAX Trio");
     expect(texto).toContain("2. Fincasa");
