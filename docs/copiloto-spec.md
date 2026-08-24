@@ -210,7 +210,12 @@ capabilities_efetivas =
    ∩ o que o RBAC do ImobPro permite àquele userId
 ```
 
-**A política do Max nunca alarga.** Se o `dealScopeWhere` devolve vazio para aquele gerente, nenhuma configuração faz o Max falar de negócio nenhum. Isso não é só regra escrita: a política decide **quais tools aparecem**, o RBAC decide **quais linhas voltam** — e é o segundo que fica no servidor do ImobPro, onde a política do Max não alcança.
+**A política do Max nunca alarga o RBAC — para quem TEM RBAC.** Se o `dealScopeWhere` devolve vazio para aquele gerente, nenhuma configuração faz o Max falar de negócio nenhum. A política decide **quais tools aparecem**, o RBAC decide **quais linhas voltam** — e é o segundo que fica no servidor do ImobPro, onde a política do Max não alcança.
+
+> ⚠️ **Correção feita no PR 4, e ela muda a leitura da fórmula acima.** Duas ressalvas que a redação original escondia:
+>
+> 1. **`byRecipient[id].allow` SOMA ao `brokerDefault`, não intersecta.** A fórmula escreve os overrides como mais um `∩`, mas `allow` é união — é a **única porta de alargamento do sistema**. Está no desenho de propósito (§3.3), e é assim que uma imobiliária libera um corretor específico.
+> 2. **Corretor comissionado NÃO tem a segunda trava.** Um `SplitRecipient` não tem `User`, logo não tem `EffectivePermissions` e não passa por `dealScopeWhere`/`proposalScopeWhere`. Para ele, `brokerDefault` + `byRecipient` é o **único** freio. Quem cruza (1) com (2) vê onde este desenho é mais sensível: a porta de alargamento se aplica justamente a quem não tem RBAC atrás. A projeção por sujeito do PR 5 (regra 5 da governança) é o que cerca isso no servidor — e é por isso que o teste dela afirma **ausência** de campo, não presença.
 
 Resolvido **uma vez por turn**, no `gate`, e guardado em `state.policy`. Resolver por chamada de tool multiplicaria round-trips dentro do laço.
 
@@ -554,6 +559,65 @@ escapasse dela entregaria o kill switch por um formato e o resto por outro. O
 `compact` continua sem rodar em turn interrompido (`afterCompose`), senão o
 turno feito para não gastar token gastaria uma chamada de modelo.
 
+### 6.3 O que o PR 4 entregou — e a lacuna que ele deixa DE PROPÓSITO
+
+**ENTREGUE em 23/08**, nos dois repos (regra 1 da governança: PR de cada lado,
+referenciados entre si, com vetor fixo idêntico).
+
+**O `gate` resolve `state.policy` e NINGUÉM consome.** Não é entrega pela
+metade — é a regra 2 ("receptor primeiro, inerte") levada a sério, e a razão é
+concreta: a janela entre o deploy do max-agent e o do ImobPro é uma janela em
+que a política chega **ausente**, e ausente é fail-closed. Se o PR 4 já
+filtrasse as tools oferecidas pela política, o Max **pararia de propor criação
+de formulário** nessa janela — `propor_criacao` é a única capability que ele
+exerce hoje, e sumiria em silêncio, sem erro e sem teste vermelho.
+
+Dois testes trancam isso (`policy.test.ts`), e foram confirmados por mutação:
+ligar o filtro derruba os dois. **Quem for escrever o PR 6 não deve afrouxá-los
+— deve mudá-los junto com o consumo.**
+
+**O EDITOR da política é do PR 6, não deste.** A §9 dizia "UI da política" e o
+PR 4 entregou só o painel de LEITURA. O motivo não é prazo: um editor entregue
+antes de existir consumidor configuraria algo sem efeito, e a primeira pergunta
+de quem o usasse — "liguei `deal.list`, por que o Max não responde do negócio?"
+— teria como resposta honesta "porque essa ferramenta ainda não existe". O
+painel de leitura responde a pergunta que importa nesta fase: **o emissor está
+emitindo?**
+
+**A perna que a fórmula da §3.1 tem e o `state.policy` NÃO tem: o RBAC.** A
+resolução aqui cobre catálogo ∩ `byRole`/`brokerDefault` ∩ overrides. O quarto
+termo — "o que o RBAC do ImobPro permite àquele userId" — **não pode** ser
+aplicado neste repo, porque o RBAC mora no outro servidor. Ele entra no PR 5,
+no `where` do `scope-query`. Quem ler `state.policy` no PR 6 **não pode assumir
+que ele já traz RBAC embutido**: a política diz o que se pode OFERECER; o
+servidor decide o que volta. Confundir os dois produz vazamento que nenhum teste
+daqui pega.
+
+**Duas dívidas que o PR 6 herda, nomeadas para não serem redescobertas:**
+
+1. **`role` congelado.** O `UserCandidate` passou a carregar `role`, e quem já
+   desambiguou de imobiliária é resolvido pela `phone_org_choice`, que devolve o
+   candidato gravado na escolha e **nunca revarre** — aquela tabela não tem TTL,
+   por decisão. Então: candidato gravado antes do PR 4 não tem `role` e resolve
+   para nada, permanentemente; e papel rebaixado fica congelado, então revogar
+   o papel não revoga o que se oferece. Tolerável enquanto **nada consome**;
+   inaceitável quando o PR 6 ligar as leituras. As saídas são revalidar o papel
+   na escolha ou mover a resolução para o servidor, que é quem sabe papel e RBAC
+   juntos.
+2. **`byRole` não distingue papéis customizados.** As chaves são valores de
+   `OrgMembership.role` (`owner|admin|finance|sales|viewer|custom|member`), e
+   **todo papel customizado de tenant carrega o literal `custom`**, com as
+   permissões reais em `customRoleId → CustomRole.permissions`. O `by-phone` não
+   devolve `customRoleId`. Consequência: um tenant com um "Estagiário" e um
+   "Diretor" customizados não consegue dar tetos diferentes aos dois — configurar
+   `byRole.custom` alcança ambos. Decidir no PR 6 se `by-phone` passa a devolver
+   `customRoleId` e se as chaves ganham a forma `custom:<id>`.
+
+**`byRecipient.allow` é a única porta de alargamento do sistema**, e ela se
+aplica justamente a quem não tem RBAC (corretor comissionado, `SplitRecipient`).
+É o ponto mais sensível do desenho de autorização — mexer ali pede o mesmo
+cuidado que uma mudança de permissão.
+
 ### 6.2 Eval de escolha de ferramenta
 
 `scripts/eval-tool-choice.ts` (existe) é estendido para a matriz completa e vira **gate de merge**:
@@ -677,7 +741,7 @@ Cada linha é um PR, com gate do agente `orchestrator` antes de commit/merge, co
 | 1 | `conversation_turn` + `turnlog` + rota admin + aba Conversas — **auditoria antes de haver o que auditar** | — |
 | 2 | `llm.ts` propaga custo real + contrato do `/api/agents/usage` + `costSource` no painel | — · **ENTREGUE 22/08** |
 | 3 | Prompt global (remove `instructions`) + deny-list + sanitizador do `compose` | — · **ENTREGUE 22/08** |
-| 4 | `MaxCapabilityPolicy` + resolução no `gate` + UI da política | 3 |
+| 4 | `MaxCapabilityPolicy` + resolução no `gate` + painel de LEITURA da política | 3 · **ENTREGUE 23/08** — o EDITOR foi adiado para o PR 6, ver §6.3 |
 | 5 | `scope-query` + projeção por sujeito (ImobPro, sem consumidor ainda) | 4 |
 | 6 | Nó `tools` + laço + tools de leitura + cerca `<dados_do_sistema>` | 5 |
 | 7 | Eval de tool-choice estendida + seleção de modelo por config | 6 |

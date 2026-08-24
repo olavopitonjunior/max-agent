@@ -57,6 +57,7 @@ const CANDIDATO = {
   kind: "user" as const,
   userId: "u1",
   userName: "Marcia",
+  role: "sales",
 };
 
 function midia(kind: "audio" | "image", over: Record<string, unknown> = {}) {

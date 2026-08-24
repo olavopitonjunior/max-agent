@@ -1,5 +1,6 @@
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
+import type { MaxPolicy } from "@/graph/policy";
 import { query } from "./db";
 import { sign } from "./hmac";
 import {
@@ -44,6 +45,19 @@ async function get<T>(path: string, token: string): Promise<T | null> {
 export interface AgentProfile {
   enabled: boolean;
   model: string;
+  /**
+   * Política de capabilities do tenant (`MaxCapabilityPolicy` no ImobPro).
+   *
+   * **Opcional de propósito**, e é a regra 2 da governança em forma de tipo: o
+   * receptor entra antes do emissor, então durante a janela entre os dois
+   * deploys esta chave simplesmente não vem. Declará-la obrigatória
+   * transformaria "o outro lado ainda não subiu" em erro de turn.
+   *
+   * Ausente resolve para NENHUMA capability (fail-closed, regra 3) — e é por
+   * isso que nada neste repo filtra tool por política ainda: nesta janela,
+   * filtrar seria desligar a única capability viva. Ver `graph/policy.ts`.
+   */
+  maxPolicy?: MaxPolicy | null;
 }
 
 /**
