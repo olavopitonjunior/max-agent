@@ -1,4 +1,6 @@
 import type { LlmTool } from "@/lib/llm";
+import type { Capability } from "./policy";
+import type { ScopeQueryVerb } from "./scope-contract";
 import type { Candidate } from "@/lib/identity";
 
 /**
@@ -54,7 +56,7 @@ export const TOOL_PROPOR_FORM = "propor_criacao";
  * aparecer na conversa. Manter aqui, e não lá, é o que faz a tool que o PR 6
  * acrescentar nascer bloqueada sem ninguém lembrar de editar dois arquivos.
  */
-export const NOMES_DE_TOOL: string[] = [TOOL_PROPOR_FORM];
+export const NOMES_DE_TOOL: string[] = [TOOL_PROPOR_FORM, "listar_negocios"];
 
 /**
  * UMA ferramenta com um parâmetro, e não três ferramentas parecidas.
@@ -319,3 +321,120 @@ export const TEXTO_FALHOU =
 // perguntando outra coisa junto e uma frase pronta atropelaria a pergunta dela.
 // O determinismo que importa — o texto que a pessoa CONFIRMA e o link que ela
 // recebe — segue por template acima.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR 6a — a máquina de tools de LEITURA
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Definição única: uma tool, dois consumidores (o prompt e o executor).
+ *
+ * `capability` é o que a política governa; `verb` é o que o `scope-query`
+ * executa. Separados de propósito — a política diz o que se pode OFERECER, o
+ * servidor decide o que VOLTA. Confundir os dois produz vazamento que nenhum
+ * teste deste repo pega (`docs/max.md` §11.4).
+ */
+export interface ToolDef {
+  def: LlmTool;
+  capability: Capability;
+  verb: ScopeQueryVerb;
+  /** Menor = entra primeiro quando o teto de 5 corta. */
+  prioridade: number;
+  /** Prefiltro barato por intenção. Generoso de propósito — ver abaixo. */
+  combina: (texto: string) => boolean;
+}
+
+/**
+ * Teto DURO de definições por chamada.
+ *
+ * Acima disso a precisão do nano cai — é a mesma medição que fez `propor_criacao`
+ * ser UMA tool com enum em vez de três vizinhas (recall 100% → 50%). O corte é
+ * por `prioridade` declarada, e o fato vai para o log: um corte silencioso
+ * viraria "a feature não funciona às vezes".
+ */
+export const TETO_DE_TOOLS = 5;
+
+const PEDE_NEGOCIO =
+  /\b(neg[oó]cio|neg[oó]cios|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid|documento)\b/i;
+
+export const LISTAR_NEGOCIOS: ToolDef = {
+  capability: "deal.list",
+  verb: "deal.list",
+  prioridade: 10,
+  combina: (t) => PEDE_NEGOCIO.test(normalizar(t)),
+  def: {
+    name: "listar_negocios",
+    /**
+     * A descrição é o que decide a chamada — mais que o prompt. Fala do que a
+     * PESSOA quer ("meus negócios", "como está o processo"), não do que a rota
+     * faz: o modelo casa intenção com intenção, não com encanamento.
+     */
+    description:
+      "Lista os negócios em que esta pessoa está envolvida, com etapa e pendências. " +
+      "Use quando ela perguntar sobre os negócios dela, o andamento, o que falta, " +
+      "ou pedir um resumo da carteira. Não use para perguntas gerais sobre como o " +
+      "processo funciona.",
+    parameters: {
+      type: "object",
+      properties: {
+        estado: {
+          type: "string",
+          description: "Filtra por etapa, quando a pessoa nomear uma. Opcional.",
+        },
+        limite: {
+          type: "integer",
+          description: "Quantos negócios trazer. Padrão 10.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+/** O catálogo de LEITURA. As de escrita seguem fora — ver `selecionarTools`. */
+export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS];
+
+/**
+ * Quais tools entram no prompt deste turn.
+ *
+ * ── ⚠️ Por que `propor_criacao` NÃO passa por aqui ────────────────────────
+ *
+ * Ela é oferecida por `podeEscrever(identity) && shouldOfferTools(texto)`, SEM
+ * consultar a política — exatamente como antes deste PR. Gateá-la agora a faria
+ * exigir `form.create`, que **nenhuma org concede** (não existe editor nem rota
+ * de escrita da política), e o Max **pararia de propor formulário em produção**,
+ * em silêncio. Seria regressão da única capability que ele exerce hoje — o
+ * cenário que a mensagem do PR 4 descreve como "regressão, não inércia".
+ *
+ * O gate dela entra no PR 6c, junto do editor que torna `form.create`
+ * concedível. Os dois testes de `policy.test.ts` que trancam isso continuam
+ * verdes sem alteração, e é assim que tem que ser.
+ *
+ * ── A fórmula ─────────────────────────────────────────────────────────────
+ *
+ *   tools = catálogo ∩ capabilities efetivas ∩ prefiltro
+ *
+ * O prefiltro é **generoso de propósito**: falso positivo custa tokens, falso
+ * negativo custa a feature.
+ */
+export function selecionarTools(params: {
+  policy: Capability[];
+  texto: string;
+  catalogo?: ToolDef[];
+}): { tools: ToolDef[]; cortadas: number } {
+  const catalogo = params.catalogo ?? TOOLS_DE_LEITURA;
+  const texto = params.texto;
+
+  const elegiveis = catalogo
+    .filter((t) => params.policy.includes(t.capability))
+    .filter((t) => t.combina(texto))
+    .sort((a, b) => a.prioridade - b.prioridade);
+
+  if (elegiveis.length <= TETO_DE_TOOLS) {
+    return { tools: elegiveis, cortadas: 0 };
+  }
+  return {
+    tools: elegiveis.slice(0, TETO_DE_TOOLS),
+    cortadas: elegiveis.length - TETO_DE_TOOLS,
+  };
+}
