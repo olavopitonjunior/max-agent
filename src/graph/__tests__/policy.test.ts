@@ -15,6 +15,9 @@ vi.mock("@/lib/cm", async (orig) => ({
   fetchProfile: vi.fn(),
   searchKnowledge: vi.fn().mockResolvedValue([]),
   reportUsage: vi.fn().mockResolvedValue(undefined),
+  // A chave de política vem do servidor por turn. Sem este mock os testes do
+  // gate tocam o banco (`orgById`) e falham com "DATABASE_URL não configurada".
+  chaveDePolitica: vi.fn().mockResolvedValue("admin"),
 }));
 vi.mock("@/lib/llm", () => ({
   complete: vi.fn(),
@@ -43,13 +46,16 @@ const gerente = {
   kind: "user" as const,
   userId: "u1",
   userName: "Marcia Gerente",
-  role: "admin",
 };
 
-/** Mesmo usuário, papel que a política não conhece. */
-const semPapelConhecido = { ...gerente, role: "viewer" };
-/** Candidato gravado ANTES desta entrega: `phone_org_choice` sem `role`. */
-const candidatoAntigo = { ...gerente, role: null };
+/**
+ * O papel NÃO mora mais no candidato — é a chave que o servidor resolve por
+ * turn (`GET /api/agents/user-scope`). Guardá-lo no candidato o congelava,
+ * porque a `phone_org_choice` não tem TTL.
+ */
+const PAPEL = "admin";
+/** Papel que a política não conhece. */
+const PAPEL_DESCONHECIDO = "viewer";
 
 const corretorSemLogin = {
   orgId: "org1",
@@ -70,18 +76,95 @@ describe("fail-closed: o que a política NÃO concede", () => {
    */
   it("política AUSENTE não concede nada", () => {
     for (const politica of [null, undefined]) {
-      expect(resolverPolitica({ politica, sujeito: gerente })).toEqual([]);
-      expect(resolverPolitica({ politica, sujeito: corretorSemLogin })).toEqual([]);
+      expect(resolverPolitica({ politica, sujeito: gerente, role: PAPEL })).toEqual([]);
+      expect(resolverPolitica({ politica, sujeito: corretorSemLogin, role: null })).toEqual([]);
     }
   });
 
+  /**
+   * **Buscar a chave por turn troca "papel congelado" por "papel
+   * indisponível", e a degradação tem que cair no MENOR privilégio.**
+   *
+   * Guardar o último valor conhecido para usar quando a rota cai
+   * reintroduziria exatamente o congelamento que esta entrega remove — e com
+   * pior sincronismo, porque ninguém saberia de quando é. Rota fora do ar
+   * resolve para NENHUMA capability, igual a papel desconhecido.
+   */
+  it("chave INDISPONÍVEL (null) não concede nada, mesmo com política rica", () => {
+    const politica = {
+      byRole: { admin: ["deal.list", "deal.detail"], sales: ["deal.list"] },
+    };
+    expect(resolverPolitica({ politica, sujeito: gerente, role: null })).toEqual([]);
+  });
+
+  /**
+   * A chave de papel customizado é `custom:<id>`, e ela NÃO pode ser alcançada
+   * por uma configuração feita para o literal `custom` — são pessoas
+   * diferentes. Se colidissem, um tenant que configurou `byRole.custom` para o
+   * usuário de serviço do próprio Max alargaria o teto de todo papel
+   * customizado humano da casa.
+   */
+  it("custom:<id> não é alcançado por uma entrada em byRole.custom", () => {
+    const politica = { byRole: { custom: ["deal.list", "deal.detail"] } };
+    expect(
+      resolverPolitica({ politica, sujeito: gerente, role: "custom:cr-estagiario" })
+    ).toEqual([]);
+  });
+
+  /** E a chave certa alcança, para o teste acima não passar por vacuidade. */
+  it("custom:<id> é alcançado pela entrada correspondente", () => {
+    const politica = { byRole: { "custom:cr-estagiario": ["deal.list"] } };
+    expect(
+      resolverPolitica({ politica, sujeito: gerente, role: "custom:cr-estagiario" })
+    ).toEqual(["deal.list"]);
+  });
+
+  /** Dois papéis customizados da mesma org NÃO compartilham teto. */
+  it("custom:<a> não alcança o que foi concedido a custom:<b>", () => {
+    const politica = {
+      byRole: { "custom:cr-diretor": ["deal.list", "deal.detail"] },
+    };
+    expect(
+      resolverPolitica({ politica, sujeito: gerente, role: "custom:cr-estagiario" })
+    ).toEqual([]);
+  });
+
+  /**
+   * **Candidato ANTIGO, gravado com `role`, não tem o papel dele respeitado.**
+   *
+   * A `phone_org_choice` não tem TTL: as linhas escritas antes desta entrega
+   * carregam `role` no JSONB e continuam sendo devolvidas. Elas desserializam
+   * sem erro — propriedade extra é ignorada —, e o ponto deste teste é que o
+   * valor congelado ali é **inerte**: quem decide é a chave que o servidor
+   * mandou, não o que estava guardado.
+   *
+   * Sem isto, um refactor que voltasse a ler `sujeito.role` como fallback
+   * passaria despercebido, e o congelamento voltaria em silêncio.
+   */
+  it("role congelado num candidato antigo é IGNORADO — vale a chave do servidor", () => {
+    const politica = {
+      byRole: { admin: ["deal.list", "deal.detail"], viewer: [] as string[] },
+    };
+    // O JSONB gravado lá atrás dizia "admin". O servidor NÃO resolve hoje.
+    const candidatoAntigo = { ...gerente, role: "admin" } as typeof gerente;
+
+    // ⚠️ `role: null` é o caso que importa, e a primeira versão deste teste
+    // passava `"viewer"` — um valor não-nulo. Com ele, um fallback
+    // `params.role ?? sujeito.role` nunca chegaria a ler o papel congelado, e
+    // a mutação de controle passava verde. O teste só sabe falhar quando o
+    // servidor NÃO dá chave: é aí que o valor guardado poderia "socorrer".
+    expect(
+      resolverPolitica({ politica, sujeito: candidatoAntigo, role: null })
+    ).toEqual([]);
+  });
+
   it("política VAZIA não concede nada", () => {
-    expect(resolverPolitica({ politica: {}, sujeito: gerente })).toEqual([]);
+    expect(resolverPolitica({ politica: {}, sujeito: gerente, role: PAPEL })).toEqual([]);
   });
 
   it("papel sem entrada em byRole não concede nada", () => {
     const politica = { byRole: { owner: ["deal.list"] } };
-    expect(resolverPolitica({ politica, sujeito: semPapelConhecido })).toEqual([]);
+    expect(resolverPolitica({ politica, sujeito: gerente, role: PAPEL_DESCONHECIDO })).toEqual([]);
   });
 
   /**
@@ -91,7 +174,7 @@ describe("fail-closed: o que a política NÃO concede", () => {
   it("papel DESCONHECIDO não cai num default", () => {
     const politica = { byRole: { admin: ["deal.list"] } };
     for (const role of ["", "   ", "papel_que_nao_existe"]) {
-      expect(resolverPolitica({ politica, sujeito: { ...gerente, role } })).toEqual([]);
+      expect(resolverPolitica({ politica, sujeito: gerente, role })).toEqual([]);
     }
   });
 
@@ -103,7 +186,7 @@ describe("fail-closed: o que a política NÃO concede", () => {
    */
   it("candidato SEM role (gravado antes desta entrega) não concede nada", () => {
     const politica = { byRole: { admin: ["deal.list"] } };
-    expect(resolverPolitica({ politica, sujeito: candidatoAntigo })).toEqual([]);
+    expect(resolverPolitica({ politica, sujeito: gerente, role: null })).toEqual([]);
   });
 
   /**
@@ -118,7 +201,7 @@ describe("fail-closed: o que a política NÃO concede", () => {
     ["byRecipient não-objeto", { brokerDefault: ["deal.list"], byRecipient: 5 }],
   ])("forma inválida (%s) não lança — resolve vazio ou ignora", (_n, politica) => {
     expect(() =>
-      resolverPolitica({ politica: politica as never, sujeito: gerente })
+      resolverPolitica({ politica: politica as never, sujeito: gerente, role: PAPEL })
     ).not.toThrow();
   });
 
@@ -126,13 +209,13 @@ describe("fail-closed: o que a política NÃO concede", () => {
   it("byRole['constructor'] não concede nada", () => {
     const politica = JSON.parse('{"byRole":{}}');
     expect(
-      resolverPolitica({ politica, sujeito: { ...gerente, role: "constructor" } })
+      resolverPolitica({ politica, sujeito: gerente, role: "constructor" })
     ).toEqual([]);
   });
 
   it("corretor sem brokerDefault e sem override não recebe nada", () => {
     const politica = { byRole: { admin: ["deal.list"] } };
-    expect(resolverPolitica({ politica, sujeito: corretorSemLogin })).toEqual([]);
+    expect(resolverPolitica({ politica, sujeito: corretorSemLogin, role: null })).toEqual([]);
   });
 
   /** `deny` vence `allow` — sempre, e sem exceção configurável. */
@@ -141,7 +224,7 @@ describe("fail-closed: o que a política NÃO concede", () => {
       brokerDefault: ["deal.list", "deal.pending"],
       byRecipient: { sr1: { allow: ["deal.detail"], deny: ["deal.list", "deal.detail"] } },
     };
-    expect(resolverPolitica({ politica, sujeito: corretorSemLogin })).toEqual([
+    expect(resolverPolitica({ politica, sujeito: corretorSemLogin, role: null })).toEqual([
       "deal.pending",
     ]);
   });
@@ -152,7 +235,7 @@ describe("fail-closed: o que a política NÃO concede", () => {
    */
   it("capability desconhecida é ignorada, não quebra", () => {
     const politica = { byRole: { admin: ["deal.list", "deal.teleporte", ""] } };
-    expect(resolverPolitica({ politica, sujeito: gerente })).toEqual([
+    expect(resolverPolitica({ politica, sujeito: gerente, role: PAPEL })).toEqual([
       "deal.list",
     ]);
   });
@@ -162,7 +245,7 @@ describe("fail-closed: o que a política NÃO concede", () => {
       brokerDefault: ["deal.list"],
       byRecipient: { sr1: { allow: ["nao.existe"], deny: ["tambem.nao"] } },
     };
-    expect(resolverPolitica({ politica, sujeito: corretorSemLogin })).toEqual([
+    expect(resolverPolitica({ politica, sujeito: corretorSemLogin, role: null })).toEqual([
       "deal.list",
     ]);
   });
@@ -172,7 +255,7 @@ describe("fail-closed: o que a política NÃO concede", () => {
       brokerDefault: ["deal.list"],
       byRecipient: { sr999: { deny: ["deal.list"] } },
     };
-    expect(resolverPolitica({ politica, sujeito: corretorSemLogin })).toEqual([
+    expect(resolverPolitica({ politica, sujeito: corretorSemLogin, role: null })).toEqual([
       "deal.list",
     ]);
   });
@@ -183,7 +266,7 @@ describe("fail-closed: o que a política NÃO concede", () => {
 describe("o que a política concede", () => {
   it("papel com entrada em byRole recebe exatamente aquilo", () => {
     const politica = { byRole: { admin: ["deal.list", "deal.pending"] } };
-    const r = resolverPolitica({ politica, sujeito: gerente });
+    const r = resolverPolitica({ politica, sujeito: gerente, role: PAPEL });
 
     expect(r).toEqual(["deal.list", "deal.pending"]);
     expect(permite(r, "deal.list")).toBe(true);
@@ -196,13 +279,13 @@ describe("o que a política concede", () => {
       byRecipient: { sr1: { allow: ["deal.list"] } },
     };
     expect(
-      resolverPolitica({ politica, sujeito: corretorSemLogin }).sort()
+      resolverPolitica({ politica, sujeito: corretorSemLogin, role: null }).sort()
     ).toEqual(["deal.list", "deal.pending"]);
   });
 
   it("o catálogo é o teto — byRole não inventa capability", () => {
     const politica = { byRole: { admin: [...CAPABILITIES, "extra.poder"] } };
-    const r = resolverPolitica({ politica, sujeito: gerente });
+    const r = resolverPolitica({ politica, sujeito: gerente, role: PAPEL });
 
     expect(r).toHaveLength(CAPABILITIES.length);
     expect(r).not.toContain("extra.poder");

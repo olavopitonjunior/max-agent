@@ -18,6 +18,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("@/lib/cm", async (orig) => ({
   ...(await orig<typeof import("@/lib/cm")>()),
+  // A chave de política vem do servidor por turn; sem stub o gate toca o banco.
+  chaveDePolitica: vi.fn().mockResolvedValue("admin"),
   fetchProfile: vi.fn(),
   searchKnowledge: vi.fn(),
   reportUsage: vi.fn().mockResolvedValue(undefined),

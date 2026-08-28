@@ -14,6 +14,8 @@ vi.mock("@/lib/cm", async (orig) => ({
   // nela, e uma classe redefinida no mock nunca casaria — o teste passaria
   // exercitando o caminho de falha genérica, que é o oposto do que ele afirma.
   ...(await orig<typeof import("@/lib/cm")>()),
+  // A chave de política vem do servidor por turn; sem stub o gate toca o banco.
+  chaveDePolitica: vi.fn().mockResolvedValue("admin"),
   fetchProfile: vi.fn(),
   searchKnowledge: vi.fn(),
   reportUsage: vi.fn().mockResolvedValue(undefined),
