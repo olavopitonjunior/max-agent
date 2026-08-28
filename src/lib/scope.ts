@@ -122,11 +122,25 @@ export function descartarSeVazou(
   kind: "user" | "broker"
 ): unknown[] {
   if (kind !== "broker") return items;
+  /**
+   * Varre em PROFUNDIDADE, não só o topo.
+   *
+   * A projeção de hoje é plana, então a varredura rasa bastaria — mas esta
+   * função existe justamente para pegar regressão do servidor que ela não pode
+   * prever, e `deal.detail`/`proposal.detail` (PR 6b) são os verbos mais
+   * propensos a aninhar dado de cliente sob um sub-objeto. Rasa, ela passaria
+   * a mentir exatamente quando começasse a importar.
+   */
+  const achaProibido = (v: unknown): string[] => {
+    if (!v || typeof v !== "object") return [];
+    if (Array.isArray(v)) return v.flatMap(achaProibido);
+    const aqui = CAMPOS_PROIBIDOS_AO_BROKER.filter((c) => Object.hasOwn(v, c));
+    return [...aqui, ...Object.values(v).flatMap(achaProibido)];
+  };
+
   return items.filter((it) => {
     if (!it || typeof it !== "object") return true;
-    const vazou = CAMPOS_PROIBIDOS_AO_BROKER.filter((c) =>
-      Object.hasOwn(it as object, c)
-    );
+    const vazou = achaProibido(it);
     if (vazou.length > 0) {
       console.error(
         `[scope] REGRESSÃO DE PROJEÇÃO: item do broker trouxe ${vazou.join(", ")} — descartado`

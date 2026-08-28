@@ -192,10 +192,22 @@ A consulta não respondeu agora. Diga que não conseguiu verificar neste momento
 e ofereça tentar de novo. NÃO afirme que não há nada.
 </dados_do_sistema>`;
       }
-      const corpo = JSON.stringify(r.items, null, 1).slice(0, 4000);
-      const aviso = r.truncated
-        ? '\ntruncado="true" — há mais itens além destes; diga isso se listar.'
-        : "";
+      const cru = JSON.stringify(r.items, null, 1);
+      const corpo = cru.slice(0, 4000);
+      /**
+       * Dois truncamentos diferentes, e os dois têm que se declarar.
+       *
+       * `r.truncated` é do SERVIDOR ("não olhei além daqui"). O `slice` é
+       * NOSSO, e pode cortar no meio de um objeto. Anunciar só o primeiro
+       * deixaria uma lista cortada aqui passar por completa — o mesmo defeito
+       * de "apresentar incompleto como completo" que o `items: null` existe
+       * para evitar.
+       */
+      const cortadoAqui = cru.length > corpo.length;
+      const aviso =
+        r.truncated || cortadoAqui
+          ? '\ntruncado="true" — há mais itens além destes; diga isso se listar.'
+          : "";
       return `<dados_do_sistema origem="${r.tool}">${aviso}
 ${corpo}
 </dados_do_sistema>`;

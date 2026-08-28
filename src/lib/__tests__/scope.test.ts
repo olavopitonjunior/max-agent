@@ -140,6 +140,14 @@ describe("descartarSeVazou — defesa em profundidade da projeção", () => {
     expect(console.error).toHaveBeenCalled();
   });
 
+  it("pega o campo proibido ANINHADO, não só no topo", () => {
+    // A projeção de hoje é plana, mas esta função existe para pegar regressão
+    // que ela não pode prever — e `deal.detail`/`proposal.detail` são os
+    // verbos mais propensos a aninhar dado de cliente sob um sub-objeto.
+    expect(descartarSeVazou([{ id: "d1", parte: { cliente: "Maria" } }], "broker")).toEqual([]);
+    expect(descartarSeVazou([{ id: "d1", partes: [{ valor: 850000 }] }], "broker")).toEqual([]);
+  });
+
   it("item que não é objeto não quebra a filtragem", () => {
     expect(descartarSeVazou([null, "x", 7], "broker")).toEqual([null, "x", 7]);
   });

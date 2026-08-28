@@ -933,8 +933,37 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
     const def = TOOLS_DE_LEITURA.find((t) => t.def.name === chamada.name);
     if (!def) {
       // O modelo inventou um nome. Descartada, e REGISTRADA: chamada
-      // descartada vale tanto quanto a aceita para quem depura.
+      // descartada vale tanto quanto a aceita para quem depura. E devolve
+      // FALHA ao modelo em vez de sumir — "sempre sinalize" é a disciplina do
+      // resto deste nó, e queimar uma volta em silêncio a quebraria.
       trilha.push({ name: chamada.name, args: chamada.args, outcome: "tool_desconhecida" });
+      resultados.push({ tool: chamada.name, items: null, truncated: false });
+      continue;
+    }
+
+    /**
+     * ⚠️ **A capability é reconferida na EXECUÇÃO, não só na oferta.**
+     *
+     * `selecionarTools` gateia o que o modelo VÊ. Isto gateia o que ele
+     * CONSEGUE. São coisas diferentes: o modelo pode emitir uma chamada com o
+     * nome de qualquer tool do catálogo — por alucinação, ou porque uma
+     * instrução injetada num resultado anterior mandou (a própria cerca
+     * `fenceToolResults` nomeia essa superfície de ataque).
+     *
+     * Hoje é dormente: o catálogo tem uma tool e nenhuma org tem política. No
+     * 6b, com cinco tools em capabilities diferentes, uma org que só recebeu
+     * `deal.list` ficaria sem proteção nenhuma contra uma chamada nomeando a
+     * tool de `proposal.list` — executada ao vivo contra o dado do tenant.
+     *
+     * É a mesma classe do `descartarSeVazou`, uma camada acima: lá o campo,
+     * aqui o verbo.
+     */
+    if (!state.policy.includes(def.capability)) {
+      console.warn(
+        `[tools] ${chamada.name} chamada SEM a capability ${def.capability} na org ${state.identity.orgId}`
+      );
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "capability_negada" });
+      resultados.push({ tool: chamada.name, items: null, truncated: false });
       continue;
     }
 
@@ -1195,6 +1224,51 @@ export interface TurnResult {
   afterReply: () => Promise<void>;
 }
 
+/**
+ * O que é zerado a CADA turn — o contrato que o checkpointer obriga a manter.
+ *
+ * Constante nomeada, e não literal dentro do `invoke`, por um motivo concreto:
+ * campo de estado novo que seja do TURN precisa entrar aqui, e um literal
+ * enterrado numa chamada não convida ninguém a lembrar disso. O PR 6a
+ * acrescentou três campos e esqueceu — o resultado foi a tool nunca mais ser
+ * oferecida depois do primeiro uso na conversa, e o dado do primeiro turn
+ * reaparecer em todo prompt seguinte. Nenhum teste pegou, porque o defeito só
+ * existe ATRAVÉS de turns.
+ *
+ * **Só `messages`, `summary` e `pendingAction` atravessam turns de propósito.**
+ * Qualquer outro campo de `MaxState` pertence aqui.
+ */
+export const RESET_DO_TURN = {
+    reply: null,
+    halt: null,
+    propostaDescartada: false,
+    // `draft` restaurado seria o pior dos dois: o `compose` publicaria a
+    // resposta do turno PASSADO por cima de uma resposta de template deste.
+    draft: null,
+    bloqueios: [],
+    // Zerados como `reply`, e pelo mesmo motivo: o checkpointer restaura o
+    // estado inteiro, então sem isto o consumo e a trilha do turn passado
+    // voltariam somados ao deste. Lista vazia é o sinal de reset (ver o
+    // reducer).
+    usage: [],
+    toolLog: [],
+    /**
+     * O laço de tools é DO TURN, e o checkpointer restaura o estado inteiro.
+     *
+     * Sem estes três, o defeito é duplo e silencioso, e foi reproduzido em
+     * dois turns na mesma thread:
+     *  - `toolRounds` nunca voltava a 0, e a seleção só roda em
+     *    `toolRounds === 0` — então a tool de leitura **nunca mais era
+     *    oferecida** naquela conversa, depois do primeiro uso. Regressão
+     *    permanente da própria feature deste PR.
+     *  - `toolResults` seguia injetando o resultado do primeiro turn em TODO
+     *    prompt seguinte, apresentando dado de negócio velho como atual.
+     */
+    pendingToolCalls: [],
+    toolRounds: 0,
+    toolResults: [],
+};
+
 export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   // Latência do TURN, não do modelo: inclui identidade, transcrição, RAG e
   // checkpoint. É esse número que a pessoa sente, e é o que o painel mostra.
@@ -1385,19 +1459,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
        *
        * Só `messages`, `summary` e `pendingAction` atravessam turns de propósito.
        */
-      reply: null,
-      halt: null,
-      propostaDescartada: false,
-      // `draft` restaurado seria o pior dos dois: o `compose` publicaria a
-      // resposta do turno PASSADO por cima de uma resposta de template deste.
-      draft: null,
-      bloqueios: [],
-      // Zerados como `reply`, e pelo mesmo motivo: o checkpointer restaura o
-      // estado inteiro, então sem isto o consumo e a trilha do turn passado
-      // voltariam somados ao deste. Lista vazia é o sinal de reset (ver o
-      // reducer).
-      usage: [],
-      toolLog: [],
+      ...RESET_DO_TURN,
     },
     {
       configurable: {
