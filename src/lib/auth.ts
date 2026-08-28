@@ -26,13 +26,19 @@ export type AuthResult =
  *    corpo vazio deixava o `?orgId=` fora da assinatura, e uma assinatura
  *    capturada valia por 5 minutos para QUALQUER org (enumeração cross-tenant).
  *
- * `allowLegacyEmptyBody`: transição do `/admin/status` — o admin do
- * Contractmaker ainda assina o formato antigo (`timestamp.""`). Aceita os dois
- * até o cliente de lá migrar; derrubar o antigo é um flag a remover.
+ * A tolerância ao formato antigo (`timestamp.""`) FOI REMOVIDA em 2026-08-28
+ * (max#21). O sunset não se apoiou no log — a retenção de runtime log do plano
+ * é de 1 dia e o `/admin/status` só é chamado quando alguém abre o painel, então
+ * "log zerado" media apenas que ninguém tinha olhado a tela. A prova foi
+ * estática: o ÚNICO chamador da rota é `getMaxStatus`
+ * (`contractmaker/apps/web/src/lib/max/admin-client.ts`), e ele assina
+ * `GET.${pathname}${search}` via `signMaxAdminRequest`. Nenhum outro repo da
+ * conta chama. A tolerância era código morto — e enquanto viva, mantinha aberto
+ * o replay cross-tenant que a assinatura com query fechou.
  */
 export async function requireHmac(
   req: NextRequest,
-  opts: { signQuery?: boolean; allowLegacyEmptyBody?: boolean } = {}
+  opts: { signQuery?: boolean } = {}
 ): Promise<AuthResult> {
   const secret = process.env.MAX_NOTIFY_SECRET;
   if (!secret) {
@@ -51,23 +57,7 @@ export async function requireHmac(
   const timestamp = req.headers.get("x-max-timestamp");
   const signature = req.headers.get("x-max-signature");
 
-  let verdict = verifySignature({ timestamp, signature, rawBody: signedPayload, secret });
-  if (!verdict.ok && opts.signQuery && opts.allowLegacyEmptyBody) {
-    verdict = verifySignature({ timestamp, signature, rawBody: "", secret });
-    if (verdict.ok) {
-      /**
-       * TELEMETRIA DO SUNSET: enquanto este log aparecer, o cliente ainda
-       * assina o formato antigo e o replay cross-tenant continua possível.
-       * Quando a migração do Contractmaker entrar (issue #347 de lá) e este
-       * log ZERAR por alguns dias, remova o `allowLegacyEmptyBody` — sem o
-       * log, o flag viraria permanente e a correção, cerimônia.
-       */
-      console.warn(
-        `[auth] assinatura LEGADA aceita em ${req.nextUrl.pathname} — ` +
-          `migrar o cliente e remover allowLegacyEmptyBody (contractmaker#347)`
-      );
-    }
-  }
+  const verdict = verifySignature({ timestamp, signature, rawBody: signedPayload, secret });
 
   if (!verdict.ok) {
     // Sem detalhe no corpo: para quem não tem o segredo, "assinatura inválida"

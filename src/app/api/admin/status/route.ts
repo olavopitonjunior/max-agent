@@ -20,15 +20,15 @@ export const runtime = "nodejs";
  * Auth: o MESMO segredo do `/notify`, mas a assinatura cobre
  * `${timestamp}.${method}.${path com query}` — assinar o corpo vazio deixava o
  * `?orgId=` FORA da assinatura, e uma assinatura capturada valia 5 minutos
- * para qualquer org (enumeração cross-tenant da fila). O formato antigo segue
- * aceito enquanto o admin do Contractmaker não migra (`allowLegacyEmptyBody`).
+ * para qualquer org (enumeração cross-tenant da fila). O formato antigo
+ * (corpo vazio) NÃO é mais aceito desde 2026-08-28 (#21).
  *
  * **`zapi.connected` é o número mais importante da tela.** Instância
  * desemparelhada aceita `send-text` com HTTP 200 e `messageId` válido e não
  * entrega nada: sem olhar aqui, a fila parece saudável enquanto ninguém recebe.
  */
 export async function GET(req: NextRequest) {
-  const auth = await requireHmac(req, { signQuery: true, allowLegacyEmptyBody: true });
+  const auth = await requireHmac(req, { signQuery: true });
   if (!auth.ok) return auth.response;
 
   const orgId = req.nextUrl.searchParams.get("orgId");

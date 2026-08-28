@@ -403,8 +403,12 @@ describe("GET /api/admin/status — a query entra na assinatura", () => {
     expect(res.status).toBe(401);
   });
 
-  it("formato antigo (corpo vazio) segue aceito até o admin migrar", async () => {
-    expect((await adminStatus(statusReq("", ""))).status).toBe(200);
+  it("formato antigo (corpo vazio) é RECUSADO — max#21", async () => {
+    // A tolerância caiu em 2026-08-28. Este caso inverteu de propósito: era o
+    // teste que travava a aceitação, e agora é o que trava a recusa. Enquanto
+    // ela existia, uma assinatura de corpo vazio capturada valia 5 minutos para
+    // QUALQUER org, porque o `?orgId=` ficava fora do que era assinado.
+    expect((await adminStatus(statusReq("", ""))).status).toBe(401);
   });
 
   it("sem assinatura é 401", async () => {

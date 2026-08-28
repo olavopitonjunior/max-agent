@@ -63,10 +63,12 @@ d("GET /api/admin/conversations", () => {
   });
 
   /**
-   * O `/admin/status` aceita o formato antigo (`ts.""`) enquanto o cliente do
-   * Contractmaker não migra. Esta rota é nova: aceitar o legado aqui seria
-   * criar dívida no dia do parto, e reabriria o replay cross-tenant que o
-   * formato com query fechou.
+   * Esta rota nunca aceitou o formato antigo (`ts.""`): aceitar o legado numa
+   * rota nova seria criar dívida no dia do parto, e reabriria o replay
+   * cross-tenant que o formato com query fechou.
+   *
+   * O `/admin/status`, que tolerava o legado por transição, também deixou de
+   * aceitar (max#21, 2026-08-28) — as duas rotas agora exigem o mesmo formato.
    */
   it("NÃO aceita o formato legado de assinatura", async () => {
     const { GET } = await import("@/app/api/admin/conversations/route");
