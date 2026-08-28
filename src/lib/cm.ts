@@ -255,6 +255,60 @@ export async function brokerRecipientId(
   }
 }
 
+/**
+ * A chave de política desta pessoa NESTA org, buscada no servidor.
+ *
+ * ── Por que buscar em vez de carregar no candidato ─────────────────────────
+ *
+ * O `UserCandidate` carregava `role`, e o candidato é gravado na
+ * `phone_org_choice` — que **não tem TTL**, por decisão (é escolha da pessoa,
+ * não cache). Consequência: o papel congelava na hora em que a PERGUNTA de
+ * desambiguação foi feita, e rebaixar alguém na plataforma não revogava o que o
+ * Max oferecia.
+ *
+ * O repo já tinha resolvido este exato problema uma vez: o `BrokerCandidate`
+ * deliberadamente NÃO guarda `dealIds`, porque "um candidato congelado
+ * continuaria dando acesso a negócio do qual o corretor já saiu". `role` é o
+ * mesmo caso — dado derivado, que só o servidor calcula certo.
+ *
+ * `null` é resultado NORMAL e fail-closed: telefone que não resolve, membership
+ * degenerada, org fora do ar. Papel desconhecido resolve para NENHUMA
+ * capability — nunca para um default, que seria a política ALARGANDO.
+ */
+export async function chaveDePolitica(
+  orgId: string,
+  rawPhone: string
+): Promise<string | null> {
+  const org = await orgById(orgId);
+  if (!org) return null;
+  const e164 = normalizeBrPhone(rawPhone);
+  if (!e164) return null;
+  try {
+    const res = await fetchWithTimeout(
+      `${BASE()}/api/agents/user-scope?phone=${encodeURIComponent(e164)}`,
+      { headers: { Authorization: `Bearer ${org.apiToken}` } },
+      IMOBPRO_TIMEOUT_MS
+    );
+    if (!res.ok) {
+      // 404 é normal (corretor comissionado não é usuário). Outros status são
+      // degradação, e o efeito é o mesmo: nenhuma capability. Logar o que não
+      // é 404 para a degradação não passar por "essa pessoa não pode nada".
+      if (res.status !== 404) {
+        console.warn(`[cm] user-scope ${res.status} na org ${orgId}`);
+      }
+      return null;
+    }
+    const r = (await res.json()) as { roleKey?: string | null };
+    return typeof r.roleKey === "string" ? r.roleKey : null;
+  } catch (err) {
+    console.warn(
+      `[cm] user-scope falhou na org ${orgId}:`,
+      err instanceof Error ? err.message : String(err)
+    );
+    return null;
+  }
+}
+
 export async function criarFormularioVenda(
   orgId: string,
   params: {

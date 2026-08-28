@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("@/lib/cm", () => ({
   fetchProfile: vi.fn(),
+  // A chave de política vem do servidor por turn; sem stub o gate toca o banco.
+  chaveDePolitica: vi.fn().mockResolvedValue("admin"),
   searchKnowledge: vi.fn(),
   reportUsage: vi.fn().mockResolvedValue(undefined),
 }));
@@ -25,7 +27,6 @@ const identity = {
   kind: "user" as const,
   userId: "u1",
   userName: "Marcia Gerente",
-  role: "sales",
 };
 
 function inbound(text: string) {

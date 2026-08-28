@@ -59,6 +59,7 @@ import {
 } from "./prompt";
 import { sanitizar } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
+import { chaveDePolitica } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/zapi";
 
 /**
@@ -408,9 +409,31 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
    * Isso é fail-closed (regra 3) e é seguro justamente porque nada filtra tool
    * por política ainda.
    */
+  /**
+   * A chave vem do SERVIDOR, por turn — nunca do candidato.
+   *
+   * O candidato é gravado na `phone_org_choice`, que não tem TTL, então um
+   * papel guardado ali congela: rebaixar alguém na plataforma não revogava o
+   * que o Max oferece. Buscar aqui custa um round-trip por turn e é o que
+   * mantém a chave fresca e ciente de papel customizado.
+   *
+   * Corretor comissionado não tem papel — a política dele é `brokerDefault` +
+   * `byRecipient` —, então nem chamamos.
+   *
+   * ⚠️ **Falha vira `null`, nunca o último valor conhecido.** Buscar por turn
+   * troca "papel congelado" por "papel indisponível", e a degradação tem que
+   * cair no MENOR privilégio: guardar um valor anterior para usar quando a rota
+   * cai reintroduziria exatamente o congelamento, e com pior sincronismo.
+   */
+  const chave =
+    state.identity.kind === "user"
+      ? await chaveDePolitica(state.identity.orgId, state.inbound.fromPhone)
+      : null;
+
   const policy = resolverPolitica({
     politica: profile?.maxPolicy,
     sujeito: state.identity,
+    role: chave,
   });
 
   /**

@@ -12,6 +12,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("@/lib/cm", () => ({
   fetchProfile: vi.fn().mockResolvedValue(null),
+  // A chave de política vem do servidor por turn; sem stub o gate toca o banco.
+  chaveDePolitica: vi.fn().mockResolvedValue("admin"),
   searchKnowledge: vi.fn().mockResolvedValue([]),
   reportUsage: vi.fn().mockResolvedValue(undefined),
   transcribeMedia: vi.fn(),
@@ -57,7 +59,6 @@ const CANDIDATO = {
   kind: "user" as const,
   userId: "u1",
   userName: "Marcia",
-  role: "sales",
 };
 
 function midia(kind: "audio" | "image", over: Record<string, unknown> = {}) {

@@ -130,16 +130,24 @@ d("resolveIdentity", () => {
   });
 
   /**
-   * **O `role` do `by-phone` chega ao candidato.**
+   * **O `role` do `by-phone` NÃO chega ao candidato — e este teste inverteu.**
    *
-   * Este teste faltava, e a falta era do tipo perigoso: o `role` é a chave da
-   * política de capabilities (`byRole`), e se o ImobPro renomear ou parar de
-   * devolver o campo, TODO usuário resolve para zero capabilities — em
-   * silêncio, com a suíte inteira verde, porque fail-closed não quebra nada.
-   * É o mesmo modo de falha que o vetor de paridade mata do outro lado do
-   * contrato; esta metade estava sem cobertura nenhuma.
+   * A versão anterior travava o oposto: afirmava que o `role` chegava, porque
+   * ele era a chave da política. Estava certo para aquele desenho e errado
+   * como desenho.
+   *
+   * O candidato é gravado na `phone_org_choice`, que **não tem TTL** — é
+   * escolha da pessoa, não cache. Guardar o papel ali o congelava na hora da
+   * PERGUNTA de desambiguação: rebaixar alguém na plataforma não revogava o
+   * que o Max oferecia, e candidato gravado antes da política resolvia para
+   * nenhuma capability, permanentemente.
+   *
+   * A chave agora vem do servidor por turn (`cm.ts::chaveDePolitica` →
+   * `GET /api/agents/user-scope`), que é quem enxerga `customRoleId` e o valor
+   * atual. Este teste existe para que reintroduzir o campo no candidato não
+   * passe despercebido.
    */
-  it("o role do by-phone chega ao candidato", async () => {
+  it("o role do by-phone NÃO é guardado no candidato", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_u: string, init: { headers: Record<string, string> }) => {
@@ -147,6 +155,8 @@ d("resolveIdentity", () => {
           return {
             ok: true,
             status: 200,
+            // O ImobPro CONTINUA devolvendo `role` nesta rota — ela tem outros
+            // consumidores. O ponto é que este módulo o ignora.
             json: async () => ({ userId: "u-trio", name: "Marcia", role: "sales" }),
           } as unknown as Response;
         }
@@ -158,30 +168,12 @@ d("resolveIdentity", () => {
 
     expect(r.kind).toBe("resolved");
     if (r.kind === "resolved" && r.candidate.kind === "user") {
-      expect(r.candidate.role).toBe("sales");
-    }
-  });
-
-  /** Resposta SEM `role` não inventa papel — vira `null`, que é fail-closed. */
-  it("by-phone sem role produz candidato com role null", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_u: string, init: { headers: Record<string, string> }) => {
-        if (init.headers.Authorization.includes("t-trio")) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ userId: "u-trio", name: "Marcia" }),
-          } as unknown as Response;
-        }
-        return { ok: true, status: 404, json: async () => ({}) } as unknown as Response;
-      })
-    );
-
-    const r = await resolveIdentity(PHONE);
-
-    if (r.kind === "resolved" && r.candidate.kind === "user") {
-      expect(r.candidate.role).toBeNull();
+      // Ausência, não presença: um teste de presença de outro campo continuaria
+      // verde no dia em que alguém reintroduzisse `role`.
+      expect(r.candidate).not.toHaveProperty("role");
+      expect(JSON.stringify(r.candidate)).not.toContain("sales");
+      // E o que ele PRECISA carregar continua lá.
+      expect(r.candidate.userId).toBe("u-trio");
     }
   });
 
@@ -216,9 +208,9 @@ d("resolveIdentity", () => {
 
 describe("matchChoice", () => {
   const cands = [
-    { orgId: "a", orgName: "RE/MAX Trio", kind: "user" as const, userId: "1", userName: null, role: "sales" },
-    { orgId: "b", orgName: "RE/MAX Ativa", kind: "user" as const, userId: "2", userName: null, role: "sales" },
-    { orgId: "c", orgName: "Fincasa", kind: "user" as const, userId: "3", userName: null, role: "sales" },
+    { orgId: "a", orgName: "RE/MAX Trio", kind: "user" as const, userId: "1", userName: null },
+    { orgId: "b", orgName: "RE/MAX Ativa", kind: "user" as const, userId: "2", userName: null },
+    { orgId: "c", orgName: "Fincasa", kind: "user" as const, userId: "3", userName: null },
   ];
 
   it("aceita o número da lista", () => {
@@ -254,8 +246,8 @@ describe("matchChoice", () => {
 describe("askWhichOrg", () => {
   it("numera as opções e só oferece as orgs vinculadas", () => {
     const texto = askWhichOrg([
-      { orgId: "a", orgName: "RE/MAX Trio", kind: "user", userId: "1", userName: null, role: "sales" },
-      { orgId: "b", orgName: "Fincasa", kind: "user", userId: "2", userName: null, role: "sales" },
+      { orgId: "a", orgName: "RE/MAX Trio", kind: "user", userId: "1", userName: null },
+      { orgId: "b", orgName: "Fincasa", kind: "user", userId: "2", userName: null },
     ]);
     expect(texto).toContain("1. RE/MAX Trio");
     expect(texto).toContain("2. Fincasa");

@@ -150,17 +150,22 @@ export function resolverPolitica(params: {
   politica: MaxPolicy | null | undefined;
   sujeito: Candidate;
   /**
-   * Sobrescrita do papel. **Normalmente não se passa** — o padrão é o `role`
-   * do próprio candidato.
+   * A **chave de política** deste sujeito, resolvida no servidor
+   * (`GET /api/agents/user-scope`) e buscada por turn.
    *
-   * Existia como parâmetro obrigatório na primeira versão, com o candidato
-   * carregando o mesmo dado: duas fontes de verdade para a mesma coisa, e um
-   * chamador que esquecesse de passar recebia `[]` sem erro e sem falha de
-   * tipo — um fail-closed silencioso idêntico a "o tenant não configurou
-   * nada". Agora o default é o candidato, e o parâmetro só serve a quem
-   * quiser simular outro papel (a UI de política, um teste).
+   * Deixou de ter default. Antes ela caía no `role` do próprio candidato — e
+   * aquele candidato é gravado na `phone_org_choice`, que não tem TTL: o papel
+   * congelava na hora da pergunta de desambiguação, e papel customizado virava
+   * o literal `"custom"` para todo mundo do tenant. Ver o aviso no
+   * `UserCandidate`.
+   *
+   * `null` é resultado NORMAL e fail-closed — telefone que não resolve, org
+   * fora do ar, membership degenerada. Resolve para NENHUMA capability, nunca
+   * para um default: adivinhar aqui seria a política ALARGANDO.
+   *
+   * Ignorado quando `sujeito.kind === "broker"`, que não tem papel.
    */
-  role?: string | null;
+  role: string | null;
 }): Capability[] {
   const { politica, sujeito } = params;
   if (!politica) return [];
@@ -178,7 +183,7 @@ export function resolverPolitica(params: {
   // Papel desconhecido cai no mesmo lugar que papel sem política: nenhuma.
   // Adivinhar um default aqui seria a política ALARGANDO, que é justamente o
   // que ela nunca pode fazer.
-  const role = (params.role ?? sujeito.role)?.trim();
+  const role = params.role?.trim();
   if (!role) return [];
   return apenasConhecidas(byRoleDe(politica, role));
 }
