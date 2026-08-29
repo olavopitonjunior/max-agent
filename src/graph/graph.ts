@@ -46,7 +46,9 @@ import {
   markGreeted,
   type Candidate,
 } from "@/lib/identity";
-import { complete, DEFAULT_MODEL, type LlmUsage } from "@/lib/llm";
+import { complete, DEFAULT_MODEL, type LlmUsage,
+  type LlmToolCall,
+} from "@/lib/llm";
 import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
 import { checkpointerPool } from "@/lib/db";
 import { conversationKey, phoneTag } from "@/lib/phone";
@@ -59,6 +61,8 @@ import {
 } from "./prompt";
 import { sanitizar } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
+import { TOOLS_DE_LEITURA, selecionarTools } from "./tools";
+import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
 import { chaveDePolitica } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/zapi";
 
@@ -75,6 +79,16 @@ import type { InboundMessage } from "@/lib/zapi";
  *  - **`interrupt()`**: pausa esperando confirmação humana e retoma no turno
  *    seguinte — é como os writes vão ser confirmados na Fase 3.
  */
+
+/**
+ * Teto de voltas do laço de ferramenta.
+ *
+ * Três razões, em ordem: orçamento de TEMPO (o turn vive numa function de 60 s
+ * que já gastou identidade, transcrição e RAG), orçamento de DINHEIRO (cada
+ * volta reenvia o histórico inteiro) e o fato de que um nano em laço não
+ * converge.
+ */
+const TOOL_MAX_ROUNDS = 3;
 
 /** Quantos turnos vão no prompt. */
 const MAX_HISTORY = 20;
@@ -98,6 +112,19 @@ export interface ChatMessage {
  * reducer.
  */
 type MessagesUpdate = ChatMessage[] | { replace: ChatMessage[] };
+
+/**
+ * O que uma tool de leitura devolveu, pronto para a cerca do prompt.
+ *
+ * `items: null` é FALHA explícita, e não lista vazia: "não consegui consultar"
+ * e "você não tem negócio" são respostas diferentes, e apresentar a primeira
+ * como a segunda mentiria para a pessoa sobre a carteira dela.
+ */
+export interface ResultadoDeTool {
+  tool: string;
+  items: unknown[] | null;
+  truncated: boolean;
+}
 
 export const MaxState = Annotation.Root({
   inbound: Annotation<InboundMessage>,
@@ -258,6 +285,42 @@ export const MaxState = Annotation.Root({
    * fora do enum só existe como um `console.warn` que ninguém correlaciona.
    */
   toolLog: Annotation<ToolLogEntry[]>({
+    reducer: (prev, next) => (next.length === 0 ? [] : [...prev, ...next]),
+    default: () => [],
+  }),
+
+  /**
+   * Chamadas de LEITURA que o modelo pediu e ainda não foram executadas.
+   *
+   * Substitui, não acumula: são as do turno corrente do laço. O `tools` as
+   * consome e devolve `[]`, que aqui significa "nenhuma pendente" — e não
+   * "reset", porque este reducer não tem a semântica de reset dos de cima.
+   */
+  pendingToolCalls: Annotation<LlmToolCall[]>({
+    reducer: (_prev, next) => next,
+    default: () => [],
+  }),
+
+  /**
+   * Quantas voltas do laço já aconteceram. Teto em `TOOL_MAX_ROUNDS`.
+   *
+   * Não é erro estourar: o `answer` responde com o que já coletou, e a trilha
+   * registra `rounds_exhausted` para o painel mostrar.
+   */
+  toolRounds: Annotation<number>({
+    reducer: (_prev, next) => next,
+    default: () => 0,
+  }),
+
+  /**
+   * O que as tools devolveram, para entrar no prompt cercado.
+   *
+   * ⚠️ Mesmo reducer de reset dos de cima (`[]` = zerar), então o nó `tools`
+   * **nunca** espalha lista vazia: quando uma consulta falha, ele devolve uma
+   * entrada de FALHA explícita. Apagar o que as voltas anteriores coletaram
+   * faria o modelo responder sem o dado que ele já tinha, em silêncio.
+   */
+  toolResults: Annotation<ResultadoDeTool[]>({
     reducer: (prev, next) => (next.length === 0 ? [] : [...prev, ...next]),
     default: () => [],
   }),
@@ -651,6 +714,8 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     // e diz de quem é o caminho. Descrever capacidade que não está no pedido é
     // a forma mais barata de um modelo pequeno prometer o que não entrega.
     podeEscrever: podeEscrever(state.identity),
+    // Vazio na primeira volta; preenchido quando o `tools` já rodou.
+    toolResults: state.toolResults,
   });
 
   const userText = state.inbound.text?.trim() || "(mensagem sem texto)";
@@ -662,10 +727,39 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    * expor em todo turn custaria os tokens da definição sempre e daria ao nano
    * mais chance de chamar sem motivo.
    */
-  const tools =
+  const escrita =
     podeEscrever(state.identity) && shouldOfferTools(userText)
       ? [FORM_TOOL]
-      : undefined;
+      : [];
+
+  /**
+   * As de LEITURA passam pela política; a de ESCRITA não — e isso não é
+   * esquecimento.
+   *
+   * `propor_criacao` é oferecida hoje sem consultar a política. Gateá-la agora
+   * a faria exigir `form.create`, que NENHUMA org concede (não existe editor
+   * nem rota de escrita da política), e o Max pararia de propor formulário em
+   * produção, em silêncio — regressão da única capability que ele exerce. O
+   * gate dela entra no PR 6c, junto do editor. Ver `selecionarTools`.
+   *
+   * Nas voltas seguintes do laço nada de novo é oferecido: o modelo já tem o
+   * resultado e o que se espera dele é a resposta, não outra chamada.
+   */
+  const leitura =
+    state.toolRounds === 0
+      ? selecionarTools({ policy: state.policy, texto: userText })
+      : { tools: [], cortadas: 0 };
+
+  if (leitura.cortadas > 0) {
+    // Corte silencioso viraria "a feature não funciona às vezes".
+    console.info(
+      `[answer] teto de tools cortou ${leitura.cortadas} em ${state.identity.orgId}`
+    );
+  }
+
+  const defsDeLeitura = leitura.tools.map((t) => t.def);
+  const todas = [...escrita, ...defsDeLeitura];
+  const tools = todas.length > 0 ? todas : undefined;
 
   let result;
   try {
@@ -765,6 +859,25 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   }
 
   /**
+   * O modelo pediu LEITURA. Não respondemos ainda — o laço executa e volta.
+   *
+   * Sem `draft` aqui de propósito: o que ele escreveu junto de uma chamada de
+   * ferramenta é preâmbulo ("deixa eu ver..."), não resposta, e mandá-lo para
+   * o `compose` faria a pessoa receber duas mensagens por turn.
+   */
+  const deLeitura = result.toolCalls.filter((c) =>
+    TOOLS_DE_LEITURA.some((t) => t.def.name === c.name)
+  );
+  if (deLeitura.length > 0) {
+    return {
+      messages: [{ role: "user", content: userText }],
+      pendingToolCalls: deLeitura,
+      usage: usageDoTurn,
+      ...(trilha.length > 0 ? { toolLog: trilha } : {}),
+    };
+  }
+
+  /**
    * Texto livre do modelo. Vai para `draft`, **não** para `reply`.
    *
    * E o turno do assistente NÃO é acrescentado aqui: quem acrescenta é o
@@ -784,6 +897,124 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     // `confirm` acabou de gravar.
     ...(trilha.length > 0 ? { toolLog: trilha } : {}),
   };
+}
+
+/**
+ * Executa as tools de LEITURA que o modelo pediu.
+ *
+ * ── Por que este nó existe, em vez de chamar dentro do `answer` ───────────
+ *
+ * O laço. `answer → tools → answer` é o que permite o modelo pedir, ver o
+ * resultado e então responder. Fazer a chamada dentro do `answer` daria uma
+ * volta só, e o caso comum ("meus negócios" → lista → "e o do Silva?") precisa
+ * de duas.
+ *
+ * ── ⚠️ O que este nó NUNCA pode espalhar ──────────────────────────────────
+ *
+ * `usage: []` e `toolLog: []`. Os reducers dos dois tratam **lista vazia como
+ * RESET**, não como "nada a acrescentar" — é como o `runTurn` os zera na
+ * entrada. Num laço de até três voltas, uma rodada que espalhasse `[]` apagaria
+ * o custo do turno inteiro: sem erro, sem teste vermelho, e sumindo exatamente
+ * no painel de custo. Viola a regra 6 da governança ("operação nova sem linha
+ * de custo é bug"). Por isso tudo aqui é espalhado condicionalmente.
+ *
+ * Este nó **não chama modelo**, então não produz `usage` — e é justamente por
+ * isso que ele não pode tocar no campo.
+ */
+async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
+  const chamadas = state.pendingToolCalls;
+  if (chamadas.length === 0) return { pendingToolCalls: [] };
+
+  const subject = subjectDe(state.identity);
+  const resultados: ResultadoDeTool[] = [];
+  const trilha: ToolLogEntry[] = [];
+
+  for (const chamada of chamadas) {
+    const def = TOOLS_DE_LEITURA.find((t) => t.def.name === chamada.name);
+    if (!def) {
+      // O modelo inventou um nome. Descartada, e REGISTRADA: chamada
+      // descartada vale tanto quanto a aceita para quem depura. E devolve
+      // FALHA ao modelo em vez de sumir — "sempre sinalize" é a disciplina do
+      // resto deste nó, e queimar uma volta em silêncio a quebraria.
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "tool_desconhecida" });
+      resultados.push({ tool: chamada.name, items: null, truncated: false });
+      continue;
+    }
+
+    /**
+     * ⚠️ **A capability é reconferida na EXECUÇÃO, não só na oferta.**
+     *
+     * `selecionarTools` gateia o que o modelo VÊ. Isto gateia o que ele
+     * CONSEGUE. São coisas diferentes: o modelo pode emitir uma chamada com o
+     * nome de qualquer tool do catálogo — por alucinação, ou porque uma
+     * instrução injetada num resultado anterior mandou (a própria cerca
+     * `fenceToolResults` nomeia essa superfície de ataque).
+     *
+     * Hoje é dormente: o catálogo tem uma tool e nenhuma org tem política. No
+     * 6b, com cinco tools em capabilities diferentes, uma org que só recebeu
+     * `deal.list` ficaria sem proteção nenhuma contra uma chamada nomeando a
+     * tool de `proposal.list` — executada ao vivo contra o dado do tenant.
+     *
+     * É a mesma classe do `descartarSeVazou`, uma camada acima: lá o campo,
+     * aqui o verbo.
+     */
+    if (!state.policy.includes(def.capability)) {
+      console.warn(
+        `[tools] ${chamada.name} chamada SEM a capability ${def.capability} na org ${state.identity.orgId}`
+      );
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "capability_negada" });
+      resultados.push({ tool: chamada.name, items: null, truncated: false });
+      continue;
+    }
+
+    const r = await consultarEscopo({
+      orgId: state.identity.orgId,
+      rawPhone: state.inbound.fromPhone,
+      subject,
+      verb: def.verb,
+      args: chamada.args,
+    });
+
+    if (!r) {
+      resultados.push({ tool: chamada.name, items: null, truncated: false });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+      continue;
+    }
+
+    // Rede de segurança da regra 5 — a projeção que VALE é a do servidor.
+    const items = descartarSeVazou(r.items, state.identity.kind);
+    resultados.push({ tool: chamada.name, items, truncated: r.truncated });
+    trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+  }
+
+  return {
+    pendingToolCalls: [],
+    toolRounds: state.toolRounds + 1,
+    // Condicional: ver o aviso do cabeçalho. `resultados` é vazio quando toda
+    // chamada tinha nome inventado.
+    ...(resultados.length > 0 ? { toolResults: resultados } : {}),
+    ...(trilha.length > 0 ? { toolLog: trilha } : {}),
+  };
+}
+
+/**
+ * Volta para o `tools` ou segue para o `compose`.
+ *
+ * `TOOL_MAX_ROUNDS = 3`, e não "até o modelo parar". O turn inteiro vive numa
+ * function de 60 s que já gastou identidade, transcrição e RAG; cada volta é
+ * uma chamada de modelo mais uma de rede. E um nano em laço não converge.
+ *
+ * Estourar o teto **não é erro**: o `answer` responde com o que já coletou.
+ */
+function afterAnswer(state: MaxStateType): "tools" | "compose" {
+  if (state.pendingToolCalls.length === 0) return "compose";
+  if (state.toolRounds >= TOOL_MAX_ROUNDS) {
+    console.info(
+      `[tools] rounds_exhausted em ${state.identity.orgId} — respondendo com o que há`
+    );
+    return "compose";
+  }
+  return "tools";
 }
 
 /**
@@ -921,6 +1152,7 @@ export function buildGraph() {
     .addNode("confirm", confirm)
     .addNode("retrieve", retrieve)
     .addNode("answer", answer)
+    .addNode("tools", tools)
     .addNode("compose", compose)
     .addNode("compact", compact)
     .addEdge(START, "gate")
@@ -933,7 +1165,13 @@ export function buildGraph() {
       compose: "compose",
     })
     .addEdge("retrieve", "answer")
-    .addEdge("answer", "compose")
+    // O laço: `answer` pede, `tools` executa, `answer` responde. Fecha em
+    // `compose` quando não há chamada pendente ou o teto de voltas estourou.
+    .addConditionalEdges("answer", afterAnswer, {
+      tools: "tools",
+      compose: "compose",
+    })
+    .addEdge("tools", "answer")
     .addConditionalEdges("compose", afterCompose, {
       compact: "compact",
       [END]: END,
@@ -985,6 +1223,51 @@ export interface TurnResult {
    */
   afterReply: () => Promise<void>;
 }
+
+/**
+ * O que é zerado a CADA turn — o contrato que o checkpointer obriga a manter.
+ *
+ * Constante nomeada, e não literal dentro do `invoke`, por um motivo concreto:
+ * campo de estado novo que seja do TURN precisa entrar aqui, e um literal
+ * enterrado numa chamada não convida ninguém a lembrar disso. O PR 6a
+ * acrescentou três campos e esqueceu — o resultado foi a tool nunca mais ser
+ * oferecida depois do primeiro uso na conversa, e o dado do primeiro turn
+ * reaparecer em todo prompt seguinte. Nenhum teste pegou, porque o defeito só
+ * existe ATRAVÉS de turns.
+ *
+ * **Só `messages`, `summary` e `pendingAction` atravessam turns de propósito.**
+ * Qualquer outro campo de `MaxState` pertence aqui.
+ */
+export const RESET_DO_TURN = {
+    reply: null,
+    halt: null,
+    propostaDescartada: false,
+    // `draft` restaurado seria o pior dos dois: o `compose` publicaria a
+    // resposta do turno PASSADO por cima de uma resposta de template deste.
+    draft: null,
+    bloqueios: [],
+    // Zerados como `reply`, e pelo mesmo motivo: o checkpointer restaura o
+    // estado inteiro, então sem isto o consumo e a trilha do turn passado
+    // voltariam somados ao deste. Lista vazia é o sinal de reset (ver o
+    // reducer).
+    usage: [],
+    toolLog: [],
+    /**
+     * O laço de tools é DO TURN, e o checkpointer restaura o estado inteiro.
+     *
+     * Sem estes três, o defeito é duplo e silencioso, e foi reproduzido em
+     * dois turns na mesma thread:
+     *  - `toolRounds` nunca voltava a 0, e a seleção só roda em
+     *    `toolRounds === 0` — então a tool de leitura **nunca mais era
+     *    oferecida** naquela conversa, depois do primeiro uso. Regressão
+     *    permanente da própria feature deste PR.
+     *  - `toolResults` seguia injetando o resultado do primeiro turn em TODO
+     *    prompt seguinte, apresentando dado de negócio velho como atual.
+     */
+    pendingToolCalls: [],
+    toolRounds: 0,
+    toolResults: [],
+};
 
 export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   // Latência do TURN, não do modelo: inclui identidade, transcrição, RAG e
@@ -1176,19 +1459,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
        *
        * Só `messages`, `summary` e `pendingAction` atravessam turns de propósito.
        */
-      reply: null,
-      halt: null,
-      propostaDescartada: false,
-      // `draft` restaurado seria o pior dos dois: o `compose` publicaria a
-      // resposta do turno PASSADO por cima de uma resposta de template deste.
-      draft: null,
-      bloqueios: [],
-      // Zerados como `reply`, e pelo mesmo motivo: o checkpointer restaura o
-      // estado inteiro, então sem isto o consumo e a trilha do turn passado
-      // voltariam somados ao deste. Lista vazia é o sinal de reset (ver o
-      // reducer).
-      usage: [],
-      toolLog: [],
+      ...RESET_DO_TURN,
     },
     {
       configurable: {

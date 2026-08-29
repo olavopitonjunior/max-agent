@@ -372,10 +372,21 @@ describe("resolução no gate", () => {
    * formulário** nessa janela — em silêncio, sem erro, sem teste vermelho, e só
    * descoberto por conversa real.
    *
-   * Por isso `state.policy` é resolvido e NÃO é consumido neste PR. O consumo
-   * entra no PR 6, junto das tools que a política de fato governa. Este teste é
-   * o que faz essa decisão sobreviver a quem vier depois achando que "está
-   * faltando ligar".
+   * ── ATUALIZADO NO PR 6a: a alegação ESTREITOU, não afrouxou ────────────
+   *
+   * Antes: "`state.policy` é resolvido e NÃO é consumido". Isso deixou de ser
+   * verdade — o 6a consome a política para as tools de LEITURA, que nascem
+   * gateadas (regra 3).
+   *
+   * O que continua verdadeiro, e é o que este teste trava: **`propor_criacao`
+   * NÃO passa pela política.** Ela é oferecida por `podeEscrever &&
+   * shouldOfferTools`, como sempre foi. Gateá-la exigiria `form.create`, que
+   * nenhuma org concede — não existe editor nem rota de escrita da política —,
+   * e o Max pararia de propor formulário em produção, em silêncio.
+   *
+   * O gate dela é do **PR 6c**, junto do editor que torna `form.create`
+   * concedível. Só lá estes dois testes mudam. Quem chegar antes disso achando
+   * que "está faltando ligar" vai encontrar este parágrafo.
    */
   it("política ausente NÃO tira propor_criacao do prompt", async () => {
     profile.mockResolvedValue({ enabled: true, model: "x" });
@@ -387,7 +398,13 @@ describe("resolução no gate", () => {
     expect(tools?.map((t: { name: string }) => t.name)).toContain(TOOL_PROPOR_FORM);
   });
 
-  /** E o mesmo vale com política presente porém sem `form.create`. */
+  /**
+   * E o mesmo vale com política presente porém sem `form.create`.
+   *
+   * O `(ainda)` do nome tem vencimento: **PR 6c**, quando o editor tornar
+   * `form.create` concedível. Sem este ponteiro o "ainda" vira permanente — é a
+   * mesma classe de dívida que a §6.3 da spec teve o cuidado de nomear.
+   */
   it("política que NÃO concede form.create também não tira a tool (ainda)", async () => {
     profile.mockResolvedValue({
       enabled: true,
