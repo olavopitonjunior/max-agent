@@ -5,7 +5,9 @@ import {
   isGroupJid,
   sendText,
   connectionStatus,
+  ZapiHttpError,
 } from "../zapi";
+import { inoperanciaDoErro } from "../zapi-erro";
 
 /**
  * O parser existe porque o payload da Z-API tem defeitos que já custaram
@@ -168,23 +170,58 @@ describe("envio", () => {
    * fila como "instância desemparelhada", mandando quem investigasse ler um QR
    * code que não resolveria nada. Custou re-pareamentos que não eram o problema.
    *
-   * Lançar é o certo porque os chamadores tratam exceção como "não consegui
-   * PERGUNTAR" e seguem (fail open), com o motivo real no log.
+   * A primeira correção (21/08) LANÇAVA em todo não-2xx. Em 10/09 isso custou
+   * dois dias de silêncio: a assinatura da Z-API caiu, o `/status` respondia
+   * 400 "must subscribe", exceção era "não consegui perguntar", e ninguém foi
+   * avisado. O veredito certo é um TERCEIRO estado — inoperante, com motivo.
    */
-  it("401 LANÇA em vez de dizer desemparelhada", async () => {
+  it("400 'must subscribe' é INOPERANTE por assinatura: connected:false, com motivo, sem lançar", async () => {
+    mockFetch({
+      ok: false,
+      status: 400,
+      text: async () =>
+        '{"error":"To continue sending a message, you must subscribe to this instance again"}',
+    });
+
+    const s = await connectionStatus();
+    expect(s.connected).toBe(false);
+    expect(s.inoperante).toMatchObject({ motivo: "assinatura" });
+    expect(s.inoperante?.detalhe).toMatch(/400.*subscribe/);
+  });
+
+  it("401 é INOPERANTE por credencial — nem 'desemparelhada', nem exceção", async () => {
     mockFetch({
       ok: false,
       status: 401,
       text: async () => '{"error":"invalid client-token"}',
     });
 
-    await expect(connectionStatus()).rejects.toThrow(/401.*NÃO é desemparelhamento/s);
+    const s = await connectionStatus();
+    expect(s.connected).toBe(false);
+    expect(s.inoperante?.motivo).toBe("credencial");
+  });
+
+  /**
+   * Mutação de controle da classificação: um 400 com OUTRO corpo não é
+   * assinatura. Sem isto, todo 400 viraria represamento da fila inteira —
+   * e o custo de um falso positivo aqui é a fila parada.
+   */
+  it("400 com corpo desconhecido continua sendo exceção, não inoperância", async () => {
+    mockFetch({ ok: false, status: 400, text: async () => '{"error":"phone is required"}' });
+
+    await expect(connectionStatus()).rejects.toThrow(/400.*não é desemparelhamento nem inoperância/s);
   });
 
   it("404 (instance id errado) também lança", async () => {
     mockFetch({ ok: false, status: 404, text: async () => "not found" });
 
     await expect(connectionStatus()).rejects.toThrow(/ZAPI_INSTANCE_ID/);
+  });
+
+  it("5xx lança — a Z-API não disse nada, e 'nada' não é 'desconectada'", async () => {
+    mockFetch({ ok: false, status: 503, text: async () => "upstream" });
+
+    await expect(connectionStatus()).rejects.toThrow(/503/);
   });
 
   /** 200 sem campo de conexão é formato desconhecido, não desconexão. */
@@ -239,6 +276,26 @@ describe("envio", () => {
     await expect(sendText({ to: "5511999063228", body: "oi" })).rejects.toThrow(
       /Z-API \/send-text 401/
     );
+  });
+
+  /**
+   * E é TIPADA: o outbox e o inbound perguntam ao erro se foi o canal que
+   * recusou (assinatura, credencial) para devolver a tentativa em vez de
+   * contá-la. Mensagem inalterada — é o que está gravado em `last_error`.
+   */
+  it("o erro de envio carrega status e corpo, e o classificador o reconhece", async () => {
+    mockFetch({
+      ok: false,
+      status: 400,
+      text: async () => '{"error":"To continue sending a message, you must subscribe to this instance again"}',
+    });
+    const err = await sendText({ to: "5511999063228", body: "oi" }).catch((e) => e);
+    expect(err).toBeInstanceOf(ZapiHttpError);
+    expect(err.status).toBe(400);
+    expect(err.body).toContain("subscribe");
+    expect(err.message).toMatch(/^Z-API \/send-text 400: /);
+    expect(inoperanciaDoErro(err)).toMatchObject({ motivo: "assinatura" });
+    expect(inoperanciaDoErro(new Error("timeout"))).toBeNull();
   });
 
   it("sem env de instância falha claro, não com URL 'undefined'", async () => {
