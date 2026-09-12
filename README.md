@@ -124,6 +124,27 @@ incidente anterior, senão um alerta de volta que nunca entrega travaria
 `alerted_down` e suprimiria toda queda futura. Os dois buracos existiram e cada
 correção tem um teste que falha se ela sumir.
 
+**"Caiu" tem três formas, e o e-mail diz qual** (desde 2026-09-12). A sessão do
+WhatsApp cair é a forma óbvia — o conselho é reparear por QR. Mas em 10/09 a
+assinatura da Z-API foi cancelada por cobrança recusada, o `/status` passou a
+responder 400 "must subscribe", e isso era tratado como "não consegui
+perguntar": fail-open, o `send-text` recusava, 16 notificações viraram `failed`
+e **nenhum e-mail saiu por dois dias**. Hoje `connectionStatus()` devolve
+`inoperante` com motivo (`assinatura` para o 400, `credencial` para 401/403), o
+outbox e o inbound **represam** em vez de tentar (e, se o `send-text` recusa
+depois de um `/status` defasado, devolvem a tentativa e informam a máquina
+por `envio`), e o alerta carrega o `motivo` gravado na queda
+(`connection_state.motivo`, migration 014) — o receptor do ImobPro passa a
+exibi-lo (cartão ou token, nunca QR) em PR próprio lá; até ele subir, o
+e-mail sai com o texto genérico e o motivo fica no log daqui. O que continua
+sendo exceção (404, 5xx, timeout, formato desconhecido) segue em fail-open no
+despacho, mas o cron conta as passadas cegas em contador próprio
+(`blind_streak`): **quinze seguidas** viram queda com motivo `inacessivel`, e
+uma passada cega nunca avança nem zera a confirmação de uma leitura
+definitiva. Para o que já ficou `failed` por causa de canal, há
+`scripts/outbox-reprocessar-canal.ts` (dry-run por padrão, corte de idade
+obrigatório, `--exceto "TESTE —"` em produção).
+
 ## Setup
 
 ```bash
