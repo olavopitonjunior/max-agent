@@ -1,6 +1,9 @@
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import type { MaxPolicy } from "@/graph/policy";
+// Só tipo: `connection.ts` importa `reportAlert` daqui, e um import de valor
+// fecharia um ciclo.
+import type { MotivoQueda } from "./connection";
 import { query } from "./db";
 import { sign } from "./hmac";
 import {
@@ -718,7 +721,19 @@ export async function reportDeliveryOutcome(outcome: {
  * mentiroso perderia o alerta para sempre.
  */
 export type AlertaDeCanal =
-  | { evento: "zapi_desconectada"; at: string; represadas: number }
+  | {
+      evento: "zapi_desconectada";
+      at: string;
+      represadas: number;
+      /**
+       * Por que caiu, quando se sabe (2026-09-12). Muda o conselho do e-mail:
+       * `assinatura`/`credencial` é cartão ou token, `inacessivel` é o Max cego
+       * há N passadas; ausente é queda de sessão, "repareie por QR". Vai por
+       * ÚLTIMO e só quando existe — o corpo sem ele é byte a byte o do vetor
+       * de paridade, e o receptor antigo descarta a chave em vez de recusar.
+       */
+      motivo?: MotivoQueda;
+    }
   | { evento: "zapi_reconectada"; at: string; foraPorMs: number };
 
 export async function reportAlert(alerta: AlertaDeCanal): Promise<boolean> {

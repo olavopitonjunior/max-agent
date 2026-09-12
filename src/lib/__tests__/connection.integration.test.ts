@@ -36,8 +36,10 @@ async function estado() {
     queda_pendente: boolean;
     notified_at: Date | null;
     miss_streak: number;
+    blind_streak: number;
+    motivo: string | null;
   }>(`SELECT connected, down_since, alerted_down, queda_pendente,
-             notified_at, miss_streak
+             notified_at, miss_streak, blind_streak, motivo
         FROM connection_state WHERE id`);
   return r;
 }
@@ -75,6 +77,203 @@ afterAll(async () => {
 });
 
 d("observeConnection", () => {
+  /**
+   * ── O motivo (2026-09-12) ─────────────────────────────────────────────────
+   *
+   * Em 10/09 a assinatura da Z-API caiu e a máquina não viu: o `/status`
+   * respondia 400, isso era exceção, e exceção não observava nada. Hoje há
+   * três formas de "caiu" e o alerta diz qual — porque o conselho muda.
+   */
+  it("queda por assinatura carrega o motivo no payload do alerta", async () => {
+    await observeConnection({ connected: true, fonte: "cron" }); // semeia
+
+    await observeConnection({ connected: false, fonte: "cron", motivo: "assinatura" });
+    const r = await observeConnection({ connected: false, fonte: "cron", motivo: "assinatura" });
+
+    expect(r.alertou).toBe("queda");
+    expect(alerta.mock.calls[0][0]).toEqual({
+      evento: "zapi_desconectada",
+      at: expect.any(String),
+      represadas: 0,
+      motivo: "assinatura",
+    });
+  });
+
+  /**
+   * Sem motivo, a chave NÃO existe no objeto — nem como `undefined`. É disso
+   * que o vetor fixo de paridade (`hmac-parity.test.ts`) depende, e é o que
+   * mantém o receptor antigo do ImobPro aceitando o corpo sem mudança.
+   */
+  it("queda de sessão (push, sem motivo) NÃO põe a chave `motivo` no payload", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+
+    const r = await observeConnection({ connected: false, fonte: "push" });
+
+    expect(r.alertou).toBe("queda");
+    expect(alerta.mock.calls[0][0]).not.toHaveProperty("motivo");
+  });
+
+  /**
+   * "Inacessível" é o cron NÃO CONSEGUINDO perguntar — timeout, 5xx, formato
+   * desconhecido. Uma leitura assim não afirma nada, e um blip do endpoint de
+   * status não pode virar e-mail de queda. Por isso o limiar é quinze, não
+   * dois. Mas quinze minutos cego É incidente — e até 12/09 nunca alertava.
+   */
+  it("inacessível exige QUINZE passadas: catorze não alertam, a décima quinta alerta com o motivo", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+
+    for (let i = 0; i < 14; i++) {
+      const r = await observeConnection({ connected: false, fonte: "cron", motivo: "inacessivel" });
+      expect(r.aguardandoConfirmacao).toBe(true);
+      expect(r.transicao).toBe(false);
+    }
+    expect(alerta).not.toHaveBeenCalled();
+    expect((await estado()).connected).toBe(true);
+
+    const r = await observeConnection({ connected: false, fonte: "cron", motivo: "inacessivel" });
+
+    expect(r.transicao).toBe(true);
+    expect(r.alertou).toBe("queda");
+    expect(alerta.mock.calls[0][0]).toMatchObject({ motivo: "inacessivel" });
+  });
+
+  it("uma leitura boa no meio das passadas cegas zera o contador", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    for (let i = 0; i < 10; i++) {
+      await observeConnection({ connected: false, fonte: "cron", motivo: "inacessivel" });
+    }
+    expect((await estado()).blind_streak).toBe(10);
+
+    await observeConnection({ connected: true, fonte: "cron" });
+
+    expect((await estado()).blind_streak).toBe(0);
+    expect(alerta).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Os contadores são SEPARADOS, e é isso que fecha dois furos achados em
+   * code review: catorze timeouts seguidos de um único `connected:false` não
+   * decretam a queda com uma leitura só; e uma passada cega no meio de uma
+   * reconexão em curso não reinicia a contagem.
+   */
+  it("passada cega NÃO avança a confirmação de uma leitura definitiva", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    for (let i = 0; i < 14; i++) {
+      await observeConnection({ connected: false, fonte: "cron", motivo: "inacessivel" });
+    }
+
+    const r = await observeConnection({ connected: false, fonte: "cron", motivo: "assinatura" });
+
+    expect(r.transicao).toBe(false);
+    expect(r.aguardandoConfirmacao).toBe(true);
+    const e = await estado();
+    expect(e.miss_streak).toBe(1);
+    expect(e.blind_streak).toBe(0); // a Z-API respondeu: a cegueira acabou
+    expect(alerta).not.toHaveBeenCalled();
+  });
+
+  it("passada cega não zera a confirmação de uma RECONEXÃO em curso", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    await observeConnection({ connected: false, fonte: "push" }); // caiu, alertou
+    expect((await estado()).alerted_down).toBe(true);
+
+    await observeConnection({ connected: true, fonte: "cron" }); // 1/2
+    await observeConnection({ connected: false, fonte: "cron", motivo: "inacessivel" }); // cega
+    expect((await estado()).miss_streak).toBe(1);
+    const r = await observeConnection({ connected: true, fonte: "cron" }); // 2/2
+
+    expect(r.transicao).toBe(true);
+    expect(r.alertou).toBe("volta");
+  });
+
+  it("passada cega sem estado gravado NÃO semeia", async () => {
+    const r = await observeConnection({ connected: false, fonte: "cron", motivo: "inacessivel" });
+    expect(r.seeded).toBe(false);
+    expect(await estado()).toBeUndefined();
+    expect(alerta).not.toHaveBeenCalled();
+  });
+
+  /**
+   * O motivo é do ESTADO. A retentativa de um alerta que falhou pode cair
+   * numa passada cega — e "inacessível" para uma assinatura cancelada seria o
+   * conselho errado no único e-mail que sai.
+   */
+  it("o retry de um alerta que falhou carrega o motivo GRAVADO, não o da passada", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    alerta.mockResolvedValue(false);
+    await observeConnection({ connected: false, fonte: "cron", motivo: "credencial" });
+    await observeConnection({ connected: false, fonte: "cron", motivo: "credencial" });
+    expect((await estado()).alerted_down).toBe(false);
+    expect((await estado()).motivo).toBe("credencial");
+
+    alerta.mockResolvedValue(true);
+    const r = await observeConnection({ connected: false, fonte: "cron", motivo: "inacessivel" });
+
+    expect(r.alertou).toBe("queda");
+    expect(alerta.mock.calls.at(-1)?.[0]).toMatchObject({ motivo: "credencial" });
+  });
+
+  /** Cego não é represado: o despacho segue em fail-open e ENTREGA a fila. */
+  it("queda por inacessível reporta represadas 0 mesmo com fila vencida", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    await enfileirarVencida(3);
+    for (let i = 0; i < 15; i++) {
+      await observeConnection({ connected: false, fonte: "cron", motivo: "inacessivel" });
+    }
+    expect(alerta).toHaveBeenCalledTimes(1);
+    expect(alerta.mock.calls[0][0]).toMatchObject({ motivo: "inacessivel", represadas: 0 });
+  });
+
+  /**
+   * "Cego por 15 min" → a Z-API volta a responder, e responde 400 de
+   * assinatura. A causa acionável chegou DEPOIS do e-mail: o alerta é
+   * rearmado e sai de novo com ela (o debounce de 1h vale como sempre).
+   */
+  it("causa definitiva depois de cegueira rearma o alerta com o motivo novo", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    for (let i = 0; i < 15; i++) {
+      await observeConnection({ connected: false, fonte: "cron", motivo: "inacessivel" });
+    }
+    expect(alerta).toHaveBeenCalledTimes(1);
+    await envelhecerNotificacao();
+
+    const r = await observeConnection({ connected: false, fonte: "cron", motivo: "assinatura" });
+
+    expect(r.alertou).toBe("queda");
+    expect(alerta).toHaveBeenCalledTimes(2);
+    expect(alerta.mock.calls[1][0]).toMatchObject({ motivo: "assinatura" });
+    expect((await estado()).motivo).toBe("assinatura");
+  });
+
+  it("de uma causa definitiva para outra NÃO rearma — é a mesma queda", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    await observeConnection({ connected: false, fonte: "cron", motivo: "assinatura" });
+    await observeConnection({ connected: false, fonte: "cron", motivo: "assinatura" });
+    await envelhecerNotificacao();
+
+    await observeConnection({ connected: false, fonte: "cron", motivo: "credencial" });
+
+    expect(alerta).toHaveBeenCalledTimes(1);
+  });
+
+  /** O `send-text` recusando é evento, como o push: primeira discordância. */
+  it("fonte `envio` age na primeira discordância e grava o motivo", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+
+    const r = await observeConnection({ connected: false, fonte: "envio", motivo: "assinatura" });
+
+    expect(r.transicao).toBe(true);
+    expect(r.alertou).toBe("queda");
+    expect((await estado()).motivo).toBe("assinatura");
+  });
+
+  it("a volta apaga o motivo", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    await observeConnection({ connected: false, fonte: "envio", motivo: "assinatura" });
+    await observeConnection({ connected: true, fonte: "push" });
+    expect((await estado()).motivo).toBeNull();
+  });
+
   /**
    * A migration não semeia de propósito: gravar `connected = true` lá
    * afirmaria um estado que ninguém observou. A primeira observação insere e

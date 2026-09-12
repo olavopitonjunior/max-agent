@@ -45,6 +45,12 @@ const ALERTA_RAW_BODY =
 const ALERTA_ASSINATURA =
   "456c4fc09a08ab9f57ad5e33b6c792dea0bd1d71b4d39103153664b9c0492f34";
 
+/** O mesmo alerta com `motivo` (2026-09-12) — a chave vai por ÚLTIMO. */
+const ALERTA_COM_MOTIVO_RAW_BODY =
+  '{"evento":"zapi_desconectada","at":"2026-08-22T03:14:00.000Z","represadas":4,"motivo":"assinatura"}';
+const ALERTA_COM_MOTIVO_ASSINATURA =
+  "99c7234d3ec865486e338044db473ad302725e31930931f7a311d4eec68c6234";
+
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
@@ -130,6 +136,35 @@ describe("paridade do HMAC com o ImobPro", () => {
     expect(init.body).toBe(ALERTA_RAW_BODY);
     expect(init.headers["x-max-timestamp"]).toBe(TIMESTAMP);
     expect(init.headers["x-max-signature"]).toBe(ALERTA_ASSINATURA);
+  });
+
+  /**
+   * O `motivo` (2026-09-12) entra por ÚLTIMO e só quando existe. As duas
+   * coisas importam: o corpo SEM motivo continua sendo o vetor acima, byte a
+   * byte, e o receptor antigo do ImobPro descarta a chave extra em vez de
+   * recusar (zod sem `.strict()`, afirmado em teste lá).
+   *
+   * Quarto vetor, com o mesmo literal no Contractmaker
+   * (`alert-webhook.test.ts` / `hmac-parity.test.ts` de lá): é o que trava a
+   * POSIÇÃO da chave — mudar a ordem muda o hex, e quebra do lado que mudou.
+   */
+  it("com motivo, a chave vai por último — vetor fixo dos dois lados", async () => {
+    vi.stubEnv("MAX_WEBHOOK_SECRET", SECRET);
+    vi.stubEnv("CONTRACTMAKER_API_URL", "https://cm.test");
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    vi.setSystemTime(Number(TIMESTAMP));
+
+    await reportAlert({
+      evento: "zapi_desconectada",
+      at: "2026-08-22T03:14:00.000Z",
+      represadas: 4,
+      motivo: "assinatura",
+    });
+
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(init.body).toBe(ALERTA_COM_MOTIVO_RAW_BODY);
+    expect(init.headers["x-max-signature"]).toBe(ALERTA_COM_MOTIVO_ASSINATURA);
   });
 
   it("é hex minúsculo de 64 caracteres (sha256)", () => {
