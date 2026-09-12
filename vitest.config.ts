@@ -18,6 +18,21 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    /**
+     * Arquivos em SÉRIE, não em paralelo. Os testes de integração compartilham
+     * UM Postgres, e o outbox é global por desenho: `dispatchDue` reivindica
+     * toda linha vencida, de qualquer org, e `contarVencidas` conta todas.
+     * Rodando em paralelo, o arquivo da conexão enfileira 4 vencidas para
+     * medir `represadas: 4` no mesmo instante em que o do outbox despacha
+     * "tudo que está vencido" — e um dos dois lê o número do outro. Passava
+     * por sorte de timing (2 execuções verdes em 12/09 antes de a suíte
+     * crescer e a janela abrir); com mais casos, falhava em toda execução,
+     * sempre em pares diferentes. Cada arquivo sozinho sempre passou.
+     *
+     * O custo é duração (~3s → ~8s). A alternativa — escopar as contagens
+     * por org — mudaria o código de produção para servir ao teste.
+     */
+    fileParallelism: false,
     // `scripts/` entrou depois do incidente de 21/08: o runner de migrações
     // destruiu dado em produção e não tinha uma linha de teste. Código que
     // toca o banco precisa de cobertura mesmo quando mora fora de `src/`.

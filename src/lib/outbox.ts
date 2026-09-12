@@ -1,10 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
-import { sendText, connectionStatus } from "./zapi";
+import { sendText, connectionStatus, type ConnectionState } from "./zapi";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
+import { inoperanciaDoErro, type Inoperancia } from "./zapi-erro";
+
+/**
+ * Prefixos de `last_error` que significam "o CANAL estava fora, a mensagem não
+ * tem defeito". Constantes porque quem carimba (aqui) e quem lê a tabela à mão
+ * precisam concordar.
+ */
+export const MARCA_CANAL_DESEMPARELHADA = "instancia z-api desemparelhada";
+export const MARCA_CANAL_INOPERANTE = "instancia z-api inoperante";
 
 /**
  * Fila de saída das notificações proativas.
@@ -108,6 +117,13 @@ export interface DispatchTotals {
    * um lote de mensagens ruins, e é a queda que precisa acordar alguém.
    */
   blocked: number;
+  /**
+   * O `send-text` RECUSOU por assinatura/credencial no meio do despacho —
+   * o `/status` tinha dito "conectada" e estava defasado. As linhas voltaram
+   * a `pending` sem contar tentativa; quem chama informa a máquina de estado
+   * (fonte `envio`).
+   */
+  inoperante?: Inoperancia;
 }
 
 interface OutboxRow extends Record<string, unknown> {
@@ -187,9 +203,14 @@ export async function contarVencidas(): Promise<number> {
  *              só gasta o orçamento da function.
  *  - ausente → comportamento antigo, pergunta por conta própria.
  */
+/** O que o despacho precisa saber da instância — o `raw` é só para o log. */
+type StatusDaInstancia = Pick<ConnectionState, "connected" | "inoperante"> & {
+  raw?: unknown;
+};
+
 export async function dispatchDue(
   limit = 50,
-  statusConhecido?: { connected: boolean; raw?: unknown } | null,
+  statusConhecido?: StatusDaInstancia | null,
   /** `Date.now()` do início da requisição — âncora do prazo de seed. */
   iniciadoEm?: number
 ): Promise<DispatchTotals> {
@@ -218,7 +239,7 @@ export async function dispatchDue(
   const due = await contarVencidas();
 
   if (due > 0) {
-    const status =
+    const status: StatusDaInstancia =
       statusConhecido !== undefined
         ? // `null` = o chamador perguntou e falhou. Fail-open, igual ao catch
           // abaixo: não conseguir PERGUNTAR não é estar desconectado.
@@ -236,19 +257,49 @@ export async function dispatchDue(
 
     if (!status.connected) {
       totals.blocked = due;
-      // Ruidoso de propósito: é a única linha que distingue "ninguém tinha o
-      // que receber" de "o canal caiu e a fila está represada".
+      /**
+       * Duas causas, dois textos — porque o conselho é diferente:
+       *
+       *  · desemparelhada: sessão do WhatsApp caiu, repareie por QR;
+       *  · INOPERANTE (assinatura/credencial): a Z-API respondeu que NÃO vai
+       *    enviar. Até 12/09 isso era exceção e caía no fail-open abaixo — o
+       *    `send-text` recusava, três tentativas queimavam e a linha virava
+       *    `failed` para sempre, sem alerta. Represar é o comportamento certo
+       *    pelo mesmo motivo do desemparelhamento: o problema é do CANAL, e o
+       *    canal volta.
+       *
+       * Ruidoso de propósito: é a única linha que distingue "ninguém tinha o
+       * que receber" de "o canal caiu e a fila está represada".
+       */
+      const inop = status.inoperante;
       console.error(
-        `[outbox] INSTÂNCIA DESEMPARELHADA — ${due} mensagem(ns) represada(s), nada enviado. ` +
-          `A fila não é perdida: volta a sair quando a instância reconectar. ` +
-          `Estado: ${JSON.stringify(status.raw)}`
+        (inop
+          ? `[outbox] INSTÂNCIA INOPERANTE (${inop.motivo}) — `
+          : `[outbox] INSTÂNCIA DESEMPARELHADA — `) +
+          `${due} mensagem(ns) represada(s), nada enviado. ` +
+          `A fila não é perdida: volta a sair quando a instância voltar. ` +
+          `Estado: ${inop ? inop.detalhe : JSON.stringify(status.raw)}`
       );
-      // Carimba o motivo nas linhas vencidas SEM tocar em status nem attempts:
-      // quem for olhar a tabela precisa achar a explicação ali, não só no log.
+      /**
+       * Carimba o motivo nas linhas vencidas SEM tocar em status nem attempts:
+       * quem for olhar a tabela precisa achar a explicação ali, não só no log.
+       *
+       * `IS DISTINCT FROM`: durante uma queda isto roda a cada minuto, e
+       * reescrever o mesmo texto é uma tupla nova por linha por passada. E
+       * NUNCA por cima da trilha do reprocesso (`reprocessada em …`): ela é o
+       * único rastro de que a linha voltou de `failed`, e o envio bem-sucedido
+       * já vai zerar `last_error` depois.
+       */
       await query(
-        `UPDATE outbox
-            SET last_error = 'instancia z-api desemparelhada — nada foi enviado'
-          WHERE status = 'pending' AND deliver_after <= now()`
+        `UPDATE outbox SET last_error = $1
+          WHERE status = 'pending' AND deliver_after <= now()
+            AND last_error IS DISTINCT FROM $1
+            AND (last_error IS NULL OR last_error NOT LIKE 'reprocessada em %')`,
+        [
+          inop
+            ? `${MARCA_CANAL_INOPERANTE} (${inop.motivo}) — nada foi enviado`
+            : `${MARCA_CANAL_DESEMPARELHADA} — nada foi enviado`,
+        ]
       );
       return totals;
     }
@@ -287,7 +338,7 @@ export async function dispatchDue(
    */
   const seedDeadline = (iniciadoEm ?? Date.now()) + 40_000;
 
-  for (const row of rows) {
+  for (const [indice, row] of rows.entries()) {
     /**
      * O que saiu no WhatsApp vira turno do assistente no thread — para que
      * "o que é isso?" tenha contexto. DEPOIS do envio, com catch próprio, e
@@ -394,6 +445,53 @@ export async function dispatchDue(
       await semear();
       totals.sent += 1;
     } catch (err) {
+      /**
+       * ── O canal recusou, não a mensagem ─────────────────────────────────
+       *
+       * 400 de assinatura ou 401/403 no `send-text` é a Z-API dizendo que não
+       * envia NADA — e o `/status` de um minuto atrás disse "conectada" porque
+       * estava defasado (a cobrança caiu entre a checagem e o envio, ou o
+       * provedor demora a refletir). Contar tentativa aqui é o que fez as 16
+       * linhas de 10/09 virarem `failed`: três passadas e acabou.
+       *
+       * Então: esta linha e TODAS as que ainda não foram tentadas voltam a
+       * `pending` com a tentativa devolvida, o laço para (as seguintes
+       * tomariam o mesmo 400), e o chamador informa a máquina de estado
+       * (fonte `envio`) — é isso que faz o e-mail sair mesmo com o `/status`
+       * mentindo "conectada" a cada minuto.
+       */
+      const inop = inoperanciaDoErro(err);
+      if (inop) {
+        const restantes = rows.slice(indice).map((r) => r.id);
+        const devolver = () =>
+          query(
+            `UPDATE outbox
+                SET status = 'pending',
+                    attempts = GREATEST(attempts - 1, 0),
+                    send_started_at = NULL,
+                    last_error = $2
+              WHERE id = ANY($1::text[]) AND status = 'sending'`,
+            [restantes, `${MARCA_CANAL_INOPERANTE} (${inop.motivo}) — envio recusado, tentativa não contada`]
+          );
+        await devolver().catch(async () => {
+          await new Promise((r) => setTimeout(r, 500));
+          await devolver().catch((e) =>
+            console.error(
+              `[outbox] ${restantes.length} linha(s) presas em 'sending' com tentativa ` +
+                `contada após recusa do canal — a retomada de órfã as pega em 10 min. Motivo: ` +
+                (e instanceof Error ? e.message : String(e))
+            )
+          );
+        });
+        totals.blocked += restantes.length;
+        totals.inoperante = inop;
+        console.error(
+          `[outbox] INSTÂNCIA INOPERANTE (${inop.motivo}) no ENVIO — ` +
+            `${restantes.length} linha(s) devolvida(s) a pending sem contar tentativa. ${inop.detalhe}`
+        );
+        break;
+      }
+
       const message = err instanceof Error ? err.message : String(err);
       // Esgotou as tentativas → `failed` (terminal, visível no painel). Ainda
       // tem crédito → volta pra `pending` com backoff, e o próximo cron pega.

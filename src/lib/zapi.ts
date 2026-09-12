@@ -18,6 +18,14 @@
  */
 
 import { fetchWithTimeout, ZAPI_TIMEOUT_MS } from "./http";
+import {
+  ZapiHttpError,
+  classificarInoperancia,
+  type Inoperancia,
+  type MotivoInoperante,
+} from "./zapi-erro";
+
+export { ZapiHttpError, classificarInoperancia, type MotivoInoperante };
 
 const BASE_URL = "https://api.z-api.io";
 
@@ -62,7 +70,9 @@ async function post(path: string, body: unknown): Promise<ZApiSendResponse> {
   );
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Z-API ${path} ${res.status}: ${text.slice(0, 500)}`);
+    // Tipado: quem pega este erro precisa saber se é o CANAL recusando
+    // (assinatura, credencial) ou a mensagem — ver `inoperanciaDoErro`.
+    throw new ZapiHttpError(path, res.status, text);
   }
   return (await res.json().catch(() => ({}))) as ZApiSendResponse;
 }
@@ -135,16 +145,37 @@ export async function downloadMedia(
   }
 }
 
+export interface ConnectionState {
+  connected: boolean;
+  session?: string;
+  raw: unknown;
+  /**
+   * Presente quando `connected` é `false` por INOPERÂNCIA (assinatura ou
+   * credencial, ver `zapi-erro.ts`), e não por desemparelhamento. Ausente na
+   * queda de sessão comum — que continua sendo "repareie por QR".
+   */
+  inoperante?: Inoperancia;
+}
+
 /**
  * Estado da instância. É o ÚNICO jeito de saber se as mensagens estão mesmo
  * saindo: desemparelhada, a Z-API aceita o `send-text` com 200 e um
  * `messageId` que nunca chega a lugar nenhum.
+ *
+ * Devolve três coisas distintas, e a distinção É o valor desta função:
+ *
+ *  · `connected: true` — pode enviar;
+ *  · `connected: false` sem `inoperante` — sessão do WhatsApp caiu, o
+ *    conselho é reparear por QR;
+ *  · `connected: false` COM `inoperante` — assinatura cancelada ou credencial
+ *    trocada. Não envia, e o conselho é OUTRO (ver `MotivoInoperante`).
+ *
+ * E LANÇA para o resto (404, 5xx, timeout, formato desconhecido): exceção aqui
+ * significa "não consegui PERGUNTAR", nunca "está desconectado". Os chamadores
+ * seguem em fail-open nesse caso, e o cron conta as passadas seguidas em que
+ * não conseguiu perguntar (`lib/connection.ts`, motivo `inacessivel`).
  */
-export async function connectionStatus(): Promise<{
-  connected: boolean;
-  session?: string;
-  raw: unknown;
-}> {
+export async function connectionStatus(): Promise<ConnectionState> {
   const res = await fetchWithTimeout(
     `${instanceBase()}/status`,
     { method: "GET", headers: headers() },
@@ -152,29 +183,46 @@ export async function connectionStatus(): Promise<{
   );
 
   /**
-   * Resposta não-2xx LANÇA. Antes não checava `res.ok`, e isso produzia um
-   * diagnóstico errado com cara de certo.
+   * ── A história desta checagem, em duas lições que se corrigem ───────────
    *
-   * Um 401/403 (Client-Token da conta trocado), um 404 (instance id errado) ou
-   * um 5xx devolvem um corpo SEM o campo `connected` — e `Boolean(undefined)` é
-   * `false`. Ou seja: qualquer falha de credencial ou de rota era carimbada na
-   * fila como **"instância desemparelhada"**, que manda quem for investigar
-   * pegar o celular e ler um QR code que não vai resolver nada.
+   * **21/08:** não checava `res.ok`. Um 401 devolve corpo SEM `connected`, e
+   * `Boolean(undefined)` é `false` — então erro de credencial era carimbado na
+   * fila como "instância desemparelhada", e alguém re-pareou a instância mais
+   * de uma vez por um QR code que não resolvia nada. A correção foi LANÇAR em
+   * todo não-2xx, com os chamadores tratando exceção como "não consegui
+   * perguntar" e seguindo em fail-open.
    *
-   * Custou uma tarde: a instância foi re-pareada mais de uma vez enquanto a
-   * causa podia ser outra, e a fila ficou represada em silêncio com a
-   * explicação errada colada nela.
+   * **10/09:** a assinatura da Z-API foi cancelada por cobrança recusada e o
+   * `/status` passou a responder 400 "must subscribe". Pela regra de 21/08
+   * isso era exceção → fail-open → o outbox TENTOU enviar, o `send-text`
+   * recusou, três tentativas queimaram e 16 linhas viraram `failed` em
+   * silêncio; o inbound ficou mudo; e a F7 não mandou e-mail nenhum, porque a
+   * máquina de estado só via `connected:false` num 200. Dois dias sem ninguém
+   * saber.
    *
-   * Lançar é o comportamento certo porque os dois chamadores já distinguem os
-   * casos: eles tratam exceção como "não consegui PERGUNTAR" e seguem (fail
-   * open), registrando o motivo real no log. É a mesma regra do `orgById` —
-   * atalho pode confirmar o acerto, nunca decretar o negativo.
+   * As duas lições apontam para a mesma coisa: **o erro nunca foi "false
+   * demais" ou "exceção demais" — foi a AUSÊNCIA de um terceiro estado.** Um
+   * 400 de assinatura não é "não consegui perguntar" (a Z-API respondeu, e
+   * respondeu que não vai enviar) e não é "desemparelhada" (o conselho é
+   * outro). É INOPERANTE, com motivo. O que continua sendo exceção é o que a
+   * gente não reconhece — ver `classificarInoperancia`.
    */
   if (!res.ok) {
     const corpo = await res.text().catch(() => "");
+    const motivo = classificarInoperancia(res.status, corpo);
+    if (motivo) {
+      return {
+        connected: false,
+        raw: { status: res.status, body: corpo.slice(0, 200) },
+        inoperante: {
+          motivo,
+          detalhe: `Z-API /status ${res.status}: ${corpo.slice(0, 200)}`,
+        },
+      };
+    }
     throw new Error(
-      `Z-API /status ${res.status} — NÃO é desemparelhamento, é a chamada ` +
-        `falhando (confira ZAPI_INSTANCE_ID/ZAPI_TOKEN/ZAPI_CLIENT_TOKEN): ` +
+      `Z-API /status ${res.status} — não é desemparelhamento nem inoperância ` +
+        `conhecida, é a chamada falhando (confira ZAPI_INSTANCE_ID/ZAPI_TOKEN): ` +
         corpo.slice(0, 200)
     );
   }

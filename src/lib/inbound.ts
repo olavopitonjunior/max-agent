@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, type InboundMessage } from "./zapi";
+import { inoperanciaDoErro } from "./zapi-erro";
+import { observeConnection } from "./connection";
 import { log } from "./log";
 import { runTurn } from "@/graph/graph";
 
@@ -117,9 +119,14 @@ async function podeResponder(): Promise<boolean> {
   try {
     const status = await connectionStatus();
     if (!status.connected) {
+      // Inoperante (assinatura/credencial) e desemparelhada param a fila do
+      // mesmo jeito; o que muda é o texto, porque o conselho é outro.
       console.error(
-        `[inbound] INSTÂNCIA DESEMPARELHADA — nada processado, a fila espera. ` +
-          `Estado: ${JSON.stringify(status.raw)}`
+        (status.inoperante
+          ? `[inbound] INSTÂNCIA INOPERANTE (${status.inoperante.motivo}) — `
+          : `[inbound] INSTÂNCIA DESEMPARELHADA — `) +
+          `nada processado, a fila espera. Estado: ` +
+          (status.inoperante ? status.inoperante.detalhe : JSON.stringify(status.raw))
       );
       return false;
     }
@@ -416,6 +423,33 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
 
     return "done";
   } catch (err) {
+    /**
+     * O CANAL recusou (400 de assinatura, 401/403), não a resposta. Mesma
+     * regra do outbox: a tentativa é devolvida e a linha espera o canal — a
+     * resposta já está em `reply_text`, então a retentativa só reenvia, sem
+     * pagar o modelo de novo. E a máquina de estado é informada por `envio`,
+     * porque o `podeResponder` de um minuto atrás leu um `/status` defasado.
+     */
+    const inop = inoperanciaDoErro(err);
+    if (inop) {
+      await query(
+        `UPDATE inbound_queue
+            SET status = 'pending',
+                attempts = GREATEST(attempts - 1, 0),
+                last_error = $2
+          WHERE id = $1`,
+        [row.id, `instancia z-api inoperante (${inop.motivo}) — resposta pronta, aguardando o canal`]
+      );
+      log.error("inbound.canal_inoperante", {
+        messageId: row.message_id,
+        rowId: row.id,
+        phone: row.from_phone,
+        motivo: inop.motivo,
+      });
+      await observeConnection({ connected: false, fonte: "envio", motivo: inop.motivo });
+      return "retry";
+    }
+
     const message = err instanceof Error ? err.message : String(err);
     // Esgotou → `failed`, terminal e visível. Ainda tem crédito → volta pra
     // `pending` e o próximo cron pega.
@@ -467,7 +501,17 @@ export async function processInboundNow(id: string): Promise<void> {
     if (!(await podeResponder())) return; // a linha fica pending; o cron retoma
     const row = await claimById(id);
     if (!row) return; // o cron chegou primeiro, ou há outro turn deste telefone
-    await runQueued(row);
+    const resultado = await runQueued(row);
+
+    /**
+     * Drena o que ficou represado DESTE telefone — só se ESTE turn fechou.
+     *
+     * Igual ao `sweepInbound`. Sem a condição, uma recusa do canal (que
+     * devolve a linha a `pending` com `attempts = 0`) fazia o dreno reivindicar
+     * a MESMA mensagem de novo, como se fosse nova, e bater no canal morto uma
+     * segunda vez dentro do mesmo request (achado do code review).
+     */
+    if (resultado !== "done") return;
 
     /**
      * Drena o que ficou represado DESTE telefone.
@@ -532,7 +576,10 @@ async function drenarTelefone(phone: string, deadline: number): Promise<void> {
 
     const row = await claimById(id);
     if (!row) return; // o cron pegou, ou outro turn deste telefone começou
-    await runQueued(row);
+    // Falhou → para de drenar. A linha voltou a `pending` (com ou sem
+    // tentativa contada) e o cron a retoma; insistir aqui — sobretudo quando
+    // o canal acabou de recusar — só repetiria o mesmo erro cinco vezes.
+    if ((await runQueued(row)) !== "done") return;
   }
   log.warn("inbound.dreno_estourou", { phone, limite: DRENO_MAX });
 }

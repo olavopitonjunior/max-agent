@@ -312,14 +312,66 @@ describe("crons", () => {
 
   /**
    * Não conseguir PERGUNTAR não é estar desconectado — é a lição do 401 de
-   * credencial que virou "instância desemparelhada" em 21/08. Sem boolean
-   * conhecido, nada é observado, e o despacho segue (fail-open).
+   * credencial que virou "instância desemparelhada" em 21/08. O despacho
+   * segue (fail-open, `null`).
+   *
+   * Mas a máquina de estado É informada, como `inacessivel` (2026-09-12): ela
+   * exige quinze passadas assim antes de alertar. Até então nada era
+   * observado — e foi por isso que a assinatura cancelada de 10/09, que na
+   * época caía aqui, passou dois dias sem e-mail.
    */
-  it("falha ao checar a instância não observa nada e não derruba o cron", async () => {
-    checaConexao.mockRejectedValueOnce(new Error("401 — credencial"));
+  it("falha ao checar a instância observa `inacessivel`, segue em fail-open e não derruba o cron", async () => {
+    checaConexao.mockRejectedValueOnce(new Error("503 — upstream"));
     expect((await cronOutbox(comAuth)).status).toBe(200);
-    expect(observa).not.toHaveBeenCalled();
+    expect(observa).toHaveBeenCalledWith({
+      connected: false,
+      fonte: "cron",
+      motivo: "inacessivel",
+    });
     expect(dispatchDueMock).toHaveBeenCalledWith(50, null, expect.any(Number));
+  });
+
+  /**
+   * Inoperante (assinatura cancelada, credencial trocada) é leitura
+   * DEFINITIVA: `connected:false` com motivo. Vai para a máquina de estado
+   * com o motivo e para o despacho como estado conhecido — que represa.
+   */
+  it("instância inoperante: observa com o motivo e repassa ao despacho", async () => {
+    const inoperante = {
+      connected: false,
+      raw: { status: 400 },
+      inoperante: { motivo: "assinatura", detalhe: "Z-API /status 400: must subscribe" },
+    };
+    checaConexao.mockResolvedValueOnce(inoperante);
+    expect((await cronOutbox(comAuth)).status).toBe(200);
+    expect(observa).toHaveBeenCalledWith({
+      connected: false,
+      fonte: "cron",
+      motivo: "assinatura",
+    });
+    expect(dispatchDueMock).toHaveBeenCalledWith(50, inoperante, expect.any(Number));
+  });
+
+  /**
+   * O `/status` disse "conectada" e o `send-text` recusou: leitura defasada.
+   * A recusa é evento (fonte `envio`) — sem isto o cron releria "conectada"
+   * a cada minuto e a queda nunca seria anunciada.
+   */
+  it("envio recusado por inoperância informa a máquina de estado por `envio`", async () => {
+    dispatchDueMock.mockResolvedValueOnce({
+      claimed: 2,
+      sent: 0,
+      failed: 0,
+      blocked: 2,
+      inoperante: { motivo: "assinatura", detalhe: "Z-API /send-text 400" },
+    });
+    expect((await cronOutbox(comAuth)).status).toBe(200);
+    expect(observa).toHaveBeenCalledWith({ connected: true, fonte: "cron" });
+    expect(observa).toHaveBeenLastCalledWith({
+      connected: false,
+      fonte: "envio",
+      motivo: "assinatura",
+    });
   });
 });
 
@@ -360,6 +412,22 @@ describe("POST /api/zapi-connection/[secret]", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, checked: false });
     expect(observa).not.toHaveBeenCalled();
+  });
+
+  /** Inoperante também é `connected:false` — e o motivo vai para o e-mail. */
+  it("checagem dizendo inoperante observa a queda com o motivo", async () => {
+    checaConexao.mockResolvedValueOnce({
+      connected: false,
+      raw: {},
+      inoperante: { motivo: "credencial", detalhe: "Z-API /status 401" },
+    });
+    const res = await connPost(...req("hook-secret"));
+    expect(res.status).toBe(200);
+    expect(observa).toHaveBeenCalledWith({
+      connected: false,
+      fonte: "push",
+      motivo: "credencial",
+    });
   });
 
   it("o GET confere a URL do painel sem mandar evento", async () => {
