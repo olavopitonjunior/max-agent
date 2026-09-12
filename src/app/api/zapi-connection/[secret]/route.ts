@@ -44,10 +44,10 @@ export async function POST(
   // Nem lemos o corpo: ver acima. `connectionStatus()` LANÇA quando o /status
   // falha ou vem num formato desconhecido — e isso é "não consegui
   // PERGUNTAR", nunca "está desconectado". Não observamos nada nesse caso; o
-  // cron pergunta de novo em até um minuto.
-  let connected: boolean;
+  // cron pergunta de novo em até um minuto (e conta as passadas cegas).
+  let status: Awaited<ReturnType<typeof connectionStatus>>;
   try {
-    ({ connected } = await connectionStatus());
+    status = await connectionStatus();
   } catch (err) {
     console.warn(
       "[zapi-connection] callback recebido mas não deu pra checar a instância:",
@@ -56,7 +56,13 @@ export async function POST(
     return NextResponse.json({ ok: true, checked: false });
   }
 
-  const r = await observeConnection({ connected, fonte: "push" });
+  // Inoperante (assinatura/credencial) também é `connected:false`, e o motivo
+  // segue para o e-mail — o push age na primeira discordância, como sempre.
+  const r = await observeConnection({
+    connected: status.connected,
+    fonte: "push",
+    motivo: status.inoperante?.motivo,
+  });
   return NextResponse.json({
     ok: true,
     connected: r.connected,

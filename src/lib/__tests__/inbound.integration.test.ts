@@ -24,16 +24,31 @@ vi.mock("@/graph/graph", () => ({
   runTurn: vi.fn().mockResolvedValue({ reply: "resposta do Max" }),
 }));
 
+// A máquina de estado da conexão tem suíte própria; aqui só se prova que o
+// inbound a INFORMA quando o envio é recusado pelo canal.
+vi.mock("../connection", () => ({
+  observeConnection: vi.fn().mockResolvedValue({
+    connected: false,
+    seeded: false,
+    transicao: true,
+    aguardandoConfirmacao: false,
+    alertou: "queda",
+  }),
+}));
+
 const { enqueueInbound, sweepInbound, processInboundNow } = await import(
   "../inbound"
 );
 const { query, db } = await import("../db");
 const { sendText, connectionStatus } = await import("../zapi");
+const { ZapiHttpError } = await import("../zapi-erro");
+const { observeConnection } = await import("../connection");
 const { runTurn } = await import("@/graph/graph");
 
 const sent = sendText as unknown as ReturnType<typeof vi.fn>;
 const turn = runTurn as unknown as ReturnType<typeof vi.fn>;
 const status = connectionStatus as unknown as ReturnType<typeof vi.fn>;
+const observa = observeConnection as unknown as ReturnType<typeof vi.fn>;
 
 const PHONE = "5511900000001";
 
@@ -120,6 +135,70 @@ d("inbound_queue (Postgres real)", () => {
    * grafo: o checkpointer já gravou o turn, então a fala da pessoa apareceria
    * duas vezes na thread — e o modelo seria pago de novo.
    */
+  /**
+   * O CANAL recusou (assinatura cancelada), não a resposta. A tentativa é
+   * devolvida — três passadas não podem matar uma resposta pronta por um
+   * problema que é do canal —, a resposta fica em `reply_text` para só
+   * reenviar, e a máquina de estado é informada por `envio`, porque o
+   * `/status` de um minuto atrás estava defasado.
+   */
+  it("envio recusado pelo canal devolve a tentativa e informa a máquina de estado", async () => {
+    const r = await enqueueInbound(msg());
+    if (r.status !== "queued") throw new Error("esperava queued");
+    sent.mockRejectedValueOnce(
+      new ZapiHttpError("/send-text", 400, '{"error":"you must subscribe to this instance again"}')
+    );
+
+    const totals = await sweepInbound();
+
+    expect(totals.retry).toBe(1);
+    const row = await statusDe(r.id);
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    expect(row.reply_text).toBe("resposta do Max");
+    expect(row.last_error).toContain("inoperante (assinatura)");
+    expect(observa).toHaveBeenCalledWith({
+      connected: false,
+      fonte: "envio",
+      motivo: "assinatura",
+    });
+  });
+
+  /**
+   * O caminho RÁPIDO drena o telefone depois do turn. Como a recusa do canal
+   * devolve a linha com `attempts = 0`, ela parecia mensagem nova ao dreno —
+   * e o canal morto levava uma segunda pancada no mesmo request.
+   */
+  it("caminho rápido: recusa do canal não redrena a mesma mensagem", async () => {
+    const r = await enqueueInbound(msg());
+    if (r.status !== "queued") throw new Error("esperava queued");
+    sent.mockRejectedValue(
+      new ZapiHttpError("/send-text", 400, '{"error":"you must subscribe to this instance again"}')
+    );
+
+    await processInboundNow(r.id);
+
+    expect(sent).toHaveBeenCalledTimes(1);
+    expect(observa).toHaveBeenCalledTimes(1);
+    const row = await statusDe(r.id);
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+  });
+
+  /** Mutação de controle: falha de envio comum continua contando tentativa. */
+  it("envio falho por outro motivo conta tentativa e não toca na máquina de estado", async () => {
+    const r = await enqueueInbound(msg());
+    if (r.status !== "queued") throw new Error("esperava queued");
+    sent.mockRejectedValueOnce(new ZapiHttpError("/send-text", 400, '{"error":"invalid phone"}'));
+
+    await sweepInbound();
+
+    const row = await statusDe(r.id);
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(1);
+    expect(observa).not.toHaveBeenCalled();
+  });
+
   it("envio falho preserva a resposta e a retentativa não roda o grafo de novo", async () => {
     const r = await enqueueInbound(msg());
     if (r.status !== "queued") throw new Error("esperava queued");

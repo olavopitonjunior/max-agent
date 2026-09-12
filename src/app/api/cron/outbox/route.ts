@@ -41,10 +41,17 @@ export async function GET(req: NextRequest) {
      * novo — o total de chamadas ao `/status` não muda quando há fila; sobe em
      * uma por minuto quando não há.
      *
-     * `null` = a pergunta FALHOU. Não é "desconectada": exceção aqui significa
-     * credencial/rota/formato, e tratá-la como queda mandaria alguém repárear
-     * a instância à toa (lição de 21/08). Nesse caso não se observa nada — a
-     * máquina de estado só aceita boolean conhecido.
+     * `null` = a pergunta FALHOU (404, 5xx, timeout, formato desconhecido).
+     * Não é "desconectada": tratar como queda mandaria alguém repárear a
+     * instância à toa (lição de 21/08). O despacho segue em fail-open.
+     *
+     * Mas a máquina de estado É informada, como `inacessivel`: ela exige
+     * quinze passadas seguidas assim antes de acreditar (contra duas de uma
+     * leitura definitiva), e aí alerta "o Max está cego há 15 min". Até
+     * 12/09 o `null` não observava nada — e foi por isso que dois dias de
+     * assinatura cancelada passaram sem e-mail: a Z-API respondia 400, isso
+     * era exceção, e exceção era silêncio. O 400 de assinatura hoje vem como
+     * `inoperante` (leitura definitiva); o resto cai aqui.
      */
     const status = await connectionStatus().catch((err) => {
       console.warn(
@@ -54,12 +61,28 @@ export async function GET(req: NextRequest) {
       return null;
     });
 
-    if (status) {
-      // Nunca lança; um alerta quebrado não pode quebrar o despacho.
-      await observeConnection({ connected: status.connected, fonte: "cron" });
-    }
+    // Nunca lança; um alerta quebrado não pode quebrar o despacho.
+    await observeConnection(
+      status
+        ? { connected: status.connected, fonte: "cron", motivo: status.inoperante?.motivo }
+        : { connected: false, fonte: "cron", motivo: "inacessivel" }
+    );
 
     const totals = await dispatchDue(50, status, iniciadoEm);
+
+    /**
+     * O ENVIO recusou por assinatura/credencial depois de o `/status` ter
+     * dito "conectada": leitura defasada. A recusa é evento (fonte `envio`,
+     * age na primeira discordância) — sem isto o cron releria "conectada" a
+     * cada minuto, zeraria a confirmação e a queda nunca seria anunciada.
+     */
+    if (totals.inoperante) {
+      await observeConnection({
+        connected: false,
+        fonte: "envio",
+        motivo: totals.inoperante.motivo,
+      });
+    }
     // Reconciliação na MESMA passada, depois do despacho (sem cron novo):
     // marca `unconfirmed` o que ficou sem callback e reporta desfechos ao
     // Contractmaker. Falha aqui não desfaz envio nenhum.
@@ -74,8 +97,10 @@ export async function GET(req: NextRequest) {
     if (totals.blocked > 0) {
       // Nível de erro, e não info: fila represada por canal fora do ar é o
       // estado que precisa acordar alguém. `dispatchDue` já logou o detalhe.
+      const inop = totals.inoperante ?? status?.inoperante;
       console.error(
-        `[cron/outbox] ${totals.blocked} represada(s) — instância desemparelhada`
+        `[cron/outbox] ${totals.blocked} represada(s) — instância ` +
+          (inop ? `inoperante (${inop.motivo})` : "desemparelhada")
       );
     } else if (totals.claimed > 0) {
       console.log(

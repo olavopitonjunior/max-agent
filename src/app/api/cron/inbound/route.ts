@@ -58,8 +58,10 @@ export async function GET(req: NextRequest) {
       }
     }
     if (totals.blocked > 0) {
+      // O motivo (desemparelhada × inoperante) já saiu no log do
+      // `podeResponder`, uma linha acima desta.
       console.error(
-        `[cron/inbound] ${totals.blocked} sem resposta — instância desemparelhada`
+        `[cron/inbound] ${totals.blocked} sem resposta — instância fora de serviço`
       );
     } else if (totals.claimed > 0) {
       console.log(

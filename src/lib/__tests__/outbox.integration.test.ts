@@ -30,6 +30,9 @@ vi.mock("../zapi", () => ({
 }));
 
 const { enqueue, dispatchDue, renderMessage } = await import("../outbox");
+const { reprocessarFalhasDeCanal } = await import("../outbox-reprocesso");
+// Não mockado de propósito: é o erro REAL que o `post()` da Z-API lança.
+const { ZapiHttpError } = await import("../zapi-erro");
 const { query, db } = await import("../db");
 const { sendText, connectionStatus } = await import("../zapi");
 
@@ -387,10 +390,304 @@ d2("instância fora do ar (Postgres real)", () => {
     expect(totals.blocked).toBe(0);
   });
 
+  /**
+   * O caso de 10/09. Inoperante (assinatura cancelada, credencial trocada) é
+   * a Z-API AFIRMANDO que não vai enviar — e até então era exceção, que caía
+   * no fail-open acima: o `send-text` recusava, três tentativas queimavam e a
+   * linha virava `failed` para sempre. Represar é o mesmo tratamento do
+   * desemparelhamento, pelo mesmo motivo: o problema é do canal, não da
+   * mensagem.
+   */
+  it("inoperante (assinatura): represa, não queima tentativa, e o motivo está na tabela", async () => {
+    const r = await enfileirarVencido();
+    if (r.status !== "queued") throw new Error("esperava queued");
+    status.mockResolvedValue({
+      connected: false,
+      raw: { status: 400 },
+      inoperante: { motivo: "assinatura", detalhe: "Z-API /status 400: must subscribe" },
+    });
+
+    const totals = await dispatchDue();
+    await dispatchDue();
+    await dispatchDue();
+
+    expect(sent).not.toHaveBeenCalled();
+    expect(totals.blocked).toBe(1);
+    const [row] = await query<{ status: string; attempts: number; last_error: string }>(
+      `SELECT status, attempts, last_error FROM outbox WHERE id = $1`,
+      [r.id]
+    );
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    // O conselho é outro: quem ler a tabela não pode ser mandado ao QR code.
+    expect(row.last_error).toContain("inoperante (assinatura)");
+    expect(row.last_error).not.toContain("desemparelhada");
+  });
+
+  /**
+   * O caso de 10/09 pelo OUTRO caminho: o `/status` disse "conectada" (estava
+   * defasado) e o `send-text` recusou. Antes, cada linha queimava uma
+   * tentativa por passada e em três passadas tudo era `failed`. Agora a
+   * tentativa é devolvida, o laço para e o chamador é avisado.
+   */
+  it("envio recusado por assinatura: devolve a tentativa, para o laço e sinaliza", async () => {
+    const a = await enfileirarVencido();
+    const b = await enfileirarVencido();
+    if (a.status !== "queued" || b.status !== "queued") throw new Error("esperava queued");
+    sent.mockRejectedValue(
+      new ZapiHttpError("/send-text", 400, '{"error":"you must subscribe to this instance again"}')
+    );
+
+    const totals = await dispatchDue();
+
+    expect(sent).toHaveBeenCalledTimes(1); // a segunda nem foi tentada
+    expect(totals.blocked).toBe(2);
+    expect(totals.failed).toBe(0);
+    expect(totals.inoperante).toMatchObject({ motivo: "assinatura" });
+    for (const id of [a.id, b.id]) {
+      const [row] = await query<{ status: string; attempts: number; last_error: string }>(
+        `SELECT status, attempts, last_error FROM outbox WHERE id = $1`,
+        [id]
+      );
+      expect(row.status).toBe("pending");
+      expect(row.attempts).toBe(0);
+      expect(row.last_error).toContain("inoperante (assinatura)");
+    }
+  });
+
+  /** Mutação de controle: erro de ENVIO que não é do canal conta tentativa. */
+  it("envio recusado por outro motivo continua contando tentativa", async () => {
+    const r = await enfileirarVencido();
+    if (r.status !== "queued") throw new Error("esperava queued");
+    sent.mockRejectedValue(new ZapiHttpError("/send-text", 400, '{"error":"invalid phone"}'));
+
+    const totals = await dispatchDue();
+
+    expect(totals.failed).toBe(1);
+    expect(totals.inoperante).toBeUndefined();
+    const [row] = await query<{ attempts: number }>(`SELECT attempts FROM outbox WHERE id = $1`, [r.id]);
+    expect(row.attempts).toBe(1);
+  });
+
+  /**
+   * O carimbo de represamento roda a cada minuto durante a queda. Ele não
+   * pode apagar a trilha do reprocesso — é o único rastro de que a linha
+   * voltou de `failed`, e o envio bem-sucedido zera `last_error` depois.
+   */
+  it("o carimbo de represamento preserva a trilha 'reprocessada em …'", async () => {
+    const r = await enfileirarVencido();
+    if (r.status !== "queued") throw new Error("esperava queued");
+    await query(
+      `UPDATE outbox SET last_error = 'reprocessada em 2026-09-12T00:00:00Z após queda de canal; erro original: x'
+        WHERE id = $1`,
+      [r.id]
+    );
+    status.mockResolvedValue({
+      connected: false,
+      raw: {},
+      inoperante: { motivo: "assinatura", detalhe: "Z-API /status 400" },
+    });
+
+    await dispatchDue();
+
+    const [row] = await query<{ last_error: string }>(`SELECT last_error FROM outbox WHERE id = $1`, [r.id]);
+    expect(row.last_error).toMatch(/^reprocessada em /);
+  });
+
   /** Fila vazia não paga a chamada de status — é a maioria das execuções. */
   it("sem nada vencido, nem pergunta o estado da instância", async () => {
     await dispatchDue();
     expect(status).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * O reprocesso do que JÁ virou `failed` por culpa do canal — as 16 linhas de
+ * 10/09 e qualquer outra que o fail-open antigo tenha queimado.
+ *
+ * Contra o Postgres porque o que se prova é o UPDATE: quais linhas ele pega
+ * (só `failed`, só erro de canal, só a partir de `desde`, nunca as excluídas)
+ * e o que ele deixa (attempts zerado, deliver_after na janela, o erro original
+ * na trilha). Cada corte tem uma linha de controle que TEM que ficar de fora.
+ */
+d("reprocessarFalhasDeCanal (Postgres real)", () => {
+  const ERRO_ASSINATURA =
+    'Z-API /send-text 400: {"error":"To continue sending a message, you must subscribe to this instance again"}';
+
+  async function falhada(p: {
+    title?: string;
+    body?: string;
+    last_error: string;
+    /** intervalo SQL relativo a now(), ex.: '10 days' */
+    idade?: string;
+    status?: string;
+  }): Promise<string> {
+    const id = `rep-${Math.random().toString(36).slice(2)}`;
+    await query(
+      `INSERT INTO outbox
+         (id, org_id, dedupe_key, audience, phone, recipient_name, title, body,
+          org_name, status, attempts, deliver_after, last_error, created_at)
+       VALUES ($1, 'org-test', $1, 'platform_user', '5511987654321', 'Marcia',
+               $2, $3, 'RE/MAX Trio', $4, 3, now() - interval '1 day', $5,
+               now() - ($6 || '')::interval)`,
+      [
+        id,
+        p.title ?? "Formulário concluído",
+        p.body ?? "O formulário do negócio X foi preenchido até o fim.",
+        p.status ?? "failed",
+        p.last_error,
+        p.idade ?? "1 hour",
+      ]
+    );
+    return id;
+  }
+
+  async function linha(id: string) {
+    const [r] = await query<{
+      status: string;
+      attempts: number;
+      last_error: string;
+      deliver_after: Date;
+    }>(`SELECT status, attempts, last_error, deliver_after FROM outbox WHERE id = $1`, [id]);
+    return r;
+  }
+
+  const desde = () => new Date(Date.now() - 3 * 24 * 60 * 60_000);
+
+  beforeEach(async () => {
+    await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
+  });
+
+  afterAll(async () => {
+    await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
+  });
+
+  it("dry-run lista as candidatas e NÃO escreve", async () => {
+    const id = await falhada({ last_error: ERRO_ASSINATURA });
+
+    const r = await reprocessarFalhasDeCanal({ apply: false, desde: desde() });
+
+    expect(r.candidatas.map((c) => c.id)).toEqual([id]);
+    expect(r.reprocessadas).toEqual([]);
+    expect((await linha(id)).status).toBe("failed");
+  });
+
+  it("apply devolve a pending com attempts zerado, na janela, e guarda o erro original na trilha", async () => {
+    const id = await falhada({ last_error: ERRO_ASSINATURA });
+
+    const r = await reprocessarFalhasDeCanal({ apply: true, desde: desde() });
+
+    expect(r.reprocessadas).toEqual([id]);
+    const l = await linha(id);
+    expect(l.status).toBe("pending");
+    expect(l.attempts).toBe(0);
+    expect(l.last_error).toMatch(/^reprocessada em /);
+    expect(l.last_error).toContain("must subscribe");
+    // Vence na próxima janela, nunca no passado: é o cron que despacha.
+    expect(l.deliver_after.getTime()).toBeGreaterThanOrEqual(Date.now() - 60_000);
+    expect(l.deliver_after.getTime()).toBe(r.deliverAfter.getTime());
+  });
+
+  /**
+   * Os três cortes, cada um com a sua linha de controle. Se qualquer um
+   * deles sumir, a linha errada volta a `pending` e sai no WhatsApp de
+   * alguém.
+   */
+  it("corte por causa: failed por OUTRO motivo não é candidata", async () => {
+    const canal = await falhada({ last_error: ERRO_ASSINATURA });
+    const numero = await falhada({ last_error: 'Z-API /send-text 400: {"error":"invalid phone"}' });
+    const rede = await falhada({ last_error: "timeout de 10000ms em api.z-api.io/send-text" });
+
+    const r = await reprocessarFalhasDeCanal({ apply: true, desde: desde() });
+
+    expect(r.reprocessadas).toEqual([canal]);
+    expect((await linha(numero)).status).toBe("failed");
+    expect((await linha(rede)).status).toBe("failed");
+  });
+
+  it("corte por idade: anterior a `desde` fica de fora", async () => {
+    const recente = await falhada({ last_error: ERRO_ASSINATURA, idade: "1 hour" });
+    const velha = await falhada({ last_error: ERRO_ASSINATURA, idade: "10 days" });
+
+    const r = await reprocessarFalhasDeCanal({ apply: true, desde: desde() });
+
+    expect(r.candidatas.map((c) => c.id)).toEqual([recente]);
+    expect(r.reprocessadas).toEqual([recente]);
+    expect((await linha(velha)).status).toBe("failed");
+  });
+
+  it("corte por exclusão: bate no `exceto` → listada como excluída, não reprocessada", async () => {
+    const real = await falhada({ last_error: ERRO_ASSINATURA, body: "O formulário do negócio Rua A, 10 foi preenchido." });
+    const teste = await falhada({ last_error: ERRO_ASSINATURA, body: "O formulário do negócio TESTE — Residencial · Caução foi preenchido." });
+
+    const r = await reprocessarFalhasDeCanal({ apply: true, desde: desde(), exceto: "TESTE —" });
+
+    expect(r.candidatas.find((c) => c.id === teste)?.excluida).toBe(true);
+    expect(r.candidatas.find((c) => c.id === real)?.excluida).toBe(false);
+    expect(r.reprocessadas).toEqual([real]);
+    expect((await linha(teste)).status).toBe("failed");
+  });
+
+  it("só `failed`: uma linha `sent` com o mesmo erro na trilha não é tocada", async () => {
+    const enviada = await falhada({ last_error: ERRO_ASSINATURA, status: "sent" });
+
+    const r = await reprocessarFalhasDeCanal({ apply: true, desde: desde() });
+
+    expect(r.candidatas).toEqual([]);
+    expect((await linha(enviada)).status).toBe("sent");
+  });
+
+  it("credencial (send-text 401) também é erro de canal", async () => {
+    const id = await falhada({ last_error: "Z-API /send-text 401: token inválido" });
+    const r = await reprocessarFalhasDeCanal({ apply: false, desde: desde() });
+    expect(r.candidatas.map((c) => c.id)).toEqual([id]);
+  });
+
+  /**
+   * O corte por causa é no SQL, ANTES do LIMIT. Com o filtro em JS, cem
+   * falhas de número inválido esgotavam o teto e o script dizia "nenhuma
+   * linha" com as certas logo atrás (achado do code review).
+   */
+  it("o teto conta só candidatas de canal — falhas de outro tipo não o consomem", async () => {
+    for (let i = 0; i < 3; i++) {
+      await falhada({ last_error: 'Z-API /send-text 400: {"error":"invalid phone"}', idade: "3 hours" });
+    }
+    const canal = await falhada({ last_error: ERRO_ASSINATURA, idade: "1 hour" });
+
+    const r = await reprocessarFalhasDeCanal({ apply: false, desde: desde(), limite: 2 });
+
+    expect(r.candidatas.map((c) => c.id)).toEqual([canal]);
+    expect(r.truncado).toBe(false);
+  });
+
+  it("acima do teto, avisa que cortou", async () => {
+    await falhada({ last_error: ERRO_ASSINATURA, idade: "3 hours" });
+    await falhada({ last_error: ERRO_ASSINATURA, idade: "2 hours" });
+    await falhada({ last_error: ERRO_ASSINATURA, idade: "1 hour" });
+
+    const r = await reprocessarFalhasDeCanal({ apply: false, desde: desde(), limite: 2 });
+
+    expect(r.candidatas).toHaveLength(2);
+    expect(r.truncado).toBe(true);
+  });
+
+  /**
+   * A reconciliação já reportou a linha ao ImobPro como `failed` e carimbou
+   * `reported_at`. Sem zerar, o `sent` que vem depois nunca seria reportado e
+   * o ImobPro mostraria "falhou" para uma mensagem que chegou.
+   */
+  it("apply zera reported_at e report_attempts para a entrega ser reportada de novo", async () => {
+    const id = await falhada({ last_error: ERRO_ASSINATURA });
+    await query(`UPDATE outbox SET reported_at = now(), report_attempts = 2 WHERE id = $1`, [id]);
+
+    await reprocessarFalhasDeCanal({ apply: true, desde: desde() });
+
+    const [row] = await query<{ reported_at: Date | null; report_attempts: number }>(
+      `SELECT reported_at, report_attempts FROM outbox WHERE id = $1`,
+      [id]
+    );
+    expect(row.reported_at).toBeNull();
+    expect(row.report_attempts).toBe(0);
   });
 });
 
