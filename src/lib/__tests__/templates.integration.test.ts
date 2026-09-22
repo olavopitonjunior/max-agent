@@ -34,6 +34,16 @@ async function linha(dedupeKey: string, linkUrl: string | null, extra: Record<st
   return r.id;
 }
 
+/** O clique é gravado FORA do 302 (`waitUntil`): espera a escrita, sem depender de timing. */
+async function cliqueGravado(id: string): Promise<Date> {
+  for (let i = 0; i < 50; i++) {
+    const [r] = await query<{ clicked_at: Date | null }>(`SELECT clicked_at FROM outbox WHERE id = $1`, [id]);
+    if (r?.clicked_at) return r.clicked_at;
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  throw new Error("clicked_at não gravado em 1s");
+}
+
 const abrir = (id: string) => GET(new NextRequest(`https://max.test/r/${id}`), { params: { id } });
 
 d("templates (Postgres real)", () => {
@@ -62,17 +72,11 @@ d("templates (Postgres real)", () => {
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("https://trio.imobpro.ia.br/deals/cmx1");
 
-    const [{ clicked_at: primeiro }] = await query<{ clicked_at: Date }>(
-      `SELECT clicked_at FROM outbox WHERE id = $1`,
-      [id]
-    );
-    expect(primeiro).not.toBeNull();
+    const primeiro = await cliqueGravado(id);
     await new Promise((r) => setTimeout(r, 20));
     await abrir(id);
-    const [{ clicked_at: segundo }] = await query<{ clicked_at: Date }>(
-      `SELECT clicked_at FROM outbox WHERE id = $1`,
-      [id]
-    );
+    await new Promise((r) => setTimeout(r, 100));
+    const segundo = await cliqueGravado(id);
     expect(new Date(segundo).getTime()).toBe(new Date(primeiro).getTime());
   });
 

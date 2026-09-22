@@ -7,18 +7,19 @@
  * variáveis soltas (`params`); aqui isso vira `name` + lista ordenada de
  * parâmetros, que é o que a Graph API recebe.
  *
- * Os TEXTOS moram aqui (são o que é submetido à Meta pelo
- * `scripts/templates-sync.ts`) e passam pela aprovação do Olavo antes da
- * submissão — rascunho em `~/.claude/plans/max-templates-rascunho.md`.
- * Mudar um texto depois de aprovado exige resubmeter e esperar nova análise.
+ * Os TEXTOS moram aqui e passam pela aprovação do Olavo antes de qualquer
+ * submissão — rascunho em `~/.claude/plans/max-templates-rascunho.md`. A
+ * submissão à Meta (script de sync) e o botão entram na PRÓXIMA fatia; mudar
+ * um texto depois de aprovado exige resubmeter e esperar nova análise.
  *
- * Regras da Meta que o catálogo respeita (e que `catalog.test.ts` trava):
+ * Regras da Meta que o catálogo respeita e que `catalog.test.ts` trava:
  *  - nenhuma variável no começo nem no fim do texto;
  *  - variáveis numeradas em sequência, sem pular;
- *  - parâmetro nunca vazio, nunca com quebra de linha;
- *  - botão de URL com domínio FIXO e a variável só no fim (é o
- *    redirecionador `/r/<id>` deste serviço, porque o link real muda de host
- *    por tenant).
+ *  - parâmetro nunca vazio, nunca com quebra de linha.
+ *
+ * Ainda NÃO travado por teste (próxima fatia, junto com o botão): botão de
+ * URL com domínio FIXO e a variável só no fim — o redirecionador `/r/<id>`
+ * deste serviço, porque o link real muda de host por tenant.
  */
 
 export type FonteDeVariavel =

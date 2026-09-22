@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { waitUntil } from "@vercel/functions";
 import { query } from "@/lib/db";
 import { destinoPermitido, ehIdDeOutbox } from "@/lib/redirect";
 
@@ -40,12 +41,13 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   const destino = destinoPermitido(rows[0]?.link_url);
   if (!destino) return naoEncontrado();
 
-  // Primeiro clique só: COALESCE mantém o carimbo original. Melhor-esforço —
-  // o clique não pode falhar por causa da métrica.
-  await query(`UPDATE outbox SET clicked_at = COALESCE(clicked_at, now()) WHERE id = $1`, [
-    params.id,
-  ]).catch((err) =>
-    console.warn("[r] clique não registrado:", err instanceof Error ? err.message : String(err))
+  // Primeiro clique só: COALESCE mantém o carimbo original. Melhor-esforço e
+  // FORA do caminho do 302: quem tocou no botão não espera pela métrica.
+  // `waitUntil` mantém a function viva até a escrita terminar.
+  waitUntil(
+    query(`UPDATE outbox SET clicked_at = COALESCE(clicked_at, now()) WHERE id = $1`, [params.id]).catch(
+      (err) => console.warn("[r] clique não registrado:", err instanceof Error ? err.message : String(err))
+    )
   );
 
   return NextResponse.redirect(destino.toString(), 302);

@@ -8,8 +8,8 @@ import { isOrgKnown } from "@/lib/orgs";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-/** Mesmo formato de chave que o contractmaker valida antes de mandar. */
-const KIND_RE = /^[a-z][a-z0-9_]{0,63}$/;
+/** O mesmo `PARAM_KEY` que o contractmaker usa para validar o `kind` antes de mandar. */
+const KIND_RE = /^[a-z][a-z0-9_]{0,31}$/;
 const PARAM_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
 /**
