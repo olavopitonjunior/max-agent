@@ -54,11 +54,18 @@ const CASOS: { texto: string; esperado: Esperado }[] = [
   { texto: "me lista as propostas enviadas", esperado: "listar_propostas" },
   { texto: "o proponente já assinou a proposta?", esperado: "listar_propostas" },
   { texto: "quantas propostas eu tenho em rascunho?", esperado: "listar_propostas" },
+  // Consultas com verbo que PARECE criação (achado do review do #37).
+  { texto: "faz quanto tempo a proposta do João foi enviada?", esperado: "listar_propostas" },
+  { texto: "abre a proposta do Carlos pra eu ver o status", esperado: "listar_propostas" },
+  { texto: "tem proposta nova?", esperado: "listar_propostas" },
 
   // ── propor_criacao: CRIAR não é listar (a vizinha mais perigosa) ────────
   { texto: "cria uma proposta pro Carlos", esperado: "propor_criacao" },
   { texto: "monta um rascunho de proposta pra esse cliente", esperado: "propor_criacao" },
   { texto: "abre um formulário de venda pro João", esperado: "propor_criacao" },
+  // Criação sem verbo de ação, e criação que cita negócio (achado do review).
+  { texto: "preciso de uma proposta pro João", esperado: "propor_criacao" },
+  { texto: "cria um formulário pro negócio da Rua das Acácias", esperado: "propor_criacao" },
 
   // ── Nenhuma: pergunta de processo, conversa ─────────────────────────────
   { texto: "como funciona a assinatura pela ClickSign?", esperado: null },
@@ -79,9 +86,11 @@ async function main() {
   const toolsDoTurn = (texto: string) =>
     semPrefiltro
       ? [...TOOLS_DE_LEITURA.map((t) => t.def), FORM_TOOL]
-      : [
-          ...selecionarTools({ policy: TODAS, texto }).tools.map((t) => t.def),
+      : // Mesma ORDEM de `graph.ts` (`[...escrita, ...leitura]`): para um nano,
+        // a posição da vizinha é um fator — a eval não pode testar outra.
+        [
           ...(shouldOfferTools(texto) ? [FORM_TOOL] : []),
+          ...selecionarTools({ policy: TODAS, texto }).tools.map((t) => t.def),
         ];
 
   console.log(`modelo: ${model}\ncasos:  ${CASOS.length}\nmodo:   ${semPrefiltro ? "sem prefiltro (pior caso)" : "produção (com prefiltro)"}\n`);

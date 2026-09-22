@@ -173,34 +173,41 @@ describe("pendências e propostas", () => {
   });
 });
 
-describe("criar proposta não é listar proposta", () => {
+describe("pedido de criação não oferece leitura nenhuma", () => {
+  const TODAS: Capability[] = ["deal.list", "deal.detail", "deal.pending", "proposal.list", "proposal.detail"];
+  const nomes = (texto: string) => selecionarTools({ policy: TODAS, texto }).tools.map((t) => t.def.name);
+
   /**
-   * Medido na eval: com `listar_propostas` oferecida ao lado, o nano deixava
-   * de propor a criação (recall da `propor_criacao` 93% → 33%). Em pedido de
-   * criação a listagem fica FORA do turn.
+   * Medido na eval: com `listar_propostas` ao lado, o nano deixava de propor a
+   * criação (recall da `propor_criacao` 93% → 33%). Em pedido de criação de
+   * documento, nenhuma leitura entra — vale para negócio também ("cria um
+   * formulário pro negócio da Rua X").
    */
-  it("pedido de criação não oferece listar_propostas", () => {
-    for (const texto of [
-      "cria uma proposta pro Carlos",
-      "monta um rascunho de proposta pra esse cliente",
-      "abre uma proposta nova aí",
-      "faz uma proposta de aluguel pro apartamento do centro",
-      "gera a proposta do João",
-    ]) {
-      const r = selecionarTools({ policy: ["proposal.list"], texto });
-      expect(r.tools.map((t) => t.def.name), texto).not.toContain("listar_propostas");
-    }
+  it.each([
+    "cria uma proposta pro Carlos",
+    "monta um rascunho de proposta pra esse cliente",
+    "abre uma proposta nova aí",
+    "faz uma proposta de aluguel pro apartamento do centro",
+    "preciso de uma proposta pro João",
+    "quero fazer uma proposta",
+    "cria proposta pro Carlos",
+    "cria um formulário pro negócio da Rua X",
+  ])("%s → nenhuma leitura", (texto) => {
+    expect(nomes(texto)).toEqual([]);
   });
 
-  /** "rascunho" sozinho é consulta: fica fora do regex de criação de propósito. */
-  it("consulta sobre propostas continua oferecendo a listagem", () => {
-    for (const texto of [
-      "quantas propostas eu tenho em rascunho?",
-      "a proposta do Carlos foi aceita?",
-      "como estão minhas propostas?",
-    ]) {
-      const r = selecionarTools({ policy: ["proposal.list"], texto });
-      expect(r.tools.map((t) => t.def.name), texto).toContain("listar_propostas");
-    }
+  /**
+   * Achado do review do #37: verbo solto ("faz", "abre", "nova") tirava a
+   * leitura de CONSULTAS e deixava só a tool de escrita. A âncora é o objeto
+   * com artigo indefinido; "a proposta" (definido) é algo que já existe.
+   */
+  it.each([
+    "faz quanto tempo a proposta foi enviada?",
+    "abre a proposta do Carlos",
+    "tem proposta nova?",
+    "quantas propostas eu tenho em rascunho?",
+    "a proposta do Carlos foi aceita?",
+  ])("%s → continua consulta de proposta", (texto) => {
+    expect(nomes(texto)).toContain("listar_propostas");
   });
 });

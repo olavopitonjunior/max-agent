@@ -356,7 +356,9 @@ export interface ToolDef {
 }
 
 /**
- * Teto DURO de definições por chamada.
+ * Teto do catálogo de LEITURA por chamada. A `propor_criacao` é somada por
+ * fora, em `graph.ts` (hoje 3 leituras + 1 escrita = 4); se o catálogo de
+ * leitura chegar a 5, o total enviado passa do teto — rever antes.
  *
  * Acima disso a precisão do nano cai — é a mesma medição que fez `propor_criacao`
  * ser UMA tool com enum em vez de três vizinhas (recall 100% → 50%). O corte é
@@ -440,17 +442,28 @@ export const PENDENCIAS_DO_NEGOCIO: ToolDef = {
 const PEDE_PROPOSTA = /\b(proposta|propostas)\b/i;
 
 /**
- * Pedido de CRIAÇÃO — terreno da `propor_criacao`, não da listagem.
+ * Pedido de CRIAÇÃO de documento — terreno da `propor_criacao`, não das
+ * leituras. Em pedido de criação, NENHUMA tool de leitura entra no turn.
  *
  * Medido na eval (2026-09-22): com `listar_propostas` oferecida ao lado, o nano
  * deixou de propor a criação em "cria uma proposta pro Carlos" (recall da
- * `propor_criacao` 93% → 33%). A vizinha de descrição parecida roubava a
- * decisão. Tirá-la do turn quando o texto é um pedido de criação resolve de
- * forma determinística — o prefiltro só tira opções, nunca acrescenta.
- * ("rascunho" não entra: "quantas propostas em rascunho?" é consulta.)
+ * `propor_criacao` 93% → 33%). A vizinha roubava a decisão.
+ *
+ * ANCORADO no objeto, e não em verbo solto (achado do review do #37): "faz",
+ * "abre" e "nova" sozinhos casavam "faz quanto tempo a proposta foi
+ * enviada?", "abre a proposta do Carlos" e "tem proposta nova?" — tirando a
+ * leitura e deixando SÓ a tool de escrita para uma consulta. O que distingue
+ * criação é verbo (ou "preciso de"/"quero") + artigo INDEFINIDO (ou nenhum) +
+ * o documento: "cria uma proposta", "preciso de um formulário", "monta
+ * proposta". "A proposta" (definido) é algo que já existe: consulta.
  */
 const PEDE_CRIACAO =
-  /\b(cri[ae]|criar|crie|monta|monte|montar|abre|abra|abrir|faz|faca|fazer|gera|gere|gerar|nova|novo)\b/i;
+  /\b(?:(?:cri[ae]r?|crie|mont[ae]r?|abr[ae]|abrir|fa[zc]a?|fazer|ger[ae]r?)|(?:preciso|precisava|quero|queria|gostaria)(?:\s+de)?(?:\s+(?:criar|fazer|montar|abrir|gerar))?)\s+(?:(?:uma|um)\s+)?(?:(?:nova|novo)\s+)?(?:rascunho\s+de\s+)?(?:proposta|formulario|ficha|cadastro)\b/i;
+
+/** O texto é um pedido de criação de documento? (Normalizado: sem acento.) */
+export function ehPedidoDeCriacao(texto: string): boolean {
+  return PEDE_CRIACAO.test(normalizar(texto));
+}
 
 /**
  * As propostas que esta pessoa enxerga no sistema — o `proposalScopeWhere` do
@@ -461,10 +474,7 @@ export const LISTAR_PROPOSTAS: ToolDef = {
   capability: "proposal.list",
   verb: "proposal.list",
   prioridade: 30,
-  combina: (t) => {
-    const n = normalizar(t);
-    return PEDE_PROPOSTA.test(n) && !PEDE_CRIACAO.test(n);
-  },
+  combina: (t) => PEDE_PROPOSTA.test(normalizar(t)),
   def: {
     name: "listar_propostas",
     description:
@@ -533,6 +543,10 @@ export function selecionarTools(params: {
 }): { tools: ToolDef[]; cortadas: number } {
   const catalogo = params.catalogo ?? TOOLS_DE_LEITURA;
   const texto = params.texto;
+
+  // Pedido de criação é da `propor_criacao`: leitura ao lado rouba a decisão
+  // do nano (ver `PEDE_CRIACAO`). Nenhuma leitura entra nesse turn.
+  if (ehPedidoDeCriacao(texto)) return { tools: [], cortadas: 0 };
 
   const elegiveis = catalogo
     .filter((t) => params.policy.includes(t.capability))
