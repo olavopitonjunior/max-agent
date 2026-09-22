@@ -7,7 +7,7 @@ import {
   connectionStatus,
   ZapiHttpError,
 } from "../zapi";
-import { inoperanciaDoErro } from "../zapi-erro";
+import { inoperanciaDoErro } from "../transport/erro";
 
 /**
  * O parser existe porque o payload da Z-API tem defeitos que já custaram

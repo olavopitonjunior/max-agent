@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
-import { sendText, connectionStatus, type ConnectionState } from "./transport";
+import { sendText, connectionStatus, provider, type ConnectionState } from "./transport";
+import { janelaAberta } from "./janela24h";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
-import { inoperanciaDoErro, type Inoperancia } from "./zapi-erro";
+import { inoperanciaDoErro, type Inoperancia } from "./transport/erro";
 
 /**
  * Prefixos de `last_error` que significam "o CANAL estava fora, a mensagem não
@@ -14,6 +15,8 @@ import { inoperanciaDoErro, type Inoperancia } from "./zapi-erro";
  */
 export const MARCA_CANAL_DESEMPARELHADA = "instancia z-api desemparelhada";
 export const MARCA_CANAL_INOPERANTE = "instancia z-api inoperante";
+/** Meta: fora da janela de 24h, texto livre não sai — espera template. */
+export const MARCA_REQUER_TEMPLATE = "requer_template: fora da janela de 24h da Meta";
 
 /**
  * Fila de saída das notificações proativas.
@@ -124,6 +127,12 @@ export interface DispatchTotals {
    * (fonte `envio`).
    */
   inoperante?: Inoperancia;
+  /**
+   * Linhas que esperam template: provedor Meta, janela de 24h fechada. Não é
+   * falha nem queda de canal — a mensagem está boa, só não pode sair como
+   * texto livre agora.
+   */
+  held: number;
 }
 
 interface OutboxRow extends Record<string, unknown> {
@@ -214,7 +223,7 @@ export async function dispatchDue(
   /** `Date.now()` do início da requisição — âncora do prazo de seed. */
   iniciadoEm?: number
 ): Promise<DispatchTotals> {
-  const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0 };
+  const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0, held: 0 };
 
   /**
    * ── A checagem que faltava ─────────────────────────────────────────────
@@ -401,6 +410,32 @@ export async function dispatchDue(
       // caso "falha não registrada" a mensagem nem chegou — semear afirmaria
       // contexto de uma mensagem que não existe. (achado do code review)
       totals.sent += 1;
+      continue;
+    }
+
+    /**
+     * ── Janela de 24h da Meta ──────────────────────────────────────────────
+     *
+     * Na Cloud API, texto livre fora da janela é aceito com 200 e recusado
+     * DEPOIS, no webhook (131047) — a linha viraria `sent` e só então
+     * `failed`, queimando uma notificação que um template entregaria. Então
+     * pergunta antes: janela fechada, a linha espera, com a tentativa
+     * devolvida e o motivo à vista no painel. Quem a libera é a pessoa
+     * escrevendo de novo ou, com o catálogo de templates, o envio por
+     * template. Só vale para a Meta: a Z-API não tem janela.
+     */
+    if (provider() === "meta" && !(await janelaAberta(row.phone))) {
+      await query(
+        `UPDATE outbox
+            SET status = 'pending',
+                attempts = GREATEST(attempts - 1, 0),
+                deliver_after = now() + interval '1 hour',
+                last_error = $2
+          WHERE id = $1 AND status = 'sending'`,
+        [row.id, MARCA_REQUER_TEMPLATE]
+      );
+      log.info("outbox.aguarda_template", { rowId: row.id, orgId: row.org_id, phone: row.phone });
+      totals.held += 1;
       continue;
     }
 

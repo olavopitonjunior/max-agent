@@ -5,8 +5,15 @@ vi.mock("../zapi", () => ({
   connectionStatus: vi.fn(),
   downloadMedia: vi.fn(),
 }));
+vi.mock("../meta", async (orig) => ({
+  ...(await orig<typeof import("../meta")>()),
+  sendText: vi.fn(),
+  connectionStatus: vi.fn(),
+  downloadMedia: vi.fn(),
+}));
 
 const zapi = await import("../zapi");
+const meta = await import("../meta");
 const { provider, sendText, connectionStatus, downloadMedia } = await import("../transport");
 
 afterEach(() => {
@@ -14,6 +21,9 @@ afterEach(() => {
   vi.mocked(zapi.sendText).mockReset();
   vi.mocked(zapi.connectionStatus).mockReset();
   vi.mocked(zapi.downloadMedia).mockReset();
+  vi.mocked(meta.sendText).mockReset();
+  vi.mocked(meta.connectionStatus).mockReset();
+  vi.mocked(meta.downloadMedia).mockReset();
 });
 
 describe("provider", () => {
@@ -65,5 +75,35 @@ describe("sendText", () => {
     const erro = new Error("Z-API /send-text 400: subscribe");
     vi.mocked(zapi.sendText).mockRejectedValue(erro);
     await expect(sendText({ to: "1", body: "x" })).rejects.toBe(erro);
+  });
+});
+
+describe("provedor meta", () => {
+  it("WHATSAPP_PROVIDER=meta manda envio e status para a Meta, e nada para a Z-API", async () => {
+    vi.stubEnv("WHATSAPP_PROVIDER", "Meta");
+    expect(provider()).toBe("meta");
+    vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.X" });
+    vi.mocked(meta.connectionStatus).mockResolvedValue({ connected: true, raw: {} });
+
+    expect(await sendText({ to: "5511999990000", body: "oi" })).toEqual({ messageId: "wamid.X" });
+    expect(await connectionStatus()).toEqual({ connected: true, raw: {} });
+    expect(zapi.sendText).not.toHaveBeenCalled();
+    expect(zapi.connectionStatus).not.toHaveBeenCalled();
+  });
+
+  /**
+   * No minuto do cutover a fila pode ter uma mensagem da Z-API (URL pública)
+   * esperando: ela tem que baixar pela Z-API mesmo com o provedor já em Meta.
+   */
+  it("mídia é roteada pela REFERÊNCIA, não pela env", async () => {
+    vi.stubEnv("WHATSAPP_PROVIDER", "meta");
+    await downloadMedia("meta:MEDIA1");
+    await downloadMedia("https://storage.z-api.io/arquivo.ogg");
+    expect(meta.downloadMedia).toHaveBeenCalledWith("meta:MEDIA1");
+    expect(zapi.downloadMedia).toHaveBeenCalledWith("https://storage.z-api.io/arquivo.ogg");
+
+    vi.stubEnv("WHATSAPP_PROVIDER", "");
+    await downloadMedia("meta:MEDIA2");
+    expect(meta.downloadMedia).toHaveBeenCalledWith("meta:MEDIA2");
   });
 });

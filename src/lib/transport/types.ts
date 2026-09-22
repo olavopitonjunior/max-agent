@@ -8,7 +8,7 @@
  * pode ter campo que só um provedor entende.
  */
 
-import type { Inoperancia } from "../zapi-erro";
+import type { Inoperancia } from "./erro";
 
 export type InboundKind = "text" | "image" | "audio" | "document" | "unknown";
 
@@ -22,7 +22,7 @@ export interface InboundMessage {
   text: string | null;
   /**
    * Referência OPACA à mídia: quem a interpreta é o `downloadMedia` do mesmo
-   * provedor que a produziu (URL pública na Z-API).
+   * provedor que a produziu (URL pública na Z-API, `meta:<media-id>` na Meta).
    */
   mediaUrl: string | null;
   mimeType: string | null;
@@ -51,9 +51,9 @@ export interface ConnectionState {
   session?: string;
   raw: unknown;
   /**
-   * Presente quando `connected` é `false` por INOPERÂNCIA (assinatura ou
-   * credencial, ver `zapi-erro.ts`), e não por desemparelhamento. Ausente na
-   * queda de sessão comum — que continua sendo "repareie por QR".
+   * Presente quando `connected` é `false` por INOPERÂNCIA (assinatura,
+   * credencial ou número, ver `transport/erro.ts`), e não por queda de sessão.
+   * Ausente na queda de sessão comum da Z-API — "repareie por QR".
    */
   inoperante?: Inoperancia;
 }
@@ -64,4 +64,4 @@ export interface SendResult {
   messageId: string | null;
 }
 
-export type ProviderName = "zapi";
+export type ProviderName = "zapi" | "meta";

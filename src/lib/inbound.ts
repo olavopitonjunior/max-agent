@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, type InboundMessage } from "./transport";
-import { inoperanciaDoErro } from "./zapi-erro";
+import { inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
+import { abrirJanela } from "./janela24h";
 import { log } from "./log";
 import { runTurn } from "@/graph/graph";
 
@@ -91,6 +92,7 @@ export async function enqueueInbound(
     );
     return { status: "duplicate", id: existing[0]?.id ?? null };
   }
+  await abrirJanela(msg);
   return { status: "queued", id };
 }
 

@@ -1,7 +1,8 @@
 import { query } from "./db";
 import { contarVencidas } from "./outbox";
 import { reportAlert } from "./cm";
-import type { MotivoInoperante } from "./zapi-erro";
+import { provider } from "./transport";
+import type { MotivoInoperante } from "./transport/erro";
 
 /**
  * Por que a queda foi observada. Vai no e-mail, porque muda o CONSELHO:
@@ -402,6 +403,22 @@ export async function observeConnection(params: {
  * defeito que este arquivo existe para matar.
  */
 /** Texto de log para um estado observado. */
+/**
+ * `{ canal: "meta" }` quando o Max fala pela Cloud API; nada na Z-API. Lido na
+ * hora do ENVIO do alerta: numa troca de provedor no meio de um incidente, o
+ * conselho segue o canal que está valendo agora, que é onde se age.
+ *
+ * Sem lançar: um `WHATSAPP_PROVIDER` inválido já derruba o despacho por outro
+ * caminho, e o alerta é justamente o que tem que sair nessa hora.
+ */
+function canalDoAlerta(): { canal?: "meta" } {
+  try {
+    return provider() === "meta" ? { canal: "meta" } : {};
+  } catch {
+    return {};
+  }
+}
+
 function descrever(connected: boolean, motivo: MotivoQueda | undefined): string {
   if (connected) return "conectada";
   return motivo ? `DESCONECTADA (${motivo})` : "DESCONECTADA";
@@ -495,6 +512,7 @@ async function alertarQueda(): Promise<"queda" | null> {
     at: (claim[0].down_since ?? new Date()).toISOString(),
     represadas,
     ...(motivo ? { motivo } : {}),
+    ...canalDoAlerta(),
   });
 
   if (!ok) {
@@ -579,6 +597,7 @@ async function alertarVolta(): Promise<"volta" | null> {
     evento: "zapi_reconectada",
     at: voltou_em.toISOString(),
     foraPorMs,
+    ...canalDoAlerta(),
   });
 
   if (!ok) {

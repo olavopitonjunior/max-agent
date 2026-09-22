@@ -18,7 +18,11 @@ vi.mock("@/lib/cm", () => ({
   reportUsage: vi.fn().mockResolvedValue(undefined),
   transcribeMedia: vi.fn(),
 }));
-vi.mock("@/lib/zapi", () => ({
+// Espalha o módulo real: o grafo chega à Z-API pela porta `transport`, e um
+// mock só com `downloadMedia` deixaria os demais exports `undefined` para
+// qualquer caminho futuro que os tocasse (achado do review do PR #32).
+vi.mock("@/lib/zapi", async (orig) => ({
+  ...(await orig<typeof import("@/lib/zapi")>()),
   downloadMedia: vi.fn(),
 }));
 vi.mock("@/lib/llm", () => ({
