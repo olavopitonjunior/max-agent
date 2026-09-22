@@ -264,6 +264,84 @@ describe("POST /api/notify", () => {
     );
   });
 
+  /**
+   * O corpo LITERAL que o contractmaker de produção manda desde cm#887/#888
+   * (`notify-trigger.ts`): mesmas chaves, mesma ordem, `kind` e `params` por
+   * último. Escrito à mão a partir de lá — não derivado do schema daqui —
+   * para que um desalinhamento entre os dois repos quebre este teste.
+   */
+  const CORPO_DO_CM = JSON.stringify({
+    orgId: "org1",
+    audience: "deal_broker",
+    phone: "+5511987654321",
+    recipientName: "Ana Corretora",
+    title: "Status do negócio atualizado",
+    body: 'O negócio "Venda Apto 302" avançou para o status "Assinatura".',
+    linkUrl: "https://trio.imobpro.ia.br/deals/cmx1",
+    dealId: "cmx1",
+    orgName: "RE/MAX Trio",
+    dedupeKey: "log-abc",
+    kind: "stage_change",
+    params: { negocio: "Venda Apto 302", etapa: "Assinatura" },
+  });
+
+  async function postar(body: string) {
+    const ts = String(Date.now());
+    return notifyPost(
+      notifyReq(body, { "x-max-timestamp": ts, "x-max-signature": sign(ts, body, SECRET) })
+    );
+  }
+
+  it("kind e params do contractmaker chegam à fila", async () => {
+    const res = await postar(CORPO_DO_CM);
+    expect(res.status).toBe(202);
+    expect(enfileiraOut).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "stage_change",
+        params: { negocio: "Venda Apto 302", etapa: "Assinatura" },
+        linkUrl: "https://trio.imobpro.ia.br/deals/cmx1",
+      })
+    );
+  });
+
+  it("emissor antigo (sem kind/params) segue 202, com os dois nulos", async () => {
+    const res = await postar(NOTIFY_BODY);
+    expect(res.status).toBe(202);
+    expect(enfileiraOut).toHaveBeenCalledWith(expect.objectContaining({ kind: null, params: null }));
+  });
+
+  /**
+   * Um enfeite ruim não pode custar a notificação: 400 aqui faria o
+   * contractmaker marcar `failed` e o aviso nunca sairia.
+   */
+  it("kind/params fora do formato viram ausentes — nunca 400", async () => {
+    const base = JSON.parse(CORPO_DO_CM);
+    for (const ruim of [
+      { kind: "Tipo Com Espaço", params: "texto" },
+      { kind: 42, params: ["a"] },
+      { kind: "", params: { "Chave Ruim": "x", ok: 7, vazio: "  " } },
+    ]) {
+      enfileiraOut.mockClear();
+      const res = await postar(JSON.stringify({ ...base, ...ruim }));
+      expect(res.status).toBe(202);
+      expect(enfileiraOut).toHaveBeenCalledWith(expect.objectContaining({ kind: null, params: null }));
+    }
+  });
+
+  it("params: quebra de linha vira espaço e só as chaves válidas ficam", async () => {
+    const base = JSON.parse(CORPO_DO_CM);
+    await postar(JSON.stringify({ ...base, params: { negocio: "Casa\nna praia", "X-Y": "fora", prazo: "30/09" } }));
+    expect(enfileiraOut).toHaveBeenCalledWith(
+      expect.objectContaining({ params: { negocio: "Casa na praia", prazo: "30/09" } })
+    );
+  });
+
+  it("chave desconhecida no corpo é descartada, não recusada (nada de .strict())", async () => {
+    const base = JSON.parse(CORPO_DO_CM);
+    const res = await postar(JSON.stringify({ ...base, campoDoFuturo: { x: 1 } }));
+    expect(res.status).toBe(202);
+  });
+
   it("duplicata é 409 — o contrato que o ImobPro lê como 'já assumido'", async () => {
     enfileiraOut.mockResolvedValueOnce({ status: "duplicate", id: "out-1" });
     const ts = String(Date.now());

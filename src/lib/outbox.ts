@@ -38,6 +38,10 @@ export interface EnqueueParams {
   linkUrl: string | null;
   dealId: string | null;
   orgName: string;
+  /** Tipo da notificação (ver migration 016). Ausente = template genérico. */
+  kind?: string | null;
+  /** Variáveis do template, já limpas pelo /notify. */
+  params?: Record<string, string> | null;
 }
 
 export type EnqueueResult =
@@ -54,8 +58,8 @@ export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
   const rows = await query<{ id: string }>(
     `INSERT INTO outbox
        (id, org_id, dedupe_key, audience, phone, recipient_name,
-        title, body, link_url, deal_id, org_name, deliver_after)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        title, body, link_url, deal_id, org_name, deliver_after, kind, params)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
      ON CONFLICT (dedupe_key) DO NOTHING
      RETURNING id`,
     [
@@ -71,6 +75,8 @@ export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
       p.dealId,
       p.orgName,
       deliverAfter,
+      p.kind ?? null,
+      p.params ? JSON.stringify(p.params) : null,
     ]
   );
 
