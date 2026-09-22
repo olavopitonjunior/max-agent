@@ -192,6 +192,11 @@ describe("pedido de criação não oferece leitura nenhuma", () => {
     "quero fazer uma proposta",
     "cria proposta pro Carlos",
     "cria um formulário pro negócio da Rua X",
+    // Re-review do #37: verbo "manda/envia" e criação sem verbo no início.
+    "manda uma proposta pro Carlos",
+    "envia uma proposta pro cliente",
+    "proposta nova pro João por favor",
+    "novo formulário de locação",
   ])("%s → nenhuma leitura", (texto) => {
     expect(nomes(texto)).toEqual([]);
   });
@@ -207,6 +212,9 @@ describe("pedido de criação não oferece leitura nenhuma", () => {
     "tem proposta nova?",
     "quantas propostas eu tenho em rascunho?",
     "a proposta do Carlos foi aceita?",
+    "o cliente quer uma proposta nova?",
+    "preciso ver a proposta do Carlos",
+    "manda a proposta do Carlos de novo",
   ])("%s → continua consulta de proposta", (texto) => {
     expect(nomes(texto)).toContain("listar_propostas");
   });

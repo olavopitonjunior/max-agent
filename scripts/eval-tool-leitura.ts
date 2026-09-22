@@ -66,6 +66,8 @@ const CASOS: { texto: string; esperado: Esperado }[] = [
   // Criação sem verbo de ação, e criação que cita negócio (achado do review).
   { texto: "preciso de uma proposta pro João", esperado: "propor_criacao" },
   { texto: "cria um formulário pro negócio da Rua das Acácias", esperado: "propor_criacao" },
+  { texto: "manda uma proposta pro Carlos", esperado: "propor_criacao" },
+  { texto: "proposta nova pro João por favor", esperado: "propor_criacao" },
 
   // ── Nenhuma: pergunta de processo, conversa ─────────────────────────────
   { texto: "como funciona a assinatura pela ClickSign?", esperado: null },

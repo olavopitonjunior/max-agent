@@ -458,11 +458,20 @@ const PEDE_PROPOSTA = /\b(proposta|propostas)\b/i;
  * proposta". "A proposta" (definido) é algo que já existe: consulta.
  */
 const PEDE_CRIACAO =
-  /\b(?:(?:cri[ae]r?|crie|mont[ae]r?|abr[ae]|abrir|fa[zc]a?|fazer|ger[ae]r?)|(?:preciso|precisava|quero|queria|gostaria)(?:\s+de)?(?:\s+(?:criar|fazer|montar|abrir|gerar))?)\s+(?:(?:uma|um)\s+)?(?:(?:nova|novo)\s+)?(?:rascunho\s+de\s+)?(?:proposta|formulario|ficha|cadastro)\b/i;
+  /\b(?:(?:cri[ae]r?|crie|mont[ae]r?|abr[ae]|abrir|fa[zc]a?|fazer|ger[ae]r?|manda?r?|envi[ae]r?)|(?:preciso|precisava|quero|queria|gostaria)(?:\s+de)?(?:\s+(?:criar|fazer|montar|abrir|gerar|mandar|enviar))?)\s+(?:(?:uma|um)\s+)?(?:(?:nova|novo)\s+)?(?:rascunho\s+de\s+)?(?:proposta|formulario|ficha|cadastro)\b/i;
+
+/**
+ * Criação SEM verbo, só no INÍCIO do texto: "proposta nova pro João", "novo
+ * formulário de locação". Ancorado no começo de propósito — "tem proposta
+ * nova?" (consulta) começa com "tem" e fica fora (re-review do #37).
+ */
+const PEDE_CRIACAO_SEM_VERBO =
+  /^(?:(?:uma|um)\s+)?(?:(?:nova|novo)\s+(?:proposta|formulario|ficha|cadastro)|(?:proposta|formulario|ficha|cadastro)\s+(?:nova|novo))\b/i;
 
 /** O texto é um pedido de criação de documento? (Normalizado: sem acento.) */
 export function ehPedidoDeCriacao(texto: string): boolean {
-  return PEDE_CRIACAO.test(normalizar(texto));
+  const n = normalizar(texto);
+  return PEDE_CRIACAO.test(n) || PEDE_CRIACAO_SEM_VERBO.test(n);
 }
 
 /**
@@ -545,7 +554,10 @@ export function selecionarTools(params: {
   const texto = params.texto;
 
   // Pedido de criação é da `propor_criacao`: leitura ao lado rouba a decisão
-  // do nano (ver `PEDE_CRIACAO`). Nenhuma leitura entra nesse turn.
+  // do nano (ver `PEDE_CRIACAO`). Nenhuma leitura entra nesse turn — inclusive
+  // em texto misto ("cria uma proposta e me diz como estão meus negócios"),
+  // que perde a leitura NESTE turn. Troca deliberada: a criação é a única
+  // escrita do Max, e a consulta pode ser refeita na mensagem seguinte.
   if (ehPedidoDeCriacao(texto)) return { tools: [], cortadas: 0 };
 
   const elegiveis = catalogo
