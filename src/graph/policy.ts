@@ -125,17 +125,27 @@ function apenasConhecidas(lista: unknown): Capability[] {
 }
 
 /**
- * Busca em `byRole` por propriedade PRÓPRIA.
+ * Busca em `byRole` por propriedade PRÓPRIA, dizendo se a chave EXISTE.
  *
  * `politica.byRole["constructor"]` num objeto vindo de JSON.parse devolveria a
  * função do protótipo, não `undefined` — e ela não é array, então o guard acima
  * já a converteria em `[]`. O `hasOwn` torna isso explícito em vez de acidental.
  */
-function byRoleDe(politica: MaxPolicy, role: string): unknown {
+function chaveDoPapel(politica: MaxPolicy, role: string): { presente: boolean; valor: unknown } {
   const mapa = politica.byRole;
-  if (!mapa || typeof mapa !== "object") return undefined;
-  return Object.hasOwn(mapa, role) ? (mapa as Record<string, unknown>)[role] : undefined;
+  if (!mapa || typeof mapa !== "object") return { presente: false, valor: undefined };
+  const presente = Object.hasOwn(mapa, role);
+  return { presente, valor: presente ? (mapa as Record<string, unknown>)[role] : undefined };
 }
+
+/**
+ * A chave de papel que vale para qualquer papel sem entrada própria.
+ *
+ * Um papel cuja chave de política fosse o próprio `"*"` leria `byRole["*"]`
+ * pelo caminho explícito — o mesmo valor que o curinga daria. Os dois
+ * caminhos colapsam; não há dupla leitura nem atalho.
+ */
+export const CURINGA = "*";
 
 /**
  * A política efetiva deste sujeito nesta org.
@@ -199,17 +209,14 @@ export function resolverPolitica(params: {
    * Não é a política ALARGANDO por adivinhação: o `"*"` só existe se quem
    * emite a política o escreveu. Ausente, o comportamento é o de antes.
    */
-  if (temChave(politica, role)) return apenasConhecidas(byRoleDe(politica, role));
-  return apenasConhecidas(byRoleDe(politica, CURINGA));
+  // UMA função de checagem (hasOwn em mapa válido) para os dois lookups: duas
+  // cópias do mesmo guard divergiriam no primeiro ajuste, e a divergência aqui
+  // é a política alargando por acidente.
+  const propria = chaveDoPapel(politica, role);
+  if (propria.presente) return apenasConhecidas(propria.valor);
+  return apenasConhecidas(chaveDoPapel(politica, CURINGA).valor);
 }
 
-/** A chave de papel que vale para qualquer papel sem entrada própria. */
-export const CURINGA = "*";
-
-function temChave(politica: MaxPolicy, role: string): boolean {
-  const mapa = politica.byRole;
-  return !!mapa && typeof mapa === "object" && Object.hasOwn(mapa, role);
-}
 
 /**
  * `deny` vence `allow` — sempre, e sem exceção configurável.
