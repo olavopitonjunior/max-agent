@@ -8,6 +8,27 @@ import { isOrgKnown } from "@/lib/orgs";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+/** Mesmo formato de chave que o contractmaker valida antes de mandar. */
+const KIND_RE = /^[a-z][a-z0-9_]{0,63}$/;
+const PARAM_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
+
+/**
+ * Só `string → string`, chave no formato, no máximo 8, valor numa linha e
+ * curto. O que não passa é descartado sem erro — mesma política do lado de lá
+ * (`sanitizeParams` do cm), repetida aqui porque este serviço não confia no
+ * formato de quem chama.
+ */
+function limparParams(raw: Record<string, unknown> | undefined): Record<string, string> | null {
+  if (!raw) return null;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw).slice(0, 8)) {
+    if (!PARAM_KEY_RE.test(k) || typeof v !== "string") continue;
+    const limpo = v.replace(/\s+/g, " ").trim().slice(0, 120);
+    if (limpo) out[k] = limpo;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 const bodySchema = z.object({
   orgId: z.string().min(1),
   audience: z.enum(["platform_user", "deal_broker", "deal_party"]),
@@ -19,6 +40,20 @@ const bodySchema = z.object({
   dealId: z.string().nullable().default(null),
   orgName: z.string().default(""),
   dedupeKey: z.string().min(1),
+  /**
+   * Tipo da notificação e variáveis do template da Meta (contractmaker
+   * cm#887, 2026-09-22). TOLERANTES de propósito: o contractmaker de produção
+   * já manda os dois, e um valor fora do formato não pode virar 400 — a
+   * notificação seria perdida por causa de um enfeite. Inválido vira ausente,
+   * e o envio cai no template genérico. Nada de `.strict()` neste schema:
+   * chave que este Max ainda não conhece tem que ser descartada, não recusada.
+   */
+  kind: z.string().regex(KIND_RE).optional().catch(undefined),
+  params: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .catch(undefined)
+    .transform(limparParams),
 });
 
 /**
@@ -77,6 +112,8 @@ export async function POST(req: NextRequest) {
     linkUrl: p.linkUrl,
     dealId: p.dealId,
     orgName: p.orgName,
+    kind: p.kind ?? null,
+    params: p.params,
   });
 
   if (result.status === "duplicate") {
