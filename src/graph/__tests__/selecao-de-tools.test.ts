@@ -102,3 +102,105 @@ describe("teto de 5 definições", () => {
     expect(r.cortadas).toBe(0);
   });
 });
+
+// ── 4. AS LEITURAS DO 6b (2026-09-22) ──────────────────────────────────────
+
+describe("pendências e propostas", () => {
+  const TODAS: Capability[] = ["deal.list", "deal.detail", "deal.pending", "proposal.list", "proposal.detail"];
+  const nomes = (policy: Capability[], texto: string) =>
+    selecionarTools({ policy, texto }).tools.map((t) => t.def.name);
+
+  /** Regra 3: o negado antes do permitido — cada tool só com a SUA capability. */
+  it("cada tool nova exige a própria capability", () => {
+    expect(nomes(["deal.list", "proposal.list"], "o que está pendente?")).not.toContain("pendencias_do_negocio");
+    expect(nomes(["deal.list", "deal.pending"], "como estão minhas propostas?")).not.toContain("listar_propostas");
+    expect(nomes(["deal.pending"], "o que está pendente?")).toEqual(["pendencias_do_negocio"]);
+    expect(nomes(["proposal.list"], "como estão minhas propostas?")).toEqual(["listar_propostas"]);
+  });
+
+  /**
+   * O corretor comissionado recebe `deal.list` + `deal.pending` pelo padrão —
+   * e a pergunta típica dele não aponta negócio nenhum.
+   */
+  it("o que o corretor comissionado pergunta chega à tool certa", () => {
+    expect(nomes(["deal.list", "deal.pending"], "falta alguma coisa nos meus negócios?")).toEqual([
+      "listar_negocios",
+      "pendencias_do_negocio",
+    ]);
+  });
+
+  /**
+   * Regressão do prefiltro: `normalizar` tira o acento, e `\bcertid\b` nunca
+   * casava "certidao"; `\bdocumento\b` não casava o plural. As duas perguntas
+   * mais comuns sobre pendência passavam direto pelo filtro.
+   */
+  it("certidão sem acento e documentos no plural passam o prefiltro", () => {
+    for (const texto of ["cadê a certidão?", "saiu a certidao?", "me manda os documentos"]) {
+      expect(nomes(TODAS, texto), texto).toContain("pendencias_do_negocio");
+      expect(nomes(TODAS, texto), texto).toContain("listar_negocios");
+    }
+  });
+
+  it("pergunta que não é sobre isso não oferece nada", () => {
+    expect(nomes(TODAS, "bom dia, tudo bem?")).toEqual([]);
+    expect(nomes(TODAS, "qual o endereço da imobiliária?")).toEqual([]);
+  });
+
+  /**
+   * Com as leituras todas concedidas o catálogo ainda cabe no teto: o corte
+   * por prioridade não age, e `propor_criacao` (fora deste catálogo) não
+   * compete por vaga — ela é oferecida à parte, por `podeEscrever`.
+   */
+  it("todas concedidas e todas pedidas: cabe no teto, nada cortado", () => {
+    const r = selecionarTools({
+      policy: TODAS,
+      texto: "como estão meus negócios, o que falta e as propostas?",
+    });
+    expect(r.cortadas).toBe(0);
+    expect(r.tools.map((t) => t.def.name)).toEqual([
+      "listar_negocios",
+      "pendencias_do_negocio",
+      "listar_propostas",
+    ]);
+    expect(r.tools.length).toBeLessThanOrEqual(TETO_DE_TOOLS);
+    expect(r.tools.map((t) => t.def.name)).not.toContain(TOOL_PROPOR_FORM);
+  });
+
+  /** O sanitizador de saída só barra nome de tool que ele conhece. */
+  it("todo nome de tool de leitura está no sanitizador", async () => {
+    const { NOMES_DE_TOOL } = await import("../tools");
+    for (const t of TOOLS_DE_LEITURA) expect(NOMES_DE_TOOL).toContain(t.def.name);
+  });
+});
+
+describe("criar proposta não é listar proposta", () => {
+  /**
+   * Medido na eval: com `listar_propostas` oferecida ao lado, o nano deixava
+   * de propor a criação (recall da `propor_criacao` 93% → 33%). Em pedido de
+   * criação a listagem fica FORA do turn.
+   */
+  it("pedido de criação não oferece listar_propostas", () => {
+    for (const texto of [
+      "cria uma proposta pro Carlos",
+      "monta um rascunho de proposta pra esse cliente",
+      "abre uma proposta nova aí",
+      "faz uma proposta de aluguel pro apartamento do centro",
+      "gera a proposta do João",
+    ]) {
+      const r = selecionarTools({ policy: ["proposal.list"], texto });
+      expect(r.tools.map((t) => t.def.name), texto).not.toContain("listar_propostas");
+    }
+  });
+
+  /** "rascunho" sozinho é consulta: fica fora do regex de criação de propósito. */
+  it("consulta sobre propostas continua oferecendo a listagem", () => {
+    for (const texto of [
+      "quantas propostas eu tenho em rascunho?",
+      "a proposta do Carlos foi aceita?",
+      "como estão minhas propostas?",
+    ]) {
+      const r = selecionarTools({ policy: ["proposal.list"], texto });
+      expect(r.tools.map((t) => t.def.name), texto).toContain("listar_propostas");
+    }
+  });
+});

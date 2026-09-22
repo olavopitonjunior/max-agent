@@ -56,7 +56,12 @@ export const TOOL_PROPOR_FORM = "propor_criacao";
  * aparecer na conversa. Manter aqui, e não lá, é o que faz a tool que o PR 6
  * acrescentar nascer bloqueada sem ninguém lembrar de editar dois arquivos.
  */
-export const NOMES_DE_TOOL: string[] = [TOOL_PROPOR_FORM, "listar_negocios"];
+export const NOMES_DE_TOOL: string[] = [
+  TOOL_PROPOR_FORM,
+  "listar_negocios",
+  "pendencias_do_negocio",
+  "listar_propostas",
+];
 
 /**
  * UMA ferramenta com um parâmetro, e não três ferramentas parecidas.
@@ -361,7 +366,7 @@ export interface ToolDef {
 export const TETO_DE_TOOLS = 5;
 
 const PEDE_NEGOCIO =
-  /\b(neg[oó]cio|neg[oó]cios|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid|documento)\b/i;
+  /\b(neg[oó]cio|neg[oó]cios|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid\w*|documentos?)\b/i;
 
 export const LISTAR_NEGOCIOS: ToolDef = {
   capability: "deal.list",
@@ -376,10 +381,10 @@ export const LISTAR_NEGOCIOS: ToolDef = {
      * faz: o modelo casa intenção com intenção, não com encanamento.
      */
     description:
-      "Lista os negócios em que esta pessoa está envolvida, com etapa e pendências. " +
-      "Use quando ela perguntar sobre os negócios dela, o andamento, o que falta, " +
-      "ou pedir um resumo da carteira. Não use para perguntas gerais sobre como o " +
-      "processo funciona.",
+      "Lista os negócios em que esta pessoa está envolvida, com a etapa de cada um. " +
+      "Use quando ela perguntar sobre os negócios dela, o andamento ou a etapa, " +
+      "ou pedir um resumo da carteira. Para saber só o que está pendente, use " +
+      "pendencias_do_negocio. Não use para perguntas gerais sobre como o processo funciona.",
     parameters: {
       type: "object",
       properties: {
@@ -397,8 +402,106 @@ export const LISTAR_NEGOCIOS: ToolDef = {
   },
 };
 
-/** O catálogo de LEITURA. As de escrita seguem fora — ver `selecionarTools`. */
-export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS];
+const PEDE_PENDENCIA =
+  /\b(pend[eê]ncia|pendencias|pendente|pendentes|falta|faltando|faltam|travad[oa]|parad[oa]|certid\w*|documentos?)\b/i;
+
+/**
+ * Os negócios desta pessoa que TÊM pendência — o servidor filtra no `where`
+ * (`deal.pending`), então `limite` conta negócios pendentes, não varridos.
+ *
+ * Tool própria, e não um filtro da `listar_negocios`, porque é a capability que
+ * o `brokerDefault` concede ao corretor comissionado: a pergunta dele é "falta
+ * algo nos meus negócios?", sem apontar negócio nenhum.
+ */
+export const PENDENCIAS_DO_NEGOCIO: ToolDef = {
+  capability: "deal.pending",
+  verb: "deal.pending",
+  prioridade: 20,
+  combina: (t) => PEDE_PENDENCIA.test(normalizar(t)),
+  def: {
+    name: "pendencias_do_negocio",
+    description:
+      "Lista só os negócios desta pessoa que têm alguma pendência, e quais são. " +
+      "Use quando ela perguntar o que falta, o que está pendente ou travado, " +
+      "ou se algum negócio dela precisa de algo.",
+    parameters: {
+      type: "object",
+      properties: {
+        limite: {
+          type: "integer",
+          description: "Quantos negócios trazer. Padrão 10.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+const PEDE_PROPOSTA = /\b(proposta|propostas)\b/i;
+
+/**
+ * Pedido de CRIAÇÃO — terreno da `propor_criacao`, não da listagem.
+ *
+ * Medido na eval (2026-09-22): com `listar_propostas` oferecida ao lado, o nano
+ * deixou de propor a criação em "cria uma proposta pro Carlos" (recall da
+ * `propor_criacao` 93% → 33%). A vizinha de descrição parecida roubava a
+ * decisão. Tirá-la do turn quando o texto é um pedido de criação resolve de
+ * forma determinística — o prefiltro só tira opções, nunca acrescenta.
+ * ("rascunho" não entra: "quantas propostas em rascunho?" é consulta.)
+ */
+const PEDE_CRIACAO =
+  /\b(cri[ae]|criar|crie|monta|monte|montar|abre|abra|abrir|faz|faca|fazer|gera|gere|gerar|nova|novo)\b/i;
+
+/**
+ * As propostas que esta pessoa enxerga no sistema — o `proposalScopeWhere` do
+ * servidor decide quais (as dela ou as da org, conforme o papel). Corretor
+ * comissionado sem login recebe lista vazia: proposta se liga a `User`.
+ */
+export const LISTAR_PROPOSTAS: ToolDef = {
+  capability: "proposal.list",
+  verb: "proposal.list",
+  prioridade: 30,
+  combina: (t) => {
+    const n = normalizar(t);
+    return PEDE_PROPOSTA.test(n) && !PEDE_CRIACAO.test(n);
+  },
+  def: {
+    name: "listar_propostas",
+    description:
+      "Lista as propostas que esta pessoa acompanha, com o status de cada uma. " +
+      "Use quando ela perguntar pelas propostas dela, se uma proposta foi aceita, " +
+      "assinada, recusada ou expirou. Não use para CRIAR proposta.",
+    parameters: {
+      type: "object",
+      properties: {
+        estado: {
+          type: "string",
+          description:
+            "Filtra por status, só quando a pessoa pedir um. Valores: rascunho, " +
+            "aguardando_aprovacao, enviada, entregue, visualizada, assinada_proponente, " +
+            "aguardando_vendedor, completa, convertida, recusada_proponente, " +
+            "recusada_vendedor, expirada, cancelada, falha_envio.",
+        },
+        limite: {
+          type: "integer",
+          description: "Quantas propostas trazer. Padrão 10.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+/**
+ * O catálogo de LEITURA. As de escrita seguem fora — ver `selecionarTools`.
+ *
+ * `deal.detail` e `proposal.detail` NÃO têm tool (2026-09-22): no servidor
+ * eles devolvem exatamente os campos da listagem, só filtrando por id. Uma
+ * tool "detalhar" não traria informação nova e seria uma vizinha a mais para
+ * o nano confundir — a medição que fez `propor_criacao` ser uma tool só.
+ * Entram quando o servidor tiver projeção de detalhe mais rica.
+ */
+export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS];
 
 /**
  * Quais tools entram no prompt deste turn.
