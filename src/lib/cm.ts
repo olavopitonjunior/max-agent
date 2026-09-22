@@ -463,6 +463,15 @@ export async function criarRascunhoProposta(
     title: string;
     schemaType: "compra_venda_v1" | "locacao_residencial_v1" | "locacao_comercial_v1";
     idempotencyKey: string;
+    /**
+     * Quem PEDIU o rascunho (o `userId` da identidade resolvida pelo telefone).
+     * Sem ele a proposta nasce só do usuário de serviço, e o corretor — que vê
+     * apenas proposta que criou ou de que é responsável — recebe um link que
+     * não abre. O ImobPro aceita este campo do Max sem `PROPOSAL_ASSIGN` e
+     * exige que o responsável possa criar proposta (cm#889, decisão do Olavo
+     * em 22/09). Nunca mandar `responsibleName`: para o Max, isso é 403.
+     */
+    responsibleUserId?: string;
   }
 ): Promise<PropostaCriada> {
   const org = await orgById(orgId);
@@ -481,6 +490,7 @@ export async function criarRascunhoProposta(
         title: params.title,
         schemaType: params.schemaType,
         dataJson: {},
+        ...(params.responsibleUserId ? { responsibleUserId: params.responsibleUserId } : {}),
       }),
     },
     IMOBPRO_TIMEOUT_MS

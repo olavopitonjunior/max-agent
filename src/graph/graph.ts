@@ -26,7 +26,7 @@ import {
   textoModuloDesligado,
   textoProposta,
   TEXTO_CANCELADO,
-  TEXTO_FALHOU,
+  textoFalhou,
   type PendingAction,
 } from "./tools";
 import { downloadMedia } from "@/lib/transport";
@@ -614,7 +614,7 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
     );
     // Limpa a pendência mesmo na falha: mantê-la faria a próxima mensagem da
     // pessoa ser lida como confirmação de novo, e ela não confirmou duas vezes.
-    return responder(TEXTO_FALHOU, "falhou");
+    return responder(textoFalhou(pending.args), "falhou");
   }
 }
 
@@ -648,6 +648,9 @@ async function executar(
       title: nome ? `Proposta — ${nome}` : "Proposta (criada pelo Max)",
       schemaType,
       idempotencyKey,
+      // O rascunho fica com quem pediu. Só usuário da plataforma tem `userId`;
+      // o corretor comissionado sem login nem chega aqui (`podeEscrever`).
+      responsibleUserId: state.identity.kind === "user" ? state.identity.userId : undefined,
     });
     console.log(`[confirm] proposta ${proposta.id} criada para ${orgId}`);
     return proposta.url;
