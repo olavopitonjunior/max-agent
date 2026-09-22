@@ -328,6 +328,24 @@ describe("confirmar", () => {
     expect(s.pendingAction).toBeNull();
   });
 
+  /**
+   * A identidade é resolvida POR TURN; a pendência sobrevive entre turns.
+   * Quem propôs como usuário pode confirmar já resolvendo como corretor sem
+   * login (rebaixado, cache vencido). Aí não há `userId` a atribuir: a
+   * proposta cai no comportamento antigo (nasce do usuário de serviço), em vez
+   * de mandar um id que não é de `User`.
+   */
+  it("identidade virou corretor entre propor e confirmar: sem responsibleUserId", async () => {
+    await run(
+      "sim",
+      { pendingAction: pendenciaDe("Carlos", Date.now(), { tipo: "proposta" }) },
+      corretorSemLogin
+    );
+    expect(criarProposta).toHaveBeenCalledTimes(1);
+    expect(criarProposta.mock.calls[0][1]).not.toHaveProperty("responsibleUserId", expect.anything());
+    expect(criarProposta.mock.calls[0][1].responsibleUserId).toBeUndefined();
+  });
+
   /** Dizer "formulário" quando foi proposta deixava a pessoa achando que pediu errado. */
   it("falha de PROPOSTA diz proposta, não formulário", async () => {
     criarProposta.mockRejectedValue(new Error("ImobPro /api/proposals 403"));
