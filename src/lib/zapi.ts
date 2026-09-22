@@ -27,6 +27,22 @@ import {
 
 export { ZapiHttpError, classificarInoperancia, type MotivoInoperante };
 
+import type {
+  ConnectionState,
+  InboundKind,
+  InboundMessage,
+  StatusCallback,
+} from "./transport/types";
+
+// Os tipos moram em `transport/types` (neutros de provedor); ficam
+// reexportados aqui para o que ainda fala com a Z-API pelo nome.
+export type {
+  ConnectionState,
+  InboundKind,
+  InboundMessage,
+  StatusCallback,
+} from "./transport/types";
+
 const BASE_URL = "https://api.z-api.io";
 
 function env(name: string): string {
@@ -145,18 +161,6 @@ export async function downloadMedia(
   }
 }
 
-export interface ConnectionState {
-  connected: boolean;
-  session?: string;
-  raw: unknown;
-  /**
-   * Presente quando `connected` é `false` por INOPERÂNCIA (assinatura ou
-   * credencial, ver `zapi-erro.ts`), e não por desemparelhamento. Ausente na
-   * queda de sessão comum — que continua sendo "repareie por QR".
-   */
-  inoperante?: Inoperancia;
-}
-
 /**
  * Estado da instância. É o ÚNICO jeito de saber se as mensagens estão mesmo
  * saindo: desemparelhada, a Z-API aceita o `send-text` com 200 e um
@@ -255,25 +259,6 @@ export async function connectionStatus(): Promise<ConnectionState> {
 
 // ── Inbound ──────────────────────────────────────────────────────────────
 
-export type InboundKind = "text" | "image" | "audio" | "document" | "unknown";
-
-export interface InboundMessage {
-  messageId: string;
-  /** Quem falou, E.164 sem "+". Em grupo é o participante, não o grupo. */
-  fromPhone: string;
-  /** Preenchido só em grupo — o JID do grupo. */
-  groupId: string | null;
-  kind: InboundKind;
-  text: string | null;
-  mediaUrl: string | null;
-  mimeType: string | null;
-  /** `momment` (sic) do provedor, em ms. */
-  timestampMs: number | null;
-  senderName: string | null;
-  /** wamid citado, quando é resposta a outra mensagem. */
-  replyToMessageId: string | null;
-}
-
 /**
  * Normaliza o webhook da Z-API. Devolve `null` para o que não deve virar turn:
  * eco das próprias mensagens (`fromMe`) e payload sem identificação.
@@ -359,15 +344,6 @@ export function parseInbound(payload: unknown): InboundMessage | null {
  * consome isto. Parser separado do `parseInbound` de propósito: status não é
  * mensagem e nunca deve virar turn.
  */
-export interface StatusCallback {
-  /** SENT | RECEIVED | READ | PLAYED (como a Z-API mandar, sem normalizar). */
-  status: string;
-  /** Ids das mensagens a que o status se refere. */
-  messageIds: string[];
-  phone: string | null;
-  momment: number | null;
-}
-
 export function parseStatusCallback(payload: unknown): StatusCallback | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as Record<string, any>;

@@ -1,6 +1,6 @@
 import { query } from "./db";
 import { reportDeliveryOutcome } from "./cm";
-import type { StatusCallback } from "./zapi";
+import type { StatusCallback } from "./transport";
 
 /**
  * Reconciliação de entrega (Fase 4A).

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
-import { sendText, connectionStatus, type InboundMessage } from "./zapi";
+import { sendText, connectionStatus, type InboundMessage } from "./transport";
 import { inoperanciaDoErro } from "./zapi-erro";
 import { observeConnection } from "./connection";
 import { log } from "./log";
@@ -382,7 +382,7 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
         });
         throw err;
       }
-      replyMessageId = res.messageId ?? res.id ?? null;
+      replyMessageId = res.messageId;
     }
 
     await query(

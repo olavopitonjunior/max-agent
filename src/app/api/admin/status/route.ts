@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { connectionStatus } from "@/lib/zapi";
+import { connectionStatus } from "@/lib/transport";
 import { requireHmac } from "@/lib/auth";
 import { isWithinWindow, nextDeliveryTime } from "@/lib/window";
 
