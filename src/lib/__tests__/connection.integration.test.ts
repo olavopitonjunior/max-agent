@@ -100,6 +100,43 @@ d("observeConnection", () => {
   });
 
   /**
+   * Canal Meta (2026-09-22): `canal` vai por ÚLTIMO e só quando o provedor é
+   * a Meta — o corpo da Z-API tem que continuar byte a byte o do vetor de
+   * paridade. A ordem das chaves é contrato (a assinatura é sobre a string).
+   */
+  it("provedor Meta: queda e volta levam canal meta, depois do motivo", async () => {
+    vi.stubEnv("WHATSAPP_PROVIDER", "meta");
+    try {
+      await observeConnection({ connected: true, fonte: "cron" });
+      await observeConnection({ connected: false, fonte: "cron", motivo: "numero" });
+      await observeConnection({ connected: false, fonte: "cron", motivo: "numero" });
+      const queda = alerta.mock.calls[0][0];
+      expect(queda).toEqual({
+        evento: "zapi_desconectada",
+        at: expect.any(String),
+        represadas: 0,
+        motivo: "numero",
+        canal: "meta",
+      });
+      expect(Object.keys(queda)).toEqual(["evento", "at", "represadas", "motivo", "canal"]);
+
+      await observeConnection({ connected: true, fonte: "push" });
+      const volta = alerta.mock.calls[1][0];
+      expect(volta).toMatchObject({ evento: "zapi_reconectada", canal: "meta" });
+      expect(Object.keys(volta)).toEqual(["evento", "at", "foraPorMs", "canal"]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("provedor Z-API (ausente): nenhuma chave `canal` no payload", async () => {
+    await observeConnection({ connected: true, fonte: "cron" });
+    await observeConnection({ connected: false, fonte: "cron", motivo: "credencial" });
+    await observeConnection({ connected: false, fonte: "cron", motivo: "credencial" });
+    expect(alerta.mock.calls[0][0]).not.toHaveProperty("canal");
+  });
+
+  /**
    * Sem motivo, a chave NÃO existe no objeto — nem como `undefined`. É disso
    * que o vetor fixo de paridade (`hmac-parity.test.ts`) depende, e é o que
    * mantém o receptor antigo do ImobPro aceitando o corpo sem mudança.

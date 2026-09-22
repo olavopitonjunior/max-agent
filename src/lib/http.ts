@@ -14,6 +14,9 @@
 /** Z-API: API de mensageria, responde em ms; 10s já é generosidade. */
 export const ZAPI_TIMEOUT_MS = 10_000;
 
+/** Graph API da Meta: mesma classe da Z-API (mensageria, responde em ms). */
+export const META_TIMEOUT_MS = 10_000;
+
 /** ImobPro: consultas de identidade/RAG/escrita. A transcrição é a exceção —
  * sobe até 3 MB em base64 E espera o Gemini transcrever um áudio que pode ter
  * minutos; 20s cortava exatamente as mídias que MAX_MEDIA_BYTES aceita

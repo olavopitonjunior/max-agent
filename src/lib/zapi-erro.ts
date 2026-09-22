@@ -20,12 +20,7 @@
  *  · `credencial` — 401/403: `ZAPI_CLIENT_TOKEN` ou o token da instância
  *    trocados. Também não é QR.
  */
-export type MotivoInoperante = "assinatura" | "credencial";
-
-export interface Inoperancia {
-  motivo: MotivoInoperante;
-  detalhe: string;
-}
+export type MotivoInoperanteZapi = "assinatura" | "credencial";
 
 /** Resposta não-2xx de qualquer endpoint da instância, com status e corpo. */
 export class ZapiHttpError extends Error {
@@ -59,15 +54,11 @@ export class ZapiHttpError extends Error {
 export function classificarInoperancia(
   status: number,
   corpo: string
-): MotivoInoperante | null {
+): MotivoInoperanteZapi | null {
   if (status === 400 && /subscri/i.test(corpo)) return "assinatura";
   if (status === 401 || status === 403) return "credencial";
   return null;
 }
 
-/** A mesma pergunta, feita a um erro de ENVIO já lançado. */
-export function inoperanciaDoErro(err: unknown): Inoperancia | null {
-  if (!(err instanceof ZapiHttpError)) return null;
-  const motivo = classificarInoperancia(err.status, err.body);
-  return motivo ? { motivo, detalhe: err.message.slice(0, 300) } : null;
-}
+// A pergunta "é o canal ou a mensagem?" para um erro de envio de QUALQUER
+// provedor mora em `transport/erro.ts` (`inoperanciaDoErro`).

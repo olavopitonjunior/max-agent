@@ -18,14 +18,9 @@
  */
 
 import { fetchWithTimeout, ZAPI_TIMEOUT_MS } from "./http";
-import {
-  ZapiHttpError,
-  classificarInoperancia,
-  type Inoperancia,
-  type MotivoInoperante,
-} from "./zapi-erro";
+import { ZapiHttpError, classificarInoperancia } from "./zapi-erro";
 
-export { ZapiHttpError, classificarInoperancia, type MotivoInoperante };
+export { ZapiHttpError, classificarInoperancia };
 
 import type {
   ConnectionState,
@@ -172,7 +167,7 @@ export async function downloadMedia(
  *  · `connected: false` sem `inoperante` — sessão do WhatsApp caiu, o
  *    conselho é reparear por QR;
  *  · `connected: false` COM `inoperante` — assinatura cancelada ou credencial
- *    trocada. Não envia, e o conselho é OUTRO (ver `MotivoInoperante`).
+ *    trocada. Não envia, e o conselho é OUTRO (ver `transport/erro.ts`).
  *
  * E LANÇA para o resto (404, 5xx, timeout, formato desconhecido): exceção aqui
  * significa "não consegui PERGUNTAR", nunca "está desconectado". Os chamadores

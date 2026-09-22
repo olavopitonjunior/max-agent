@@ -27,12 +27,20 @@ const RANK: Record<string, number> = {
   read: 3,
 };
 
-/** SENT/RECEIVED/READ/PLAYED da Z-API → nosso vocabulário. `null` = ignorar. */
+/**
+ * Status do provedor → nosso vocabulário. `null` = ignorar.
+ *
+ * Z-API: SENT/RECEIVED/READ/PLAYED. Meta: sent/delivered/read (minúsculo; o
+ * `failed` da Meta NÃO passa por aqui — é desfecho de envio, ver
+ * `applyFalhaDeEnvio`). Sem o DELIVERED, toda confirmação de entrega da Meta
+ * seria descartada e as notificações virariam `unconfirmed` em 15 min.
+ */
 export function mapZapiStatus(status: string): "sent" | "delivered" | "read" | null {
   switch (status.toUpperCase()) {
     case "SENT":
       return "sent";
     case "RECEIVED":
+    case "DELIVERED":
       return "delivered";
     case "READ":
     case "PLAYED":
@@ -109,6 +117,40 @@ export async function applyStatusCallback(cb: StatusCallback): Promise<ApplyTota
   );
 
   return { outbox: outboxRows.length, replies: replyRows.length };
+}
+
+/**
+ * Falha de envio ASSÍNCRONA — a Meta aceitou o envio com 200 e só depois, no
+ * webhook, disse `failed` (ex.: 131026 destinatário sem WhatsApp, 131047 fora
+ * da janela). A linha do outbox, que estava `sent`, vira `failed` com o código,
+ * e o report ao Contractmaker reabre para contar o desfecho verdadeiro — o
+ * `sent` que ele assumiu no 202 era mentira.
+ *
+ * Só linhas `sent`: uma já `failed` não muda, e uma resposta de conversa
+ * (`inbound_queue`) só é registrada em log — ela não tem report nem retry.
+ */
+export async function applyFalhaDeEnvio(f: {
+  messageId: string;
+  code: number | null;
+  title: string | null;
+}): Promise<number> {
+  const detalhe = `meta${f.code !== null ? ` #${f.code}` : ""}: ${f.title ?? "falha sem descrição"}`;
+  const rows = await query<{ id: string }>(
+    `UPDATE outbox
+        SET status = 'failed', error_code = $2, last_error = $3, reported_at = NULL
+      WHERE provider_message_id = $1 AND status = 'sent'
+        -- Já confirmada como entregue/lida: um failed fora de ordem não pode
+        -- reportar falha de uma mensagem que chegou (achado do review).
+        AND (delivery_status IS NULL OR delivery_status IN ('sent', 'unconfirmed'))
+      RETURNING id`,
+    [f.messageId, f.code, detalhe.slice(0, 500)]
+  );
+  if (rows.length === 0) {
+    console.warn(
+      `[delivery] falha de envio não aplicada — sem linha 'sent' ou já entregue (${detalhe})`
+    );
+  }
+  return rows.length;
 }
 
 /**

@@ -15,6 +15,7 @@
  * `../zapi` continua valendo, porque esta camada só repassa.
  */
 
+import * as meta from "../meta";
 import * as zapi from "../zapi";
 import type { ConnectionState, ProviderName, SendResult } from "./types";
 
@@ -37,7 +38,8 @@ export type {
 export function provider(): ProviderName {
   const v = (process.env.WHATSAPP_PROVIDER ?? "").trim().toLowerCase();
   if (v === "" || v === "zapi") return "zapi";
-  throw new Error(`WHATSAPP_PROVIDER inválido: "${v}" (aceitos: zapi)`);
+  if (v === "meta") return "meta";
+  throw new Error(`WHATSAPP_PROVIDER inválido: "${v}" (aceitos: zapi, meta)`);
 }
 
 export async function sendText(params: {
@@ -45,23 +47,23 @@ export async function sendText(params: {
   body: string;
   quoteMessageId?: string;
 }): Promise<SendResult> {
-  provider();
+  if (provider() === "meta") return meta.sendText(params);
   const res = await zapi.sendText(params);
   return { messageId: res.messageId ?? res.id ?? null };
 }
 
 export async function connectionStatus(): Promise<ConnectionState> {
-  provider();
-  return zapi.connectionStatus();
+  return provider() === "meta" ? meta.connectionStatus() : zapi.connectionStatus();
 }
 
 /**
- * `ref` é o `mediaUrl` do `InboundMessage`, opaco: só o provedor que o
- * produziu sabe o que ele é.
+ * `ref` é o `mediaUrl` do `InboundMessage`, opaco. Roteado pelo FORMATO da
+ * referência, e não pela env: uma mensagem da Z-API ainda na fila no minuto do
+ * cutover guarda uma URL pública, e tem que continuar baixando por ela.
  */
 export async function downloadMedia(
   ref: string
 ): Promise<{ data: Buffer; contentType: string | null } | null> {
   provider();
-  return zapi.downloadMedia(ref);
+  return ref.startsWith(meta.META_MEDIA_PREFIX) ? meta.downloadMedia(ref) : zapi.downloadMedia(ref);
 }

@@ -91,6 +91,13 @@ export async function POST(req: NextRequest) {
     await del("identity_cache", `DELETE FROM identity_cache WHERE phone = ANY($1)`, [plus]);
     await del("inbound_queue", `DELETE FROM inbound_queue WHERE from_phone = ANY($1)`, [bare]);
     await del("outbox", `DELETE FROM outbox WHERE phone = ANY($1)`, [bare]);
+    // Janela de 24h da Meta (migration 015): só o instante da última
+    // mensagem, mas chaveado pelo telefone — então sai junto.
+    await del(
+      "conversation_window",
+      `DELETE FROM conversation_window WHERE phone = ANY($1)`,
+      [bare]
+    );
 
     /**
      * A auditoria de conversa guarda o que a pessoa DISSE — e por isso o

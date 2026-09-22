@@ -733,8 +733,15 @@ export type AlertaDeCanal =
        * de paridade, e o receptor antigo descarta a chave em vez de recusar.
        */
       motivo?: MotivoQueda;
+      /**
+       * Provedor, quando NÃO é a Z-API (2026-09-22). O receptor trata ausente
+       * como Z-API, então só vai quando é `meta` — e por último, depois de
+       * `motivo`: o corpo da Z-API continua byte a byte o do vetor de
+       * paridade. Muda o conselho do e-mail (WhatsApp Manager, não QR).
+       */
+      canal?: "meta";
     }
-  | { evento: "zapi_reconectada"; at: string; foraPorMs: number };
+  | { evento: "zapi_reconectada"; at: string; foraPorMs: number; canal?: "meta" };
 
 export async function reportAlert(alerta: AlertaDeCanal): Promise<boolean> {
   const secret = process.env.MAX_WEBHOOK_SECRET;
