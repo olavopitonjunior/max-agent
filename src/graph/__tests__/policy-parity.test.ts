@@ -215,3 +215,54 @@ describe("paridade do contrato da política (lado max-agent)", () => {
     ]);
   });
 });
+
+/**
+ * Vetor do CURINGA `"*"` (2026-09-22) — o padrão que o ImobPro passa a
+ * emitir para org sem política própria. A outra metade, com o MESMO literal,
+ * é o `policy-parity.test.ts` do contractmaker (PR do padrão de política).
+ *
+ * Os casos que o curinga não pode quebrar, cada um com a sua asserção:
+ *  - papel customizado (`custom:<id>`, id por org) cai no curinga;
+ *  - chave explícita VENCE o curinga, inclusive `[]` explícito, que nega;
+ *  - sem chave de papel (`null`) é nada — nem o curinga;
+ *  - o corretor comissionado NÃO herda o curinga: é `brokerDefault`.
+ */
+const VETOR_CURINGA_SERIALIZADO =
+  '{"byRole":{"*":["deal.list","deal.detail","deal.pending","proposal.list","proposal.detail"],' +
+  '"viewer":[],"sales":["deal.list"]},' +
+  '"byRecipient":{},' +
+  '"brokerDefault":["deal.list","deal.pending"]}';
+
+describe("paridade do curinga `*` (lado max-agent)", () => {
+  const politica = () => JSON.parse(VETOR_CURINGA_SERIALIZADO) as MaxPolicy;
+  const CINCO = ["deal.list", "deal.detail", "deal.pending", "proposal.list", "proposal.detail"];
+
+  it("papel customizado e papel sem entrada própria caem no curinga", () => {
+    for (const role of ["custom:cr_diretor", "admin", "owner", "finance"]) {
+      expect(resolverPolitica({ politica: politica(), sujeito: gerente, role }), role).toEqual(CINCO);
+    }
+  });
+
+  it("chave explícita vence o curinga — e [] explícito NEGA", () => {
+    expect(resolverPolitica({ politica: politica(), sujeito: gerente, role: "sales" })).toEqual(["deal.list"]);
+    expect(resolverPolitica({ politica: politica(), sujeito: gerente, role: "viewer" })).toEqual([]);
+  });
+
+  it("sem chave de papel é nada, nem o curinga", () => {
+    expect(resolverPolitica({ politica: politica(), sujeito: gerente, role: null })).toEqual([]);
+    expect(resolverPolitica({ politica: politica(), sujeito: gerente, role: "  " })).toEqual([]);
+  });
+
+  it("o corretor comissionado não herda o curinga: recebe só o brokerDefault", () => {
+    expect(resolverPolitica({ politica: politica(), sujeito: corretorSemOverride, role: null }).sort()).toEqual([
+      "deal.list",
+      "deal.pending",
+    ]);
+  });
+
+  /** Sem `"*"` emitido, nada muda: é o que torna este lado inerte até o ImobPro. */
+  it("política sem curinga se comporta como antes", () => {
+    const semCuringa = JSON.parse(VETOR_SERIALIZADO) as MaxPolicy;
+    expect(resolverPolitica({ politica: semCuringa, sujeito: gerente, role: "custom:cr_diretor" })).toEqual([]);
+  });
+});

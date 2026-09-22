@@ -180,12 +180,35 @@ export function resolverPolitica(params: {
     return aplicarOverride(base, over);
   }
 
-  // Papel desconhecido cai no mesmo lugar que papel sem política: nenhuma.
-  // Adivinhar um default aqui seria a política ALARGANDO, que é justamente o
-  // que ela nunca pode fazer.
+  // Sem chave de papel (telefone que não resolve, membership degenerada) é
+  // NENHUMA — nem o curinga. O curinga é para quem é membro e tem papel.
   const role = params.role?.trim();
   if (!role) return [];
-  return apenasConhecidas(byRoleDe(politica, role));
+
+  /**
+   * Chave explícita vence — inclusive `[]`, que é a org dizendo "este papel
+   * não". Só quando o papel NÃO tem entrada própria vale o curinga `"*"`.
+   *
+   * Por que o curinga existe (2026-09-22, decisão do Olavo): o padrão de
+   * leituras vale para "usuário da plataforma, qualquer papel". Papel
+   * customizado chega como `custom:<CustomRole.id>` — um id por org —, e um
+   * padrão que enumerasse chaves nunca o alcançaria: justamente o estagiário
+   * e o diretor da casa ficariam sem nada. `"*"` é a forma de dizer "qualquer
+   * papel" sem conhecer os ids.
+   *
+   * Não é a política ALARGANDO por adivinhação: o `"*"` só existe se quem
+   * emite a política o escreveu. Ausente, o comportamento é o de antes.
+   */
+  if (temChave(politica, role)) return apenasConhecidas(byRoleDe(politica, role));
+  return apenasConhecidas(byRoleDe(politica, CURINGA));
+}
+
+/** A chave de papel que vale para qualquer papel sem entrada própria. */
+export const CURINGA = "*";
+
+function temChave(politica: MaxPolicy, role: string): boolean {
+  const mapa = politica.byRole;
+  return !!mapa && typeof mapa === "object" && Object.hasOwn(mapa, role);
 }
 
 /**
