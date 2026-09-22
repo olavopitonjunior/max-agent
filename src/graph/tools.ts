@@ -56,7 +56,12 @@ export const TOOL_PROPOR_FORM = "propor_criacao";
  * aparecer na conversa. Manter aqui, e não lá, é o que faz a tool que o PR 6
  * acrescentar nascer bloqueada sem ninguém lembrar de editar dois arquivos.
  */
-export const NOMES_DE_TOOL: string[] = [TOOL_PROPOR_FORM, "listar_negocios"];
+export const NOMES_DE_TOOL: string[] = [
+  TOOL_PROPOR_FORM,
+  "listar_negocios",
+  "pendencias_do_negocio",
+  "listar_propostas",
+];
 
 /**
  * UMA ferramenta com um parâmetro, e não três ferramentas parecidas.
@@ -351,7 +356,9 @@ export interface ToolDef {
 }
 
 /**
- * Teto DURO de definições por chamada.
+ * Teto do catálogo de LEITURA por chamada. A `propor_criacao` é somada por
+ * fora, em `graph.ts` (hoje 3 leituras + 1 escrita = 4); se o catálogo de
+ * leitura chegar a 5, o total enviado passa do teto — rever antes.
  *
  * Acima disso a precisão do nano cai — é a mesma medição que fez `propor_criacao`
  * ser UMA tool com enum em vez de três vizinhas (recall 100% → 50%). O corte é
@@ -361,7 +368,7 @@ export interface ToolDef {
 export const TETO_DE_TOOLS = 5;
 
 const PEDE_NEGOCIO =
-  /\b(neg[oó]cio|neg[oó]cios|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid|documento)\b/i;
+  /\b(neg[oó]cio|neg[oó]cios|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid\w*|documentos?)\b/i;
 
 export const LISTAR_NEGOCIOS: ToolDef = {
   capability: "deal.list",
@@ -376,10 +383,10 @@ export const LISTAR_NEGOCIOS: ToolDef = {
      * faz: o modelo casa intenção com intenção, não com encanamento.
      */
     description:
-      "Lista os negócios em que esta pessoa está envolvida, com etapa e pendências. " +
-      "Use quando ela perguntar sobre os negócios dela, o andamento, o que falta, " +
-      "ou pedir um resumo da carteira. Não use para perguntas gerais sobre como o " +
-      "processo funciona.",
+      "Lista os negócios em que esta pessoa está envolvida, com a etapa de cada um. " +
+      "Use quando ela perguntar sobre os negócios dela, o andamento ou a etapa, " +
+      "ou pedir um resumo da carteira. Para saber só o que está pendente, use " +
+      "pendencias_do_negocio. Não use para perguntas gerais sobre como o processo funciona.",
     parameters: {
       type: "object",
       properties: {
@@ -397,8 +404,123 @@ export const LISTAR_NEGOCIOS: ToolDef = {
   },
 };
 
-/** O catálogo de LEITURA. As de escrita seguem fora — ver `selecionarTools`. */
-export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS];
+const PEDE_PENDENCIA =
+  /\b(pend[eê]ncia|pendencias|pendente|pendentes|falta|faltando|faltam|travad[oa]|parad[oa]|certid\w*|documentos?)\b/i;
+
+/**
+ * Os negócios desta pessoa que TÊM pendência — o servidor filtra no `where`
+ * (`deal.pending`), então `limite` conta negócios pendentes, não varridos.
+ *
+ * Tool própria, e não um filtro da `listar_negocios`, porque é a capability que
+ * o `brokerDefault` concede ao corretor comissionado: a pergunta dele é "falta
+ * algo nos meus negócios?", sem apontar negócio nenhum.
+ */
+export const PENDENCIAS_DO_NEGOCIO: ToolDef = {
+  capability: "deal.pending",
+  verb: "deal.pending",
+  prioridade: 20,
+  combina: (t) => PEDE_PENDENCIA.test(normalizar(t)),
+  def: {
+    name: "pendencias_do_negocio",
+    description:
+      "Lista só os negócios desta pessoa que têm alguma pendência, e quais são. " +
+      "Use quando ela perguntar o que falta, o que está pendente ou travado, " +
+      "ou se algum negócio dela precisa de algo.",
+    parameters: {
+      type: "object",
+      properties: {
+        limite: {
+          type: "integer",
+          description: "Quantos negócios trazer. Padrão 10.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+const PEDE_PROPOSTA = /\b(proposta|propostas)\b/i;
+
+/**
+ * Pedido de CRIAÇÃO de documento — terreno da `propor_criacao`, não das
+ * leituras. Em pedido de criação, NENHUMA tool de leitura entra no turn.
+ *
+ * Medido na eval (2026-09-22): com `listar_propostas` oferecida ao lado, o nano
+ * deixou de propor a criação em "cria uma proposta pro Carlos" (recall da
+ * `propor_criacao` 93% → 33%). A vizinha roubava a decisão.
+ *
+ * ANCORADO no objeto, e não em verbo solto (achado do review do #37): "faz",
+ * "abre" e "nova" sozinhos casavam "faz quanto tempo a proposta foi
+ * enviada?", "abre a proposta do Carlos" e "tem proposta nova?" — tirando a
+ * leitura e deixando SÓ a tool de escrita para uma consulta. O que distingue
+ * criação é verbo (ou "preciso de"/"quero") + artigo INDEFINIDO (ou nenhum) +
+ * o documento: "cria uma proposta", "preciso de um formulário", "monta
+ * proposta". "A proposta" (definido) é algo que já existe: consulta.
+ */
+const PEDE_CRIACAO =
+  /\b(?:(?:cri[ae]r?|crie|mont[ae]r?|abr[ae]|abrir|fa[zc]a?|fazer|ger[ae]r?|manda?r?|envi[ae]r?)|(?:preciso|precisava|quero|queria|gostaria)(?:\s+de)?(?:\s+(?:criar|fazer|montar|abrir|gerar|mandar|enviar))?)\s+(?:(?:uma|um)\s+)?(?:(?:nova|novo)\s+)?(?:rascunho\s+de\s+)?(?:proposta|formulario|ficha|cadastro)\b/i;
+
+/**
+ * Criação SEM verbo, só no INÍCIO do texto: "proposta nova pro João", "novo
+ * formulário de locação". Ancorado no começo de propósito — "tem proposta
+ * nova?" (consulta) começa com "tem" e fica fora (re-review do #37).
+ */
+const PEDE_CRIACAO_SEM_VERBO =
+  /^(?:(?:uma|um)\s+)?(?:(?:nova|novo)\s+(?:proposta|formulario|ficha|cadastro)|(?:proposta|formulario|ficha|cadastro)\s+(?:nova|novo))\b/i;
+
+/** O texto é um pedido de criação de documento? (Normalizado: sem acento.) */
+export function ehPedidoDeCriacao(texto: string): boolean {
+  const n = normalizar(texto);
+  return PEDE_CRIACAO.test(n) || PEDE_CRIACAO_SEM_VERBO.test(n);
+}
+
+/**
+ * As propostas que esta pessoa enxerga no sistema — o `proposalScopeWhere` do
+ * servidor decide quais (as dela ou as da org, conforme o papel). Corretor
+ * comissionado sem login recebe lista vazia: proposta se liga a `User`.
+ */
+export const LISTAR_PROPOSTAS: ToolDef = {
+  capability: "proposal.list",
+  verb: "proposal.list",
+  prioridade: 30,
+  combina: (t) => PEDE_PROPOSTA.test(normalizar(t)),
+  def: {
+    name: "listar_propostas",
+    description:
+      "Lista as propostas que esta pessoa acompanha, com o status de cada uma. " +
+      "Use quando ela perguntar pelas propostas dela, se uma proposta foi aceita, " +
+      "assinada, recusada ou expirou. Não use para CRIAR proposta.",
+    parameters: {
+      type: "object",
+      properties: {
+        estado: {
+          type: "string",
+          description:
+            "Filtra por status, só quando a pessoa pedir um. Valores: rascunho, " +
+            "aguardando_aprovacao, enviada, entregue, visualizada, assinada_proponente, " +
+            "aguardando_vendedor, completa, convertida, recusada_proponente, " +
+            "recusada_vendedor, expirada, cancelada, falha_envio.",
+        },
+        limite: {
+          type: "integer",
+          description: "Quantas propostas trazer. Padrão 10.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+/**
+ * O catálogo de LEITURA. As de escrita seguem fora — ver `selecionarTools`.
+ *
+ * `deal.detail` e `proposal.detail` NÃO têm tool (2026-09-22): no servidor
+ * eles devolvem exatamente os campos da listagem, só filtrando por id. Uma
+ * tool "detalhar" não traria informação nova e seria uma vizinha a mais para
+ * o nano confundir — a medição que fez `propor_criacao` ser uma tool só.
+ * Entram quando o servidor tiver projeção de detalhe mais rica.
+ */
+export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS];
 
 /**
  * Quais tools entram no prompt deste turn.
@@ -430,6 +552,13 @@ export function selecionarTools(params: {
 }): { tools: ToolDef[]; cortadas: number } {
   const catalogo = params.catalogo ?? TOOLS_DE_LEITURA;
   const texto = params.texto;
+
+  // Pedido de criação é da `propor_criacao`: leitura ao lado rouba a decisão
+  // do nano (ver `PEDE_CRIACAO`). Nenhuma leitura entra nesse turn — inclusive
+  // em texto misto ("cria uma proposta e me diz como estão meus negócios"),
+  // que perde a leitura NESTE turn. Troca deliberada: a criação é a única
+  // escrita do Max, e a consulta pode ser refeita na mensagem seguinte.
+  if (ehPedidoDeCriacao(texto)) return { tools: [], cortadas: 0 };
 
   const elegiveis = catalogo
     .filter((t) => params.policy.includes(t.capability))
