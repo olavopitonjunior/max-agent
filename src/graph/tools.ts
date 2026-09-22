@@ -312,9 +312,15 @@ export const TEXTO_CANCELADO = "Beleza, não criei nada.";
  * sobre o formulário ter nascido ou não, e a pessoa ou pediria de novo (criando
  * dois) ou esperaria um link que nunca vem.
  */
-export const TEXTO_FALHOU =
-  "Não consegui criar o formulário agora — nada foi criado. " +
-  "Tenta de novo em instantes, ou cria pelo sistema se for urgente.";
+export function textoFalhou(args: Pick<PendingAction["args"], "tipo">): string {
+  // O que falhou tem nome: dizer "formulário" quando foi uma proposta deixava
+  // a pessoa achando que pediu a coisa errada.
+  const oque = args.tipo === "proposta" ? "a proposta" : "o formulário";
+  return (
+    `Não consegui criar ${oque} agora — nada foi criado. ` +
+    "Tenta de novo em instantes, ou cria pelo sistema se for urgente."
+  );
+}
 
 // A recusa a corretor sem login NÃO mora aqui: ela é uma instrução condicional
 // do prompt (`NAO_SABE_CRIAR_FORM` em prompt.ts), porque a pessoa pode estar

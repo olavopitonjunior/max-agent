@@ -328,6 +328,19 @@ describe("confirmar", () => {
     expect(s.pendingAction).toBeNull();
   });
 
+  /** Dizer "formulário" quando foi proposta deixava a pessoa achando que pediu errado. */
+  it("falha de PROPOSTA diz proposta, não formulário", async () => {
+    criarProposta.mockRejectedValue(new Error("ImobPro /api/proposals 403"));
+
+    const s = await run("sim", {
+      pendingAction: pendenciaDe("Carlos", Date.now(), { tipo: "proposta" }),
+    });
+
+    expect(s.reply).toContain("Não consegui criar a proposta");
+    expect(s.reply).not.toContain("formulário");
+    expect(s.reply).toContain("nada foi criado");
+  });
+
   it("sem pendência, um SIM solto não cria nada", async () => {
     const s = await run("sim");
 
@@ -372,6 +385,10 @@ describe("locação e proposta", () => {
       title: "Proposta — Carlos",
       schemaType: "compra_venda_v1",
       idempotencyKey: "m-prop",
+      // O rascunho fica com quem pediu (cm#889): sem isso o corretor recebe
+      // um link que não abre, porque só vê proposta que criou ou de que é
+      // responsável.
+      responsibleUserId: "u1",
     });
     expect(s.reply).toContain("RASCUNHO");
     expect(s.reply).toContain("/pipeline/propostas/prop1/editar");
@@ -400,6 +417,7 @@ describe("locação e proposta", () => {
       title: "Proposta — Bia",
       schemaType: "locacao_residencial_v1",
       idempotencyKey: "m-prop-loc",
+      responsibleUserId: "u1",
     });
     expect(s.reply).toContain("RASCUNHO");
   });
