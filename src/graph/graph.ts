@@ -29,7 +29,7 @@ import {
   TEXTO_FALHOU,
   type PendingAction,
 } from "./tools";
-import { downloadMedia } from "@/lib/zapi";
+import { downloadMedia } from "@/lib/transport";
 import {
   loadFacts,
   saveFacts,
@@ -64,7 +64,7 @@ import { resolverPolitica, type Capability } from "./policy";
 import { TOOLS_DE_LEITURA, selecionarTools } from "./tools";
 import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
 import { chaveDePolitica } from "@/lib/cm";
-import type { InboundMessage } from "@/lib/zapi";
+import type { InboundMessage } from "@/lib/transport";
 
 /**
  * Grafo de conversa do Max.

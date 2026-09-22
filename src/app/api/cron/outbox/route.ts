@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth";
 import { dispatchDue } from "@/lib/outbox";
 import { reconcile } from "@/lib/delivery";
-import { connectionStatus } from "@/lib/zapi";
+import { connectionStatus } from "@/lib/transport";
 import { observeConnection } from "@/lib/connection";
 
 export const dynamic = "force-dynamic";

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
-import { sendText, connectionStatus, type ConnectionState } from "./zapi";
+import { sendText, connectionStatus, type ConnectionState } from "./transport";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
@@ -414,7 +414,7 @@ export async function dispatchDue(
         rowId: row.id,
         orgId: row.org_id,
         phone: row.phone,
-        sentMessageId: res.messageId ?? res.id ?? null,
+        sentMessageId: res.messageId,
         audience: row.audience,
       });
       /**
@@ -428,7 +428,7 @@ export async function dispatchDue(
           `UPDATE outbox
               SET status = 'sent', sent_at = now(), provider_message_id = $2, last_error = NULL
             WHERE id = $1`,
-          [row.id, res.messageId ?? res.id ?? null]
+          [row.id, res.messageId]
         );
       await settle().catch(async () => {
         await new Promise((r) => setTimeout(r, 500));
