@@ -213,6 +213,16 @@ d("canal Meta (Postgres real)", () => {
       expect(l.reported_at).toBeNull();
     });
 
+    /** Fora de ordem: a mensagem CHEGOU; reportar falha seria mentir. */
+    it("failed depois de delivered não regride a linha", async () => {
+      await enviada("k-dlv-fail", "wamid.DF");
+      await applyStatusCallback({ status: "delivered", messageIds: ["wamid.DF"], phone: PHONE, momment: Date.now() });
+      expect(await applyFalhaDeEnvio({ messageId: "wamid.DF", code: 131000, title: "x" })).toBe(0);
+      const l = await linha("k-dlv-fail");
+      expect(l.status).toBe("sent");
+      expect(l.delivery_status).toBe("delivered");
+    });
+
     it("failed não mexe em linha que não está `sent`, nem em wamid desconhecido", async () => {
       await linhaVencida("k-pend");
       await query(`UPDATE outbox SET provider_message_id = 'wamid.P' WHERE dedupe_key = 'k-pend'`);

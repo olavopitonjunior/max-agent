@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { waitUntil } from "@vercel/functions";
 import {
-  isExpectedPhoneNumber,
   parseWebhook,
   verifyChallenge,
   verifySignature,
@@ -50,16 +49,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignored: "json" });
   }
 
-  const ev = parseWebhook(payload);
-  if (ev.phoneNumberIds.length === 0) {
-    // Outro campo assinado no app (templates, qualidade, conta) — não é
-    // mensagem nem status. Tratado nas fases seguintes; aceito e ignorado.
-    return NextResponse.json({ ok: true, ignored: "campo" });
+  const nosso = process.env.META_PHONE_NUMBER_ID;
+  if (!nosso) {
+    console.error("[meta-webhook] META_PHONE_NUMBER_ID ausente — nada aceito");
+    return NextResponse.json({ ok: true, ignored: "sem_numero" });
   }
-  if (!isExpectedPhoneNumber(ev.phoneNumberIds)) {
-    // O mesmo app pode servir outro número (o do Newton, p.ex.). Não é nosso.
-    console.warn("[meta-webhook] phone_number_id inesperado — ignorado");
-    return NextResponse.json({ ok: true, ignored: "numero" });
+
+  const ev = parseWebhook(payload, nosso);
+  if (ev.outrosNumeros > 0) {
+    // O mesmo app pode servir outro número (o do Newton, p.ex.). Os changes
+    // dele saem; os do nosso, no mesmo POST, seguem.
+    console.warn(`[meta-webhook] ${ev.outrosNumeros} change(s) de outro phone_number_id — ignorado(s)`);
+  }
+  if (ev.phoneNumberIds.length === 0) {
+    // Só outro número, ou outro campo assinado no app (templates, qualidade,
+    // conta) — não é mensagem nem status nosso. Aceito e ignorado.
+    return NextResponse.json({ ok: true, ignored: ev.outrosNumeros > 0 ? "numero" : "campo" });
   }
 
   const aceitas: string[] = [];

@@ -272,8 +272,10 @@ export function canonicalizarWaId(waId: string): string {
 }
 
 export interface MetaWebhookEvents {
-  /** `metadata.phone_number_id` de cada change, para conferir que é o nosso. */
+  /** `metadata.phone_number_id` dos changes ACEITOS (os do nosso número). */
   phoneNumberIds: string[];
+  /** Changes de `messages` de OUTRO número do mesmo app — descartados. */
+  outrosNumeros: number;
   messages: InboundMessage[];
   statuses: StatusCallback[];
   /** Falhas de envio vindas em `statuses[].errors`, por wamid. */
@@ -289,8 +291,14 @@ const str = (v: unknown): string | null => (typeof v === "string" && v ? v : nul
  * nem status é ignorado aqui — o mesmo POST pode trazer outros campos
  * assinados no app (templates, qualidade), tratados à parte.
  */
-export function parseWebhook(payload: unknown): MetaWebhookEvents {
-  const out: MetaWebhookEvents = { phoneNumberIds: [], messages: [], statuses: [], failures: [] };
+export function parseWebhook(payload: unknown, somenteNumero: string): MetaWebhookEvents {
+  const out: MetaWebhookEvents = {
+    phoneNumberIds: [],
+    outrosNumeros: 0,
+    messages: [],
+    statuses: [],
+    failures: [],
+  };
   if (!isRec(payload) || payload.object !== "whatsapp_business_account") return out;
   const entries = Array.isArray(payload.entry) ? payload.entry : [];
 
@@ -300,8 +308,17 @@ export function parseWebhook(payload: unknown): MetaWebhookEvents {
       if (!isRec(change) || change.field !== "messages" || !isRec(change.value)) continue;
       const value = change.value;
 
+      /**
+       * O filtro é POR CHANGE, não por payload: se o mesmo app servir outro
+       * número (o do Newton, p.ex.) e a Meta juntar os dois num POST, as
+       * mensagens do nosso não podem ir embora junto com as do outro.
+       */
       const pnid = isRec(value.metadata) ? str(value.metadata.phone_number_id) : null;
-      if (pnid && !out.phoneNumberIds.includes(pnid)) out.phoneNumberIds.push(pnid);
+      if (!pnid || pnid !== somenteNumero) {
+        out.outrosNumeros += 1;
+        continue;
+      }
+      if (!out.phoneNumberIds.includes(pnid)) out.phoneNumberIds.push(pnid);
 
       const nomes = new Map<string, string>();
       for (const c of Array.isArray(value.contacts) ? value.contacts : []) {
@@ -407,10 +424,4 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
     senderName: nomes.get(from) ?? null,
     replyToMessageId: ctx,
   };
-}
-
-/** O webhook é do nosso número? (O mesmo app pode servir mais de um.) */
-export function isExpectedPhoneNumber(ids: string[]): boolean {
-  const esperado = process.env.META_PHONE_NUMBER_ID;
-  return !!esperado && ids.length > 0 && ids.every((id) => id === esperado);
 }

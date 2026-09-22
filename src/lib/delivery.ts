@@ -139,11 +139,16 @@ export async function applyFalhaDeEnvio(f: {
     `UPDATE outbox
         SET status = 'failed', error_code = $2, last_error = $3, reported_at = NULL
       WHERE provider_message_id = $1 AND status = 'sent'
+        -- Já confirmada como entregue/lida: um failed fora de ordem não pode
+        -- reportar falha de uma mensagem que chegou (achado do review).
+        AND (delivery_status IS NULL OR delivery_status IN ('sent', 'unconfirmed'))
       RETURNING id`,
     [f.messageId, f.code, detalhe.slice(0, 500)]
   );
   if (rows.length === 0) {
-    console.warn(`[delivery] falha de envio sem linha no outbox (${detalhe})`);
+    console.warn(
+      `[delivery] falha de envio não aplicada — sem linha 'sent' ou já entregue (${detalhe})`
+    );
   }
   return rows.length;
 }

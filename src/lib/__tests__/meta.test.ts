@@ -4,7 +4,6 @@ import {
   canonicalizarWaId,
   connectionStatus,
   downloadMedia,
-  isExpectedPhoneNumber,
   parseWebhook,
   sendText,
   verifyChallenge,
@@ -62,7 +61,8 @@ describe("parseWebhook — mensagens", () => {
             context: { from: "5511970850046", id: "wamid.CITADA" },
           },
         ],
-      })
+      }),
+      PNID
     );
     expect(ev.phoneNumberIds).toEqual([PNID]);
     expect(ev.messages).toEqual([
@@ -107,7 +107,8 @@ describe("parseWebhook — mensagens", () => {
             document: { filename: "rg.pdf", mime_type: "application/pdf", sha256: "z", id: "MEDIA3" },
           },
         ],
-      })
+      }),
+      PNID
     );
     expect(ev.messages.map((m) => [m.kind, m.mediaUrl, m.mimeType, m.text])).toEqual([
       ["audio", "meta:MEDIA1", "audio/ogg; codecs=opus", null],
@@ -135,7 +136,8 @@ describe("parseWebhook — mensagens", () => {
             interactive: { type: "button_reply", button_reply: { id: "b1", title: "Venda" } },
           },
         ],
-      })
+      }),
+      PNID
     );
     expect(ev.messages.map((m) => [m.kind, m.text])).toEqual([
       ["text", "Sim"],
@@ -164,7 +166,8 @@ describe("parseWebhook — mensagens", () => {
             text: { body: "oi grupo" },
           },
         ],
-      })
+      }),
+      PNID
     );
     expect(ev.messages).toEqual([]);
   });
@@ -181,16 +184,17 @@ describe("parseWebhook — mensagens", () => {
             location: { latitude: -23.5, longitude: -46.6 },
           },
         ],
-      })
+      }),
+      PNID
     );
     expect(ev.messages[0]).toMatchObject({ kind: "unknown", text: null, mediaUrl: null });
   });
 
   it("outro objeto ou outro campo não produz nada", () => {
-    expect(parseWebhook({ object: "page", entry: [] }).phoneNumberIds).toEqual([]);
-    const outroCampo = parseWebhook(webhook({ event: "APPROVED" }, "message_template_status_update"));
-    expect(outroCampo).toEqual({ phoneNumberIds: [], messages: [], statuses: [], failures: [] });
-    expect(parseWebhook(null).messages).toEqual([]);
+    expect(parseWebhook({ object: "page", entry: [] }, PNID).phoneNumberIds).toEqual([]);
+    const outroCampo = parseWebhook(webhook({ event: "APPROVED" }, "message_template_status_update"), PNID);
+    expect(outroCampo).toEqual({ phoneNumberIds: [], outrosNumeros: 0, messages: [], statuses: [], failures: [] });
+    expect(parseWebhook(null, PNID).messages).toEqual([]);
   });
 });
 
@@ -203,7 +207,8 @@ describe("parseWebhook — status de entrega", () => {
           { id: "wamid.OUT1", status: "delivered", timestamp: "1758549605", recipient_id: "5511987654321" },
           { id: "wamid.OUT1", status: "read", timestamp: "1758549610", recipient_id: "5511987654321" },
         ],
-      })
+      }),
+      PNID
     );
     expect(ev.statuses).toEqual([
       { status: "sent", messageIds: ["wamid.OUT1"], phone: "5511987654321", momment: 1758549600000 },
@@ -232,7 +237,8 @@ describe("parseWebhook — status de entrega", () => {
             ],
           },
         ],
-      })
+      }),
+      PNID
     );
     expect(ev.failures).toEqual([{ messageId: "wamid.OUT2", code: 131047, title: "Re-engagement message" }]);
   });
@@ -251,7 +257,8 @@ describe("canonicalizarWaId — 9º dígito", () => {
       webhook({
         contacts: [contato("551187654321", "Ana")],
         messages: [{ from: "551187654321", id: "w", timestamp: "1", type: "text", text: { body: "oi" } }],
-      })
+      }),
+      PNID
     );
     expect(ev.messages[0].fromPhone).toBe("5511987654321");
     // O nome é casado pelo wa_id ORIGINAL, antes de canonicalizar.
@@ -304,14 +311,35 @@ describe("verifyChallenge", () => {
   });
 });
 
-describe("isExpectedPhoneNumber", () => {
-  it("só o nosso phone_number_id, e todos os do lote", () => {
-    vi.stubEnv("META_PHONE_NUMBER_ID", PNID);
-    expect(isExpectedPhoneNumber([PNID])).toBe(true);
-    expect(isExpectedPhoneNumber([PNID, "outro"])).toBe(false);
-    expect(isExpectedPhoneNumber([])).toBe(false);
-    vi.stubEnv("META_PHONE_NUMBER_ID", "");
-    expect(isExpectedPhoneNumber([PNID])).toBe(false);
+describe("filtro por número", () => {
+  /**
+   * O mesmo app pode servir outro número. Se a Meta juntar os dois num POST,
+   * as mensagens do nosso seguem — o filtro é por change, não por payload.
+   */
+  it("lote misto: aceita os changes do nosso número e conta os do outro", () => {
+    const nosso = webhook({
+      messages: [{ from: "5511987654321", id: "wamid.NOSSO", timestamp: "1", type: "text", text: { body: "oi" } }],
+    });
+    const outro = webhook({
+      messages: [{ from: "5511987654321", id: "wamid.OUTRO", timestamp: "1", type: "text", text: { body: "x" } }],
+    });
+    (outro.entry[0].changes[0].value.metadata as { phone_number_id: string }).phone_number_id = "999";
+    const misto = { ...nosso, entry: [...nosso.entry, ...outro.entry] };
+
+    const ev = parseWebhook(misto, PNID);
+    expect(ev.messages.map((m) => m.messageId)).toEqual(["wamid.NOSSO"]);
+    expect(ev.phoneNumberIds).toEqual([PNID]);
+    expect(ev.outrosNumeros).toBe(1);
+  });
+
+  it("só outro número: nada aceito", () => {
+    const ev = parseWebhook(
+      webhook({ messages: [{ from: "1", id: "w", timestamp: "1", type: "text", text: { body: "x" } }] }),
+      "999"
+    );
+    expect(ev.messages).toEqual([]);
+    expect(ev.phoneNumberIds).toEqual([]);
+    expect(ev.outrosNumeros).toBe(1);
   });
 });
 
