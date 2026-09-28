@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
-import { sendText, connectionStatus, provider, type ConnectionState } from "./transport";
+import { sendText, sendTemplate, connectionStatus, provider, type ConnectionState } from "./transport";
 import { janelaAberta } from "./janela24h";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
-import { inoperanciaDoErro, type Inoperancia } from "./transport/erro";
+import { inoperanciaDoErro, falhaDaMensagemMeta, type Inoperancia } from "./transport/erro";
+import { templateDoKind, parametrosDoCorpo, type TemplateDef } from "./templates/catalog";
+import { templateAprovado } from "./templates/aprovacao";
 
 /**
  * Prefixos de `last_error` que significam "o CANAL estava fora, a mensagem não
@@ -17,6 +19,15 @@ export const MARCA_CANAL_DESEMPARELHADA = "instancia z-api desemparelhada";
 export const MARCA_CANAL_INOPERANTE = "instancia z-api inoperante";
 /** Meta: fora da janela de 24h, texto livre não sai — espera template. */
 export const MARCA_REQUER_TEMPLATE = "requer_template: fora da janela de 24h da Meta";
+/**
+ * Janela fechada E o template deste `kind` ainda não está `APPROVED` em
+ * `wa_template` (submissão pendente, rejeitada, ou nem submetida). Marcador
+ * PRÓPRIO, distinto de `MARCA_REQUER_TEMPLATE`: aqui a mensagem tem template
+ * definido no catálogo, só falta a Meta aprovar — o painel e o alerta podem
+ * dar um conselho diferente ("aguarde a aprovação") de "escreva pra pessoa".
+ */
+export const MARCA_TEMPLATE_PENDENTE =
+  "template_pendente: sem template aprovado para este tipo — aguardando aprovação da Meta";
 
 /**
  * Fila de saída das notificações proativas.
@@ -154,6 +165,10 @@ interface OutboxRow extends Record<string, unknown> {
   attempts: number;
   /** O envio COMEÇOU numa tentativa anterior (ver migration 007). */
   send_started_at: string | Date | null;
+  /** Tipo da notificação (migration 016). Ausente = template genérico. */
+  kind: string | null;
+  /** Variáveis do fato, já limpas pelo /notify — jsonb, o driver devolve objeto. */
+  params: Record<string, string> | null;
 }
 
 /**
@@ -333,7 +348,7 @@ export async function dispatchDue(
          FOR UPDATE SKIP LOCKED
       )
       RETURNING id, org_id, audience, phone, title, body, link_url, org_name,
-                recipient_name, attempts, send_started_at`,
+                recipient_name, attempts, send_started_at, kind, params`,
     [limit, String(SENDING_ORPHAN_MINUTES)]
   );
   totals.claimed = rows.length;
@@ -425,24 +440,45 @@ export async function dispatchDue(
      * Na Cloud API, texto livre fora da janela é aceito com 200 e recusado
      * DEPOIS, no webhook (131047) — a linha viraria `sent` e só então
      * `failed`, queimando uma notificação que um template entregaria. Então
-     * pergunta antes: janela fechada, a linha espera, com a tentativa
-     * devolvida e o motivo à vista no painel. Quem a libera é a pessoa
-     * escrevendo de novo ou, com o catálogo de templates, o envio por
-     * template. Só vale para a Meta: a Z-API não tem janela.
+     * pergunta antes: janela fechada, olha se o template do `kind` desta
+     * linha já está `APPROVED` (catálogo em `templates/catalog.ts`,
+     * aprovação em `templates/aprovacao.ts`) — se estiver, sai por ELE; senão
+     * represa com a tentativa devolvida e o motivo à vista no painel. Quem
+     * libera é a pessoa escrevendo de novo, a Meta aprovando o template, ou
+     * (se nenhum dos dois) o alerta chegando à mão do Olavo. Só vale para a
+     * Meta: a Z-API não tem janela.
      */
+    let envioTemplate: TemplateDef | null = null;
     if (provider() === "meta" && !(await janelaAberta(row.phone))) {
-      await query(
-        `UPDATE outbox
-            SET status = 'pending',
-                attempts = GREATEST(attempts - 1, 0),
-                deliver_after = now() + interval '1 hour',
-                last_error = $2
-          WHERE id = $1 AND status = 'sending'`,
-        [row.id, MARCA_REQUER_TEMPLATE]
-      );
-      log.info("outbox.aguarda_template", { rowId: row.id, orgId: row.org_id, phone: row.phone });
-      totals.held += 1;
-      continue;
+      const def = templateDoKind(row.kind);
+      // Fail-closed: não deu pra CONFIRMAR aprovação (erro de leitura) é
+      // tratado como não aprovado — nunca assume aprovado sem checar.
+      const aprovado = await templateAprovado(def.name).catch((err) => {
+        console.warn(
+          `[outbox] não deu pra checar aprovação do template ${def.name}:`,
+          err instanceof Error ? err.message : String(err)
+        );
+        return false;
+      });
+      if (!aprovado) {
+        await query(
+          `UPDATE outbox
+              SET status = 'pending',
+                  attempts = GREATEST(attempts - 1, 0),
+                  deliver_after = now() + interval '1 hour',
+                  last_error = $2
+            WHERE id = $1 AND status = 'sending'`,
+          [row.id, MARCA_TEMPLATE_PENDENTE]
+        );
+        log.info("outbox.aguarda_aprovacao_template", {
+          rowId: row.id,
+          orgId: row.org_id,
+          template: def.name,
+        });
+        totals.held += 1;
+        continue;
+      }
+      envioTemplate = def;
     }
 
     try {
@@ -450,26 +486,40 @@ export async function dispatchDue(
       await query(`UPDATE outbox SET send_started_at = now() WHERE id = $1`, [
         row.id,
       ]);
-      const res = await sendText({ to: row.phone, body: renderMessage(row) });
-      log.info("outbox.enviado", {
+      const res = envioTemplate
+        ? await sendTemplate({
+            to: row.phone,
+            name: envioTemplate.name,
+            lang: envioTemplate.lang,
+            bodyParams: parametrosDoCorpo(envioTemplate, row),
+            buttonParam: row.id,
+          })
+        : await sendText({ to: row.phone, body: renderMessage(row) });
+      log.info(envioTemplate ? "outbox.enviado_template" : "outbox.enviado", {
         rowId: row.id,
         orgId: row.org_id,
         phone: row.phone,
         sentMessageId: res.messageId,
         audience: row.audience,
+        ...(envioTemplate ? { template: envioTemplate.name } : {}),
       });
       /**
        * O UPDATE final ganha um retry local: falhar AQUI (blip do Neon) com a
        * mensagem já entregue deixaria a linha órfã — e era o reenvio duplicado.
        * Duas tentativas curtas resolvem o blip; se ambas falharem, o marcador
        * acima garante que a retomada não reenvia.
+       *
+       * `template_name` grava o template com que a linha SAIU (NULL = texto
+       * livre) — é o que o painel e a auditoria de custo (Meta cobra
+       * template) precisam distinguir.
        */
       const settle = () =>
         query(
           `UPDATE outbox
-              SET status = 'sent', sent_at = now(), provider_message_id = $2, last_error = NULL
+              SET status = 'sent', sent_at = now(), provider_message_id = $2,
+                  template_name = $3, last_error = NULL
             WHERE id = $1`,
-          [row.id, res.messageId]
+          [row.id, res.messageId, envioTemplate?.name ?? null]
         );
       await settle().catch(async () => {
         await new Promise((r) => setTimeout(r, 500));
@@ -486,6 +536,41 @@ export async function dispatchDue(
       await semear();
       totals.sent += 1;
     } catch (err) {
+      /**
+       * ── Corrida rara: a Meta recusou por 131047, ou o TEMPLATE mudou de
+       * estado entre a checagem e o `send` ────────────────────────────────
+       *
+       * `envioTemplate` só é `null` aqui quando a checagem ACIMA achou a
+       * janela aberta — e ela fechou entre a checagem e o `send`. Com
+       * `envioTemplate` preenchido, é o próprio template que deixou de ser
+       * usável nesse intervalo (pausado, desativado, parâmetro — ver
+       * `transport/erro.ts`). Nenhum dos dois é falha da MENSAGEM: representa
+       * igual ao caminho normal, sem contar tentativa nem derrubar o canal —
+       * retentar o mesmo template imediatamente só repetiria o erro.
+       */
+      const falhaMsg = falhaDaMensagemMeta(err);
+      if (falhaMsg === "requer_template" || falhaMsg === "template_invalido") {
+        const marca = envioTemplate ? MARCA_TEMPLATE_PENDENTE : MARCA_REQUER_TEMPLATE;
+        const devolverTemplate = () =>
+          query(
+            `UPDATE outbox
+                SET status = 'pending',
+                    attempts = GREATEST(attempts - 1, 0),
+                    send_started_at = NULL,
+                    deliver_after = now() + interval '5 minutes',
+                    last_error = $2
+              WHERE id = $1 AND status = 'sending'`,
+            [row.id, marca]
+          );
+        await devolverTemplate().catch((e) =>
+          console.error(
+            `[outbox] linha ${row.id} presa em 'sending' após ${falhaMsg} na corrida — a retomada de órfã a pega:`,
+            e instanceof Error ? e.message : String(e)
+          )
+        );
+        totals.held += 1;
+        continue;
+      }
       /**
        * ── O canal recusou, não a mensagem ─────────────────────────────────
        *

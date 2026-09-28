@@ -101,6 +101,17 @@ export async function sendText(params: {
 }
 
 /**
+ * A Z-API não tem o conceito de template aprovado da Meta — é WhatsApp Web
+ * espelhado, sem janela de 24h. `dispatchDue` só chama `sendTemplate` com
+ * `provider() === "meta"`; chegar aqui é bug de roteamento, então lança alto
+ * em vez de fingir um envio de texto que mudaria o conteúdo combinado com a
+ * Meta.
+ */
+export async function sendTemplate(): Promise<never> {
+  throw new Error("sendTemplate não é suportado pela Z-API — só a Cloud API da Meta tem templates aprovados");
+}
+
+/**
  * Teto do que aceitamos baixar.
  *
  * Amarrado ao limite do outro lado: o `/api/agents/media/transcribe` do ImobPro

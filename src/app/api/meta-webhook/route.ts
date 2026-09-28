@@ -7,6 +7,7 @@ import {
 } from "@/lib/meta";
 import { enqueueInbound, processInboundNow } from "@/lib/inbound";
 import { applyFalhaDeEnvio, applyStatusCallback } from "@/lib/delivery";
+import { applyTemplateStatusUpdate } from "@/lib/templates/aprovacao";
 import { log } from "@/lib/log";
 
 export const dynamic = "force-dynamic";
@@ -55,15 +56,43 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignored: "sem_numero" });
   }
 
-  const ev = parseWebhook(payload, nosso);
+  const ev = parseWebhook(payload, nosso, process.env.META_WABA_ID);
   if (ev.outrosNumeros > 0) {
     // O mesmo app pode servir outro número (o do Newton, p.ex.). Os changes
     // dele saem; os do nosso, no mesmo POST, seguem.
     console.warn(`[meta-webhook] ${ev.outrosNumeros} change(s) de outro phone_number_id — ignorado(s)`);
   }
-  if (ev.phoneNumberIds.length === 0) {
-    // Só outro número, ou outro campo assinado no app (templates, qualidade,
-    // conta) — não é mensagem nem status nosso. Aceito e ignorado.
+
+  // `message_template_status_update` é evento do WABA, não do número: sai
+  // ANTES do corte por `phoneNumberIds`, senão um POST que só traz aprovação
+  // de template (sem mensagem nem status) seria descartado como "campo".
+  let templatesAtualizados = 0;
+  let templatesFalharam = 0;
+  for (const u of ev.templateStatusUpdates) {
+    await applyTemplateStatusUpdate(u)
+      .then(() => {
+        templatesAtualizados += 1;
+      })
+      .catch((err) => {
+        templatesFalharam += 1;
+        console.error(
+          `[meta-webhook] status do template ${u.name} não aplicado:`,
+          err instanceof Error ? err.message : String(err)
+        );
+      });
+  }
+  if (templatesFalharam > 0) {
+    // 5xx de propósito, ao contrário do resto desta rota: o upsert de
+    // `wa_template` é IDEMPOTENTE (achado do code review), então a
+    // reentrega da Meta corrige sem duplicar nada — e sem ela, um blip do
+    // Neon na hora do APPROVED deixaria o template represado indefinidamente
+    // (`templates-sync` não reconcilia por GET, só cria o que falta).
+    return NextResponse.json({ ok: false, templatesFalharam }, { status: 500 });
+  }
+
+  if (ev.phoneNumberIds.length === 0 && templatesAtualizados === 0) {
+    // Só outro número, ou outro campo assinado no app (qualidade, conta) —
+    // não é mensagem, status nem template nosso. Aceito e ignorado.
     return NextResponse.json({ ok: true, ignored: ev.outrosNumeros > 0 ? "numero" : "campo" });
   }
 
@@ -98,6 +127,7 @@ export async function POST(req: NextRequest) {
     accepted: aceitas.length,
     statuses: statusAplicados,
     failures: ev.failures.length,
+    templates: templatesAtualizados,
   });
 }
 

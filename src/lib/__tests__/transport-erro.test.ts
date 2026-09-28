@@ -45,6 +45,11 @@ describe("falhaDaMensagemMeta", () => {
     expect(falhaDaMensagemMeta(metaErro(400, 131047))).toBe("requer_template");
     for (const c of [130429, 131048, 131056]) expect(falhaDaMensagemMeta(metaErro(429, c))).toBe("limite");
   });
+  it("132000/132001/132012/132015/132016 são o TEMPLATE, não a mensagem", () => {
+    for (const c of [132000, 132001, 132012, 132015, 132016]) {
+      expect(falhaDaMensagemMeta(metaErro(400, c))).toBe("template_invalido");
+    }
+  });
   it("outro erro, erro sem código ou erro que não é da Meta: null", () => {
     expect(falhaDaMensagemMeta(metaErro(400, 131026))).toBeNull();
     expect(falhaDaMensagemMeta(new MetaHttpError("/x", 500, ""))).toBeNull();

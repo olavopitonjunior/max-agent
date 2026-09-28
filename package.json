@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:migrate": "tsx scripts/migrate.ts"
+    "db:migrate": "tsx scripts/migrate.ts",
+    "templates:sync": "tsx scripts/templates-sync.ts"
   },
   "dependencies": {
     "@langchain/core": "^0.3.40",

@@ -88,15 +88,27 @@ export function classificarMeta(code: number | null): MotivoInoperante | null {
  *    pessoa; texto livre não sai, só template aprovado. Não adianta
  *    retentar: a linha espera (ver `dispatchDue`);
  *  · `limite` — 130429/131048/131056: vazão ou par remetente-destinatário;
- *    retentar depois resolve.
+ *    retentar depois resolve;
+ *  · `template_invalido` — 132000/132001/132012/132015/132016: a Meta
+ *    recusou o TEMPLATE em si (parâmetro, idioma, pausado, desativado) numa
+ *    corrida entre a checagem de `wa_template` e o envio (o status mudou
+ *    nesse meio). Não é defeito da mensagem: retentar o MESMO template
+ *    repete o erro, então representa como `template_pendente` em vez de
+ *    queimar as 3 tentativas — o webhook `message_template_status_update`
+ *    corrige `wa_template` quando (se) o template voltar.
  */
-export type FalhaDaMensagem = "requer_template" | "limite";
+export type FalhaDaMensagem = "requer_template" | "limite" | "template_invalido";
 
 const FALHA_META: Record<number, FalhaDaMensagem> = {
   131047: "requer_template",
   130429: "limite",
   131048: "limite",
   131056: "limite",
+  132000: "template_invalido",
+  132001: "template_invalido",
+  132012: "template_invalido",
+  132015: "template_invalido",
+  132016: "template_invalido",
 };
 
 export function falhaDaMensagemMeta(err: unknown): FalhaDaMensagem | null {
