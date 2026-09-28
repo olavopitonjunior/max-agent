@@ -16,13 +16,18 @@ vi.mock("@/lib/delivery", () => ({
   applyStatusCallback: vi.fn().mockResolvedValue({ outbox: 1, replies: 0 }),
   applyFalhaDeEnvio: vi.fn().mockResolvedValue(1),
 }));
+vi.mock("@/lib/templates/aprovacao", () => ({
+  applyTemplateStatusUpdate: vi.fn().mockResolvedValue(undefined),
+}));
 
 const { POST, GET } = await import("../meta-webhook/route");
 const inbound = await import("@/lib/inbound");
 const delivery = await import("@/lib/delivery");
+const aprovacao = await import("@/lib/templates/aprovacao");
 const { waitUntil } = await import("@vercel/functions");
 
 const enqueue = inbound.enqueueInbound as unknown as ReturnType<typeof vi.fn>;
+const aplicarTemplate = aprovacao.applyTemplateStatusUpdate as unknown as ReturnType<typeof vi.fn>;
 const PNID = "123456789012345";
 const SECRET = "app-secret";
 
@@ -153,6 +158,52 @@ describe("POST /api/meta-webhook", () => {
     const res = await POST(post(tpl));
     expect(await res.json()).toMatchObject({ ignored: "campo" });
     expect(enqueue).not.toHaveBeenCalled();
+    // Sem message_template_name/language: não virou templateStatusUpdate,
+    // então nem chega a chamar a escrita.
+    expect(aplicarTemplate).not.toHaveBeenCalled();
+  });
+
+  const corpoTemplate = (value: Record<string, unknown>) =>
+    JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ id: "WABA", changes: [{ field: "message_template_status_update", value }] }],
+    });
+
+  it("message_template_status_update sozinho (sem mensagem nem status): 200 e aplica, mesmo sem phoneNumberIds", async () => {
+    const body = corpoTemplate({
+      event: "APPROVED",
+      message_template_name: "imobpro_aviso",
+      message_template_language: "pt_BR",
+    });
+    const res = await POST(post(body));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, templates: 1 });
+    expect(aplicarTemplate).toHaveBeenCalledWith({
+      name: "imobpro_aviso",
+      lang: "pt_BR",
+      status: "APPROVED",
+      metaId: null,
+      reason: null,
+    });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  /**
+   * O upsert de `wa_template` é IDEMPOTENTE: 500 aqui é de propósito, para a
+   * Meta reentregar — ao contrário do resto da rota, que devolve 200 sempre
+   * (achado do code review, W2).
+   */
+  it("falha ao aplicar o status do template: 500, para a Meta reentregar", async () => {
+    aplicarTemplate.mockRejectedValueOnce(new Error("timeout do Neon"));
+    const body = corpoTemplate({
+      event: "REJECTED",
+      message_template_name: "imobpro_aviso",
+      message_template_language: "pt_BR",
+      reason: "INVALID_FORMAT",
+    });
+    const res = await POST(post(body));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ ok: false, templatesFalharam: 1 });
   });
 });
 

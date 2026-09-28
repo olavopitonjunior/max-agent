@@ -5,6 +5,7 @@ import {
   connectionStatus,
   downloadMedia,
   parseWebhook,
+  sendTemplate,
   sendText,
   verifyChallenge,
   verifySignature,
@@ -190,11 +191,71 @@ describe("parseWebhook — mensagens", () => {
     expect(ev.messages[0]).toMatchObject({ kind: "unknown", text: null, mediaUrl: null });
   });
 
-  it("outro objeto ou outro campo não produz nada", () => {
+  it("outro objeto, ou campo desconhecido sem os campos exigidos, não produz nada", () => {
     expect(parseWebhook({ object: "page", entry: [] }, PNID).phoneNumberIds).toEqual([]);
+    // Falta message_template_name/language: não vira templateStatusUpdate.
     const outroCampo = parseWebhook(webhook({ event: "APPROVED" }, "message_template_status_update"), PNID);
-    expect(outroCampo).toEqual({ phoneNumberIds: [], outrosNumeros: 0, messages: [], statuses: [], failures: [] });
+    expect(outroCampo).toEqual({
+      phoneNumberIds: [],
+      outrosNumeros: 0,
+      messages: [],
+      statuses: [],
+      failures: [],
+      templateStatusUpdates: [],
+    });
     expect(parseWebhook(null, PNID).messages).toEqual([]);
+  });
+
+  it("message_template_status_update: evento do WABA, não passa pelo filtro de número", () => {
+    const ev = parseWebhook(
+      webhook(
+        {
+          event: "REJECTED",
+          message_template_id: 123456,
+          message_template_name: "imobpro_negocio_status",
+          message_template_language: "pt_BR",
+          reason: "INVALID_FORMAT",
+        },
+        "message_template_status_update"
+      ),
+      // número QUALQUER — não é filtrado por phone_number_id, o payload nem tem um.
+      "999999999999999"
+    );
+    expect(ev.phoneNumberIds).toEqual([]);
+    expect(ev.outrosNumeros).toBe(0);
+    expect(ev.templateStatusUpdates).toEqual([
+      {
+        name: "imobpro_negocio_status",
+        lang: "pt_BR",
+        status: "REJECTED",
+        metaId: "123456",
+        reason: "INVALID_FORMAT",
+      },
+    ]);
+  });
+
+  it("REINSTATED vira APPROVED — é o template pausado por qualidade voltando a poder ser usado", () => {
+    const ev = parseWebhook(
+      webhook(
+        { event: "REINSTATED", message_template_name: "imobpro_aviso", message_template_language: "pt_BR" },
+        "message_template_status_update"
+      ),
+      PNID
+    );
+    expect(ev.templateStatusUpdates[0]).toMatchObject({ name: "imobpro_aviso", status: "APPROVED" });
+  });
+
+  it("somenteWaba filtra por WABA (entry.id) — outro app inscrito noutra WABA não mexe no nosso template", () => {
+    const payload = webhook(
+      { event: "APPROVED", message_template_name: "imobpro_aviso", message_template_language: "pt_BR" },
+      "message_template_status_update"
+    );
+    // Do WABA certo: passa.
+    expect(parseWebhook(payload, PNID, "WABA_ID").templateStatusUpdates).toHaveLength(1);
+    // De outra WABA: filtrado.
+    expect(parseWebhook(payload, PNID, "OUTRA_WABA").templateStatusUpdates).toHaveLength(0);
+    // Sem `somenteWaba` (env ausente): comportamento anterior, sem filtro.
+    expect(parseWebhook(payload, PNID).templateStatusUpdates).toHaveLength(1);
   });
 });
 
@@ -378,6 +439,51 @@ describe("chamadas à Graph API", () => {
       text: { body: "oi", preview_url: false },
       context: { message_id: "wamid.Q" },
     });
+  });
+
+  it("sendTemplate: POST type=template com body + botão de URL, sempre com o parâmetro do botão", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL" }] }));
+    const res = await sendTemplate({
+      to: "5511987654321",
+      name: "imobpro_negocio_status",
+      lang: "pt_BR",
+      bodyParams: ["Ana", "Venda Apto 302", "Assinatura", "RE/MAX Trio"],
+      buttonParam: "row-id-123",
+    });
+    expect(res).toEqual({ messageId: "wamid.TPL" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`https://graph.facebook.com/v24.0/${PNID}/messages`);
+    expect(JSON.parse(init.body)).toEqual({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: "5511987654321",
+      type: "template",
+      template: {
+        name: "imobpro_negocio_status",
+        language: { code: "pt_BR" },
+        components: [
+          {
+            type: "body",
+            parameters: [
+              { type: "text", text: "Ana" },
+              { type: "text", text: "Venda Apto 302" },
+              { type: "text", text: "Assinatura" },
+              { type: "text", text: "RE/MAX Trio" },
+            ],
+          },
+          { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "row-id-123" }] },
+        ],
+      },
+    });
+  });
+
+  it("sendTemplate: sem parâmetro de corpo, o botão continua indo — a Meta exige sempre o dele", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL2" }] }));
+    await sendTemplate({ to: "1", name: "imobpro_aviso", lang: "pt_BR", bodyParams: [], buttonParam: "id" });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body).template.components).toEqual([
+      { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "id" }] },
+    ]);
   });
 
   it("sendText: erro vira MetaHttpError com o código — é ele que classifica canal × mensagem", async () => {

@@ -17,6 +17,7 @@ vi.mock("../identity", () => ({
 vi.mock("../meta", async (orig) => ({
   ...(await orig<typeof import("../meta")>()),
   sendText: vi.fn().mockResolvedValue({ messageId: "wamid.MID" }),
+  sendTemplate: vi.fn().mockResolvedValue({ messageId: "wamid.TPL" }),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 vi.mock("../zapi", async (orig) => ({
@@ -25,7 +26,7 @@ vi.mock("../zapi", async (orig) => ({
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 
-const { enqueue, dispatchDue, MARCA_REQUER_TEMPLATE } = await import("../outbox");
+const { enqueue, dispatchDue, MARCA_TEMPLATE_PENDENTE } = await import("../outbox");
 const { enqueueInbound } = await import("../inbound");
 const { janelaAberta } = await import("../janela24h");
 const { applyFalhaDeEnvio, applyStatusCallback } = await import("../delivery");
@@ -35,6 +36,7 @@ const zapi = await import("../zapi");
 
 const PHONE = "5511900001111";
 const metaSend = meta.sendText as unknown as ReturnType<typeof vi.fn>;
+const metaSendTemplate = meta.sendTemplate as unknown as ReturnType<typeof vi.fn>;
 const zapiSend = zapi.sendText as unknown as ReturnType<typeof vi.fn>;
 
 async function linhaVencida(dedupeKey: string) {
@@ -65,9 +67,10 @@ async function linha(dedupeKey: string) {
     error_code: number | null;
     reported_at: Date | null;
     delivery_status: string | null;
+    template_name: string | null;
   }>(
     `SELECT status, attempts, last_error, deliver_after, provider_message_id,
-            error_code, reported_at, delivery_status
+            error_code, reported_at, delivery_status, template_name
        FROM outbox WHERE dedupe_key = $1`,
     [dedupeKey]
   );
@@ -78,11 +81,15 @@ d("canal Meta (Postgres real)", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     metaSend.mockResolvedValue({ messageId: "wamid.MID" });
+    metaSendTemplate.mockResolvedValue({ messageId: "wamid.TPL" });
     zapiSend.mockResolvedValue({ messageId: "ZMID" });
     vi.stubEnv("WHATSAPP_PROVIDER", "meta");
     await query(`DELETE FROM outbox WHERE org_id = 'org-meta'`);
     await query(`DELETE FROM conversation_window WHERE phone = $1`, [PHONE]);
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
+    // Sem isto, um teste que aprova `imobpro_aviso` vazaria pro próximo — o
+    // genérico é o template de TODA linha sem `kind` explícito.
+    await query(`DELETE FROM wa_template WHERE name = 'imobpro_aviso'`);
   });
 
   afterEach(() => vi.unstubAllEnvs());
@@ -91,6 +98,7 @@ d("canal Meta (Postgres real)", () => {
     await query(`DELETE FROM outbox WHERE org_id = 'org-meta'`);
     await query(`DELETE FROM conversation_window WHERE phone = $1`, [PHONE]);
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
+    await query(`DELETE FROM wa_template WHERE name = 'imobpro_aviso'`);
   });
 
   describe("janela de 24h no outbox", () => {
@@ -98,18 +106,36 @@ d("canal Meta (Postgres real)", () => {
      * A Meta aceitaria com 200 e recusaria depois (131047). Represar ANTES é
      * o que evita queimar a notificação: nada é chamado, a tentativa volta.
      */
-    it("janela fechada: não chama a Meta, represa 1h com a tentativa devolvida e o motivo", async () => {
+    it("janela fechada, sem template aprovado: não chama a Meta, represa 1h com a tentativa devolvida e o motivo", async () => {
       await linhaVencida("k-fechada");
       const totals = await dispatchDue();
 
       expect(metaSend).not.toHaveBeenCalled();
+      expect(metaSendTemplate).not.toHaveBeenCalled();
       expect(totals.held).toBe(1);
       expect(totals.sent).toBe(0);
       const l = await linha("k-fechada");
       expect(l.status).toBe("pending");
       expect(l.attempts).toBe(0);
-      expect(l.last_error).toBe(MARCA_REQUER_TEMPLATE);
+      expect(l.last_error).toBe(MARCA_TEMPLATE_PENDENTE);
       expect(new Date(l.deliver_after).getTime()).toBeGreaterThan(Date.now() + 50 * 60_000);
+    });
+
+    it("janela fechada, template APROVADO: sai por template, não por texto livre", async () => {
+      await query(
+        `INSERT INTO wa_template (name, lang, status) VALUES ('imobpro_aviso', 'pt_BR', 'APPROVED')`
+      );
+      await linhaVencida("k-template");
+      const totals = await dispatchDue();
+
+      expect(metaSend).not.toHaveBeenCalled();
+      expect(metaSendTemplate).toHaveBeenCalledTimes(1);
+      expect(metaSendTemplate.mock.calls[0][0]).toMatchObject({ name: "imobpro_aviso", lang: "pt_BR" });
+      expect(totals.sent).toBe(1);
+      const l = await linha("k-template");
+      expect(l.status).toBe("sent");
+      expect(l.provider_message_id).toBe("wamid.TPL");
+      expect(l.template_name).toBe("imobpro_aviso");
     });
 
     it("janela aberta: sai como texto livre pela Meta e grava o wamid", async () => {
@@ -121,10 +147,12 @@ d("canal Meta (Postgres real)", () => {
 
       expect(totals.sent).toBe(1);
       expect(metaSend).toHaveBeenCalledTimes(1);
+      expect(metaSendTemplate).not.toHaveBeenCalled();
       expect(zapiSend).not.toHaveBeenCalled();
       const l = await linha("k-aberta");
       expect(l.status).toBe("sent");
       expect(l.provider_message_id).toBe("wamid.MID");
+      expect(l.template_name).toBeNull();
     });
 
     it("janela vencida (25h) conta como fechada", async () => {
@@ -229,6 +257,60 @@ d("canal Meta (Postgres real)", () => {
       expect(await applyFalhaDeEnvio({ messageId: "wamid.P", code: 131047, title: "x" })).toBe(0);
       expect((await linha("k-pend")).status).toBe("pending");
       expect(await applyFalhaDeEnvio({ messageId: "wamid.NAOEXISTE", code: 1, title: null })).toBe(0);
+    });
+
+    /**
+     * 131047 ASSÍNCRONO (a Meta aceitou com 200 e recusou depois, no
+     * webhook): NÃO é falha permanente. A linha volta a `pending`, pronta pro
+     * próximo `dispatchDue` — que agora vai achar a janela fechada de
+     * verdade e tentar por template.
+     */
+    /**
+     * A linha PRECISA vir de um `dispatchDue` real: só ele grava
+     * `send_started_at`, que é justamente o marcador cujo esquecimento
+     * causava o sucesso falso (achado do code review no C1). Um `enviada()`
+     * sintético não reproduzia o bug.
+     */
+    it("131047 assíncrono limpa send_started_at — sem isso o PRÓXIMO dispatchDue liquidaria como 'sent' sem reenviar", async () => {
+      // 1) Envio real por texto livre, janela aberta — deixa send_started_at gravado.
+      await query(`INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now() - interval '1 hour')`, [
+        PHONE,
+      ]);
+      await linhaVencida("k-131047");
+      await dispatchDue();
+      const antes = await linha("k-131047");
+      expect(antes.status).toBe("sent");
+      expect(antes.provider_message_id).toBe("wamid.MID");
+
+      // 2) A Meta aceitou e recusou depois: webhook assíncrono 131047.
+      const n = await applyFalhaDeEnvio({ messageId: "wamid.MID", code: 131047, title: "Re-engagement message" });
+      expect(n).toBe(1);
+      const depois = await linha("k-131047");
+      expect(depois.status).toBe("pending");
+      expect(depois.provider_message_id).toBeNull();
+      expect(depois.template_name).toBeNull();
+      expect(depois.last_error).toContain("#131047");
+      expect(depois.error_code).toBeNull(); // não é `failed`: error_code é só do desfecho terminal
+
+      // 3) Janela fechou de verdade e o template está aprovado: o PRÓXIMO
+      //    dispatchDue precisa REENVIAR por template — não liquidar em
+      //    silêncio como "órfã com envio já iniciado" (o bug do C1: sem
+      //    limpar send_started_at, cairia ali e nunca chamaria sendTemplate).
+      await query(`DELETE FROM conversation_window WHERE phone = $1`, [PHONE]);
+      await query(`INSERT INTO wa_template (name, lang, status) VALUES ('imobpro_aviso', 'pt_BR', 'APPROVED')`);
+      await query(`UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = 'k-131047'`);
+      metaSend.mockClear();
+      metaSendTemplate.mockClear();
+      const totals2 = await dispatchDue();
+
+      expect(totals2.sent).toBe(1);
+      expect(metaSendTemplate).toHaveBeenCalledTimes(1);
+      expect(metaSend).not.toHaveBeenCalled();
+      const final = await linha("k-131047");
+      expect(final.status).toBe("sent");
+      expect(final.template_name).toBe("imobpro_aviso");
+      expect(final.provider_message_id).toBe("wamid.TPL");
+      expect(final.last_error).toBeNull();
     });
   });
 });

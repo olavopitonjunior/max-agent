@@ -1,5 +1,6 @@
 import { query } from "./db";
 import { reportDeliveryOutcome } from "./cm";
+import { nextDeliveryTime } from "./window";
 import type { StatusCallback } from "./transport";
 
 /**
@@ -135,6 +136,49 @@ export async function applyFalhaDeEnvio(f: {
   title: string | null;
 }): Promise<number> {
   const detalhe = `meta${f.code !== null ? ` #${f.code}` : ""}: ${f.title ?? "falha sem descrição"}`;
+
+  /**
+   * 131047 é o único código de `applyFalhaDeEnvio` que NÃO é falha permanente:
+   * a Meta aceitou com 200 e recusou depois porque a janela de 24h fechou
+   * entre o `send` e a entrega. `failed` para sempre perderia a notificação;
+   * volta a `pending` para o próximo `dispatchDue` tentar de novo — que agora
+   * está fechada com certeza, então vai direto pro caminho de template. Sem
+   * `reported_at = NULL` aqui: o report ainda não aconteceu (a linha nunca
+   * chegou a `failed`).
+   *
+   * `send_started_at = NULL` é OBRIGATÓRIO, não cosmético: é o marcador que
+   * `dispatchDue` usa para reconhecer "órfã com envio já iniciado" e liquidar
+   * como `sent` SEM enviar (achado do code review). Deixá-lo de pé faria o
+   * próximo claim encontrar a linha, achar o marcador de um envio que JÁ
+   * falhou, e marcá-la `sent` de novo — um sucesso falso escondendo a falha
+   * real. Junto, zera o rastro de entrega do envio antigo (`sent_at`,
+   * `delivery_status`, `delivered_at`, `read_at`, `template_name`): o
+   * próximo envio começa limpo, e um `delivered`/`read` atrasado do wamid
+   * VELHO não pode casar com a linha (o `WHERE provider_message_id = $1` já
+   * não bate, porque ele foi zerado aqui).
+   *
+   * `deliver_after` respeita a janela de cortesia 7h–22h (`nextDeliveryTime`,
+   * a mesma do `enqueue`) — sem isto, um 131047 chegando de madrugada
+   * dispararia um template PAGO fora do horário.
+   */
+  if (f.code === 131047) {
+    const rows = await query<{ id: string }>(
+      `UPDATE outbox
+          SET status = 'pending', deliver_after = $2, provider_message_id = NULL,
+              send_started_at = NULL, sent_at = NULL, template_name = NULL,
+              delivery_status = NULL, delivered_at = NULL, read_at = NULL,
+              last_error = $3
+        WHERE provider_message_id = $1 AND status = 'sent'
+          AND (delivery_status IS NULL OR delivery_status IN ('sent', 'unconfirmed'))
+        RETURNING id`,
+      [f.messageId, nextDeliveryTime(), detalhe.slice(0, 500)]
+    );
+    if (rows.length === 0) {
+      console.warn(`[delivery] 131047 assíncrono não aplicado — sem linha 'sent' ou já entregue (${detalhe})`);
+    }
+    return rows.length;
+  }
+
   const rows = await query<{ id: string }>(
     `UPDATE outbox
         SET status = 'failed', error_code = $2, last_error = $3, reported_at = NULL

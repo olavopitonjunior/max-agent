@@ -104,6 +104,48 @@ export async function sendText(params: {
   return { messageId: res.messages?.[0]?.id ?? null };
 }
 
+/**
+ * Envio por TEMPLATE — a única saída fora da janela de 24h. `name`/`lang`
+ * saem do catálogo (`templates/catalog.ts`), já aprovados na Meta (quem
+ * chama, `dispatchDue`, confere `wa_template` antes). `bodyParams` é a lista
+ * ordenada de `{{1}}`, `{{2}}`…; o botão de URL manda SEMPRE, com o único
+ * parâmetro dinâmico que a Meta aceita nele — o id do redirecionador `/r/<id>`,
+ * porque o link real muda de host por tenant (ver `src/app/r/[id]/route.ts`).
+ */
+export async function sendTemplate(params: {
+  to: string;
+  name: string;
+  lang: string;
+  bodyParams: string[];
+  buttonParam: string;
+}): Promise<{ messageId: string | null }> {
+  const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
+    method: "POST",
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: params.to,
+      type: "template",
+      template: {
+        name: params.name,
+        language: { code: params.lang },
+        components: [
+          ...(params.bodyParams.length > 0
+            ? [{ type: "body", parameters: params.bodyParams.map((text) => ({ type: "text", text })) }]
+            : []),
+          {
+            type: "button",
+            sub_type: "url",
+            index: "0",
+            parameters: [{ type: "text", text: params.buttonParam }],
+          },
+        ],
+      },
+    }),
+  });
+  return { messageId: res.messages?.[0]?.id ?? null };
+}
+
 // ── Mídia ────────────────────────────────────────────────────────────────
 
 /**
@@ -280,6 +322,19 @@ export interface MetaWebhookEvents {
   statuses: StatusCallback[];
   /** Falhas de envio vindas em `statuses[].errors`, por wamid. */
   failures: Array<{ messageId: string; code: number | null; title: string | null }>;
+  /**
+   * Mudança de status de um template (`message_template_status_update`) — a
+   * Meta aprovou, rejeitou ou pausou. É evento do WABA, não do número: não
+   * passa pelo filtro de `somenteNumero` porque o payload não traz
+   * `phone_number_id` nenhum aqui.
+   */
+  templateStatusUpdates: Array<{
+    name: string;
+    lang: string;
+    status: string;
+    metaId: string | null;
+    reason: string | null;
+  }>;
 }
 
 type Rec = Record<string, unknown>;
@@ -290,14 +345,26 @@ const str = (v: unknown): string | null => (typeof v === "string" && v ? v : nul
  * Lê o webhook de `messages` da Cloud API. Tudo que não é mensagem de pessoa
  * nem status é ignorado aqui — o mesmo POST pode trazer outros campos
  * assinados no app (templates, qualidade), tratados à parte.
+ *
+ * `somenteWaba` (opcional, `META_WABA_ID`): o mesmo APP da Meta pode estar
+ * inscrito em outra WABA (achado do code review — o comentário de
+ * `outrosNumeros` já registra o caso análogo de outro NÚMERO no mesmo app).
+ * Sem o filtro, um template de nome igual aprovado numa WABA alheia
+ * marcaria `wa_template` como aprovado aqui. Ausente = sem filtro (estado
+ * anterior); configure `META_WABA_ID` em produção para fechar a brecha.
  */
-export function parseWebhook(payload: unknown, somenteNumero: string): MetaWebhookEvents {
+export function parseWebhook(
+  payload: unknown,
+  somenteNumero: string,
+  somenteWaba?: string
+): MetaWebhookEvents {
   const out: MetaWebhookEvents = {
     phoneNumberIds: [],
     outrosNumeros: 0,
     messages: [],
     statuses: [],
     failures: [],
+    templateStatusUpdates: [],
   };
   if (!isRec(payload) || payload.object !== "whatsapp_business_account") return out;
   const entries = Array.isArray(payload.entry) ? payload.entry : [];
@@ -305,7 +372,32 @@ export function parseWebhook(payload: unknown, somenteNumero: string): MetaWebho
   for (const entry of entries) {
     if (!isRec(entry) || !Array.isArray(entry.changes)) continue;
     for (const change of entry.changes) {
-      if (!isRec(change) || change.field !== "messages" || !isRec(change.value)) continue;
+      if (!isRec(change) || !isRec(change.value)) continue;
+
+      if (change.field === "message_template_status_update") {
+        if (somenteWaba && str(entry.id) !== somenteWaba) continue;
+        const v = change.value;
+        const name = str(v.message_template_name);
+        const lang = str(v.message_template_language);
+        const event = str(v.event);
+        if (name && lang && event) {
+          out.templateStatusUpdates.push({
+            name,
+            lang,
+            // `REINSTATED` (documentado em developers.facebook.com, 2026-09)
+            // é o evento de um template PAUSADO por qualidade que voltou a
+            // poder ser usado — equivale a `APPROVED` pro dispatch, que só
+            // conhece dois estados (aprovado ou não). Os demais (ARCHIVED,
+            // UNARCHIVED, FLAGGED, IN_APPEAL, LIMIT_EXCEEDED, LOCKED,
+            // PENDING_DELETION…) ficam como vieram: fail-closed, representam.
+            status: event.toUpperCase() === "REINSTATED" ? "APPROVED" : event.toUpperCase(),
+            metaId: v.message_template_id != null ? String(v.message_template_id) : null,
+            reason: str(v.reason),
+          });
+        }
+        continue;
+      }
+      if (change.field !== "messages") continue;
       const value = change.value;
 
       /**

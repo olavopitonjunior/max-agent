@@ -52,6 +52,22 @@ export async function sendText(params: {
   return { messageId: res.messageId ?? res.id ?? null };
 }
 
+/**
+ * Envio por template aprovado — só existe na Meta (ver `zapi.sendTemplate`,
+ * que lança). `dispatchDue` só chama isto com a janela de 24h fechada e o
+ * template confirmado `APPROVED` em `wa_template`.
+ */
+export async function sendTemplate(params: {
+  to: string;
+  name: string;
+  lang: string;
+  bodyParams: string[];
+  buttonParam: string;
+}): Promise<SendResult> {
+  if (provider() === "meta") return meta.sendTemplate(params);
+  return zapi.sendTemplate();
+}
+
 export async function connectionStatus(): Promise<ConnectionState> {
   return provider() === "meta" ? meta.connectionStatus() : zapi.connectionStatus();
 }
