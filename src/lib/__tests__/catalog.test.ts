@@ -40,21 +40,21 @@ describe("regras da Meta sobre os textos", () => {
 
 describe("cobertura dos tipos que o contractmaker manda", () => {
   /**
-   * Os `kind` do motor de eventos e da rota avulsa (cm#887). Os do sino
-   * (Notification.type) vão para o genérico, de propósito.
+   * Os `kind` do motor de eventos (cm#887), sem financeiro — decisão do
+   * Olavo em 29/09: a régua de comunicação por template é formulário,
+   * contrato e prazo, nunca cobrança/comissão. Os do sino (Notification.type)
+   * vão para o genérico, de propósito.
    */
   it.each([
     "stage_change",
     "form_completed",
     "form_reminder",
+    "form_completed_parte",
+    "form_reminder_parte",
     "contract_sent",
     "contract_signed",
     "contract_signed_parte",
-    "charge_created",
-    "charge_paid",
-    "charge_created_parte",
     "deal_sla_breached",
-    "split_recipient_completion",
   ])("%s tem template próprio", (kind) => {
     expect(CATALOGO[kind]).toBeDefined();
     expect(templateDoKind(kind)).not.toBe(GENERICO);
@@ -65,6 +65,17 @@ describe("cobertura dos tipos que o contractmaker manda", () => {
     expect(templateDoKind(null)).toBe(GENERICO);
     expect(templateDoKind(undefined)).toBe(GENERICO);
     expect(templateDoKind("")).toBe(GENERICO);
+  });
+
+  /**
+   * Decisão do Olavo (29/09): nenhum template pra financeiro. Removidos do
+   * catálogo — se o contractmaker ainda mandar esses kinds, caem no genérico
+   * em vez de vazar "comissão"/"cobrança" num template com nome próprio.
+   */
+  it("financeiro não tem template próprio — cai no genérico", () => {
+    for (const kind of ["charge_created", "charge_paid", "charge_created_parte", "split_recipient_completion"]) {
+      expect(templateDoKind(kind)).toBe(GENERICO);
+    }
   });
 });
 
