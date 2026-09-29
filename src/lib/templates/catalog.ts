@@ -98,6 +98,18 @@ export const CATALOGO: Record<string, TemplateDef> = {
     [NOME, NEGOCIO, ORG],
     ["Ana", "Venda Apto 302", "RE/MAX Trio"]
   ),
+  form_completed_parte: t(
+    "imobpro_formulario_concluido_parte",
+    "Olá, {{1}}! O formulário do seu negócio foi preenchido até o fim. A {{2}} segue com os próximos passos e avisa você se precisar de algo.",
+    [NOME, ORG],
+    ["Carlos", "RE/MAX Trio"]
+  ),
+  form_reminder_parte: t(
+    "imobpro_formulario_lembrete_parte",
+    "Olá, {{1}}! O formulário do seu negócio ainda não foi concluído. A {{2}} está à disposição se precisar de ajuda para continuar.",
+    [NOME, ORG],
+    ["Carlos", "RE/MAX Trio"]
+  ),
   contract_sent: t(
     "imobpro_contrato_enviado",
     "Olá, {{1}}! O contrato do negócio {{2}} foi enviado para assinatura das partes. Aviso da {{3}} pelo ImobPro.",
@@ -116,35 +128,11 @@ export const CATALOGO: Record<string, TemplateDef> = {
     [NOME, ORG],
     ["Carlos", "RE/MAX Trio"]
   ),
-  charge_created: t(
-    "imobpro_comissao_gerada",
-    "Olá, {{1}}! A cobrança de comissão do negócio {{2}} foi emitida. Aviso da {{3}} pelo ImobPro.",
-    [NOME, NEGOCIO, ORG],
-    ["Ana", "Venda Apto 302", "RE/MAX Trio"]
-  ),
-  charge_paid: t(
-    "imobpro_comissao_paga",
-    "Olá, {{1}}! A cobrança de comissão do negócio {{2}} foi paga. Aviso da {{3}} pelo ImobPro.",
-    [NOME, NEGOCIO, ORG],
-    ["Ana", "Venda Apto 302", "RE/MAX Trio"]
-  ),
-  charge_created_parte: t(
-    "imobpro_cobranca_parte",
-    "Olá, {{1}}! A {{2}} emitiu uma cobrança referente ao seu negócio. Toque no botão para ver os detalhes e o pagamento.",
-    [NOME, ORG],
-    ["Carlos", "RE/MAX Trio"]
-  ),
   deal_sla_breached: t(
     "imobpro_negocio_sla",
     "Olá, {{1}}! O negócio {{2}} passou do prazo da etapa {{3}}. Aviso da {{4}} pelo ImobPro.",
     [NOME, NEGOCIO, ETAPA, ORG],
     ["Ana", "Venda Apto 302", "Documentação", "RE/MAX Trio"]
-  ),
-  split_recipient_completion: t(
-    "imobpro_cadastro_corretor",
-    "Olá, {{1}}! Faltam alguns dados do seu cadastro de corretor na {{2}} para o recebimento de comissão. Complete até {{3}} pelo botão abaixo.",
-    [NOME, ORG, { param: "prazo" }],
-    ["Bruno", "RE/MAX Trio", "30/09/2026"]
   ),
 };
 
