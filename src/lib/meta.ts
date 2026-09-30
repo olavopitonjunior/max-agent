@@ -108,16 +108,18 @@ export async function sendText(params: {
  * Envio por TEMPLATE — a única saída fora da janela de 24h. `name`/`lang`
  * saem do catálogo (`templates/catalog.ts`), já aprovados na Meta (quem
  * chama, `dispatchDue`, confere `wa_template` antes). `bodyParams` é a lista
- * ordenada de `{{1}}`, `{{2}}`…; o botão de URL manda SEMPRE, com o único
- * parâmetro dinâmico que a Meta aceita nele — o id do redirecionador `/r/<id>`,
- * porque o link real muda de host por tenant (ver `src/app/r/[id]/route.ts`).
+ * ordenada de `{{1}}`, `{{2}}`…; o botão de URL, quando o template tem um,
+ * leva o único parâmetro dinâmico que a Meta aceita nele — o id do
+ * redirecionador `/r/<id>`, porque o link real muda de host por tenant (ver
+ * `src/app/r/[id]/route.ts`). Template da parte não tem botão.
  */
 export async function sendTemplate(params: {
   to: string;
   name: string;
   lang: string;
   bodyParams: string[];
-  buttonParam: string;
+  /** `null` = template SEM botão (os da parte — ver `TemplateDef.botao`). */
+  buttonParam: string | null;
 }): Promise<{ messageId: string | null }> {
   const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
     method: "POST",
@@ -133,12 +135,18 @@ export async function sendTemplate(params: {
           ...(params.bodyParams.length > 0
             ? [{ type: "body", parameters: params.bodyParams.map((text) => ({ type: "text", text })) }]
             : []),
-          {
-            type: "button",
-            sub_type: "url",
-            index: "0",
-            parameters: [{ type: "text", text: params.buttonParam }],
-          },
+          // Componente de botão SÓ quando o template aprovado tem botão: a
+          // Meta recusa (132000) parâmetro de botão num template sem ele.
+          ...(params.buttonParam !== null
+            ? [
+                {
+                  type: "button",
+                  sub_type: "url",
+                  index: "0",
+                  parameters: [{ type: "text", text: params.buttonParam }],
+                },
+              ]
+            : []),
         ],
       },
     }),

@@ -84,17 +84,23 @@ function corpoDaSubmissao(def: TemplateDef) {
         text: def.body,
         ...(def.exemplos.length > 0 ? { example: { body_text: [def.exemplos] } } : {}),
       },
-      {
-        type: "BUTTONS",
-        buttons: [
-          {
-            type: "URL",
-            text: BOTAO_TEXTO,
-            url: urlBotao,
-            example: [EXEMPLO_ID_REDIRECT],
-          },
-        ],
-      },
+      // Templates da parte não têm botão (`TemplateDef.botao`): o cliente
+      // final não tem link pra abrir.
+      ...(def.botao
+        ? [
+            {
+              type: "BUTTONS",
+              buttons: [
+                {
+                  type: "URL",
+                  text: BOTAO_TEXTO,
+                  url: urlBotao,
+                  example: [EXEMPLO_ID_REDIRECT],
+                },
+              ],
+            },
+          ]
+        : []),
     ],
   };
 }

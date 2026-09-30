@@ -62,7 +62,7 @@ export async function sendTemplate(params: {
   name: string;
   lang: string;
   bodyParams: string[];
-  buttonParam: string;
+  buttonParam: string | null;
 }): Promise<SendResult> {
   if (provider() === "meta") return meta.sendTemplate(params);
   return zapi.sendTemplate();
