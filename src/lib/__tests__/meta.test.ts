@@ -486,6 +486,27 @@ describe("chamadas à Graph API", () => {
     ]);
   });
 
+  it("sendTemplate: buttonParam null = template SEM botão — nenhum componente de botão vai (a Meta recusa com 132000)", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL3" }] }));
+    await sendTemplate({
+      to: "1",
+      name: "imobpro_contrato_assinado_parte",
+      lang: "pt_BR",
+      bodyParams: ["Carlos", "RE/MAX Trio"],
+      buttonParam: null,
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body).template.components).toEqual([
+      {
+        type: "body",
+        parameters: [
+          { type: "text", text: "Carlos" },
+          { type: "text", text: "RE/MAX Trio" },
+        ],
+      },
+    ]);
+  });
+
   it("sendText: erro vira MetaHttpError com o código — é ele que classifica canal × mensagem", async () => {
     fetchMock.mockResolvedValue(
       json(401, { error: { message: "Error validating access token", type: "OAuthException", code: 190 } })

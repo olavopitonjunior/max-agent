@@ -136,6 +136,28 @@ d("canal Meta (Postgres real)", () => {
       expect(l.status).toBe("sent");
       expect(l.provider_message_id).toBe("wamid.TPL");
       expect(l.template_name).toBe("imobpro_aviso");
+      // Template da equipe: o botão leva o id da linha (redirecionador /r/<id>).
+      expect(typeof metaSendTemplate.mock.calls[0][0].buttonParam).toBe("string");
+    });
+
+    /** A parte não tem link: o template dela é aprovado SEM botão. */
+    it("template da PARTE sai sem parâmetro de botão", async () => {
+      await query(
+        `INSERT INTO wa_template (name, lang, status) VALUES ('imobpro_contrato_assinado_parte', 'pt_BR', 'APPROVED')
+         ON CONFLICT (name) DO UPDATE SET status = 'APPROVED'`
+      );
+      await linhaVencida("k-parte");
+      await query(`UPDATE outbox SET kind = 'contract_signed_parte', link_url = NULL WHERE dedupe_key = 'k-parte'`);
+      try {
+        const totals = await dispatchDue();
+        expect(totals.sent).toBe(1);
+        expect(metaSendTemplate.mock.calls[0][0]).toMatchObject({
+          name: "imobpro_contrato_assinado_parte",
+          buttonParam: null,
+        });
+      } finally {
+        await query(`DELETE FROM wa_template WHERE name = 'imobpro_contrato_assinado_parte'`);
+      }
     });
 
     it("janela aberta: sai como texto livre pela Meta e grava o wamid", async () => {

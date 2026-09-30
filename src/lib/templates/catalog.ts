@@ -8,18 +8,21 @@
  * parâmetros, que é o que a Graph API recebe.
  *
  * Os TEXTOS moram aqui e passam pela aprovação do Olavo antes de qualquer
- * submissão — rascunho em `~/.claude/plans/max-templates-rascunho.md`. A
- * submissão à Meta (script de sync) e o botão entram na PRÓXIMA fatia; mudar
- * um texto depois de aprovado exige resubmeter e esperar nova análise.
+ * submissão. A submissão à Meta é o `scripts/templates-sync.ts` (dry-run por
+ * padrão); mudar um texto depois de aprovado exige resubmeter e esperar nova
+ * análise.
  *
  * Regras da Meta que o catálogo respeita e que `catalog.test.ts` trava:
  *  - nenhuma variável no começo nem no fim do texto;
  *  - variáveis numeradas em sequência, sem pular;
  *  - parâmetro nunca vazio, nunca com quebra de linha.
  *
- * Ainda NÃO travado por teste (próxima fatia, junto com o botão): botão de
- * URL com domínio FIXO e a variável só no fim — o redirecionador `/r/<id>`
- * deste serviço, porque o link real muda de host por tenant.
+ * Botão de URL ("Abrir no ImobPro"): domínio FIXO com a variável só no fim —
+ * o redirecionador `/r/<id>` deste serviço, porque o link real muda de host
+ * por tenant. Só os templates da EQUIPE têm; os da parte não (`botao`).
+ *
+ * Régua do Olavo (29/09/2026): nenhum template financeiro — cobrança,
+ * pagamento e comissão não entram aqui.
  */
 
 export type FonteDeVariavel =
@@ -43,6 +46,14 @@ export interface TemplateDef {
   vars: FonteDeVariavel[];
   /** Exemplo por variável — a Meta exige na submissão. */
   exemplos: string[];
+  /**
+   * Leva o botão de URL "Abrir no ImobPro"? `false` nos templates da PARTE:
+   * o cliente final não tem login nem link público — o botão dele abriria o
+   * redirecionador `/r/<id>` sem destino, ou seja, um 404. Decidido no
+   * catálogo (e não na hora do envio) porque o botão faz parte do template
+   * APROVADO: não dá para omiti-lo numa mensagem e mandá-lo em outra.
+   */
+  botao: boolean;
 }
 
 /** Texto do botão de todos os templates. */
@@ -62,8 +73,13 @@ const t = (
   name: string,
   body: string,
   vars: FonteDeVariavel[],
-  exemplos: string[]
-): TemplateDef => ({ name, lang: "pt_BR", category: "UTILITY", body, vars, exemplos });
+  exemplos: string[],
+  botao = true
+): TemplateDef => ({ name, lang: "pt_BR", category: "UTILITY", body, vars, exemplos, botao });
+
+/** Template da PARTE: sem botão (ver `TemplateDef.botao`). */
+const tParte = (name: string, body: string, vars: FonteDeVariavel[], exemplos: string[]) =>
+  t(name, body, vars, exemplos, false);
 
 const NOME = "nome" as const;
 const ORG = "org" as const;
@@ -98,13 +114,13 @@ export const CATALOGO: Record<string, TemplateDef> = {
     [NOME, NEGOCIO, ORG],
     ["Ana", "Venda Apto 302", "RE/MAX Trio"]
   ),
-  form_completed_parte: t(
+  form_completed_parte: tParte(
     "imobpro_formulario_concluido_parte",
     "Olá, {{1}}! O formulário do seu negócio foi preenchido até o fim. A {{2}} segue com os próximos passos e avisa você se precisar de algo.",
     [NOME, ORG],
     ["Carlos", "RE/MAX Trio"]
   ),
-  form_reminder_parte: t(
+  form_reminder_parte: tParte(
     "imobpro_formulario_lembrete_parte",
     "Olá, {{1}}! O formulário do seu negócio ainda não foi concluído. A {{2}} está à disposição se precisar de ajuda para continuar.",
     [NOME, ORG],
@@ -122,7 +138,7 @@ export const CATALOGO: Record<string, TemplateDef> = {
     [NOME, NEGOCIO, ORG],
     ["Ana", "Venda Apto 302", "RE/MAX Trio"]
   ),
-  contract_signed_parte: t(
+  contract_signed_parte: tParte(
     "imobpro_contrato_assinado_parte",
     "Olá, {{1}}! O contrato foi assinado por todas as partes. A {{2}} segue com os próximos passos e avisa você se precisar de algo.",
     [NOME, ORG],
@@ -133,6 +149,42 @@ export const CATALOGO: Record<string, TemplateDef> = {
     "Olá, {{1}}! O negócio {{2}} passou do prazo da etapa {{3}}. Aviso da {{4}} pelo ImobPro.",
     [NOME, NEGOCIO, ETAPA, ORG],
     ["Ana", "Venda Apto 302", "Documentação", "RE/MAX Trio"]
+  ),
+
+  // ── Pedidos manuais (menu fixo do admin) ────────────────────────────────
+  // Um por item de `lib/max/manual-requests.ts` do contractmaker, que manda
+  // `manual_<id>` para o corretor e `manual_<id>_parte` para a parte. Item
+  // novo lá exige o template aqui ANTES — sem ele, cai no genérico, que não
+  // diz o que está sendo pedido.
+  manual_documentos: t(
+    "imobpro_pedido_documentos",
+    "Olá, {{1}}! A {{2}} pede os documentos pendentes do negócio {{3}}. Toque no botão abaixo para abrir o negócio.",
+    [NOME, ORG, NEGOCIO],
+    ["Ana", "RE/MAX Trio", "Venda Apto 302"]
+  ),
+  manual_documentos_parte: tParte(
+    "imobpro_pedido_documentos_parte",
+    "Olá, {{1}}! A {{2}} precisa dos documentos pendentes do seu negócio para seguir com o processo. Envie assim que possível ou fale com o seu corretor.",
+    [NOME, ORG],
+    ["Carlos", "RE/MAX Trio"]
+  ),
+  manual_contato: t(
+    "imobpro_pedido_contato",
+    "Olá, {{1}}! A administração da {{2}} pede que você entre em contato sobre o negócio {{3}}. Toque no botão abaixo para abrir o negócio.",
+    [NOME, ORG, NEGOCIO],
+    ["Ana", "RE/MAX Trio", "Venda Apto 302"]
+  ),
+  manual_contato_parte: tParte(
+    "imobpro_pedido_contato_parte",
+    "Olá, {{1}}! A {{2}} precisa falar com você sobre o seu negócio. Entre em contato assim que puder.",
+    [NOME, ORG],
+    ["Carlos", "RE/MAX Trio"]
+  ),
+  manual_atualizacao: t(
+    "imobpro_pedido_atualizacao",
+    "Olá, {{1}}! A {{2}} pede uma atualização do negócio {{3}}. Toque no botão abaixo para abrir e registrar o andamento.",
+    [NOME, ORG, NEGOCIO],
+    ["Ana", "RE/MAX Trio", "Venda Apto 302"]
   ),
 };
 

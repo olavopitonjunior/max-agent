@@ -55,6 +55,11 @@ describe("cobertura dos tipos que o contractmaker manda", () => {
     "contract_signed",
     "contract_signed_parte",
     "deal_sla_breached",
+    "manual_documentos",
+    "manual_documentos_parte",
+    "manual_contato",
+    "manual_contato_parte",
+    "manual_atualizacao",
   ])("%s tem template próprio", (kind) => {
     expect(CATALOGO[kind]).toBeDefined();
     expect(templateDoKind(kind)).not.toBe(GENERICO);
@@ -75,6 +80,39 @@ describe("cobertura dos tipos que o contractmaker manda", () => {
   it("financeiro não tem template próprio — cai no genérico", () => {
     for (const kind of ["charge_created", "charge_paid", "charge_created_parte", "split_recipient_completion"]) {
       expect(templateDoKind(kind)).toBe(GENERICO);
+    }
+  });
+});
+
+/**
+ * A parte (cliente final) não tem login nem link público: um botão no
+ * template dela abriria o redirecionador sem destino — um 404 no WhatsApp do
+ * cliente da imobiliária.
+ */
+describe("botão: a parte nunca recebe", () => {
+  const entradas = Object.entries(CATALOGO);
+
+  it("todo kind `_parte` é sem botão, e o texto não manda tocar em botão nenhum", () => {
+    const daParte = entradas.filter(([kind]) => kind.endsWith("_parte"));
+    expect(daParte.length).toBe(5);
+    for (const [kind, t] of daParte) {
+      expect(t.botao, kind).toBe(false);
+      expect(t.body.toLowerCase(), kind).not.toContain("botão");
+    }
+  });
+
+  it("os demais (equipe) e o genérico têm botão", () => {
+    for (const [kind, t] of entradas.filter(([k]) => !k.endsWith("_parte"))) {
+      expect(t.botao, kind).toBe(true);
+    }
+    expect(GENERICO.botao).toBe(true);
+  });
+
+  /** Régua do Olavo (29/09): nenhum template financeiro. */
+  it("nenhum template fala de cobrança, pagamento ou comissão", () => {
+    for (const t of todosOsTemplates()) {
+      expect(t.body.toLowerCase(), t.name).not.toMatch(/cobran|pagamento|comiss|boleto|pix/);
+      expect(t.name, t.name).not.toMatch(/cobranca|comissao|pagamento/);
     }
   });
 });

@@ -492,7 +492,7 @@ export async function dispatchDue(
             name: envioTemplate.name,
             lang: envioTemplate.lang,
             bodyParams: parametrosDoCorpo(envioTemplate, row),
-            buttonParam: row.id,
+            buttonParam: envioTemplate.botao ? row.id : null,
           })
         : await sendText({ to: row.phone, body: renderMessage(row) });
       log.info(envioTemplate ? "outbox.enviado_template" : "outbox.enviado", {
