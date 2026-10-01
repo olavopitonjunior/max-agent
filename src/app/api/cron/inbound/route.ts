@@ -3,6 +3,7 @@ import { requireCronSecret } from "@/lib/auth";
 import { sweepInbound } from "@/lib/inbound";
 import { pruneOldFacts } from "@/lib/memory";
 import { pruneOldTurns } from "@/lib/turnlog";
+import { podarPedidosDeDuvida } from "@/lib/aceite";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -56,6 +57,16 @@ export async function GET(req: NextRequest) {
       if (anonimizados > 0) {
         console.log(`[cron/inbound] ${anonimizados} turn(s) anonimizados por idade`);
       }
+
+      // Pedido de dúvida que ninguém usou guarda telefone e nome à toa.
+      const pedidos = await podarPedidosDeDuvida().catch((err) => {
+        console.warn(
+          "[cron/inbound] poda de pedidos de dúvida falhou:",
+          err instanceof Error ? err.message : String(err)
+        );
+        return 0;
+      });
+      if (pedidos > 0) console.log(`[cron/inbound] ${pedidos} pedido(s) de dúvida vencidos podados`);
     }
     if (totals.blocked > 0) {
       // O motivo (desemparelhada × inoperante) já saiu no log do

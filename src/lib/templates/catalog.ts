@@ -7,22 +7,28 @@
  * variáveis soltas (`params`); aqui isso vira `name` + lista ordenada de
  * parâmetros, que é o que a Graph API recebe.
  *
- * Os TEXTOS moram aqui e passam pela aprovação do Olavo antes de qualquer
- * submissão. A submissão à Meta é o `scripts/templates-sync.ts` (dry-run por
- * padrão); mudar um texto depois de aprovado exige resubmeter e esperar nova
- * análise.
+ * ── A régua (decisão do Olavo, 01/10/2026) ──────────────────────────────
+ * SÓ estes temas têm template: formulário finalizado, formulário pendente,
+ * contrato assinado, pesquisa de satisfação, mensagem da imobiliária e
+ * onboarding (boas-vindas, configuração pendente e o repasse de dúvida).
+ * Nenhum texto cita o nome do sistema. Tudo o mais é FORA DA RÉGUA: sai como
+ * texto livre dentro da janela de 24h e, fora dela, não sai pelo WhatsApp
+ * (`templateDoKind` devolve `null` e o outbox desiste). Não existe mais
+ * template genérico — ele fazia qualquer aviso virar mensagem paga.
+ *
+ * ── Nomes ────────────────────────────────────────────────────────────────
+ * Prefixo `max_`: o WABA é COMPARTILHADO com o app da própria FINCasa, e um
+ * nome genérico (`boas_vindas`) pode colidir com um template dela. O nome
+ * nunca aparece para quem recebe.
+ *
+ * Os TEXTOS passam pela aprovação do Olavo antes de qualquer submissão
+ * (`scripts/templates-sync.ts`, dry-run por padrão); mudar um texto depois
+ * de aprovado exige resubmeter e esperar nova análise.
  *
  * Regras da Meta que o catálogo respeita e que `catalog.test.ts` trava:
  *  - nenhuma variável no começo nem no fim do texto;
  *  - variáveis numeradas em sequência, sem pular;
  *  - parâmetro nunca vazio, nunca com quebra de linha.
- *
- * Botão de URL ("Abrir no ImobPro"): domínio FIXO com a variável só no fim —
- * o redirecionador `/r/<id>` deste serviço, porque o link real muda de host
- * por tenant. Só os templates da EQUIPE têm; os da parte não (`botao`).
- *
- * Régua do Olavo (29/09/2026): nenhum template financeiro — cobrança,
- * pagamento e comissão não entram aqui.
  */
 
 export type FonteDeVariavel =
@@ -32,8 +38,46 @@ export type FonteDeVariavel =
   | "org"
   /** Título da notificação (curto, uma linha). */
   | "titulo"
-  /** Uma chave de `params` (ex.: `negocio`, `etapa`, `prazo`). */
+  /** Uma chave de `params` (ex.: `negocio`, `quem`). */
   | { param: string };
+
+/**
+ * Botões do template — fazem parte do template APROVADO, então são decididos
+ * aqui e não na hora do envio.
+ *
+ *  · `url`: "abrir" com domínio fixo e a variável no fim — o redirecionador
+ *    `/r/<id>` deste serviço, porque o link real muda de host por tenant. Só
+ *    onde existe destino: a parte não tem login, então template de parte só
+ *    leva URL quando o destino é público (o formulário, a pesquisa).
+ *  · `ok`: resposta rápida. O toque volta no webhook com o payload
+ *    `ok:<id da linha>`, e o Max entrega o texto guardado (`lib/aceite.ts`).
+ *  · `url_e_ok`: os dois — o de resposta rápida aqui é "Tenho uma dúvida"
+ *    (payload `duvida:<id>`), que abre o repasse ao time.
+ */
+export type Botao =
+  | { tipo: "url"; texto: string }
+  | { tipo: "ok"; texto: string }
+  | { tipo: "url_e_ok"; texto: string; ok: string };
+
+/**
+ * Os botões do template NA ORDEM em que a Meta os indexa (0, 1…). Fonte
+ * única da ordem: a submissão (`scripts/templates-sync.ts`) e o envio
+ * (`botoesDaLinha` no outbox) derivam daqui — um descasamento entre os dois
+ * é recusado na hora do envio (132000).
+ */
+export type BotaoOrdenado =
+  | { tipo: "url"; texto: string }
+  | { tipo: "quick_reply"; texto: string; prefixo: "ok" | "duvida" };
+
+export function botoesEmOrdem(botao: Botao | null): BotaoOrdenado[] {
+  if (!botao) return [];
+  if (botao.tipo === "url") return [{ tipo: "url", texto: botao.texto }];
+  if (botao.tipo === "ok") return [{ tipo: "quick_reply", texto: botao.texto, prefixo: "ok" }];
+  return [
+    { tipo: "url", texto: botao.texto },
+    { tipo: "quick_reply", texto: botao.ok, prefixo: "duvida" },
+  ];
+}
 
 export interface TemplateDef {
   /** Nome do template na Meta — minúsculo, `_`, único no WABA. */
@@ -46,18 +90,8 @@ export interface TemplateDef {
   vars: FonteDeVariavel[];
   /** Exemplo por variável — a Meta exige na submissão. */
   exemplos: string[];
-  /**
-   * Leva o botão de URL "Abrir no ImobPro"? `false` nos templates da PARTE:
-   * o cliente final não tem login nem link público — o botão dele abriria o
-   * redirecionador `/r/<id>` sem destino, ou seja, um 404. Decidido no
-   * catálogo (e não na hora do envio) porque o botão faz parte do template
-   * APROVADO: não dá para omiti-lo numa mensagem e mandá-lo em outra.
-   */
-  botao: boolean;
+  botao: Botao | null;
 }
-
-/** Texto do botão de todos os templates. */
-export const BOTAO_TEXTO = "Abrir no ImobPro";
 
 /** Fallback por fonte: a Meta recusa parâmetro vazio. */
 const FALLBACK: Record<string, string> = {
@@ -65,8 +99,7 @@ const FALLBACK: Record<string, string> = {
   org: "imobiliária",
   titulo: "atualização",
   negocio: "em andamento",
-  etapa: "atual",
-  prazo: "o prazo informado",
+  quem: "Um cliente",
 };
 
 const t = (
@@ -74,127 +107,130 @@ const t = (
   body: string,
   vars: FonteDeVariavel[],
   exemplos: string[],
-  botao = true
+  botao: Botao | null
 ): TemplateDef => ({ name, lang: "pt_BR", category: "UTILITY", body, vars, exemplos, botao });
-
-/** Template da PARTE: sem botão (ver `TemplateDef.botao`). */
-const tParte = (name: string, body: string, vars: FonteDeVariavel[], exemplos: string[]) =>
-  t(name, body, vars, exemplos, false);
 
 const NOME = "nome" as const;
 const ORG = "org" as const;
 const NEGOCIO = { param: "negocio" };
-const ETAPA = { param: "etapa" };
 
-/** Template de quem não tem um próprio — inclusive todo tipo do sino. */
-export const GENERICO = t(
-  "imobpro_aviso",
-  "Olá, {{1}}! Você tem uma atualização na {{2}}: {{3}}. Toque no botão abaixo para ver os detalhes.",
-  [NOME, ORG, "titulo"],
-  ["Ana", "RE/MAX Trio", "Proposta aceita"]
+const ABRIR_NEGOCIO: Botao = { tipo: "url", texto: "Abrir negócio" };
+const OK: Botao = { tipo: "ok", texto: "OK" };
+
+const PESQUISA = t(
+  "max_pesquisa_satisfacao",
+  "Olá, {{1}}! A {{2}} quer saber como está sendo sua experiência até agora. É uma pergunta só e leva menos de um minuto.",
+  [NOME, ORG],
+  ["Carlos", "RE/MAX Trio"],
+  { tipo: "url", texto: "Responder" }
 );
 
-/** `kind` → template. O que não está aqui usa o `GENERICO`. */
+const MENSAGEM = t(
+  "max_mensagem_imobiliaria",
+  "Olá, {{1}}! A {{2}} tem uma mensagem para você. Responda OK ou toque no botão abaixo para ver.",
+  [NOME, ORG],
+  ["Carlos", "RE/MAX Trio"],
+  OK
+);
+
+/**
+ * `kind` → template. O que não está aqui é FORA DA RÉGUA (ver o topo).
+ *
+ * Mesma convenção do contractmaker: a versão da PARTE leva `_parte`. Pesquisa
+ * e mensagem da imobiliária usam o MESMO template para os dois públicos — o
+ * texto não tem jargão interno.
+ */
 export const CATALOGO: Record<string, TemplateDef> = {
-  stage_change: t(
-    "imobpro_negocio_status",
-    "Olá, {{1}}! O negócio {{2}} avançou para a etapa {{3}}. Aviso da {{4}} pelo ImobPro.",
-    [NOME, NEGOCIO, ETAPA, ORG],
-    ["Ana", "Venda Apto 302", "Assinatura", "RE/MAX Trio"]
-  ),
   form_completed: t(
-    "imobpro_formulario_concluido",
-    "Olá, {{1}}! O formulário do negócio {{2}} foi preenchido até o fim e o contrato já está em geração. Aviso da {{3}} pelo ImobPro.",
-    [NOME, NEGOCIO, ORG],
-    ["Ana", "Venda Apto 302", "RE/MAX Trio"]
+    "max_formulario_concluido",
+    "Olá, {{1}}! A {{2}} avisa: o formulário do negócio {{3}} foi preenchido até o fim. Toque no botão abaixo para abrir o negócio.",
+    [NOME, ORG, NEGOCIO],
+    ["Ana", "RE/MAX Trio", "Venda Apto 302"],
+    ABRIR_NEGOCIO
   ),
-  form_reminder: t(
-    "imobpro_formulario_lembrete",
-    "Olá, {{1}}! O formulário do negócio {{2}} ainda não foi concluído. Se precisar, reencaminhe o link às partes. Aviso da {{3}} pelo ImobPro.",
-    [NOME, NEGOCIO, ORG],
-    ["Ana", "Venda Apto 302", "RE/MAX Trio"]
-  ),
-  form_completed_parte: tParte(
-    "imobpro_formulario_concluido_parte",
+  form_completed_parte: t(
+    "max_formulario_concluido_parte",
     "Olá, {{1}}! O formulário do seu negócio foi preenchido até o fim. A {{2}} segue com os próximos passos e avisa você se precisar de algo.",
     [NOME, ORG],
-    ["Carlos", "RE/MAX Trio"]
+    ["Carlos", "RE/MAX Trio"],
+    null
   ),
-  form_reminder_parte: tParte(
-    "imobpro_formulario_lembrete_parte",
-    "Olá, {{1}}! O formulário do seu negócio ainda não foi concluído. A {{2}} está à disposição se precisar de ajuda para continuar.",
+  form_reminder: t(
+    "max_formulario_pendente",
+    "Olá, {{1}}! A {{2}} avisa: o formulário do negócio {{3}} ainda não foi concluído. Toque no botão abaixo para abrir o negócio e reenviar o link às partes.",
+    [NOME, ORG, NEGOCIO],
+    ["Ana", "RE/MAX Trio", "Venda Apto 302"],
+    ABRIR_NEGOCIO
+  ),
+  form_reminder_parte: t(
+    "max_formulario_pendente_parte",
+    "Olá, {{1}}! O formulário do seu negócio com a {{2}} ainda não foi concluído. Toque no botão abaixo para continuar de onde parou.",
     [NOME, ORG],
-    ["Carlos", "RE/MAX Trio"]
-  ),
-  contract_sent: t(
-    "imobpro_contrato_enviado",
-    "Olá, {{1}}! O contrato do negócio {{2}} foi enviado para assinatura das partes. Aviso da {{3}} pelo ImobPro.",
-    [NOME, NEGOCIO, ORG],
-    ["Ana", "Venda Apto 302", "RE/MAX Trio"]
+    ["Carlos", "RE/MAX Trio"],
+    // O destino é o link PÚBLICO do formulário — a parte não precisa de login.
+    { tipo: "url", texto: "Continuar formulário" }
   ),
   contract_signed: t(
-    "imobpro_contrato_assinado",
-    "Olá, {{1}}! O contrato do negócio {{2}} foi assinado por todas as partes. Aviso da {{3}} pelo ImobPro.",
-    [NOME, NEGOCIO, ORG],
-    ["Ana", "Venda Apto 302", "RE/MAX Trio"]
+    "max_contrato_assinado",
+    "Olá, {{1}}! A {{2}} avisa: o contrato do negócio {{3}} foi assinado por todas as partes. Toque no botão abaixo para abrir o negócio.",
+    [NOME, ORG, NEGOCIO],
+    ["Ana", "RE/MAX Trio", "Venda Apto 302"],
+    ABRIR_NEGOCIO
   ),
-  contract_signed_parte: tParte(
-    "imobpro_contrato_assinado_parte",
+  contract_signed_parte: t(
+    "max_contrato_assinado_parte",
     "Olá, {{1}}! O contrato foi assinado por todas as partes. A {{2}} segue com os próximos passos e avisa você se precisar de algo.",
     [NOME, ORG],
-    ["Carlos", "RE/MAX Trio"]
+    ["Carlos", "RE/MAX Trio"],
+    null
   ),
-  deal_sla_breached: t(
-    "imobpro_negocio_sla",
-    "Olá, {{1}}! O negócio {{2}} passou do prazo da etapa {{3}}. Aviso da {{4}} pelo ImobPro.",
-    [NOME, NEGOCIO, ETAPA, ORG],
-    ["Ana", "Venda Apto 302", "Documentação", "RE/MAX Trio"]
-  ),
-
-  // ── Pedidos manuais (menu fixo do admin) ────────────────────────────────
-  // Um por item de `lib/max/manual-requests.ts` do contractmaker, que manda
-  // `manual_<id>` para o corretor e `manual_<id>_parte` para a parte. Item
-  // novo lá exige o template aqui ANTES — sem ele, cai no genérico, que não
-  // diz o que está sendo pedido.
-  manual_documentos: t(
-    "imobpro_pedido_documentos",
-    "Olá, {{1}}! A {{2}} pede os documentos pendentes do negócio {{3}}. Toque no botão abaixo para abrir o negócio.",
-    [NOME, ORG, NEGOCIO],
-    ["Ana", "RE/MAX Trio", "Venda Apto 302"]
-  ),
-  manual_documentos_parte: tParte(
-    "imobpro_pedido_documentos_parte",
-    "Olá, {{1}}! A {{2}} precisa dos documentos pendentes do seu negócio para seguir com o processo. Envie assim que possível ou fale com o seu corretor.",
+  survey_invite: PESQUISA,
+  survey_invite_parte: PESQUISA,
+  manual_message: MENSAGEM,
+  manual_message_parte: MENSAGEM,
+  welcome: t(
+    "max_boas_vindas",
+    "Olá, {{1}}! Eu sou o Max, o assistente da {{2}} no WhatsApp. É por aqui que você vai receber as notificações dos negócios: formulários, contratos e o que precisar da sua atenção. Para começar, toque no botão abaixo e faça o seu primeiro acesso ao sistema. Se quiser saber o que mais posso fazer, é só perguntar.",
     [NOME, ORG],
-    ["Carlos", "RE/MAX Trio"]
+    ["Ana", "RE/MAX Trio"],
+    { tipo: "url", texto: "Fazer primeiro acesso" }
   ),
-  manual_contato: t(
-    "imobpro_pedido_contato",
-    "Olá, {{1}}! A administração da {{2}} pede que você entre em contato sobre o negócio {{3}}. Toque no botão abaixo para abrir o negócio.",
-    [NOME, ORG, NEGOCIO],
-    ["Ana", "RE/MAX Trio", "Venda Apto 302"]
-  ),
-  manual_contato_parte: tParte(
-    "imobpro_pedido_contato_parte",
-    "Olá, {{1}}! A {{2}} precisa falar com você sobre o seu negócio. Entre em contato assim que puder.",
+  onboarding_pending: t(
+    "max_configuracao_pendente",
+    "Olá, {{1}}! A configuração da {{2}} ainda não foi concluída. Toque no botão abaixo para continuar de onde parou. Se ficou alguma dúvida, toque em \"Tenho uma dúvida\" e me conte: eu passo direto para a nossa equipe.",
     [NOME, ORG],
-    ["Carlos", "RE/MAX Trio"]
+    ["Ana", "RE/MAX Trio"],
+    { tipo: "url_e_ok", texto: "Continuar configuração", ok: "Tenho uma dúvida" }
   ),
-  manual_atualizacao: t(
-    "imobpro_pedido_atualizacao",
-    "Olá, {{1}}! A {{2}} pede uma atualização do negócio {{3}}. Toque no botão abaixo para abrir e registrar o andamento.",
-    [NOME, ORG, NEGOCIO],
-    ["Ana", "RE/MAX Trio", "Venda Apto 302"]
+  /** O repasse da dúvida para o time (ver `lib/aceite.ts`). */
+  support_handoff: t(
+    "max_duvida_de_cliente",
+    "Olá, {{1}}! {{2}}, da {{3}}, mandou uma dúvida sobre a configuração do sistema. Responda OK ou toque no botão abaixo para ver a mensagem.",
+    [NOME, { param: "quem" }, ORG],
+    ["Olavo", "Ana Souza", "RE/MAX Trio"],
+    OK
   ),
 };
 
-/** Todos os templates, para a submissão e para os testes de regra. */
+/**
+ * Kinds cujo texto (`outbox.body`) só é entregue depois do OK — quando saem
+ * por template. Mora aqui, e não em `lib/aceite.ts`, porque o outbox também
+ * precisa dela e o aceite importa o outbox.
+ */
+export const KINDS_COM_ACEITE: readonly string[] = [
+  "manual_message",
+  "manual_message_parte",
+  "support_handoff",
+];
+
+/** Todos os templates (sem repetição), para a submissão e para os testes de regra. */
 export function todosOsTemplates(): TemplateDef[] {
-  return [...Object.values(CATALOGO), GENERICO];
+  return [...new Map(Object.values(CATALOGO).map((d) => [d.name, d])).values()];
 }
 
-export function templateDoKind(kind: string | null | undefined): TemplateDef {
-  return (kind && CATALOGO[kind]) || GENERICO;
+/** O template do `kind`, ou `null` quando o tipo está FORA DA RÉGUA. */
+export function templateDoKind(kind: string | null | undefined): TemplateDef | null {
+  return (kind && CATALOGO[kind]) || null;
 }
 
 /** O que a linha do outbox oferece para montar os parâmetros. */

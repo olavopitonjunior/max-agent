@@ -17,9 +17,10 @@
 
 import * as meta from "../meta";
 import * as zapi from "../zapi";
-import type { ConnectionState, ProviderName, SendResult } from "./types";
+import type { BotaoEnviado, ConnectionState, ProviderName, SendResult } from "./types";
 
 export type {
+  BotaoEnviado,
   ConnectionState,
   InboundKind,
   InboundMessage,
@@ -62,7 +63,7 @@ export async function sendTemplate(params: {
   name: string;
   lang: string;
   bodyParams: string[];
-  buttonParam: string | null;
+  botoes: BotaoEnviado[];
 }): Promise<SendResult> {
   if (provider() === "meta") return meta.sendTemplate(params);
   return zapi.sendTemplate();

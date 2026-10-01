@@ -7,7 +7,14 @@ import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
 import { inoperanciaDoErro, falhaDaMensagemMeta, type Inoperancia } from "./transport/erro";
-import { templateDoKind, parametrosDoCorpo, type TemplateDef } from "./templates/catalog";
+import {
+  KINDS_COM_ACEITE,
+  botoesEmOrdem,
+  templateDoKind,
+  parametrosDoCorpo,
+  type TemplateDef,
+} from "./templates/catalog";
+import type { BotaoEnviado } from "./transport";
 import { templateAprovado } from "./templates/aprovacao";
 
 /**
@@ -26,6 +33,27 @@ export const MARCA_REQUER_TEMPLATE = "requer_template: fora da janela de 24h da 
  * definido no catálogo, só falta a Meta aprovar — o painel e o alerta podem
  * dar um conselho diferente ("aguarde a aprovação") de "escreva pra pessoa".
  */
+/**
+ * Janela fechada e o `kind` está FORA DA RÉGUA — não tem template (régua do
+ * Olavo, 01/10/2026). Terminal: esperar não resolve, e represar para sempre
+ * era o defeito do genérico. O aviso já foi por e-mail; pelo WhatsApp só
+ * sairia como texto livre, e a pessoa não falou com o Max nas últimas 24h.
+ */
+export const MARCA_FORA_DA_REGUA =
+  "fora_da_regua: tipo sem template e janela de 24h fechada — não enviado";
+
+/**
+ * Botões na ordem do template, preenchidos para ESTA linha. O id da linha é o
+ * que o redirecionador `/r/<id>` resolve e o que volta no payload do toque.
+ */
+export function botoesDaLinha(def: TemplateDef, rowId: string): BotaoEnviado[] {
+  return botoesEmOrdem(def.botao).map((b) =>
+    b.tipo === "url"
+      ? { tipo: "url", param: rowId }
+      : { tipo: "quick_reply", payload: `${b.prefixo}:${rowId}` }
+  );
+}
+
 export const MARCA_TEMPLATE_PENDENTE =
   "template_pendente: sem template aprovado para este tipo — aguardando aprovação da Meta";
 
@@ -49,7 +77,7 @@ export interface EnqueueParams {
   linkUrl: string | null;
   dealId: string | null;
   orgName: string;
-  /** Tipo da notificação (ver migration 016). Ausente = template genérico. */
+  /** Tipo da notificação (ver migration 016). Sem template no catálogo = fora da régua. */
   kind?: string | null;
   /** Variáveis do template, já limpas pelo /notify. */
   params?: Record<string, string> | null;
@@ -165,7 +193,7 @@ interface OutboxRow extends Record<string, unknown> {
   attempts: number;
   /** O envio COMEÇOU numa tentativa anterior (ver migration 007). */
   send_started_at: string | Date | null;
-  /** Tipo da notificação (migration 016). Ausente = template genérico. */
+  /** Tipo da notificação (migration 016). Sem template no catálogo = fora da régua. */
   kind: string | null;
   /** Variáveis do fato, já limpas pelo /notify — jsonb, o driver devolve objeto. */
   params: Record<string, string> | null;
@@ -391,6 +419,12 @@ export async function dispatchDue(
       try {
         if (Date.now() > seedDeadline) return;
         if (row.audience === "deal_party") return;
+        // Repasse de dúvida: o corpo é a dúvida de OUTRA pessoa — no thread
+        // do time viraria contexto que o esquecimento dela não alcança.
+        if (row.kind === "support_handoff") return;
+        // Saiu como "tem uma mensagem — responda OK": a pessoa ainda não viu
+        // o texto, e semeá-lo faria o Max "lembrar" do que não foi entregue.
+        if (envioTemplate && row.kind && KINDS_COM_ACEITE.includes(row.kind)) return;
 
         const identity = await resolveIdentity(row.phone);
         if (identity.kind !== "resolved") return;
@@ -451,6 +485,18 @@ export async function dispatchDue(
     let envioTemplate: TemplateDef | null = null;
     if (provider() === "meta" && !(await janelaAberta(row.phone))) {
       const def = templateDoKind(row.kind);
+      if (!def) {
+        await query(
+          `UPDATE outbox
+              SET status = 'failed', last_error = $2, send_started_at = NULL,
+                  reported_at = NULL
+            WHERE id = $1 AND status = 'sending'`,
+          [row.id, MARCA_FORA_DA_REGUA]
+        );
+        log.info("outbox.fora_da_regua", { rowId: row.id, orgId: row.org_id, kind: row.kind });
+        totals.failed += 1;
+        continue;
+      }
       // Fail-closed: não deu pra CONFIRMAR aprovação (erro de leitura) é
       // tratado como não aprovado — nunca assume aprovado sem checar.
       const aprovado = await templateAprovado(def.name).catch((err) => {
@@ -483,16 +529,21 @@ export async function dispatchDue(
 
     try {
       // Marcador ANTES do send — é ele que a retomada de órfã consulta acima.
-      await query(`UPDATE outbox SET send_started_at = now() WHERE id = $1`, [
-        row.id,
-      ]);
+      // O template vai junto: a órfã liquidada como `sent` precisa dizer que
+      // saiu por template, senão o OK de uma mensagem da imobiliária não a
+      // acha (`lib/aceite.ts` só entrega o que saiu por template). Tentativa
+      // que falha deixa o nome da última tentativa; a próxima o sobrescreve.
+      await query(
+        `UPDATE outbox SET send_started_at = now(), template_name = $2 WHERE id = $1`,
+        [row.id, envioTemplate?.name ?? null]
+      );
       const res = envioTemplate
         ? await sendTemplate({
             to: row.phone,
             name: envioTemplate.name,
             lang: envioTemplate.lang,
             bodyParams: parametrosDoCorpo(envioTemplate, row),
-            buttonParam: envioTemplate.botao ? row.id : null,
+            botoes: botoesDaLinha(envioTemplate, row.id),
           })
         : await sendText({ to: row.phone, body: renderMessage(row) });
       log.info(envioTemplate ? "outbox.enviado_template" : "outbox.enviado", {

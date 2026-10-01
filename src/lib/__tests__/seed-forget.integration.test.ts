@@ -25,6 +25,9 @@ async function limpar() {
   await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
   await query(`DELETE FROM conversation_turn WHERE phone = $1`, [PHONE]);
   await query(`DELETE FROM outbox WHERE phone = $1`, [PHONE]);
+  await query(`DELETE FROM outbox WHERE org_id = $1`, [ORG]);
+  await query(`DELETE FROM pending_handoff WHERE phone = $1`, [PHONE]);
+  await query(`DELETE FROM conversation_turn WHERE phone = '5511900009999' AND org_id = $1`, [ORG]);
   /**
    * As tabelas do checkpointer não vêm de migration: o `setup()` do LangGraph
    * as cria no primeiro `invoke`. Em banco NOVO elas ainda não existem, e o
@@ -208,6 +211,75 @@ d("fase 4B", () => {
       [PHONE]
     );
     expect(sobrou).toHaveLength(0);
+  });
+
+  /**
+   * A dúvida repassada mora no telefone do TIME, mas o corpo leva o telefone
+   * e o texto de quem perguntou. Apagar só `WHERE phone = <pessoa>` deixaria
+   * a dúvida inteira para trás — o esquecimento a alcança por `params.de`.
+   */
+  it("forget apaga o pedido de dúvida aberto e a dúvida já repassada ao time", async () => {
+    vi.stubEnv("MAX_NOTIFY_SECRET", "s-forget");
+    const { POST } = await import("@/app/api/admin/forget/route");
+    const { enqueue } = await import("../outbox");
+
+    await query(
+      `INSERT INTO pending_handoff (phone, org_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')`,
+      [PHONE, ORG]
+    );
+    const repasse = {
+      orgId: ORG,
+      audience: "platform_user",
+      phone: "5511900009999",
+      recipientName: "Olavo",
+      title: "Dúvida de configuração",
+      linkUrl: null,
+      dealId: null,
+      orgName: "Org",
+      kind: "support_handoff",
+    };
+    await enqueue({
+      ...repasse,
+      dedupeKey: "forget-handoff-1",
+      body: `Dúvida de Ana (+${PHONE}): segredo`,
+      params: { quem: "Ana", de: PHONE },
+    });
+    // A dúvida de OUTRA pessoa, para o mesmo time, fica.
+    await enqueue({
+      ...repasse,
+      dedupeKey: "forget-handoff-2",
+      body: "Dúvida de Bia: outra",
+      params: { quem: "Bia", de: "5511900008888" },
+    });
+
+    // O time já tocou OK: a dúvida virou resposta de um turn DO TIME.
+    await query(
+      `INSERT INTO conversation_turn (org_id, phone, inbound_text, reply_text)
+       VALUES ($1, '5511900009999', 'ok', $2)`,
+      [ORG, `*Mensagem da Org*\n\nDúvida de Ana (Org, +${PHONE}):\n\nsegredo`]
+    );
+    const rawBody = JSON.stringify({ phone: PHONE });
+    const ts = String(Date.now());
+    const res = await POST(
+      new NextRequest("http://max.test/api/admin/forget", {
+        method: "POST",
+        body: rawBody,
+        headers: {
+          "x-max-timestamp": ts,
+          "x-max-signature": sign(ts, rawBody, "s-forget"),
+        },
+      })
+    );
+
+    const { deleted } = await res.json();
+    expect(deleted.pending_handoff).toBe(1);
+    expect(deleted.conversation_turn_repasse).toBe(1);
+    expect(deleted.outbox_repasse).toBe(1);
+    const sobrou = await query<{ dedupe_key: string }>(
+      `SELECT dedupe_key FROM outbox WHERE org_id = $1 AND kind = 'support_handoff'`,
+      [ORG]
+    );
+    expect(sobrou.map((r) => r.dedupe_key)).toEqual(["forget-handoff-2"]);
   });
 
   /**

@@ -1,3 +1,4 @@
+import { interceptar } from "@/lib/aceite";
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
@@ -1335,6 +1336,17 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
       throw err;
     }
   };
+
+  /**
+   * Resposta a template que pede resposta (OK da mensagem da imobiliária,
+   * "Tenho uma dúvida" do lembrete de configuração) — ANTES da identidade: a
+   * parte do negócio é desconhecida para o Max e é quem mais recebe a
+   * mensagem da imobiliária. Sem modelo. Ver `lib/aceite.ts`.
+   */
+  const aceite = await comRastro(() => interceptar(inbound));
+  if (aceite) {
+    return sair(aceite.reply, { orgId: aceite.orgId ?? undefined, error: aceite.marca });
+  }
 
   const identity = await comRastro(() => resolveIdentity(inbound.fromPhone));
 

@@ -98,6 +98,30 @@ export async function POST(req: NextRequest) {
       `DELETE FROM conversation_window WHERE phone = ANY($1)`,
       [bare]
     );
+    // Repasse de dúvida (migration 017): o pedido aberto é chaveado pelo
+    // telefone, e a linha que vai para o TIME leva o telefone e o texto de
+    // quem perguntou — fica no telefone do time, então sai por `params.de`.
+    await del("pending_handoff", `DELETE FROM pending_handoff WHERE phone = ANY($1)`, [bare]);
+    await del(
+      "outbox_repasse",
+      `DELETE FROM outbox WHERE kind = 'support_handoff' AND params->>'de' = ANY($1)`,
+      [bare]
+    );
+    // Quando o time toca OK, a dúvida é ENTREGUE como resposta de um turn do
+    // telefone do time: o texto fica na auditoria (`conversation_turn`) e na
+    // fila (`inbound_queue.reply_text`) dele. O cabeçalho que o aceite monta
+    // traz "+<telefone>" de quem perguntou — é por ele que se acha.
+    const marcas = bare.map((b) => `%+${b}%`);
+    await del(
+      "conversation_turn_repasse",
+      `DELETE FROM conversation_turn WHERE reply_text LIKE ANY($1)`,
+      [marcas]
+    );
+    const r = await client.query(
+      `UPDATE inbound_queue SET reply_text = NULL WHERE reply_text LIKE ANY($1)`,
+      [marcas]
+    );
+    deleted.inbound_queue_repasse = r.rowCount ?? 0;
 
     /**
      * A auditoria de conversa guarda o que a pessoa DISSE — e por isso o

@@ -31,7 +31,18 @@ export interface InboundMessage {
   senderName: string | null;
   /** Id da mensagem citada, quando é resposta a outra mensagem. */
   replyToMessageId: string | null;
+  /**
+   * Payload do botão de resposta rápida tocado (`ok:<id>`, `duvida:<id>`),
+   * quando a mensagem é um toque em botão de template. Opcional: a Z-API não
+   * tem, e o texto visível do botão continua em `text`.
+   */
+  buttonPayload?: string | null;
 }
+
+/** Botão preenchido na hora do envio, na ordem em que o template os declara. */
+export type BotaoEnviado =
+  | { tipo: "url"; param: string }
+  | { tipo: "quick_reply"; payload: string };
 
 /**
  * Status de uma mensagem ENVIADA, como o provedor mandou. A tradução para o

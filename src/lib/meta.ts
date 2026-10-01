@@ -30,6 +30,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { fetchWithTimeout, META_TIMEOUT_MS } from "./http";
 import { classificarMeta, MetaHttpError } from "./transport/erro";
 import type {
+  BotaoEnviado,
   ConnectionState,
   InboundKind,
   InboundMessage,
@@ -108,18 +109,22 @@ export async function sendText(params: {
  * Envio por TEMPLATE — a única saída fora da janela de 24h. `name`/`lang`
  * saem do catálogo (`templates/catalog.ts`), já aprovados na Meta (quem
  * chama, `dispatchDue`, confere `wa_template` antes). `bodyParams` é a lista
- * ordenada de `{{1}}`, `{{2}}`…; o botão de URL, quando o template tem um,
- * leva o único parâmetro dinâmico que a Meta aceita nele — o id do
- * redirecionador `/r/<id>`, porque o link real muda de host por tenant (ver
- * `src/app/r/[id]/route.ts`). Template da parte não tem botão.
+ * ordenada de `{{1}}`, `{{2}}`…; `botoes` segue a ordem do template: o de URL
+ * leva o id do redirecionador `/r/<id>` (o link real muda de host por
+ * tenant, ver `src/app/r/[id]/route.ts`); o de resposta rápida leva o payload
+ * que volta no webhook quando a pessoa toca.
  */
 export async function sendTemplate(params: {
   to: string;
   name: string;
   lang: string;
   bodyParams: string[];
-  /** `null` = template SEM botão (os da parte — ver `TemplateDef.botao`). */
-  buttonParam: string | null;
+  /**
+   * Botões na ORDEM do template aprovado — o índice de cada um é a posição.
+   * Vazio = template sem botão. Mandar parâmetro de botão que o template não
+   * tem (ou deixar de mandar o que ele tem) a Meta recusa (132000).
+   */
+  botoes: BotaoEnviado[];
 }): Promise<{ messageId: string | null }> {
   const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
     method: "POST",
@@ -135,18 +140,21 @@ export async function sendTemplate(params: {
           ...(params.bodyParams.length > 0
             ? [{ type: "body", parameters: params.bodyParams.map((text) => ({ type: "text", text })) }]
             : []),
-          // Componente de botão SÓ quando o template aprovado tem botão: a
-          // Meta recusa (132000) parâmetro de botão num template sem ele.
-          ...(params.buttonParam !== null
-            ? [
-                {
+          ...params.botoes.map((b, i) =>
+            b.tipo === "url"
+              ? {
                   type: "button",
                   sub_type: "url",
-                  index: "0",
-                  parameters: [{ type: "text", text: params.buttonParam }],
-                },
-              ]
-            : []),
+                  index: String(i),
+                  parameters: [{ type: "text", text: b.param }],
+                }
+              : {
+                  type: "button",
+                  sub_type: "quick_reply",
+                  index: String(i),
+                  parameters: [{ type: "payload", payload: b.payload }],
+                }
+          ),
         ],
       },
     }),
@@ -472,6 +480,7 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
   let text: string | null = null;
   let mediaUrl: string | null = null;
   let mimeType: string | null = null;
+  let buttonPayload: string | null = null;
 
   const media = (k: string): Rec | null => (isRec(m[k]) ? (m[k] as Rec) : null);
 
@@ -496,9 +505,11 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
     mimeType = str(d.mime_type);
     text = str(d.caption) ?? str(d.filename);
   } else if (type === "button" && isRec(m.button)) {
-    // Toque num botão de resposta rápida de template: é uma resposta de texto.
+    // Toque num botão de resposta rápida de template: é uma resposta de texto
+    // — e o PAYLOAD diz a qual mensagem ela responde (`lib/aceite.ts`).
     kind = "text";
     text = str(m.button.text) ?? "";
+    buttonPayload = str(m.button.payload);
   } else if (type === "interactive" && isRec(m.interactive)) {
     const r = isRec(m.interactive.button_reply)
       ? m.interactive.button_reply
@@ -507,6 +518,7 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
         : null;
     kind = "text";
     text = r ? (str(r.title) ?? "") : "";
+    buttonPayload = r ? str(r.id) : null;
   }
 
   const ts = Number(m.timestamp);
@@ -523,5 +535,6 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
     timestampMs: Number.isFinite(ts) && ts > 0 ? ts * 1000 : null,
     senderName: nomes.get(from) ?? null,
     replyToMessageId: ctx,
+    buttonPayload,
   };
 }
