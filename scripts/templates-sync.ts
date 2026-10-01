@@ -36,7 +36,7 @@ import { config as loadEnv } from "dotenv";
 loadEnv({ path: process.env.OUTBOX_ENV ?? ".env.local" });
 
 import { query, db } from "../src/lib/db";
-import { todosOsTemplates, BOTAO_TEXTO, type TemplateDef } from "../src/lib/templates/catalog";
+import { botoesEmOrdem, todosOsTemplates, type TemplateDef } from "../src/lib/templates/catalog";
 import { fetchWithTimeout, META_TIMEOUT_MS } from "../src/lib/http";
 
 const APPLY = process.argv.includes("--apply");
@@ -72,8 +72,26 @@ async function estadoAtual(): Promise<Map<string, WaTemplateRow>> {
   return new Map(rows.map((r) => [r.name, r]));
 }
 
+/**
+ * Botões no formato da SUBMISSÃO, na mesma ordem em que o envio os preenche
+ * (`botoesDaLinha` no outbox) — a posição é o índice. URL primeiro e resposta
+ * rápida depois: a Meta exige os dois grupos separados, não intercalados.
+ */
+function botoesDaSubmissao(def: TemplateDef) {
+  return botoesEmOrdem(def.botao).map((b) =>
+    b.tipo === "url"
+      ? {
+          type: "URL",
+          text: b.texto,
+          url: `${redirectBase()}/r/{{1}}`,
+          example: [EXEMPLO_ID_REDIRECT],
+        }
+      : { type: "QUICK_REPLY", text: b.texto }
+  );
+}
+
 function corpoDaSubmissao(def: TemplateDef) {
-  const urlBotao = `${redirectBase()}/r/{{1}}`;
+  const botoes = botoesDaSubmissao(def);
   return {
     name: def.name,
     language: def.lang,
@@ -84,23 +102,7 @@ function corpoDaSubmissao(def: TemplateDef) {
         text: def.body,
         ...(def.exemplos.length > 0 ? { example: { body_text: [def.exemplos] } } : {}),
       },
-      // Templates da parte não têm botão (`TemplateDef.botao`): o cliente
-      // final não tem link pra abrir.
-      ...(def.botao
-        ? [
-            {
-              type: "BUTTONS",
-              buttons: [
-                {
-                  type: "URL",
-                  text: BOTAO_TEXTO,
-                  url: urlBotao,
-                  example: [EXEMPLO_ID_REDIRECT],
-                },
-              ],
-            },
-          ]
-        : []),
+      ...(botoes.length > 0 ? [{ type: "BUTTONS", buttons: botoes }] : []),
     ],
   };
 }
@@ -213,7 +215,7 @@ async function main() {
   console.log("-".repeat(80));
   if (!APPLY && novos > 0) {
     console.log(
-      `\n${novos} template(s) novo(s). Revise os textos com o Olavo (ver ~/.claude/plans/max-templates-rascunho.md) ` +
+      `\n${novos} template(s) novo(s). Revise os textos com o Olavo (página "Régua final" — https://claude.ai/artifact/HA4MTTFRJR7y2bqHZgAhW9) ` +
         `antes de rodar com --apply — rejeição custa dias de nova análise.`
     );
   }

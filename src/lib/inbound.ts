@@ -42,6 +42,7 @@ export interface InboundRow extends Record<string, unknown> {
   sender_name: string | null;
   reply_to_message_id: string | null;
   timestamp_ms: string | number | null;
+  button_payload: string | null;
   attempts: number;
   reply_text: string | null;
   /** O envio COMEÇOU numa tentativa (ver migration 007). */
@@ -66,8 +67,8 @@ export async function enqueueInbound(
   const rows = await query<{ id: string }>(
     `INSERT INTO inbound_queue
        (id, message_id, from_phone, group_id, kind, text, media_url, mime_type,
-        sender_name, reply_to_message_id, timestamp_ms)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        sender_name, reply_to_message_id, timestamp_ms, button_payload)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      ON CONFLICT (message_id) DO NOTHING
      RETURNING id`,
     [
@@ -82,6 +83,7 @@ export async function enqueueInbound(
       msg.senderName,
       msg.replyToMessageId,
       msg.timestampMs,
+      msg.buttonPayload ?? null,
     ]
   );
 
@@ -98,7 +100,7 @@ export async function enqueueInbound(
 
 const CLAIM_COLUMNS = `id, message_id, from_phone, group_id, kind, text,
   media_url, mime_type, sender_name, reply_to_message_id, timestamp_ms,
-  attempts, reply_text, last_send_started_at`;
+  button_payload, attempts, reply_text, last_send_started_at`;
 
 /**
  * Dá pra responder agora?
@@ -290,6 +292,7 @@ function toInboundMessage(row: InboundRow): InboundMessage {
     timestampMs: row.timestamp_ms == null ? null : Number(row.timestamp_ms),
     senderName: row.sender_name,
     replyToMessageId: row.reply_to_message_id,
+    buttonPayload: row.button_payload ?? null,
   };
 }
 

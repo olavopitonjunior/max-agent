@@ -78,6 +78,7 @@ describe("parseWebhook — mensagens", () => {
         timestampMs: 1758549600000,
         senderName: "Ana Corretora",
         replyToMessageId: "wamid.CITADA",
+        buttonPayload: null,
       },
     ]);
   });
@@ -140,10 +141,22 @@ describe("parseWebhook — mensagens", () => {
       }),
       PNID
     );
-    expect(ev.messages.map((m) => [m.kind, m.text])).toEqual([
-      ["text", "Sim"],
-      ["text", "Venda"],
+    expect(ev.messages.map((m) => [m.kind, m.text, m.buttonPayload])).toEqual([
+      ["text", "Sim", "SIM"],
+      ["text", "Venda", "b1"],
     ]);
+  });
+
+  it("texto digitado não traz payload — só o toque diz a qual mensagem responde", () => {
+    const ev = parseWebhook(
+      webhook({
+        messages: [
+          { from: "5511987654321", id: "wamid.T", timestamp: "1", type: "text", text: { body: "ok" } },
+        ],
+      }),
+      PNID
+    );
+    expect(ev.messages[0].buttonPayload ?? null).toBeNull();
   });
 
   it("reação, sticker e grupo não viram mensagem", () => {
@@ -212,7 +225,7 @@ describe("parseWebhook — mensagens", () => {
         {
           event: "REJECTED",
           message_template_id: 123456,
-          message_template_name: "imobpro_negocio_status",
+          message_template_name: "max_formulario_concluido",
           message_template_language: "pt_BR",
           reason: "INVALID_FORMAT",
         },
@@ -225,7 +238,7 @@ describe("parseWebhook — mensagens", () => {
     expect(ev.outrosNumeros).toBe(0);
     expect(ev.templateStatusUpdates).toEqual([
       {
-        name: "imobpro_negocio_status",
+        name: "max_formulario_concluido",
         lang: "pt_BR",
         status: "REJECTED",
         metaId: "123456",
@@ -237,17 +250,17 @@ describe("parseWebhook — mensagens", () => {
   it("REINSTATED vira APPROVED — é o template pausado por qualidade voltando a poder ser usado", () => {
     const ev = parseWebhook(
       webhook(
-        { event: "REINSTATED", message_template_name: "imobpro_aviso", message_template_language: "pt_BR" },
+        { event: "REINSTATED", message_template_name: "max_mensagem_imobiliaria", message_template_language: "pt_BR" },
         "message_template_status_update"
       ),
       PNID
     );
-    expect(ev.templateStatusUpdates[0]).toMatchObject({ name: "imobpro_aviso", status: "APPROVED" });
+    expect(ev.templateStatusUpdates[0]).toMatchObject({ name: "max_mensagem_imobiliaria", status: "APPROVED" });
   });
 
   it("somenteWaba filtra por WABA (entry.id) — outro app inscrito noutra WABA não mexe no nosso template", () => {
     const payload = webhook(
-      { event: "APPROVED", message_template_name: "imobpro_aviso", message_template_language: "pt_BR" },
+      { event: "APPROVED", message_template_name: "max_mensagem_imobiliaria", message_template_language: "pt_BR" },
       "message_template_status_update"
     );
     // Do WABA certo: passa.
@@ -441,14 +454,14 @@ describe("chamadas à Graph API", () => {
     });
   });
 
-  it("sendTemplate: POST type=template com body + botão de URL, sempre com o parâmetro do botão", async () => {
+  it("sendTemplate: POST type=template com body + botão de URL com o parâmetro", async () => {
     fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL" }] }));
     const res = await sendTemplate({
       to: "5511987654321",
-      name: "imobpro_negocio_status",
+      name: "max_formulario_concluido",
       lang: "pt_BR",
       bodyParams: ["Ana", "Venda Apto 302", "Assinatura", "RE/MAX Trio"],
-      buttonParam: "row-id-123",
+      botoes: [{ tipo: "url", param: "row-id-123" }],
     });
     expect(res).toEqual({ messageId: "wamid.TPL" });
     const [url, init] = fetchMock.mock.calls[0];
@@ -459,7 +472,7 @@ describe("chamadas à Graph API", () => {
       to: "5511987654321",
       type: "template",
       template: {
-        name: "imobpro_negocio_status",
+        name: "max_formulario_concluido",
         language: { code: "pt_BR" },
         components: [
           {
@@ -479,21 +492,45 @@ describe("chamadas à Graph API", () => {
 
   it("sendTemplate: sem parâmetro de corpo, o botão continua indo — a Meta exige sempre o dele", async () => {
     fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL2" }] }));
-    await sendTemplate({ to: "1", name: "imobpro_aviso", lang: "pt_BR", bodyParams: [], buttonParam: "id" });
+    await sendTemplate({ to: "1", name: "x", lang: "pt_BR", bodyParams: [], botoes: [{ tipo: "url", param: "id" }] });
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse(init.body).template.components).toEqual([
       { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "id" }] },
     ]);
   });
 
-  it("sendTemplate: buttonParam null = template SEM botão — nenhum componente de botão vai (a Meta recusa com 132000)", async () => {
+  it("sendTemplate: resposta rápida leva o payload — é por ele que o toque volta identificado", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL4" }] }));
+    await sendTemplate({
+      to: "1",
+      name: "max_configuracao_pendente",
+      lang: "pt_BR",
+      bodyParams: [],
+      botoes: [
+        { tipo: "url", param: "r9" },
+        { tipo: "quick_reply", payload: "duvida:r9" },
+      ],
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body).template.components).toEqual([
+      { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: "r9" }] },
+      {
+        type: "button",
+        sub_type: "quick_reply",
+        index: "1",
+        parameters: [{ type: "payload", payload: "duvida:r9" }],
+      },
+    ]);
+  });
+
+  it("sendTemplate: sem botões = template SEM botão — nenhum componente de botão vai (a Meta recusa com 132000)", async () => {
     fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL3" }] }));
     await sendTemplate({
       to: "1",
-      name: "imobpro_contrato_assinado_parte",
+      name: "max_contrato_assinado_parte",
       lang: "pt_BR",
       bodyParams: ["Carlos", "RE/MAX Trio"],
-      buttonParam: null,
+      botoes: [],
     });
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse(init.body).template.components).toEqual([

@@ -172,14 +172,14 @@ describe("POST /api/meta-webhook", () => {
   it("message_template_status_update sozinho (sem mensagem nem status): 200 e aplica, mesmo sem phoneNumberIds", async () => {
     const body = corpoTemplate({
       event: "APPROVED",
-      message_template_name: "imobpro_aviso",
+      message_template_name: "max_mensagem_imobiliaria",
       message_template_language: "pt_BR",
     });
     const res = await POST(post(body));
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, templates: 1 });
     expect(aplicarTemplate).toHaveBeenCalledWith({
-      name: "imobpro_aviso",
+      name: "max_mensagem_imobiliaria",
       lang: "pt_BR",
       status: "APPROVED",
       metaId: null,
@@ -197,7 +197,7 @@ describe("POST /api/meta-webhook", () => {
     aplicarTemplate.mockRejectedValueOnce(new Error("timeout do Neon"));
     const body = corpoTemplate({
       event: "REJECTED",
-      message_template_name: "imobpro_aviso",
+      message_template_name: "max_mensagem_imobiliaria",
       message_template_language: "pt_BR",
       reason: "INVALID_FORMAT",
     });

@@ -300,6 +300,9 @@ export async function reconcile(): Promise<ReconcileTotals> {
        FROM outbox
       WHERE reported_at IS NULL
         AND report_attempts < $1
+        -- Repasse de dúvida nasce aqui, não no contractmaker: lá ninguém
+        -- conhece a chave \`handoff:<wamid>\`, e cada report seria recusado.
+        AND kind IS DISTINCT FROM 'support_handoff'
         AND (delivery_status IN ('delivered', 'read', 'unconfirmed')
              OR status = 'failed')
       ORDER BY report_attempts, created_at

@@ -26,7 +26,7 @@ vi.mock("../zapi", async (orig) => ({
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 
-const { enqueue, dispatchDue, MARCA_TEMPLATE_PENDENTE } = await import("../outbox");
+const { enqueue, dispatchDue, MARCA_TEMPLATE_PENDENTE, MARCA_FORA_DA_REGUA } = await import("../outbox");
 const { enqueueInbound } = await import("../inbound");
 const { janelaAberta } = await import("../janela24h");
 const { applyFalhaDeEnvio, applyStatusCallback } = await import("../delivery");
@@ -39,7 +39,10 @@ const metaSend = meta.sendText as unknown as ReturnType<typeof vi.fn>;
 const metaSendTemplate = meta.sendTemplate as unknown as ReturnType<typeof vi.fn>;
 const zapiSend = zapi.sendText as unknown as ReturnType<typeof vi.fn>;
 
-async function linhaVencida(dedupeKey: string) {
+/** Template da linha padrão (`kind: form_completed`). */
+const TPL = "max_formulario_concluido";
+
+async function linhaVencida(dedupeKey: string, kind: string | null = "form_completed") {
   await enqueue({
     orgId: "org-meta",
     dedupeKey,
@@ -51,6 +54,8 @@ async function linhaVencida(dedupeKey: string) {
     linkUrl: "https://imobpro.ia.br/deals/1",
     dealId: "deal1",
     orgName: "FINCasa",
+    kind,
+    params: { negocio: "Venda Apto 302" },
   });
   await query(`UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = $1`, [
     dedupeKey,
@@ -87,9 +92,8 @@ d("canal Meta (Postgres real)", () => {
     await query(`DELETE FROM outbox WHERE org_id = 'org-meta'`);
     await query(`DELETE FROM conversation_window WHERE phone = $1`, [PHONE]);
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
-    // Sem isto, um teste que aprova `imobpro_aviso` vazaria pro próximo — o
-    // genérico é o template de TODA linha sem `kind` explícito.
-    await query(`DELETE FROM wa_template WHERE name = 'imobpro_aviso'`);
+    // Sem isto, um teste que aprova o template vazaria pro próximo.
+    await query(`DELETE FROM wa_template WHERE name = $1`, [TPL]);
   });
 
   afterEach(() => vi.unstubAllEnvs());
@@ -98,7 +102,7 @@ d("canal Meta (Postgres real)", () => {
     await query(`DELETE FROM outbox WHERE org_id = 'org-meta'`);
     await query(`DELETE FROM conversation_window WHERE phone = $1`, [PHONE]);
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
-    await query(`DELETE FROM wa_template WHERE name = 'imobpro_aviso'`);
+    await query(`DELETE FROM wa_template WHERE name = $1`, [TPL]);
   });
 
   describe("janela de 24h no outbox", () => {
@@ -123,27 +127,34 @@ d("canal Meta (Postgres real)", () => {
 
     it("janela fechada, template APROVADO: sai por template, não por texto livre", async () => {
       await query(
-        `INSERT INTO wa_template (name, lang, status) VALUES ('imobpro_aviso', 'pt_BR', 'APPROVED')`
+        `INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`,
+        [TPL]
       );
       await linhaVencida("k-template");
       const totals = await dispatchDue();
 
       expect(metaSend).not.toHaveBeenCalled();
       expect(metaSendTemplate).toHaveBeenCalledTimes(1);
-      expect(metaSendTemplate.mock.calls[0][0]).toMatchObject({ name: "imobpro_aviso", lang: "pt_BR" });
+      expect(metaSendTemplate.mock.calls[0][0]).toMatchObject({
+        name: TPL,
+        lang: "pt_BR",
+        bodyParams: ["Ana", "FINCasa", "Venda Apto 302"],
+      });
       expect(totals.sent).toBe(1);
       const l = await linha("k-template");
       expect(l.status).toBe("sent");
       expect(l.provider_message_id).toBe("wamid.TPL");
-      expect(l.template_name).toBe("imobpro_aviso");
+      expect(l.template_name).toBe(TPL);
       // Template da equipe: o botão leva o id da linha (redirecionador /r/<id>).
-      expect(typeof metaSendTemplate.mock.calls[0][0].buttonParam).toBe("string");
+      const [b] = metaSendTemplate.mock.calls[0][0].botoes;
+      expect(b.tipo).toBe("url");
+      expect(typeof b.param).toBe("string");
     });
 
     /** A parte não tem link: o template dela é aprovado SEM botão. */
     it("template da PARTE sai sem parâmetro de botão", async () => {
       await query(
-        `INSERT INTO wa_template (name, lang, status) VALUES ('imobpro_contrato_assinado_parte', 'pt_BR', 'APPROVED')
+        `INSERT INTO wa_template (name, lang, status) VALUES ('max_contrato_assinado_parte', 'pt_BR', 'APPROVED')
          ON CONFLICT (name) DO UPDATE SET status = 'APPROVED'`
       );
       await linhaVencida("k-parte");
@@ -152,12 +163,43 @@ d("canal Meta (Postgres real)", () => {
         const totals = await dispatchDue();
         expect(totals.sent).toBe(1);
         expect(metaSendTemplate.mock.calls[0][0]).toMatchObject({
-          name: "imobpro_contrato_assinado_parte",
-          buttonParam: null,
+          name: "max_contrato_assinado_parte",
+          botoes: [],
         });
       } finally {
-        await query(`DELETE FROM wa_template WHERE name = 'imobpro_contrato_assinado_parte'`);
+        await query(`DELETE FROM wa_template WHERE name = 'max_contrato_assinado_parte'`);
       }
+    });
+
+    /**
+     * Régua de 01/10: tipo sem template não vira mensagem paga genérica.
+     * Fora da janela ele desiste na hora — represar seria esperar uma
+     * aprovação que nunca vem.
+     */
+    it.each([["stage_change"], [null]])(
+      "janela fechada, tipo FORA DA RÉGUA (%s): não chama a Meta e falha com o motivo",
+      async (kind) => {
+        await linhaVencida(`k-fora-${kind}`, kind);
+        const totals = await dispatchDue();
+
+        expect(metaSend).not.toHaveBeenCalled();
+        expect(metaSendTemplate).not.toHaveBeenCalled();
+        expect(totals.failed).toBe(1);
+        const l = await linha(`k-fora-${kind}`);
+        expect(l.status).toBe("failed");
+        expect(l.last_error).toBe(MARCA_FORA_DA_REGUA);
+      }
+    );
+
+    it("tipo fora da régua com a janela ABERTA ainda sai, como texto livre", async () => {
+      await query(`INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now() - interval '1 hour')`, [
+        PHONE,
+      ]);
+      await linhaVencida("k-fora-aberta", "stage_change");
+      const totals = await dispatchDue();
+      expect(totals.sent).toBe(1);
+      expect(metaSend).toHaveBeenCalledTimes(1);
+      expect(metaSendTemplate).not.toHaveBeenCalled();
     });
 
     it("janela aberta: sai como texto livre pela Meta e grava o wamid", async () => {
@@ -319,7 +361,7 @@ d("canal Meta (Postgres real)", () => {
       //    silêncio como "órfã com envio já iniciado" (o bug do C1: sem
       //    limpar send_started_at, cairia ali e nunca chamaria sendTemplate).
       await query(`DELETE FROM conversation_window WHERE phone = $1`, [PHONE]);
-      await query(`INSERT INTO wa_template (name, lang, status) VALUES ('imobpro_aviso', 'pt_BR', 'APPROVED')`);
+      await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [TPL]);
       await query(`UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = 'k-131047'`);
       metaSend.mockClear();
       metaSendTemplate.mockClear();
@@ -330,7 +372,7 @@ d("canal Meta (Postgres real)", () => {
       expect(metaSend).not.toHaveBeenCalled();
       const final = await linha("k-131047");
       expect(final.status).toBe("sent");
-      expect(final.template_name).toBe("imobpro_aviso");
+      expect(final.template_name).toBe(TPL);
       expect(final.provider_message_id).toBe("wamid.TPL");
       expect(final.last_error).toBeNull();
     });
