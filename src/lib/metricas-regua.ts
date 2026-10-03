@@ -220,6 +220,29 @@ export async function metricasDoMax(c: Consulta, a: Periodo): Promise<{ metricas
   // ── Guardrails ───────────────────────────────────────────────────────
   const rejeitados = await um(c, `SELECT count(*) AS c FROM wa_template WHERE status = 'REJECTED' AND name LIKE 'max\\_%'`, []);
   out.push(m("guardrail", "templates max_* rejeitados", n(rejeitados.c), "num", "0", n(rejeitados.c) === 0, null));
+  // Template reclassificado pela Meta como MARKETING: custo maior, limite de
+  // frequência por pessoa (131049) e opção de descadastro.
+  const marketing = (
+    await c.query(
+      `SELECT w.name FROM wa_template w
+        WHERE w.name LIKE 'max\\_%' AND w.category = 'MARKETING' AND w.status = 'APPROVED'
+          -- v1 aposentado: o v2 aprovado é quem sai, o v1 não pesa mais.
+          AND NOT EXISTS (SELECT 1 FROM wa_template v
+                           WHERE v.name = w.name || '_v2' AND v.status = 'APPROVED')
+        ORDER BY 1`
+    )
+  ).rows as Linha[];
+  out.push(
+    m(
+      "guardrail",
+      "templates max_* classificados como MARKETING",
+      marketing.length ? marketing.map((r) => r.name).join("; ") : "nenhum",
+      "texto",
+      "nenhum",
+      marketing.length === 0,
+      null
+    )
+  );
   // Qualquer status diferente de APPROVED deixa aquele tema mudo fora da janela.
   const naoAprovados = (
     await c.query(

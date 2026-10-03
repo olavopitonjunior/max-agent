@@ -306,3 +306,63 @@ d("aceite (Postgres real)", () => {
     });
   });
 });
+
+d("apresentação do Max na primeira resposta (boas-vindas por template)", () => {
+  beforeEach(async () => {
+    await query(`DELETE FROM outbox WHERE org_id = $1`, [ORG]);
+    await query(`DELETE FROM conversation_turn WHERE phone = $1`, [PHONE]);
+  });
+  afterAll(async () => {
+    await query(`DELETE FROM outbox WHERE org_id = $1`, [ORG]);
+    await query(`DELETE FROM conversation_turn WHERE phone = $1`, [PHONE]);
+  });
+
+  const APRESENTACAO =
+    "Olá, Ana! Eu sou o Max, o assistente da RE/MAX Trio no WhatsApp. Se quiser saber o que mais posso fazer, é só perguntar.";
+
+  it("primeira mensagem depois das boas-vindas por template: o Max se apresenta — uma vez só", async () => {
+    await enviada("ap-1", { kind: "welcome", template: "max_boas_vindas_v2", body: APRESENTACAO });
+    const m1 = msg({ text: "oi" });
+    expect(await interceptar(m1)).toEqual({ reply: APRESENTACAO, orgId: ORG, marca: "apresentacao_entregue" });
+    // Retentativa da MESMA mensagem reencontra; a próxima segue para a conversa.
+    expect((await interceptar(m1))?.marca).toBe("apresentacao_entregue");
+    expect(await interceptar(msg({ text: "o que você faz?" }))).toBeNull();
+  });
+
+  it("boas-vindas que saíram como texto livre (janela aberta) já tinham a apresentação: nada a fazer", async () => {
+    await enviada("ap-2", { kind: "welcome", template: null, body: APRESENTACAO });
+    expect(await interceptar(msg({ text: "oi" }))).toBeNull();
+  });
+
+  it("boas-vindas pelo v1 (que já se apresenta) não repetem a apresentação", async () => {
+    await enviada("ap-3", { kind: "welcome", template: "max_boas_vindas", body: APRESENTACAO });
+    expect(await interceptar(msg({ text: "oi" }))).toBeNull();
+  });
+
+  it("quem já conversou depois das boas-vindas não recebe apresentação no meio da conversa", async () => {
+    await enviada("ap-4", { kind: "welcome", template: "max_boas_vindas_v2", body: APRESENTACAO, diasAtras: 2 });
+    await query(
+      `INSERT INTO conversation_turn (org_id, phone, message_id, inbound_text, reply_text)
+       VALUES ($1, $2, 'wamid.antes', '(áudio)', 'resposta')`,
+      [ORG, PHONE]
+    );
+    expect(await interceptar(msg({ text: "oi" }))).toBeNull();
+  });
+
+  it("duas boas-vindas (convite reenviado): uma apresentação por pessoa, com a mais recente", async () => {
+    await enviada("ap-5a", { kind: "welcome", template: "max_boas_vindas_v2", body: "antiga", diasAtras: 3 });
+    await enviada("ap-5b", { kind: "welcome", template: "max_boas_vindas_v2", body: APRESENTACAO, diasAtras: 1 });
+    expect((await interceptar(msg({ text: "oi" })))?.reply).toBe(APRESENTACAO);
+    expect(await interceptar(msg({ text: "bom dia" }))).toBeNull();
+  });
+
+  it("pergunta de verdade como primeira mensagem segue para o grafo, e a apresentação é consumida", async () => {
+    await enviada("ap-6", { kind: "welcome", template: "max_boas_vindas_v2", body: APRESENTACAO });
+    expect(await interceptar(msg({ text: "como cadastro uma venda?" }))).toBeNull();
+    expect(await interceptar(msg({ text: "oi" }))).toBeNull();
+    const [row] = await query<{ released_at: Date | null }>(
+      `SELECT released_at FROM outbox WHERE dedupe_key = 'ap-6'`
+    );
+    expect(row.released_at).not.toBeNull();
+  });
+});

@@ -180,3 +180,45 @@ describe("parametrosDoCorpo", () => {
     expect(negocio.length).toBeLessThanOrEqual(120);
   });
 });
+
+describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", () => {
+  const comV2 = [
+    "form_completed",
+    "form_reminder",
+    "form_reminder_parte",
+    "welcome",
+    "onboarding_pending",
+    "support_handoff",
+    "manual_message",
+    "manual_message_parte",
+  ];
+
+  it("ordem de preferência [v2, v1] nos 8 kinds; os outros só v1", async () => {
+    const { templatesDoKind } = await import("../templates/catalog");
+    for (const k of comV2) {
+      const [v2, v1] = templatesDoKind(k);
+      expect(v2.name, k).toBe(`${v1.name}_v2`);
+    }
+    for (const k of ["contract_signed", "contract_signed_parte", "form_completed_parte", "survey_invite"]) {
+      expect(templatesDoKind(k), k).toHaveLength(1);
+    }
+    expect(templatesDoKind("stage_change")).toEqual([]);
+  });
+
+  it("v2 tem as MESMAS variáveis e os MESMOS botões do v1 — o envio não muda", async () => {
+    const { templatesDoKind } = await import("../templates/catalog");
+    for (const k of comV2) {
+      const [v2, v1] = templatesDoKind(k);
+      expect(v2.vars, k).toEqual(v1.vars);
+      expect(v2.botao, k).toEqual(v1.botao);
+    }
+  });
+
+  it("v2 sem apresentação, convite ou suspense — o que levou ao MARKETING", async () => {
+    const { templatesDoKind } = await import("../templates/catalog");
+    for (const k of comV2) {
+      const [v2] = templatesDoKind(k);
+      expect(v2.body, k).not.toMatch(/Eu sou o Max|Se quiser saber|é só perguntar|avisa:|tem uma mensagem para você/i);
+    }
+  });
+});

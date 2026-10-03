@@ -174,6 +174,56 @@ d("canal Meta (Postgres real)", () => {
       expect(l.error_code).toBe(132000);
     });
 
+    /** v2 transacional assume quando aprovado; até lá o v1 segue valendo. */
+    it("usa o v2 quando aprovado; sem o v2, o v1; nenhum aprovado, represa", async () => {
+      const V2 = `${TPL}_v2`;
+      try {
+        await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [TPL]);
+        await linhaVencida("k-v1");
+        await dispatchDue();
+        expect(metaSendTemplate.mock.calls.at(-1)![0].name).toBe(TPL);
+
+        await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [V2]);
+        await linhaVencida("k-v2");
+        await dispatchDue();
+        expect(metaSendTemplate.mock.calls.at(-1)![0].name).toBe(V2);
+        expect((await linha("k-v2")).template_name).toBe(V2);
+      } finally {
+        await query(`DELETE FROM wa_template WHERE name = $1`, [V2]);
+      }
+    });
+
+    it("v2 recusado pela Meta no envio: a próxima passada vai pelo v1 aprovado, não repete o v2", async () => {
+      const V2 = `${TPL}_v2`;
+      try {
+        await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED'), ($2, 'pt_BR', 'APPROVED')`, [TPL, V2]);
+        await linhaVencida("k-recusa");
+        await query(
+          `UPDATE outbox SET last_error = $2 WHERE dedupe_key = $1`,
+          ["k-recusa", `${MARCA_TEMPLATE_INVALIDO} (#132015, ${V2})`]
+        );
+        await dispatchDue();
+        expect(metaSendTemplate.mock.calls.at(-1)![0].name).toBe(TPL);
+      } finally {
+        await query(`DELETE FROM wa_template WHERE name = $1`, [V2]);
+      }
+    });
+
+    it("entre aprovados, prefere o que a Meta não classificou como MARKETING", async () => {
+      const V2 = `${TPL}_v2`;
+      try {
+        await query(
+          `INSERT INTO wa_template (name, lang, status, category) VALUES ($1, 'pt_BR', 'APPROVED', 'UTILITY'), ($2, 'pt_BR', 'APPROVED', 'MARKETING')`,
+          [TPL, V2]
+        );
+        await linhaVencida("k-cat");
+        await dispatchDue();
+        expect(metaSendTemplate.mock.calls.at(-1)![0].name).toBe(TPL);
+      } finally {
+        await query(`DELETE FROM wa_template WHERE name = $1`, [V2]);
+      }
+    });
+
     /** A parte não tem link: o template dela é aprovado SEM botão. */
     it("template da PARTE sai sem parâmetro de botão", async () => {
       await query(

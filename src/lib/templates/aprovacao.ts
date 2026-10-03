@@ -17,6 +17,18 @@ export async function templateAprovado(name: string): Promise<boolean> {
 }
 
 /**
+ * Os APROVADOS entre `names`, com a categoria que a Meta deu (nome → categoria).
+ * Uma leitura para os candidatos do kind ([v2, v1]).
+ */
+export async function templatesAprovados(names: string[]): Promise<Map<string, string>> {
+  const rows = await query<{ name: string; category: string | null }>(
+    `SELECT name, category FROM wa_template WHERE name = ANY($1) AND status = 'APPROVED'`,
+    [names]
+  );
+  return new Map(rows.map((r) => [r.name, r.category ?? ""]));
+}
+
+/**
  * Aplica o que o webhook `message_template_status_update` da Meta informou.
  * `UPSERT`: o primeiro evento de um template ainda não submetido por este
  * serviço (submissão manual no Business Manager, por exemplo) cria a linha —

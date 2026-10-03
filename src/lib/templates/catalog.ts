@@ -223,14 +223,92 @@ export const KINDS_COM_ACEITE: readonly string[] = [
   "support_handoff",
 ];
 
-/** Todos os templates (sem repetição), para a submissão e para os testes de regra. */
+/**
+ * Versão 2 — texto estritamente TRANSACIONAL (decisão do Olavo, 03/10/2026).
+ *
+ * Em 03/10 a Meta reclassificou 7 dos 11 templates de UTILITY para MARKETING
+ * (`previous_category: UTILITY`): mais caro, sujeito ao limite de frequência
+ * por pessoa (erro 131049, visto em produção) e com opção de descadastro. O
+ * v2 diz o fato da transação da pessoa e a ação — sem apresentação, convite
+ * ou suspense. A apresentação do Max saiu do template de boas-vindas e vai
+ * como texto livre na primeira resposta da pessoa (`lib/aceite.ts`).
+ *
+ * Mesmas variáveis e botões do v1. O envio usa o PRIMEIRO aprovado entre
+ * [v2, v1] (`templatesDoKind`): nada fica mudo enquanto a Meta analisa o v2.
+ */
+const V2: Record<string, TemplateDef> = {
+  form_completed: t(
+    "max_formulario_concluido_v2",
+    "Olá, {{1}}! Formulário concluído na {{2}}: o negócio {{3}} já tem todas as respostas das partes. Toque no botão abaixo para abrir o negócio.",
+    [NOME, ORG, NEGOCIO],
+    ["Ana", "RE/MAX Trio", "Venda Apto 302"],
+    ABRIR_NEGOCIO
+  ),
+  form_reminder: t(
+    "max_formulario_pendente_v2",
+    "Olá, {{1}}! Formulário incompleto na {{2}}: o negócio {{3}} ainda tem respostas pendentes das partes. Toque no botão abaixo para abrir o negócio e reenviar o link.",
+    [NOME, ORG, NEGOCIO],
+    ["Ana", "RE/MAX Trio", "Venda Apto 302"],
+    ABRIR_NEGOCIO
+  ),
+  form_reminder_parte: t(
+    "max_formulario_pendente_parte_v2",
+    "Olá, {{1}}! O formulário do seu negócio com a {{2}} está incompleto. Toque no botão abaixo para continuar o preenchimento.",
+    [NOME, ORG],
+    ["Carlos", "RE/MAX Trio"],
+    { tipo: "url", texto: "Continuar formulário" }
+  ),
+  welcome: t(
+    "max_boas_vindas_v2",
+    "Olá, {{1}}! Seu acesso à {{2}} foi aprovado. Toque no botão abaixo para criar sua senha de primeiro acesso. As notificações dos seus negócios chegarão por este número.",
+    [NOME, ORG],
+    ["Ana", "RE/MAX Trio"],
+    { tipo: "url", texto: "Fazer primeiro acesso" }
+  ),
+  onboarding_pending: t(
+    "max_configuracao_pendente_v2",
+    "Olá, {{1}}! A configuração inicial da {{2}} ainda não foi concluída. Toque em \"Continuar configuração\" para concluir. Se tiver dúvida sobre a configuração, toque em \"Tenho uma dúvida\".",
+    [NOME, ORG],
+    ["Ana", "RE/MAX Trio"],
+    { tipo: "url_e_ok", texto: "Continuar configuração", ok: "Tenho uma dúvida" }
+  ),
+  support_handoff: t(
+    "max_duvida_de_cliente_v2",
+    "Olá, {{1}}! Nova dúvida de configuração recebida de {{2}}, da {{3}}. Responda OK para ver a dúvida.",
+    [NOME, { param: "quem" }, ORG],
+    ["Olavo", "Ana Souza", "RE/MAX Trio"],
+    OK
+  ),
+};
+const MENSAGEM_V2 = t(
+  "max_mensagem_imobiliaria_v2",
+  "Olá, {{1}}! A {{2}} enviou uma mensagem sobre o seu negócio. Responda OK para recebê-la aqui.",
+  [NOME, ORG],
+  ["Carlos", "RE/MAX Trio"],
+  OK
+);
+V2.manual_message = MENSAGEM_V2;
+V2.manual_message_parte = MENSAGEM_V2;
+
+/** Todos os templates (sem repetição, v1 e v2), para a submissão, o refresh e os testes de regra. */
 export function todosOsTemplates(): TemplateDef[] {
-  return [...new Map(Object.values(CATALOGO).map((d) => [d.name, d])).values()];
+  return [
+    ...new Map([...Object.values(CATALOGO), ...Object.values(V2)].map((d) => [d.name, d])).values(),
+  ];
 }
 
-/** O template do `kind`, ou `null` quando o tipo está FORA DA RÉGUA. */
+/**
+ * Os templates do `kind` em ordem de preferência — [v2, v1] quando há v2 —, ou
+ * `[]` quando o tipo está FORA DA RÉGUA. O envio usa o primeiro APROVADO.
+ */
+export function templatesDoKind(kind: string | null | undefined): TemplateDef[] {
+  if (!kind || !CATALOGO[kind]) return [];
+  return V2[kind] ? [V2[kind], CATALOGO[kind]] : [CATALOGO[kind]];
+}
+
+/** O template preferido do `kind`, ou `null` quando o tipo está FORA DA RÉGUA. */
 export function templateDoKind(kind: string | null | undefined): TemplateDef | null {
-  return (kind && CATALOGO[kind]) || null;
+  return templatesDoKind(kind)[0] ?? null;
 }
 
 /** O que a linha do outbox oferece para montar os parâmetros. */

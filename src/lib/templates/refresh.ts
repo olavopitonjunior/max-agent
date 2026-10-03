@@ -56,6 +56,8 @@ interface TemplateNaMeta {
   language: string;
   id: string;
   rejected_reason?: string;
+  /** A Meta pode RECLASSIFICAR (UTILITY → MARKETING) depois de aprovar. */
+  category?: string;
   components?: Array<{ type: string; text?: string; buttons?: Array<{ type: string }> }>;
 }
 
@@ -66,7 +68,7 @@ async function lerDaMeta(def: TemplateDef): Promise<TemplateNaMeta | null> {
   const url =
     `${graphBase()}/${waba}/message_templates` +
     `?name=${encodeURIComponent(def.name)}` +
-    `&fields=name,status,language,id,rejected_reason,components&limit=50`;
+    `&fields=name,status,language,id,rejected_reason,category,components&limit=50`;
   const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, META_TIMEOUT_MS);
   const corpo = (await res.json().catch(() => ({}))) as {
     data?: TemplateNaMeta[];
@@ -88,14 +90,14 @@ async function lerDaMeta(def: TemplateDef): Promise<TemplateNaMeta | null> {
 async function gravar(
   def: TemplateDef,
   antes: string | null,
-  t: { status: string; id: string | null; reason: string | null }
+  t: { status: string; id: string | null; reason: string | null; category?: string | null }
 ): Promise<boolean> {
   if (antes === null) {
     const r = await query<{ name: string }>(
-      `INSERT INTO wa_template (name, lang, status, meta_id, rejected_reason, updated_at)
-       VALUES ($1, $2, $3, $4, $5, now())
+      `INSERT INTO wa_template (name, lang, status, meta_id, rejected_reason, category, updated_at)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6, $7), now())
        ON CONFLICT (name) DO NOTHING RETURNING name`,
-      [def.name, def.lang, t.status, t.id, t.status === "REJECTED" ? t.reason : null]
+      [def.name, def.lang, t.status, t.id, t.status === "REJECTED" ? t.reason : null, t.category ?? null, def.category]
     );
     return r.length > 0;
   }
@@ -131,6 +133,15 @@ export async function refreshTemplates(): Promise<ResultadoRefresh[]> {
         out.push({ name: def.name, acao: "ausente", de: antes });
         continue;
       }
+      // Categoria: a Meta reclassificou 7 templates de UTILITY para MARKETING
+      // em 03/10/2026 (mais caro, limite por pessoa — erro 131049). Fica
+      // gravada para a métrica acusar.
+      if (t.category && antes !== null) {
+        await query(`UPDATE wa_template SET category = $2 WHERE name = $1 AND category IS DISTINCT FROM $2`, [
+          def.name,
+          t.category,
+        ]);
+      }
       const body = t.components?.find((c) => c.type === "BODY")?.text ?? null;
       const confere =
         body !== null && normalizarTexto(body) === normalizarTexto(def.body) && botoesConferem(def, t);
@@ -150,7 +161,7 @@ export async function refreshTemplates(): Promise<ResultadoRefresh[]> {
         continue;
       }
       const reason = t.rejected_reason && t.rejected_reason !== "NONE" ? t.rejected_reason : null;
-      if (await gravar(def, antes, { status: t.status, id: t.id, reason })) {
+      if (await gravar(def, antes, { status: t.status, id: t.id, reason, category: t.category ?? null })) {
         log.info("templates.status_atualizado", { name: def.name, de: antes, para: t.status, via: "refresh" });
         out.push({ name: def.name, acao: "atualizado", de: antes, para: t.status });
       } else {
