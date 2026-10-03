@@ -8,6 +8,7 @@
  * Uso:
  *   npx tsx scripts/templates-sync.ts             # dry-run: mostra a tabela final
  *   npx tsx scripts/templates-sync.ts --apply      # submete os que faltam
+ *   npx tsx scripts/templates-sync.ts --refresh    # traz da Meta o status atual
  *   OUTBOX_ENV=.env.staging npx tsx scripts/templates-sync.ts
  *
  * ── O que o dry-run mostra (SEM chamar a Meta) ───────────────────────────
@@ -37,9 +38,18 @@ loadEnv({ path: process.env.OUTBOX_ENV ?? ".env.local" });
 
 import { query, db } from "../src/lib/db";
 import { botoesEmOrdem, todosOsTemplates, type TemplateDef } from "../src/lib/templates/catalog";
+import { refreshTemplates } from "../src/lib/templates/refresh";
 import { fetchWithTimeout, META_TIMEOUT_MS } from "../src/lib/http";
 
 const APPLY = process.argv.includes("--apply");
+/**
+ * `--refresh`: lê da Graph API o status ATUAL de cada template do catálogo e
+ * grava (`lib/templates/refresh.ts`, o mesmo que o cron horário roda). O
+ * evento `message_template_status_update` não chega a este serviço — sem isto
+ * o template aprovado ficaria PENDING aqui e o Max, por ser fail-closed, nunca
+ * o usaria. Não submete nada; com `--apply` junto, só o refresh roda.
+ */
+const REFRESH = process.argv.includes("--refresh");
 const REDIRECT_BASE_PADRAO = "https://max-agent-olive.vercel.app";
 const GRAPH_VERSION_PADRAO = "v24.0";
 /** Id de outbox de exemplo, só para o formato do botão — nunca é resolvido. */
@@ -149,6 +159,22 @@ async function submeter(
   return { id: corpo.id, status: corpo.status ?? "PENDING" };
 }
 
+async function refresh(): Promise<void> {
+  for (const r of await refreshTemplates()) {
+    const detalhe =
+      r.acao === "atualizado"
+        ? `${r.de ?? "—"} → ${r.para}`
+        : r.acao === "igual"
+          ? r.status
+          : r.acao === "diverge"
+            ? `${r.status} na Meta, mas o TEXTO difere do catálogo — não gravado`
+            : r.acao === "ausente"
+              ? `não existe na Meta (local: ${r.de ?? "—"})`
+              : r.erro;
+    console.log(r.name.padEnd(34) + r.acao.padEnd(12) + detalhe);
+  }
+}
+
 async function main() {
   const host = (() => {
     try {
@@ -157,7 +183,14 @@ async function main() {
       return "?";
     }
   })();
-  console.log(`[templates-sync] banco: ${host} — ${APPLY ? "APPLY (vai chamar a Meta)" : "dry-run"}\n`);
+  console.log(
+    `[templates-sync] banco: ${host} — ${REFRESH ? "REFRESH (lê a Meta, grava status)" : APPLY ? "APPLY (vai chamar a Meta)" : "dry-run"}\n`
+  );
+  if (REFRESH) {
+    await refresh();
+    await db().end();
+    return;
+  }
 
   const atual = await estadoAtual();
   const catalogo = todosOsTemplates();
@@ -208,6 +241,8 @@ async function main() {
         ? "nada a fazer"
         : existente.status === "REJECTED"
           ? `rejeitado (${existente.rejected_reason ?? "sem motivo"}) — resubmissão é manual`
+          : existente.status === "DELETED" || existente.status === "DIVERGENTE"
+            ? `${existente.status === "DELETED" ? "apagado na Meta" : "texto/botões na Meta diferem do catálogo"} — resubmissão manual (remova a linha)`
           : `aguardando a Meta (${existente.status})`;
     console.log(def.name.padEnd(34) + existente.status.padEnd(16) + acao);
   }

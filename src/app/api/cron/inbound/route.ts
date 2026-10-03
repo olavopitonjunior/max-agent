@@ -4,6 +4,7 @@ import { sweepInbound } from "@/lib/inbound";
 import { pruneOldFacts } from "@/lib/memory";
 import { pruneOldTurns } from "@/lib/turnlog";
 import { podarPedidosDeDuvida } from "@/lib/aceite";
+import { refreshTemplates } from "@/lib/templates/refresh";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -67,6 +68,28 @@ export async function GET(req: NextRequest) {
         return 0;
       });
       if (pedidos > 0) console.log(`[cron/inbound] ${pedidos} pedido(s) de dúvida vencidos podados`);
+
+      // Status dos templates direto da Meta: o webhook de status NÃO chega
+      // (02/10/2026), e sem isto um template aprovado nunca seria usado.
+      // Sem META_WABA_ID não há o que consultar — o envio segue fail-closed.
+      if (process.env.META_WABA_ID) {
+        const r = await refreshTemplates().catch((err) => {
+          console.warn(
+            "[cron/inbound] refresh de templates falhou:",
+            err instanceof Error ? err.message : String(err)
+          );
+          return [];
+        });
+        const mudou = r.filter((x) => x.acao !== "igual");
+        if (mudou.length > 0) {
+          const problema = mudou.some((x) => x.acao === "erro" || x.acao === "diverge");
+          (problema ? console.warn : console.log)(
+            `[cron/inbound] templates: ${mudou
+              .map((x) => (x.acao === "erro" ? `${x.name}=erro(${x.erro})` : `${x.name}=${x.acao}`))
+              .join(", ")}`
+          );
+        }
+      }
     }
     if (totals.blocked > 0) {
       // O motivo (desemparelhada × inoperante) já saiu no log do

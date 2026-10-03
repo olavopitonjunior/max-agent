@@ -44,7 +44,7 @@ import type {
  */
 const GRAPH_VERSION_PADRAO = "v24.0";
 
-function graphBase(): string {
+export function graphBase(): string {
   const v = (process.env.META_GRAPH_VERSION ?? "").trim() || GRAPH_VERSION_PADRAO;
   return `https://graph.facebook.com/${v}`;
 }

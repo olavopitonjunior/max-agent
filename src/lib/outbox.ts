@@ -6,7 +6,12 @@ import { janelaAberta } from "./janela24h";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
-import { inoperanciaDoErro, falhaDaMensagemMeta, type Inoperancia } from "./transport/erro";
+import {
+  inoperanciaDoErro,
+  falhaDaMensagemMeta,
+  MetaHttpError,
+  type Inoperancia,
+} from "./transport/erro";
 import {
   KINDS_COM_ACEITE,
   botoesEmOrdem,
@@ -53,6 +58,9 @@ export function botoesDaLinha(def: TemplateDef, rowId: string): BotaoEnviado[] {
       : { tipo: "quick_reply", payload: `${b.prefixo}:${rowId}` }
   );
 }
+
+/** A Meta recusou o template na hora do envio (132xxx: parâmetro, pausa…). */
+export const MARCA_TEMPLATE_INVALIDO = "template_invalido: a Meta recusou o template no envio";
 
 export const MARCA_TEMPLATE_PENDENTE =
   "template_pendente: sem template aprovado para este tipo — aguardando aprovação da Meta";
@@ -601,7 +609,16 @@ export async function dispatchDue(
        */
       const falhaMsg = falhaDaMensagemMeta(err);
       if (falhaMsg === "requer_template" || falhaMsg === "template_invalido") {
-        const marca = envioTemplate ? MARCA_TEMPLATE_PENDENTE : MARCA_REQUER_TEMPLATE;
+        // Template recusado no envio leva marca PRÓPRIA com o código da Meta:
+        // misturado ao "aguardando aprovação", um template quebrado em loop
+        // passava por pendente — e a métrica de falha de template (G1) zerava.
+        const codigo = err instanceof MetaHttpError ? err.code : null;
+        const marca =
+          falhaMsg === "template_invalido" && envioTemplate
+            ? `${MARCA_TEMPLATE_INVALIDO} (#${codigo ?? "?"}, ${envioTemplate.name})`
+            : envioTemplate
+              ? MARCA_TEMPLATE_PENDENTE
+              : MARCA_REQUER_TEMPLATE;
         const devolverTemplate = () =>
           query(
             `UPDATE outbox
@@ -609,9 +626,13 @@ export async function dispatchDue(
                     attempts = GREATEST(attempts - 1, 0),
                     send_started_at = NULL,
                     deliver_after = now() + interval '5 minutes',
-                    last_error = $2
+                    last_error = $2,
+                    -- O código da Meta fica: \`last_error\` é sobrescrito pelo
+                    -- próximo desfecho, e a métrica de falha de template (G1)
+                    -- precisa do histórico.
+                    error_code = COALESCE($3, error_code)
               WHERE id = $1 AND status = 'sending'`,
-            [row.id, marca]
+            [row.id, marca, falhaMsg === "template_invalido" ? codigo : null]
           );
         await devolverTemplate().catch((e) =>
           console.error(
