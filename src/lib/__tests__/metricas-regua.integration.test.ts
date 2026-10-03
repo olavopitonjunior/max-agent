@@ -6,6 +6,12 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
  * deve contar (outra org, fora do período, imaturo, toque em botão).
  */
 const hasDb = Boolean(process.env.DATABASE_URL);
+// Estes testes apagam linhas de wa_template com nomes REAIS (max_*): fora de um
+// Postgres local (shell com o DATABASE_URL de produção exportado, por exemplo)
+// eles derrubariam templates aprovados. Recusa em vez de pular em silêncio.
+if (hasDb && !/@(127\.0\.0\.1|localhost)[:/]/.test(process.env.DATABASE_URL ?? "")) {
+  throw new Error("metricas-regua.integration: DATABASE_URL não é local — recusado");
+}
 const d = hasDb ? describe : describe.skip;
 
 const { metricasDoMax, metricasDoContractmaker, somenteLeitura } = await import("../metricas-regua");
@@ -248,7 +254,10 @@ d("métricas da régua — banco do contractmaker (formato Prisma)", () => {
 });
 
 d("métricas da régua — guardrail de MARKETING", () => {
-  const NOMES = ["max_formulario_concluido", "max_formulario_concluido_v2", "max_boas_vindas", "max_boas_vindas_v2"];
+  const NOMES = [
+    "max_formulario_concluido", "max_formulario_concluido_v2", "max_boas_vindas", "max_boas_vindas_v2",
+    "max_formulario_pendente", "max_formulario_pendente_v2", "max_formulario_pendente_v3",
+  ];
   afterAll(async () => {
     await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [NOMES]);
   });
@@ -264,5 +273,39 @@ d("métricas da régua — guardrail de MARKETING", () => {
     );
     const r = await somenteLeitura(URL_TESTE, (c) => metricasDoMax(c, { desde: DESDE, ate: ATE, org: ORG }));
     expect(valor(r.metricas, "templates max_* classificados como MARKETING")).toBe("max_boas_vindas");
+  });
+});
+
+d("métricas da régua — guardrail de MARKETING com v3", () => {
+  const NOMES = ["max_formulario_pendente", "max_formulario_pendente_v2", "max_formulario_pendente_v3"];
+  afterAll(async () => {
+    await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [NOMES]);
+  });
+  const marketing = async () => {
+    const r = await somenteLeitura(URL_TESTE, (c) => metricasDoMax(c, { desde: DESDE, ate: ATE, org: ORG }));
+    return valor(r.metricas, "templates max_* classificados como MARKETING");
+  };
+
+  it("v1 e v2 MARKETING: só o v2 (o que sai) conta; v3 UTILITY aprovado aposenta os dois", async () => {
+    await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [NOMES]);
+    await query(
+      `INSERT INTO wa_template (name, lang, status, category) VALUES
+         ('max_formulario_pendente', 'pt_BR', 'APPROVED', 'MARKETING'),
+         ('max_formulario_pendente_v2', 'pt_BR', 'APPROVED', 'MARKETING'),
+         ('max_formulario_pendente_v3', 'pt_BR', 'PENDING', 'UTILITY')`
+    );
+    expect(await marketing()).toBe("max_formulario_pendente_v2");
+    await query(`UPDATE wa_template SET status = 'APPROVED' WHERE name = 'max_formulario_pendente_v3'`);
+    expect(await marketing()).toBe("nenhum");
+  });
+
+  it("versão antiga UTILITY aprovada e a nova MARKETING: o outbox fica com a antiga, nada conta", async () => {
+    await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [NOMES]);
+    await query(
+      `INSERT INTO wa_template (name, lang, status, category) VALUES
+         ('max_formulario_pendente', 'pt_BR', 'APPROVED', 'UTILITY'),
+         ('max_formulario_pendente_v2', 'pt_BR', 'APPROVED', 'MARKETING')`
+    );
+    expect(await marketing()).toBe("nenhum");
   });
 });

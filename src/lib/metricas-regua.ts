@@ -226,9 +226,18 @@ export async function metricasDoMax(c: Consulta, a: Periodo): Promise<{ metricas
     await c.query(
       `SELECT w.name FROM wa_template w
         WHERE w.name LIKE 'max\\_%' AND w.category = 'MARKETING' AND w.status = 'APPROVED'
-          -- v1 aposentado: o v2 aprovado é quem sai, o v1 não pesa mais.
-          AND NOT EXISTS (SELECT 1 FROM wa_template v
-                           WHERE v.name = w.name || '_v2' AND v.status = 'APPROVED')
+          -- A versão que o outbox usa (sem contar o pulo pontual de um
+          -- template recusado numa linha): ele prefere uma aprovada não
+          -- MARKETING e, entre MARKETING, a mais nova. Outra versão aprovada
+          -- não MARKETING, ou uma mais nova aprovada, aposenta esta.
+          AND NOT EXISTS (
+                SELECT 1 FROM wa_template v
+                 WHERE v.status = 'APPROVED'
+                   AND v.name <> w.name
+                   AND regexp_replace(v.name, '_v[0-9]+$', '') = regexp_replace(w.name, '_v[0-9]+$', '')
+                   AND (v.category IS DISTINCT FROM 'MARKETING'
+                        OR COALESCE(substring(v.name from '_v([0-9]+)$')::int, 1)
+                         > COALESCE(substring(w.name from '_v([0-9]+)$')::int, 1)))
         ORDER BY 1`
     )
   ).rows as Linha[];

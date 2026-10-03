@@ -152,6 +152,13 @@ describe("parametrosDoCorpo", () => {
     ]);
   });
 
+  it("v3 do lembrete: segue a ordem DELE — negócio antes da org", async () => {
+    const { templatesDoKind } = await import("../templates/catalog");
+    const [v3] = templatesDoKind("form_reminder");
+    expect(v3.name).toBe("max_formulario_pendente_v3");
+    expect(parametrosDoCorpo(v3, linha)).toEqual(["Ana", "Venda Apto 302", "RE/MAX Trio"]);
+  });
+
   /** A Meta recusa parâmetro vazio: emissor sem params não pode quebrar o envio. */
   it("nada vazio: sem nome, sem org, sem params — tudo cai no fallback", () => {
     const p = parametrosDoCorpo(CATALOGO.contract_signed, {
@@ -193,11 +200,14 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
     "manual_message_parte",
   ];
 
-  it("ordem de preferência [v2, v1] nos 8 kinds; os outros só v1", async () => {
+  it("ordem de preferência: versão mais nova primeiro; os outros só v1", async () => {
     const { templatesDoKind } = await import("../templates/catalog");
+    const comV3 = ["form_reminder", "form_reminder_parte", "onboarding_pending", "manual_message", "manual_message_parte"];
     for (const k of comV2) {
-      const [v2, v1] = templatesDoKind(k);
-      expect(v2.name, k).toBe(`${v1.name}_v2`);
+      const lista = templatesDoKind(k);
+      const v1 = lista[lista.length - 1];
+      const esperado = comV3.includes(k) ? [`${v1.name}_v3`, `${v1.name}_v2`, v1.name] : [`${v1.name}_v2`, v1.name];
+      expect(lista.map((d) => d.name), k).toEqual(esperado);
     }
     for (const k of ["contract_signed", "contract_signed_parte", "form_completed_parte", "survey_invite"]) {
       expect(templatesDoKind(k), k).toHaveLength(1);
@@ -205,20 +215,33 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
     expect(templatesDoKind("stage_change")).toEqual([]);
   });
 
-  it("v2 tem as MESMAS variáveis e os MESMOS botões do v1 — o envio não muda", async () => {
+  it("toda versão tem as MESMAS variáveis (em qualquer ordem) e os MESMOS botões do v1 — o envio não muda", async () => {
     const { templatesDoKind } = await import("../templates/catalog");
     for (const k of comV2) {
-      const [v2, v1] = templatesDoKind(k);
-      expect(v2.vars, k).toEqual(v1.vars);
-      expect(v2.botao, k).toEqual(v1.botao);
+      const lista = templatesDoKind(k);
+      const v1 = lista[lista.length - 1];
+      for (const d of lista) {
+        const chave = (v: unknown) => JSON.stringify(v);
+        expect(d.vars.map(chave).sort(), d.name).toEqual(v1.vars.map(chave).sort());
+        expect(d.botao, d.name).toEqual(v1.botao);
+      }
+    }
+  });
+
+  it("v3 sem lembrete nem suspense — o que manteve os v2 em MARKETING", async () => {
+    const { templatesDoKind } = await import("../templates/catalog");
+    for (const k of comV2) {
+      const d = templatesDoKind(k)[0];
+      if (!d.name.endsWith("_v3")) continue;
+      expect(d.body, d.name).not.toMatch(/ainda|incomplet|continue|enviou uma mensagem/i);
     }
   });
 
   it("v2 sem apresentação, convite ou suspense — o que levou ao MARKETING", async () => {
     const { templatesDoKind } = await import("../templates/catalog");
     for (const k of comV2) {
-      const [v2] = templatesDoKind(k);
-      expect(v2.body, k).not.toMatch(/Eu sou o Max|Se quiser saber|é só perguntar|avisa:|tem uma mensagem para você/i);
+      for (const d of templatesDoKind(k).slice(0, -1))
+        expect(d.body, d.name).not.toMatch(/Eu sou o Max|Se quiser saber|é só perguntar|avisa:|tem uma mensagem para você/i);
     }
   });
 });

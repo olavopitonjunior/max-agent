@@ -298,12 +298,12 @@ async function repassar(inbound: InboundMessage, texto: string): Promise<Interce
 /**
  * A apresentação do Max saiu do template de boas-vindas (o v2 é só
  * transacional — a Meta classificava a apresentação como MARKETING) e vai aqui:
- * na PRIMEIRA mensagem da pessoa depois das boas-vindas que saíram pelo
- * template v2, o Max responde com o texto de `body` (montado pelo
+ * na PRIMEIRA mensagem da pessoa depois das boas-vindas que saíram por um
+ * template posterior ao v1 (v2 em diante), o Max responde com o texto de `body` (montado pelo
  * contractmaker em `lib/max/boas-vindas.ts`: apresentação + "faça o primeiro
  * acesso pelo link do e-mail" + "é só perguntar" — não depende do botão).
  *
- * - Só o v2: o v1 já trazia a apresentação; repetir seria a segunda vez.
+ * - Nunca o v1: ele já trazia a apresentação; repetir seria a segunda vez.
  * - Só se ainda não houve conversa depois das boas-vindas (o mesmo critério do
  *   OK): quem já falou com o Max — inclusive por áudio, que não passa aqui —
  *   não recebe apresentação no meio da conversa.
@@ -317,7 +317,8 @@ async function repassar(inbound: InboundMessage, texto: string): Promise<Interce
  */
 const VALIDADE_APRESENTACAO_DIAS = 7;
 /** O template de boas-vindas SEM apresentação — o primeiro de `welcome`. */
-const BOAS_VINDAS_V2 = templatesDoKind("welcome")[0]?.name ?? "max_boas_vindas_v2";
+/** Só o v1 trazia a apresentação; qualquer versão posterior a deixa para cá. */
+const BOAS_VINDAS_V1 = templatesDoKind("welcome").at(-1)?.name ?? "max_boas_vindas";
 
 /** Curto e sem pergunta: cumprimento, "ok", "obrigado". */
 export function ehCumprimento(texto: string): boolean {
@@ -334,7 +335,7 @@ async function apresentacaoPendente(
     `WITH alvo AS (
        SELECT o.id FROM outbox o
         WHERE o.phone = $1 AND o.kind = 'welcome' AND o.status = 'sent'
-          AND o.template_name = $4
+          AND o.template_name IS NOT NULL AND o.template_name <> $4
           AND (o.released_at IS NULL OR o.released_by = $2)
           AND o.sent_at > now() - ($3 || ' days')::interval
           AND NOT EXISTS (
@@ -350,7 +351,7 @@ async function apresentacaoPendente(
       WHERE u.id = alvo.id
         AND (u.released_at IS NULL OR u.released_by = $2)
       RETURNING u.org_id, u.body, u.sent_at`,
-    [phone, messageId, String(VALIDADE_APRESENTACAO_DIAS), BOAS_VINDAS_V2]
+    [phone, messageId, String(VALIDADE_APRESENTACAO_DIAS), BOAS_VINDAS_V1]
   );
   if (r.length === 0) return null;
   const a = r.reduce((x, y) => (new Date(y.sent_at) > new Date(x.sent_at) ? y : x));

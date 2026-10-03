@@ -18,7 +18,7 @@ export async function templateAprovado(name: string): Promise<boolean> {
 
 /**
  * Os APROVADOS entre `names`, com a categoria que a Meta deu (nome → categoria).
- * Uma leitura para os candidatos do kind ([v2, v1]).
+ * Uma leitura para os candidatos do kind ([v3, v2, v1]).
  */
 export async function templatesAprovados(names: string[]): Promise<Map<string, string>> {
   const rows = await query<{ name: string; category: string | null }>(
