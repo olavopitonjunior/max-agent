@@ -233,8 +233,9 @@ export const KINDS_COM_ACEITE: readonly string[] = [
  * ou suspense. A apresentação do Max saiu do template de boas-vindas e vai
  * como texto livre na primeira resposta da pessoa (`lib/aceite.ts`).
  *
- * Mesmas variáveis e botões do v1. O envio usa o PRIMEIRO aprovado entre
- * [v2, v1] (`templatesDoKind`): nada fica mudo enquanto a Meta analisa o v2.
+ * Mesmas variáveis e botões do v1. O envio escolhe entre as versões
+ * aprovadas (`templatesDoKind` + `outbox.ts`): nada fica mudo enquanto a Meta
+ * analisa uma versão nova.
  */
 const V2: Record<string, TemplateDef> = {
   form_completed: t(
@@ -290,20 +291,65 @@ const MENSAGEM_V2 = t(
 V2.manual_message = MENSAGEM_V2;
 V2.manual_message_parte = MENSAGEM_V2;
 
-/** Todos os templates (sem repetição, v1 e v2), para a submissão, o refresh e os testes de regra. */
+/**
+ * Versão 3 — texto de STATUS da transação (decisão do Olavo, 03/10/2026).
+ *
+ * Na análise dos v2 (03/10) a Meta deu UTILITY às boas-vindas e ao formulário
+ * concluído, mas manteve MARKETING nos lembretes ("ainda", "incompleto",
+ * "continue") e na mensagem que só avisa que existe ("responda OK"). O v3
+ * escreve como os aprovados: status de um negócio/conta em andamento + onde
+ * está o detalhe. Mesmas variáveis (a ordem pode mudar) e botões do v1.
+ */
+const V3: Record<string, TemplateDef> = {
+  form_reminder: t(
+    "max_formulario_pendente_v3",
+    "Olá, {{1}}! Status do negócio {{2}} na {{3}}: formulário com respostas pendentes das partes. Detalhes e link de reenvio no botão abaixo.",
+    // A Meta exige {{1}}, {{2}}, {{3}} em sequência no texto: a ordem das
+    // variáveis muda em relação ao v1, os parâmetros saem desta lista.
+    [NOME, NEGOCIO, ORG],
+    ["Ana", "Venda Apto 302", "RE/MAX Trio"],
+    ABRIR_NEGOCIO
+  ),
+  form_reminder_parte: t(
+    "max_formulario_pendente_parte_v3",
+    "Olá, {{1}}! Status do seu formulário com a {{2}}: preenchimento em aberto. O formulário está disponível no botão abaixo.",
+    [NOME, ORG],
+    ["Carlos", "RE/MAX Trio"],
+    { tipo: "url", texto: "Continuar formulário" }
+  ),
+  onboarding_pending: t(
+    "max_configuracao_pendente_v3",
+    "Olá, {{1}}! Status da conta da {{2}}: configuração inicial em aberto. Para acessar a configuração, use o botão \"Continuar configuração\". Para enviar uma dúvida, use \"Tenho uma dúvida\".",
+    [NOME, ORG],
+    ["Ana", "RE/MAX Trio"],
+    { tipo: "url_e_ok", texto: "Continuar configuração", ok: "Tenho uma dúvida" }
+  ),
+};
+const MENSAGEM_V3 = t(
+  "max_mensagem_imobiliaria_v3",
+  "Olá, {{1}}! A {{2}} registrou uma mensagem referente ao seu negócio em andamento. Responda OK para receber o conteúdo da mensagem nesta conversa.",
+  [NOME, ORG],
+  ["Carlos", "RE/MAX Trio"],
+  OK
+);
+V3.manual_message = MENSAGEM_V3;
+V3.manual_message_parte = MENSAGEM_V3;
+
+/** Todos os templates (sem repetição, todas as versões), para a submissão, o refresh e os testes de regra. */
 export function todosOsTemplates(): TemplateDef[] {
   return [
-    ...new Map([...Object.values(CATALOGO), ...Object.values(V2)].map((d) => [d.name, d])).values(),
+    ...new Map([...Object.values(CATALOGO), ...Object.values(V2), ...Object.values(V3)].map((d) => [d.name, d])).values(),
   ];
 }
 
 /**
- * Os templates do `kind` em ordem de preferência — [v2, v1] quando há v2 —, ou
- * `[]` quando o tipo está FORA DA RÉGUA. O envio usa o primeiro APROVADO.
+ * Os templates do `kind` em ordem de preferência — a versão mais nova primeiro
+ * ([v3, v2, v1]) —, ou `[]` quando o tipo está FORA DA RÉGUA. O envio usa o
+ * aprovado, de preferência não MARKETING (`outbox.ts`).
  */
 export function templatesDoKind(kind: string | null | undefined): TemplateDef[] {
   if (!kind || !CATALOGO[kind]) return [];
-  return V2[kind] ? [V2[kind], CATALOGO[kind]] : [CATALOGO[kind]];
+  return [V3[kind], V2[kind], CATALOGO[kind]].filter((d): d is TemplateDef => !!d);
 }
 
 /** O template preferido do `kind`, ou `null` quando o tipo está FORA DA RÉGUA. */

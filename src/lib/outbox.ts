@@ -507,7 +507,7 @@ export async function dispatchDue(
         totals.failed += 1;
         continue;
       }
-      // Entre [v2, v1], o APROVADO — de preferência o que a Meta não
+      // Entre as versões do kind ([v3, v2, v1]), o APROVADO — de preferência o que a Meta não
       // classificou como MARKETING (limite de frequência por pessoa, 131049).
       // O template que a Meta acabou de recusar NESTA linha (marca
       // `template_invalido` com o nome) fica de fora enquanto houver outro:

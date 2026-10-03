@@ -209,6 +209,35 @@ d("canal Meta (Postgres real)", () => {
       }
     });
 
+    it("lembrete com 3 versões: os parâmetros seguem a ordem do template escolhido", async () => {
+      const V1 = "max_formulario_pendente";
+      const nomes = [V1, `${V1}_v2`, `${V1}_v3`];
+      try {
+        await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [nomes]);
+        await query(
+          `INSERT INTO wa_template (name, lang, status, category) VALUES
+             ($1, 'pt_BR', 'APPROVED', 'MARKETING'), ($2, 'pt_BR', 'APPROVED', 'MARKETING'),
+             ($3, 'pt_BR', 'APPROVED', 'UTILITY')`,
+          nomes
+        );
+        await linhaVencida("k-v3", "form_reminder");
+        await dispatchDue();
+        let call = metaSendTemplate.mock.calls.at(-1)![0];
+        expect(call.name).toBe(`${V1}_v3`);
+        expect(call.bodyParams).toEqual(["Ana", "Venda Apto 302", "FINCasa"]);
+
+        // Sem o v3: entre dois MARKETING sai o mais novo, com a ordem do v1/v2.
+        await query(`DELETE FROM wa_template WHERE name = $1`, [`${V1}_v3`]);
+        await linhaVencida("k-v2b", "form_reminder");
+        await dispatchDue();
+        call = metaSendTemplate.mock.calls.at(-1)![0];
+        expect(call.name).toBe(`${V1}_v2`);
+        expect(call.bodyParams).toEqual(["Ana", "FINCasa", "Venda Apto 302"]);
+      } finally {
+        await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [nomes]);
+      }
+    });
+
     it("entre aprovados, prefere o que a Meta não classificou como MARKETING", async () => {
       const V2 = `${TPL}_v2`;
       try {
