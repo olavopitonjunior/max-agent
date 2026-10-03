@@ -15,12 +15,12 @@ import {
 import {
   KINDS_COM_ACEITE,
   botoesEmOrdem,
-  templateDoKind,
+  templatesDoKind,
   parametrosDoCorpo,
   type TemplateDef,
 } from "./templates/catalog";
 import type { BotaoEnviado } from "./transport";
-import { templateAprovado } from "./templates/aprovacao";
+import { templatesAprovados } from "./templates/aprovacao";
 
 /**
  * Prefixos de `last_error` que significam "o CANAL estava fora, a mensagem não
@@ -205,6 +205,8 @@ interface OutboxRow extends Record<string, unknown> {
   kind: string | null;
   /** Variáveis do fato, já limpas pelo /notify — jsonb, o driver devolve objeto. */
   params: Record<string, string> | null;
+  /** Desfecho da tentativa anterior — diz qual template a Meta acabou de recusar. */
+  last_error: string | null;
 }
 
 /**
@@ -384,7 +386,7 @@ export async function dispatchDue(
          FOR UPDATE SKIP LOCKED
       )
       RETURNING id, org_id, audience, phone, title, body, link_url, org_name,
-                recipient_name, attempts, send_started_at, kind, params`,
+                recipient_name, attempts, send_started_at, kind, params, last_error`,
     [limit, String(SENDING_ORPHAN_MINUTES)]
   );
   totals.claimed = rows.length;
@@ -492,8 +494,8 @@ export async function dispatchDue(
      */
     let envioTemplate: TemplateDef | null = null;
     if (provider() === "meta" && !(await janelaAberta(row.phone))) {
-      const def = templateDoKind(row.kind);
-      if (!def) {
+      const candidatos = templatesDoKind(row.kind);
+      if (candidatos.length === 0) {
         await query(
           `UPDATE outbox
               SET status = 'failed', last_error = $2, send_started_at = NULL,
@@ -505,16 +507,26 @@ export async function dispatchDue(
         totals.failed += 1;
         continue;
       }
-      // Fail-closed: não deu pra CONFIRMAR aprovação (erro de leitura) é
-      // tratado como não aprovado — nunca assume aprovado sem checar.
-      const aprovado = await templateAprovado(def.name).catch((err) => {
+      // Entre [v2, v1], o APROVADO — de preferência o que a Meta não
+      // classificou como MARKETING (limite de frequência por pessoa, 131049).
+      // O template que a Meta acabou de recusar NESTA linha (marca
+      // `template_invalido` com o nome) fica de fora enquanto houver outro:
+      // sem isso o v2 pausado se repetia de 5 em 5 minutos com o v1 aprovado
+      // ao lado. Fail-closed: erro de leitura = nenhum aprovado.
+      const aprovados = await templatesAprovados(candidatos.map((c) => c.name)).catch((err) => {
         console.warn(
-          `[outbox] não deu pra checar aprovação do template ${def.name}:`,
+          `[outbox] não deu pra checar aprovação dos templates de ${row.kind}:`,
           err instanceof Error ? err.message : String(err)
         );
-        return false;
+        return new Map<string, string>();
       });
-      if (!aprovado) {
+      const recusadoAgora = (c: TemplateDef) =>
+        !!row.last_error?.startsWith(MARCA_TEMPLATE_INVALIDO) && row.last_error.includes(`, ${c.name})`);
+      const usaveis = candidatos.filter((c) => aprovados.has(c.name));
+      const semRecusa = usaveis.filter((c) => !recusadoAgora(c));
+      const pool = semRecusa.length > 0 ? semRecusa : usaveis;
+      const def: TemplateDef | null = pool.find((c) => aprovados.get(c.name) !== "MARKETING") ?? pool[0] ?? null;
+      if (!def) {
         await query(
           `UPDATE outbox
               SET status = 'pending',
@@ -527,7 +539,7 @@ export async function dispatchDue(
         log.info("outbox.aguarda_aprovacao_template", {
           rowId: row.id,
           orgId: row.org_id,
-          template: def.name,
+          templates: candidatos.map((c) => c.name).join(","),
         });
         totals.held += 1;
         continue;

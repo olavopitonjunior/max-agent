@@ -246,3 +246,23 @@ d("métricas da régua — banco do contractmaker (formato Prisma)", () => {
     expect(valor(ms, "pesquisas respondidas (WhatsApp)")).toBeCloseTo(1 / 2);
   });
 });
+
+d("métricas da régua — guardrail de MARKETING", () => {
+  const NOMES = ["max_formulario_concluido", "max_formulario_concluido_v2", "max_boas_vindas", "max_boas_vindas_v2"];
+  afterAll(async () => {
+    await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [NOMES]);
+  });
+
+  it("v1 MARKETING aposentado por v2 aprovado não conta; v1 MARKETING ainda em uso conta", async () => {
+    await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [NOMES]);
+    await query(
+      `INSERT INTO wa_template (name, lang, status, category) VALUES
+         ('max_formulario_concluido', 'pt_BR', 'APPROVED', 'MARKETING'),
+         ('max_formulario_concluido_v2', 'pt_BR', 'APPROVED', 'UTILITY'),
+         ('max_boas_vindas', 'pt_BR', 'APPROVED', 'MARKETING'),
+         ('max_boas_vindas_v2', 'pt_BR', 'PENDING', 'UTILITY')`
+    );
+    const r = await somenteLeitura(URL_TESTE, (c) => metricasDoMax(c, { desde: DESDE, ate: ATE, org: ORG }));
+    expect(valor(r.metricas, "templates max_* classificados como MARKETING")).toBe("max_boas_vindas");
+  });
+});

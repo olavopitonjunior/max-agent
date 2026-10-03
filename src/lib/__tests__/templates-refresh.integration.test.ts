@@ -166,3 +166,42 @@ d("refreshTemplates", () => {
     expect(await status(DEF.name)).toBe("APPROVED");
   });
 });
+
+d("refresh — categoria", () => {
+  beforeEach(async () => {
+    vi.stubEnv("META_WABA_ID", "waba-teste");
+    vi.stubEnv("META_ACCESS_TOKEN", "tok");
+    await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [NOMES]);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("reclassificação da Meta (UTILITY → MARKETING) fica gravada", async () => {
+    await query(`INSERT INTO wa_template (name, lang, status, category) VALUES ($1, 'pt_BR', 'APPROVED', 'UTILITY')`, [DEF.name]);
+    vi.stubGlobal("fetch", graph({ [DEF.name]: [naMeta({ category: "MARKETING" })] }));
+    await refreshTemplates();
+    const [row] = await query<{ category: string }>(`SELECT category FROM wa_template WHERE name = $1`, [DEF.name]);
+    expect(row.category).toBe("MARKETING");
+  });
+});
+
+d("refresh — categoria na primeira gravação", () => {
+  beforeEach(async () => {
+    vi.stubEnv("META_WABA_ID", "waba-teste");
+    vi.stubEnv("META_ACCESS_TOKEN", "tok");
+    await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [NOMES]);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("template novo aqui já entra com a categoria que a Meta deu", async () => {
+    vi.stubGlobal("fetch", graph({ [DEF.name]: [naMeta({ category: "MARKETING" })] }));
+    await refreshTemplates();
+    const [row] = await query<{ category: string }>(`SELECT category FROM wa_template WHERE name = $1`, [DEF.name]);
+    expect(row.category).toBe("MARKETING");
+  });
+});

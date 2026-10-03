@@ -24,7 +24,7 @@
 import { query } from "./db";
 import { enqueue } from "./outbox";
 import { log } from "./log";
-import { KINDS_COM_ACEITE } from "./templates/catalog";
+import { KINDS_COM_ACEITE, templatesDoKind } from "./templates/catalog";
 import type { InboundMessage } from "./transport";
 
 /** Kinds cujo texto só é entregue depois do OK (ver o catálogo). */
@@ -295,6 +295,72 @@ async function repassar(inbound: InboundMessage, texto: string): Promise<Interce
   };
 }
 
+/**
+ * A apresentação do Max saiu do template de boas-vindas (o v2 é só
+ * transacional — a Meta classificava a apresentação como MARKETING) e vai aqui:
+ * na PRIMEIRA mensagem da pessoa depois das boas-vindas que saíram pelo
+ * template v2, o Max responde com o texto de `body` (montado pelo
+ * contractmaker em `lib/max/boas-vindas.ts`: apresentação + "faça o primeiro
+ * acesso pelo link do e-mail" + "é só perguntar" — não depende do botão).
+ *
+ * - Só o v2: o v1 já trazia a apresentação; repetir seria a segunda vez.
+ * - Só se ainda não houve conversa depois das boas-vindas (o mesmo critério do
+ *   OK): quem já falou com o Max — inclusive por áudio, que não passa aqui —
+ *   não recebe apresentação no meio da conversa.
+ * - Uma vez por PESSOA: consome TODAS as boas-vindas pendentes do telefone
+ *   (convite reenviado, duas imobiliárias) e responde com a mais recente.
+ * - Só para cumprimento ("oi", "bom dia"): uma pergunta de verdade segue para
+ *   o grafo e é respondida — a apresentação é consumida em silêncio, em vez de
+ *   engolir a pergunta com um texto pronto.
+ * - Retentativa da mesma mensagem reencontra o mesmo desfecho
+ *   (`released_by` = message_id).
+ */
+const VALIDADE_APRESENTACAO_DIAS = 7;
+/** O template de boas-vindas SEM apresentação — o primeiro de `welcome`. */
+const BOAS_VINDAS_V2 = templatesDoKind("welcome")[0]?.name ?? "max_boas_vindas_v2";
+
+/** Curto e sem pergunta: cumprimento, "ok", "obrigado". */
+export function ehCumprimento(texto: string): boolean {
+  const t = texto.trim();
+  return t.length > 0 && !t.includes("?") && t.split(/\s+/).length <= 4;
+}
+
+async function apresentacaoPendente(
+  phone: string,
+  messageId: string,
+  texto: string
+): Promise<Interceptado | null> {
+  const r = await query<{ org_id: string; body: string; sent_at: Date }>(
+    `WITH alvo AS (
+       SELECT o.id FROM outbox o
+        WHERE o.phone = $1 AND o.kind = 'welcome' AND o.status = 'sent'
+          AND o.template_name = $4
+          AND (o.released_at IS NULL OR o.released_by = $2)
+          AND o.sent_at > now() - ($3 || ' days')::interval
+          AND NOT EXISTS (
+                SELECT 1 FROM conversation_turn t
+                 WHERE t.phone = o.phone
+                   AND t.created_at > o.sent_at
+                   AND t.message_id IS DISTINCT FROM $2)
+        ORDER BY o.id
+        FOR UPDATE)
+     UPDATE outbox u
+        SET released_at = COALESCE(u.released_at, now()), released_by = $2
+       FROM alvo
+      WHERE u.id = alvo.id
+        AND (u.released_at IS NULL OR u.released_by = $2)
+      RETURNING u.org_id, u.body, u.sent_at`,
+    [phone, messageId, String(VALIDADE_APRESENTACAO_DIAS), BOAS_VINDAS_V2]
+  );
+  if (r.length === 0) return null;
+  const a = r.reduce((x, y) => (new Date(y.sent_at) > new Date(x.sent_at) ? y : x));
+  if (!ehCumprimento(texto) || !a.body.trim()) {
+    log.info("aceite.apresentacao_consumida", { orgId: a.org_id, motivo: "pergunta" });
+    return null;
+  }
+  return { reply: a.body.trim(), orgId: a.org_id, marca: "apresentacao_entregue" };
+}
+
 /** Pedidos de dúvida vencidos ou já consumidos — carona no cron horário. */
 export async function podarPedidosDeDuvida(): Promise<number> {
   const r = await query<{ phone: string }>(
@@ -350,6 +416,12 @@ export async function interceptar(inbound: InboundMessage): Promise<Interceptado
     });
     if (entregues.length > 0) return respostaDaEntrega(entregues, restantes);
     // Nada guardado: "ok" é só conversa.
+  }
+
+  // 5. Primeira mensagem depois das boas-vindas por template: a apresentação.
+  if (texto) {
+    const apresentacao = await apresentacaoPendente(inbound.fromPhone, inbound.messageId, texto);
+    if (apresentacao) return apresentacao;
   }
   return null;
 }
