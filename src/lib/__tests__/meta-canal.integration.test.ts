@@ -26,7 +26,9 @@ vi.mock("../zapi", async (orig) => ({
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 
-const { enqueue, dispatchDue, MARCA_TEMPLATE_PENDENTE, MARCA_FORA_DA_REGUA } = await import("../outbox");
+const { enqueue, dispatchDue, MARCA_TEMPLATE_PENDENTE, MARCA_FORA_DA_REGUA, MARCA_TEMPLATE_INVALIDO } =
+  await import("../outbox");
+const { MetaHttpError } = await import("../transport/erro");
 const { enqueueInbound } = await import("../inbound");
 const { janelaAberta } = await import("../janela24h");
 const { applyFalhaDeEnvio, applyStatusCallback } = await import("../delivery");
@@ -149,6 +151,27 @@ d("canal Meta (Postgres real)", () => {
       const [b] = metaSendTemplate.mock.calls[0][0].botoes;
       expect(b.tipo).toBe("url");
       expect(typeof b.param).toBe("string");
+    });
+
+    /**
+     * 132xxx no envio: o template existe mas a Meta o recusou (parâmetro,
+     * pausa). Marca própria com o código — misturada ao "aguardando
+     * aprovação", um template quebrado em loop passava despercebido.
+     */
+    it("template recusado no envio (132000): represa com marca própria e o código da Meta", async () => {
+      await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [TPL]);
+      metaSendTemplate.mockRejectedValueOnce(
+        new MetaHttpError("/messages", 400, JSON.stringify({ error: { code: 132000, message: "params" } }))
+      );
+      await linhaVencida("k-132000");
+      const totals = await dispatchDue();
+      expect(totals.held).toBe(1);
+      const l = await linha("k-132000");
+      expect(l.status).toBe("pending");
+      expect(l.last_error).toBe(`${MARCA_TEMPLATE_INVALIDO} (#132000, ${TPL})`);
+      expect(l.last_error).not.toBe(MARCA_TEMPLATE_PENDENTE);
+      // O código fica em error_code: last_error é sobrescrito pelo próximo desfecho.
+      expect(l.error_code).toBe(132000);
     });
 
     /** A parte não tem link: o template dela é aprovado SEM botão. */
