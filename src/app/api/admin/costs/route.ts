@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireHmac } from "@/lib/auth";
 import { relatorioCustos } from "@/lib/custos/relatorio";
+import { diaNoFuso } from "@/lib/custos/meta-analytics";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -14,14 +15,15 @@ const MAX_DIAS = 400;
  *
  * Mesma auth do `/api/admin/status`: a assinatura cobre método e path COM a
  * query, então uma assinatura capturada não serve para outro período nem para
- * outra imobiliária. Sem `de`/`ate`: o mês corrente (UTC) até hoje.
+ * outra imobiliária. Sem `de`/`ate`: o mês corrente até hoje, no fuso da WABA (São Paulo).
  */
 export async function GET(req: NextRequest) {
   const auth = await requireHmac(req, { signQuery: true });
   if (!auth.ok) return auth.response;
 
   const sp = req.nextUrl.searchParams;
-  const hoje = new Date().toISOString().slice(0, 10);
+  // "Hoje" e o mês corrente no fuso dos custos (o da Meta), não em UTC.
+  const hoje = diaNoFuso(Date.now());
   const de = sp.get("de") ?? `${hoje.slice(0, 8)}01`;
   const ate = sp.get("ate") ?? hoje;
   const orgId = sp.get("orgId") || null;

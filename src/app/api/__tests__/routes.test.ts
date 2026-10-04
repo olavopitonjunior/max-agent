@@ -580,8 +580,8 @@ describe("GET /api/admin/costs", () => {
     expect(await res.json()).toEqual({ eco: { de: "2026-10-01", ate: "2026-10-04", orgId: "org1" } });
   });
 
-  it("sem período: o mês corrente até hoje (UTC)", async () => {
-    const hoje = new Date().toISOString().slice(0, 10);
+  it("sem período: o mês corrente até hoje, no fuso de São Paulo", async () => {
+    const hoje = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(new Date());
     const res = await adminCosts(costsReq(""));
     expect(await res.json()).toEqual({ eco: { de: `${hoje.slice(0, 8)}01`, ate: hoje, orgId: null } });
   });
