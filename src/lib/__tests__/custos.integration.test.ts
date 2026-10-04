@@ -73,9 +73,25 @@ async function limpar() {
   await query(`DELETE FROM meta_cost_daily WHERE day BETWEEN '2025-01-01' AND '2025-01-31'`);
 }
 
+describe("fuso dos custos", () => {
+  it("dia e meia-noite em São Paulo", async () => {
+    const { diaNoFuso, meiaNoiteNoFuso } = await import("../custos/meta-analytics");
+    expect(diaNoFuso(Date.parse("2026-10-03T02:07:00Z"))).toBe("2026-10-02");
+    expect(diaNoFuso(Date.parse("2026-10-03T03:00:00Z"))).toBe("2026-10-03");
+    expect(new Date(meiaNoiteNoFuso("2026-10-03")).toISOString()).toBe("2026-10-03T03:00:00.000Z");
+  });
+
+  it("virada de mês e de ano", async () => {
+    const { diaNoFuso, meiaNoiteNoFuso } = await import("../custos/meta-analytics");
+    expect(diaNoFuso(Date.parse("2026-01-01T02:00:00Z"))).toBe("2025-12-31");
+    expect(new Date(meiaNoiteNoFuso("2026-01-01")).toISOString()).toBe("2026-01-01T03:00:00.000Z");
+    expect(new Date(meiaNoiteNoFuso("2026-03-01")).toISOString()).toBe("2026-03-01T03:00:00.000Z");
+  });
+});
+
 describe("agregarPontos", () => {
   it("só o número do Max, somado por dia/categoria/tipo, em minúsculas", () => {
-    const t = Date.UTC(2025, 0, 10) / 1000;
+    const t = Date.UTC(2025, 0, 10, 3) / 1000; // 00:00 em São Paulo
     const linhas = agregarPontos(
       [
         { start: t, phone_number: "+55 11 97085-0046", pricing_category: "MARKETING", pricing_type: "REGULAR", volume: 2, cost: 0.12 },
@@ -141,7 +157,7 @@ d("syncCustosMeta", () => {
   }
 
   it("grava só o número do Max; a releitura do dia SUBSTITUI, dia sem ponto fica", async () => {
-    const t10 = Date.UTC(2025, 0, 10) / 1000;
+    const t10 = Date.UTC(2025, 0, 10, 3) / 1000; // 00:00 em São Paulo
     const t11 = t10 + 86_400;
     await custoMeta("2025-01-09", "marketing", 9, 0.9); // fora da janela relida
     vi.stubGlobal(
@@ -174,7 +190,7 @@ d("syncCustosMeta", () => {
 
   it("resposta paginada: recusa em vez de trocar o dia por um pedaço dele", async () => {
     await custoMeta("2025-01-10", "marketing", 9, 0.54);
-    const t10 = Date.UTC(2025, 0, 10) / 1000;
+    const t10 = Date.UTC(2025, 0, 10, 3) / 1000; // 00:00 em São Paulo
     vi.stubGlobal(
       "fetch",
       graph(
@@ -189,7 +205,7 @@ d("syncCustosMeta", () => {
 
   it("Meta respondeu, mas nada é do Max: não grava e avisa", async () => {
     const aviso = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const t10 = Date.UTC(2025, 0, 10) / 1000;
+    const t10 = Date.UTC(2025, 0, 10, 3) / 1000; // 00:00 em São Paulo
     vi.stubGlobal(
       "fetch",
       graph([{ start: t10, phone_number: FINCASA, pricing_category: "MARKETING", pricing_type: "REGULAR", volume: 7, cost: 0.4 }])
@@ -197,6 +213,27 @@ d("syncCustosMeta", () => {
     const r = await syncCustosMeta(new Date("2025-01-11T15:00:00Z"), 3);
     expect(r).toMatchObject({ linhas: 0, pontos: 1 });
     expect(aviso.mock.calls.flat().join(" ")).toMatch(/nenhum do Max \(finais: 1515\)/);
+    aviso.mockRestore();
+  });
+
+  it("janela pelo dia de São Paulo: 01:00Z de 12/01 ainda é 11/01 lá", async () => {
+    const fetchMock = graph([]);
+    vi.stubGlobal("fetch", fetchMock);
+    const r = await syncCustosMeta(new Date("2025-01-12T01:00:00Z"), 3);
+    expect(r.dias).toEqual(["2025-01-09", "2025-01-10", "2025-01-11"]);
+    const url = decodeURIComponent(String(fetchMock.mock.calls.find((c) => String(c[0]).includes("/waba-teste?"))![0]));
+    expect(url).toContain(`start(${Date.UTC(2025, 0, 9, 3) / 1000})`);
+  });
+
+  it("bucket fora da meia-noite de São Paulo: grava, mas avisa", async () => {
+    const aviso = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubGlobal(
+      "fetch",
+      graph([{ start: Date.UTC(2025, 0, 10, 0) / 1000, phone_number: MAX, pricing_category: "MARKETING", pricing_type: "REGULAR", volume: 1, cost: 0.06 }])
+    );
+    const r = await syncCustosMeta(new Date("2025-01-11T15:00:00Z"), 3);
+    expect(r.linhas).toBe(1);
+    expect(aviso.mock.calls.flat().join(" ")).toMatch(/fora da meia-noite de America\/Sao_Paulo/);
     aviso.mockRestore();
   });
 
@@ -285,14 +322,31 @@ d("relatorioCustos — rateio por imobiliária", () => {
     expect(r.semPreco).toEqual({ mensagens: 1 });
   });
 
+  it("o dia é o de São Paulo, como a Meta conta (caso real de 03/10/2026: 02:07Z caiu em 02/10)", async () => {
+    await custoMeta("2025-01-10", "marketing", 1, 0.0625);
+    await enviada({
+      org: "org-a",
+      dia: DIAS[1],
+      categoria: "marketing",
+      enviadaEm: "2025-01-11T02:06:00Z",
+      entregueEm: "2025-01-11T02:07:00Z",
+    });
+    const r = await relatorioCustos({ de: DIAS[0], ate: DIAS[1] });
+    expect(r.fuso).toBe("America/Sao_Paulo");
+    expect(r.rateio.total).toEqual({ mensagens: 1, custo: 0.0625 });
+    expect(r.semPreco).toEqual({ mensagens: 0 });
+    expect(r.conciliacao?.diferencaPct).toBe(0);
+  });
+
   it("o dia é o da ENTREGA (a Meta cobra na entrega), não o do envio", async () => {
     await custoMeta("2025-01-11", "marketing", 1, 0.06);
     await enviada({
       org: "org-a",
       dia: DIAS[0],
       categoria: "marketing",
-      enviadaEm: "2025-01-10T23:59:00Z",
-      entregueEm: "2025-01-11T00:01:00Z",
+      // 23:59 de 10/01 e 00:01 de 11/01 em São Paulo (UTC-3).
+      enviadaEm: "2025-01-11T02:59:00Z",
+      entregueEm: "2025-01-11T03:01:00Z",
     });
     const r11 = await relatorioCustos({ de: DIAS[1], ate: DIAS[1] });
     expect(r11.rateio.total).toEqual({ mensagens: 1, custo: 0.06 });

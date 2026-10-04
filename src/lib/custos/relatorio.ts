@@ -14,6 +14,7 @@
  * da cobrança (`pricing_category`), senão a do template hoje.
  */
 import { query } from "../db";
+import { FUSO_CUSTOS } from "./meta-analytics";
 
 export interface Valor {
   mensagens: number;
@@ -23,6 +24,8 @@ export interface Valor {
 export interface RelatorioCustos {
   de: string;
   ate: string;
+  /** Fuso dos dias do período (o da WABA, como a Meta conta). */
+  fuso: string;
   moeda: string;
   /** Último dia com dado da Meta (a Meta consolida com atraso). */
   atualizadoAte: string | null;
@@ -42,7 +45,7 @@ export interface RelatorioCustos {
 
 const arred = (n: number) => Math.round(n * 1e6) / 1e6;
 
-/** `de` e `ate` são dias UTC inclusivos (YYYY-MM-DD). */
+/** `de` e `ate` são dias inclusivos (YYYY-MM-DD) no fuso dos custos — o da Meta. */
 export async function relatorioCustos(p: { de: string; ate: string; orgId?: string | null }): Promise<RelatorioCustos> {
   const orgId = p.orgId ?? null;
 
@@ -72,9 +75,9 @@ export async function relatorioCustos(p: { de: string; ate: string; orgId?: stri
     categoria: string;
     n: number;
   }>(
-    // Dia da ENTREGA (a Meta cobra na entrega), em UTC como o analytics. O
+    // Dia da ENTREGA (a Meta cobra na entrega), no fuso da WABA como o analytics. O
     // filtro de período vai pelo envio com 1 dia de folga (usa o índice).
-    `SELECT to_char((COALESCE(o.delivered_at, o.sent_at) AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day,
+    `SELECT to_char((COALESCE(o.delivered_at, o.sent_at) AT TIME ZONE $4::text)::date, 'YYYY-MM-DD') AS day,
             o.org_id,
             MAX(o.org_name) AS org_name,
             o.template_name AS template,
@@ -87,12 +90,12 @@ export async function relatorioCustos(p: { de: string; ate: string; orgId?: stri
         AND o.delivery_status IN ('delivered', 'read')
         AND o.billable IS NOT FALSE
         AND COALESCE(o.pricing_type, 'regular') = 'regular'
-        AND o.sent_at >= (($1::date - 1)::timestamp AT TIME ZONE 'UTC')
-        AND o.sent_at <  (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
-        AND (COALESCE(o.delivered_at, o.sent_at) AT TIME ZONE 'UTC')::date BETWEEN $1::date AND $2::date
+        AND o.sent_at >= (($1::date - 1)::timestamp AT TIME ZONE $4)
+        AND o.sent_at <  (($2::date + 1)::timestamp AT TIME ZONE $4)
+        AND (COALESCE(o.delivered_at, o.sent_at) AT TIME ZONE $4)::date BETWEEN $1::date AND $2::date
         AND ($3::text IS NULL OR o.org_id = $3)
       GROUP BY 1, 2, 4, 5`,
-    [p.de, p.ate, orgId]
+    [p.de, p.ate, orgId, FUSO_CUSTOS]
   );
 
   // Custo unitário por (dia, categoria).
@@ -150,6 +153,7 @@ export async function relatorioCustos(p: { de: string; ate: string; orgId?: stri
   return {
     de: p.de,
     ate: p.ate,
+    fuso: FUSO_CUSTOS,
     moeda: ultimo?.currency ?? "",
     atualizadoAte: ultimo?.day ?? null,
     meta: global

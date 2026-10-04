@@ -1,6 +1,7 @@
 /**
  * Custo REAL do WhatsApp do Max, como a Meta cobra (`pricing_analytics` da
- * WABA), por dia (UTC), categoria e tipo — gravado em `meta_cost_daily`.
+ * WABA), por dia no fuso da WABA (`FUSO_CUSTOS`), categoria e tipo — gravado
+ * em `meta_cost_daily`.
  *
  * A WABA é COMPARTILHADA com o app da FINCasa (outro número): o total da WABA
  * mistura os dois. O filtro é pela dimensão PHONE, contra o número de exibição
@@ -17,6 +18,52 @@ import { graphBase } from "../meta";
 
 /** Uma semana: cobre cron parado por alguns dias e a consolidação tardia. */
 export const DIAS_RELIDOS = 7;
+
+/**
+ * O dia da Meta é o do FUSO DA WABA, não UTC (medido em produção em
+ * 04/10/2026: uma entrega às 02:07Z de 03/10 caiu no dia 02/10 da Meta — 23:07
+ * em São Paulo). Custo e rateio usam este fuso; o sync confere que cada bucket
+ * começa à meia-noite nele e avisa se não começar.
+ */
+export const FUSO_CUSTOS = "America/Sao_Paulo";
+
+const partes = (epochMs: number) => {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: FUSO_CUSTOS,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(new Date(epochMs))
+      .map((x) => [x.type, x.value])
+  );
+  return { dia: `${p.year}-${p.month}-${p.day}`, hora: `${p.hour}:${p.minute}` };
+};
+
+/** YYYY-MM-DD no fuso dos custos. */
+export const diaNoFuso = (epochMs: number): string => partes(epochMs).dia;
+
+/** Instante da meia-noite de `dia` (YYYY-MM-DD) no fuso dos custos, em ms. */
+export function meiaNoiteNoFuso(dia: string): number {
+  const [y, m, d] = dia.split("-").map(Number);
+  const guess = Date.UTC(y, m - 1, d);
+  // Relógio do fuso − UTC num instante. Duas passadas: a segunda corrige o
+  // dia de troca de horário de verão (São Paulo não tem desde 2019).
+  const desvio = (epochMs: number) => {
+    const { dia: dl, hora } = partes(epochMs);
+    const [hh, mm] = hora.split(":").map(Number);
+    const [ly, lm, ld] = dl.split("-").map(Number);
+    return Date.UTC(ly, lm - 1, ld, hh, mm) - epochMs;
+  };
+  const d1 = desvio(guess);
+  const r1 = guess - d1;
+  const d2 = desvio(r1);
+  return d2 === d1 ? r1 : guess - d2;
+}
 
 /** `AUTHENTICATION_INTERNATIONAL` (analytics) = `authentication-international` (webhook). */
 export const normalizarCategoria = (c: string | null | undefined): string | null =>
@@ -62,7 +109,7 @@ export function agregarPontos(pontos: PontoMeta[], nossoNumero: string): LinhaDe
   for (const p of pontos) {
     if (!alvo || digitos(p.phone_number) !== alvo) continue;
     if (typeof p.start !== "number") continue;
-    const day = new Date(p.start * 1000).toISOString().slice(0, 10);
+    const day = diaNoFuso(p.start * 1000);
     const category = normalizarCategoria(p.pricing_category) ?? "desconhecida";
     const pricingType = (p.pricing_type ?? "desconhecido").toLowerCase();
     const k = `${day}|${category}|${pricingType}`;
@@ -97,15 +144,14 @@ export async function syncCustosMeta(agora = new Date(), dias = DIAS_RELIDOS): P
   const nosso = digitos(display_phone_number);
   if (!nosso) throw new Error("número de exibição do Max não veio da Meta");
 
-  // Janela em dias UTC inteiros: de (hoje - dias + 1) 00:00 até agora.
   const fim = Math.floor(agora.getTime() / 1000);
-  const inicioDia = new Date(
-    Date.UTC(agora.getUTCFullYear(), agora.getUTCMonth(), agora.getUTCDate() - (dias - 1))
-  );
-  const inicio = Math.floor(inicioDia.getTime() / 1000);
+  // Janela em dias inteiros do fuso: de (hoje - dias + 1) 00:00 até agora.
+  const hoje = diaNoFuso(agora.getTime());
+  const [hy, hm, hd] = hoje.split("-").map(Number);
   const diasDaJanela = Array.from({ length: dias }, (_, i) =>
-    new Date(inicioDia.getTime() + i * 86_400_000).toISOString().slice(0, 10)
+    new Date(Date.UTC(hy, hm - 1, hd - (dias - 1) + i)).toISOString().slice(0, 10)
   );
+  const inicio = Math.floor(meiaNoiteNoFuso(diasDaJanela[0]) / 1000);
 
   const campo =
     `pricing_analytics.start(${inicio}).end(${fim}).granularity(DAILY)` +
@@ -121,6 +167,14 @@ export async function syncCustosMeta(agora = new Date(), dias = DIAS_RELIDOS): P
   const pontos = (r.pricing_analytics?.data ?? []).flatMap((d) => d.data_points ?? []);
   const linhas = agregarPontos(pontos, nosso);
   const moeda = (r.currency ?? "").toUpperCase();
+  // Bucket que não começa à meia-noite do fuso = a WABA mudou de fuso: o rateio
+  // por dia passaria a cruzar dias errados. Grava (é o dado da Meta), mas avisa.
+  const foraDoFuso = pontos.filter((p) => typeof p.start === "number" && partes(p.start * 1000).hora !== "00:00");
+  if (foraDoFuso.length > 0) {
+    console.warn(
+      `[custos] ${foraDoFuso.length} bucket(s) da Meta fora da meia-noite de ${FUSO_CUSTOS} — o fuso da WABA mudou?`
+    );
+  }
   const descartados = pontos.length > 0 && linhas.length === 0;
   if (descartados) {
     // Meta respondeu, mas nenhum ponto é do Max: formato do número mudou, ou
