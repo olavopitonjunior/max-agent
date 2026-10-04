@@ -447,11 +447,23 @@ export function parseWebhook(
         const status = str(s.status);
         if (!id || !status) continue;
         const ts = Number(s.timestamp);
+        const p = isRec(s.pricing) ? s.pricing : null;
         out.statuses.push({
           status,
           messageIds: [id],
           phone: str(s.recipient_id),
           momment: Number.isFinite(ts) && ts > 0 ? ts * 1000 : null,
+          // Custo: `billable` + categoria em que a mensagem foi cobrada.
+          ...(p
+            ? {
+                pricing: {
+                  billable: typeof p.billable === "boolean" ? p.billable : null,
+                  // Mesma grafia do pricing_analytics (`_` em vez de `-`).
+                  category: str(p.category)?.toLowerCase().replace(/-/g, "_") ?? null,
+                  type: str(p.type)?.toLowerCase() ?? null,
+                },
+              }
+            : {}),
         });
         if (status === "failed") {
           const e = Array.isArray(s.errors) && isRec(s.errors[0]) ? s.errors[0] : null;

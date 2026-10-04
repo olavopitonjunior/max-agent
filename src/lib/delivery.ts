@@ -117,6 +117,23 @@ export async function applyStatusCallback(cb: StatusCallback): Promise<ApplyTota
     [cb.messageIds, status, rank, at]
   );
 
+  // Cobrança: grava à parte do status — chega em `sent`/`delivered` e não
+  // segue a escada de rank (um `read` sem `pricing` não apaga o que veio).
+  // Só MEDE: falhar aqui nunca pode derrubar o webhook de entrega (o lote
+  // seguinte — falhas de envio, inbound — não rodaria).
+  if (cb.pricing && (cb.pricing.billable !== null || cb.pricing.category)) {
+    await query(
+      `UPDATE outbox
+          SET billable         = COALESCE($2, billable),
+              pricing_category = COALESCE($3, pricing_category),
+              pricing_type     = COALESCE($4, pricing_type)
+        WHERE provider_message_id = ANY($1)`,
+      [cb.messageIds, cb.pricing.billable, cb.pricing.category, cb.pricing.type]
+    ).catch((err) =>
+      console.warn("[delivery] pricing não gravado:", err instanceof Error ? err.message : String(err))
+    );
+  }
+
   return { outbox: outboxRows.length, replies: replyRows.length };
 }
 
@@ -167,6 +184,7 @@ export async function applyFalhaDeEnvio(f: {
           SET status = 'pending', deliver_after = $2, provider_message_id = NULL,
               send_started_at = NULL, sent_at = NULL, template_name = NULL,
               delivery_status = NULL, delivered_at = NULL, read_at = NULL,
+              billable = NULL, pricing_category = NULL, pricing_type = NULL,
               last_error = $3
         WHERE provider_message_id = $1 AND status = 'sent'
           AND (delivery_status IS NULL OR delivery_status IN ('sent', 'unconfirmed'))

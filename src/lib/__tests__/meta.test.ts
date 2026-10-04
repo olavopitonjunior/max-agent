@@ -292,6 +292,34 @@ describe("parseWebhook — status de entrega", () => {
     expect(ev.failures).toEqual([]);
   });
 
+  it("pricing do status (formato documentado): cobrança e categoria da mensagem", () => {
+    const ev = parseWebhook(
+      webhook({
+        statuses: [
+          {
+            id: "wamid.OUT3",
+            status: "delivered",
+            timestamp: "1758549605",
+            recipient_id: "5511987654321",
+            pricing: { billable: true, pricing_model: "PMP", category: "marketing", type: "regular" },
+          },
+          {
+            id: "wamid.OUT4",
+            status: "sent",
+            timestamp: "1758549606",
+            recipient_id: "5511987654321",
+            pricing: { billable: false, pricing_model: "PMP", category: "service", type: "free_customer_service" },
+          },
+        ],
+      }),
+      PNID
+    );
+    expect(ev.statuses.map((s) => s.pricing)).toEqual([
+      { billable: true, category: "marketing", type: "regular" },
+      { billable: false, category: "service", type: "free_customer_service" },
+    ]);
+  });
+
   it("failed traz o código da Meta — é o 131047 que chega DEPOIS de um envio aceito", () => {
     const ev = parseWebhook(
       webhook({

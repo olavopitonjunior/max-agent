@@ -55,6 +55,15 @@ export interface StatusCallback {
   messageIds: string[];
   phone: string | null;
   momment: number | null;
+  /**
+   * Cobrança da mensagem, como a Meta informa no status (`pricing`). Só a
+   * Cloud API manda; ausente = sem informação (Z-API, ou status sem o bloco).
+   */
+  pricing?: {
+    billable: boolean | null;
+    category: string | null;
+    type: string | null;
+  } | null;
 }
 
 export interface ConnectionState {
