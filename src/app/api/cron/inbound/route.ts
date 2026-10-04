@@ -5,6 +5,7 @@ import { pruneOldFacts } from "@/lib/memory";
 import { pruneOldTurns } from "@/lib/turnlog";
 import { podarPedidosDeDuvida } from "@/lib/aceite";
 import { refreshTemplates } from "@/lib/templates/refresh";
+import { syncCustosMeta } from "@/lib/custos/meta-analytics";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -73,6 +74,19 @@ export async function GET(req: NextRequest) {
       // (02/10/2026), e sem isto um template aprovado nunca seria usado.
       // Sem META_WABA_ID não há o que consultar — o envio segue fail-closed.
       if (process.env.META_WABA_ID) {
+        // Custo real da Meta dos últimos dias (aba Custos do /admin/max), em
+        // PARALELO com o refresh: os dois somados em série apertariam o
+        // maxDuration. Falhar aqui não atrasa nada além do painel de custo.
+        const custos = syncCustosMeta()
+          .then((s) => {
+            if (s.linhas > 0) console.log(`[cron/inbound] custos meta: ${s.linhas} linha(s) ${s.moeda} ${s.numero}`);
+          })
+          .catch((err) =>
+            console.warn(
+              "[cron/inbound] custos meta falhou:",
+              err instanceof Error ? err.message : String(err)
+            )
+          );
         const r = await refreshTemplates().catch((err) => {
           console.warn(
             "[cron/inbound] refresh de templates falhou:",
@@ -80,6 +94,7 @@ export async function GET(req: NextRequest) {
           );
           return [];
         });
+        await custos;
         const mudou = r.filter((x) => x.acao !== "igual");
         if (mudou.length > 0) {
           const problema = mudou.some((x) => x.acao === "erro" || x.acao === "diverge");

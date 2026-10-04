@@ -31,6 +31,9 @@ vi.mock("@/lib/orgs", () => ({
 vi.mock("@/lib/identity", () => ({
   clearIdentityCache: vi.fn().mockResolvedValue(undefined),
 }));
+vi.mock("@/lib/custos/relatorio", () => ({
+  relatorioCustos: vi.fn(async (p: unknown) => ({ eco: p })),
+}));
 vi.mock("@/lib/db", () => ({
   query: vi.fn().mockResolvedValue([]),
 }));
@@ -61,6 +64,7 @@ const { POST: notifyPost } = await import("../notify/route");
 const { GET: cronInbound } = await import("../cron/inbound/route");
 const { GET: cronOutbox } = await import("../cron/outbox/route");
 const { GET: adminStatus } = await import("../admin/status/route");
+const { GET: adminCosts } = await import("../admin/costs/route");
 const { sign } = await import("@/lib/hmac");
 const { observeConnection } = await import("@/lib/connection");
 const { connectionStatus } = await import("@/lib/zapi");
@@ -561,3 +565,33 @@ describe("GET /api/admin/status — a query entra na assinatura", () => {
     expect((await adminStatus(statusReq("", null))).status).toBe(401);
   });
 });
+
+describe("GET /api/admin/costs", () => {
+  function costsReq(query: string, assinada = query) {
+    const ts = String(Date.now());
+    return new NextRequest(`http://max.test/api/admin/costs${query}`, {
+      headers: { "x-max-timestamp": ts, "x-max-signature": sign(ts, `GET./api/admin/costs${assinada}`, SECRET) },
+    });
+  }
+
+  it("período e org da query assinada chegam ao relatório", async () => {
+    const res = await adminCosts(costsReq("?de=2026-10-01&ate=2026-10-04&orgId=org1"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ eco: { de: "2026-10-01", ate: "2026-10-04", orgId: "org1" } });
+  });
+
+  it("sem período: o mês corrente até hoje (UTC)", async () => {
+    const hoje = new Date().toISOString().slice(0, 10);
+    const res = await adminCosts(costsReq(""));
+    expect(await res.json()).toEqual({ eco: { de: `${hoje.slice(0, 8)}01`, ate: hoje, orgId: null } });
+  });
+
+  it("assinatura de outro período é 401; período inválido ou invertido é 400", async () => {
+    expect((await adminCosts(costsReq("?de=2026-01-01&ate=2026-12-31", "?de=2026-10-01&ate=2026-10-04"))).status).toBe(401);
+    expect((await adminCosts(costsReq("?de=ontem&ate=2026-10-04"))).status).toBe(400);
+    expect((await adminCosts(costsReq("?de=2026-10-04&ate=2026-10-01"))).status).toBe(400);
+    expect((await adminCosts(costsReq("?de=2024-01-01&ate=2026-10-01"))).status).toBe(400);
+    expect((await adminCosts(costsReq("?de=2026-02-31&ate=2026-03-02"))).status).toBe(400);
+  });
+});
+
