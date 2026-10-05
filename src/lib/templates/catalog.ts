@@ -7,14 +7,15 @@
  * variáveis soltas (`params`); aqui isso vira `name` + lista ordenada de
  * parâmetros, que é o que a Graph API recebe.
  *
- * ── A régua (decisão do Olavo, 01/10/2026) ──────────────────────────────
+ * ── A régua (decisão do Olavo, 01/10/2026; propostas no PR 3, 05/10/2026) ──
  * SÓ estes temas têm template: formulário finalizado, formulário pendente,
- * contrato assinado, pesquisa de satisfação, mensagem da imobiliária e
- * onboarding (boas-vindas, configuração pendente e o repasse de dúvida).
- * Nenhum texto cita o nome do sistema. Tudo o mais é FORA DA RÉGUA: sai como
- * texto livre dentro da janela de 24h e, fora dela, não sai pelo WhatsApp
- * (`templateDoKind` devolve `null` e o outbox desiste). Não existe mais
- * template genérico — ele fazia qualquer aviso virar mensagem paga.
+ * contrato assinado, pesquisa de satisfação, mensagem da imobiliária,
+ * onboarding (boas-vindas, configuração pendente e o repasse de dúvida) e
+ * proposta (assinada, recusada, expirada, entregue). Nenhum texto cita o nome
+ * do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
+ * janela de 24h e, fora dela, não sai pelo WhatsApp (`templateDoKind` devolve
+ * `null` e o outbox desiste). Não existe mais template genérico — ele fazia
+ * qualquer aviso virar mensagem paga.
  *
  * ── Nomes ────────────────────────────────────────────────────────────────
  * Prefixo `max_`: o WABA é COMPARTILHADO com o app da própria FINCasa, e um
@@ -42,6 +43,20 @@ export type FonteDeVariavel =
   | { param: string };
 
 /**
+ * Ações dos botões de AÇÃO (`acoes`/`acao_e_url`, PR 3) — enum FECHADO porque
+ * vira parte do payload que volta no webhook (`acao:<id>:<ação>`) e é o que
+ * `lib/aceite.ts` usa para decidir se pode responder. A ação de verdade
+ * (converter a proposta, recriá-la) é o PR 6; aqui só o botão e o roteamento.
+ */
+export type AcaoBotao = "converter" | "agora_nao" | "recriar";
+
+/** Um botão de resposta rápida de AÇÃO: texto visível + a ação do enum. */
+export interface AcaoItem {
+  texto: string;
+  acao: AcaoBotao;
+}
+
+/**
  * Botões do template — fazem parte do template APROVADO, então são decididos
  * aqui e não na hora do envio.
  *
@@ -53,11 +68,17 @@ export type FonteDeVariavel =
  *    `ok:<id da linha>`, e o Max entrega o texto guardado (`lib/aceite.ts`).
  *  · `url_e_ok`: os dois — o de resposta rápida aqui é "Tenho uma dúvida"
  *    (payload `duvida:<id>`), que abre o repasse ao time.
+ *  · `acoes`: até 2 respostas rápidas de AÇÃO (ex.: "Converter em negócio" /
+ *    "Agora não") — o toque volta como `acao:<id>:<ação>` (`lib/aceite.ts`).
+ *  · `acao_e_url`: uma ação + um botão de URL (ex.: "Recriar proposta" +
+ *    "Abrir proposta") — mesma regra de URL do `url` acima.
  */
 export type Botao =
   | { tipo: "url"; texto: string }
   | { tipo: "ok"; texto: string }
-  | { tipo: "url_e_ok"; texto: string; ok: string };
+  | { tipo: "url_e_ok"; texto: string; ok: string }
+  | { tipo: "acoes"; acoes: [AcaoItem, AcaoItem] }
+  | { tipo: "acao_e_url"; acao: AcaoItem; urlTexto: string };
 
 /**
  * Os botões do template NA ORDEM em que a Meta os indexa (0, 1…). Fonte
@@ -67,15 +88,26 @@ export type Botao =
  */
 export type BotaoOrdenado =
   | { tipo: "url"; texto: string }
-  | { tipo: "quick_reply"; texto: string; prefixo: "ok" | "duvida" };
+  | { tipo: "quick_reply"; texto: string; prefixo: "ok" | "duvida" }
+  | { tipo: "quick_reply_acao"; texto: string; acao: AcaoBotao };
 
 export function botoesEmOrdem(botao: Botao | null): BotaoOrdenado[] {
   if (!botao) return [];
   if (botao.tipo === "url") return [{ tipo: "url", texto: botao.texto }];
   if (botao.tipo === "ok") return [{ tipo: "quick_reply", texto: botao.texto, prefixo: "ok" }];
+  if (botao.tipo === "url_e_ok")
+    return [
+      { tipo: "url", texto: botao.texto },
+      { tipo: "quick_reply", texto: botao.ok, prefixo: "duvida" },
+    ];
+  if (botao.tipo === "acoes")
+    return botao.acoes.map((a) => ({ tipo: "quick_reply_acao", texto: a.texto, acao: a.acao }));
+  // `acao_e_url`: URL primeiro, ação (resposta rápida) depois — mesma regra
+  // da Meta que o `url_e_ok` já segue (call-to-action antes de quick reply;
+  // misturar na ordem errada é recusado na submissão).
   return [
-    { tipo: "url", texto: botao.texto },
-    { tipo: "quick_reply", texto: botao.ok, prefixo: "duvida" },
+    { tipo: "url", texto: botao.urlTexto },
+    { tipo: "quick_reply_acao", texto: botao.acao.texto, acao: botao.acao.acao },
   ];
 }
 
@@ -91,6 +123,16 @@ export interface TemplateDef {
   /** Exemplo por variável — a Meta exige na submissão. */
   exemplos: string[];
   botao: Botao | null;
+  /**
+   * Params (chaves de `linha.params`) que precisam estar presentes e NÃO
+   * vazios para este template poder ser usado (ver `templateUsavel`).
+   * Ausente/`[]` = comportamento antigo: falta vira o `FALLBACK` abaixo.
+   * Existe porque o mesmo `{ param: X }` genérico serve a dois mundos — o
+   * `negocio`/`quem` antigos, que sempre tiveram fallback, e o `proposta`/
+   * `quem` dos templates de proposta (PR 3), onde um fallback tipo "a
+   * proposta em andamento foi assinada" seria pior que não enviar.
+   */
+  paramsObrigatorios?: string[];
 }
 
 /** Fallback por fonte: a Meta recusa parâmetro vazio. */
@@ -107,15 +149,31 @@ const t = (
   body: string,
   vars: FonteDeVariavel[],
   exemplos: string[],
-  botao: Botao | null
-): TemplateDef => ({ name, lang: "pt_BR", category: "UTILITY", body, vars, exemplos, botao });
+  botao: Botao | null,
+  paramsObrigatorios?: string[]
+): TemplateDef => ({
+  name,
+  lang: "pt_BR",
+  category: "UTILITY",
+  body,
+  vars,
+  exemplos,
+  botao,
+  ...(paramsObrigatorios && paramsObrigatorios.length > 0 ? { paramsObrigatorios } : {}),
+});
 
 const NOME = "nome" as const;
 const ORG = "org" as const;
 const NEGOCIO = { param: "negocio" };
+const PROPOSTA = { param: "proposta" };
+const QUEM = { param: "quem" };
 
 const ABRIR_NEGOCIO: Botao = { tipo: "url", texto: "Abrir negócio" };
 const OK: Botao = { tipo: "ok", texto: "OK" };
+
+const CONVERTER: AcaoItem = { texto: "Converter em negócio", acao: "converter" };
+const AGORA_NAO: AcaoItem = { texto: "Agora não", acao: "agora_nao" };
+const RECRIAR: AcaoItem = { texto: "Recriar proposta", acao: "recriar" };
 
 const PESQUISA = t(
   "max_pesquisa_satisfacao",
@@ -209,6 +267,51 @@ export const CATALOGO: Record<string, TemplateDef> = {
     [NOME, { param: "quem" }, ORG],
     ["Olavo", "Ana Souza", "RE/MAX Trio"],
     OK
+  ),
+  /**
+   * ── Propostas (PR 3, decisão do Olavo, 05/10/2026) ───────────────────────
+   * `proposta`/`quem` são OBRIGATÓRIOS (`paramsObrigatorios`): o contractmaker
+   * ainda não manda essas chaves (vai mandar num PR separado) — sem elas a
+   * linha não sai por ESTE template, nunca com um fallback genérico tipo "a
+   * proposta em andamento" (ver `templateUsavel`). A ação de verdade por
+   * trás dos botões (converter, recriar) é o PR 6; aqui só o botão e o texto
+   * fixo de resposta (`lib/aceite.ts`).
+   */
+  proposal_completed: t(
+    "max_proposta_assinada",
+    "Olá, {{1}}! A proposta {{2}}, da {{3}}, foi assinada por todos os signatários. Escolha abaixo se quer converter a proposta em negócio agora.",
+    [NOME, PROPOSTA, ORG],
+    ["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio"],
+    { tipo: "acoes", acoes: [CONVERTER, AGORA_NAO] },
+    ["proposta"]
+  ),
+  // {{4}} vem com a preposição contraída ("pelo proponente"/"pelo
+  // proprietário") — decisão do Olavo, 05/10/2026.
+  proposal_refused: t(
+    "max_proposta_recusada",
+    "Olá, {{1}}! A proposta {{2}}, da {{3}}, foi recusada {{4}}. Você pode recriar a proposta com os mesmos dados pelo botão abaixo.",
+    [NOME, PROPOSTA, ORG, QUEM],
+    ["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio", "pelo proprietário"],
+    { tipo: "acao_e_url", acao: RECRIAR, urlTexto: "Abrir proposta" },
+    ["proposta", "quem"]
+  ),
+  proposal_expired: t(
+    "max_proposta_expirada",
+    "Olá, {{1}}! O prazo de assinatura da proposta {{2}}, da {{3}}, venceu sem todas as assinaturas. Você pode recriar a proposta com os mesmos dados pelo botão abaixo.",
+    [NOME, PROPOSTA, ORG],
+    ["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio"],
+    { tipo: "acao_e_url", acao: RECRIAR, urlTexto: "Abrir proposta" },
+    ["proposta"]
+  ),
+  // {{4}} vem com a preposição contraída ("ao proponente"/"ao
+  // proprietário") — decisão do Olavo, 05/10/2026.
+  proposal_delivered: t(
+    "max_proposta_entregue",
+    "Olá, {{1}}! A proposta {{2}}, da {{3}}, foi entregue {{4}} para assinatura. Acompanhe o andamento pelo botão abaixo.",
+    [NOME, PROPOSTA, ORG, QUEM],
+    ["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio", "ao proprietário"],
+    { tipo: "url", texto: "Abrir proposta" },
+    ["proposta", "quem"]
   ),
 };
 
@@ -335,21 +438,44 @@ const MENSAGEM_V3 = t(
 V3.manual_message = MENSAGEM_V3;
 V3.manual_message_parte = MENSAGEM_V3;
 
+/**
+ * Versão 4 — só do `welcome` (decisão do Olavo, 05/10/2026). Troca a
+ * apresentação por uma instrução de AGENDA ("salve este número como Max"):
+ * diz quem está falando sem reintroduzir o texto que levou o v1 a MARKETING.
+ * Botão novo ("Criar senha" — não repete o texto do v1/v2/v3); mesmas
+ * variáveis ([NOME, ORG]).
+ */
+const V4: Record<string, TemplateDef> = {
+  welcome: t(
+    "max_boas_vindas_v4",
+    "Olá, {{1}}! Seu acesso à {{2}} foi aprovado. Salve este número na sua agenda como Max: é por ele que chegam os avisos dos seus negócios e propostas. Toque no botão abaixo para criar sua senha.",
+    [NOME, ORG],
+    ["Ana", "RE/MAX Trio"],
+    { tipo: "url", texto: "Criar senha" }
+  ),
+};
+
 /** Todos os templates (sem repetição, todas as versões), para a submissão, o refresh e os testes de regra. */
 export function todosOsTemplates(): TemplateDef[] {
   return [
-    ...new Map([...Object.values(CATALOGO), ...Object.values(V2), ...Object.values(V3)].map((d) => [d.name, d])).values(),
+    ...new Map(
+      [...Object.values(CATALOGO), ...Object.values(V2), ...Object.values(V3), ...Object.values(V4)].map((d) => [
+        d.name,
+        d,
+      ])
+    ).values(),
   ];
 }
 
 /**
  * Os templates do `kind` em ordem de preferência — a versão mais nova primeiro
- * ([v3, v2, v1]) —, ou `[]` quando o tipo está FORA DA RÉGUA. O envio usa o
- * aprovado, de preferência não MARKETING (`outbox.ts`).
+ * ([v4, v3, v2, v1], pulando as versões que esse `kind` não tem) —, ou `[]`
+ * quando o tipo está FORA DA RÉGUA. O envio usa o aprovado, de preferência
+ * não MARKETING (`outbox.ts`).
  */
 export function templatesDoKind(kind: string | null | undefined): TemplateDef[] {
   if (!kind || !CATALOGO[kind]) return [];
-  return [V3[kind], V2[kind], CATALOGO[kind]].filter((d): d is TemplateDef => !!d);
+  return [V4[kind], V3[kind], V2[kind], CATALOGO[kind]].filter((d): d is TemplateDef => !!d);
 }
 
 /** O template preferido do `kind`, ou `null` quando o tipo está FORA DA RÉGUA. */
@@ -369,6 +495,24 @@ export interface LinhaParaTemplate {
 function parametro(valor: string | null | undefined, fallback: string): string {
   const limpo = (valor ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
   return limpo || fallback;
+}
+
+/**
+ * Falso quando `def.paramsObrigatorios` tem alguma chave ausente ou vazia em
+ * `linha.params` — este candidato NÃO pode ser usado para esta linha, nunca
+ * com o `FALLBACK` (ver o comentário do campo em `TemplateDef`). Quem decide
+ * o template a usar (`outbox.ts`) filtra os candidatos por isto ANTES de
+ * checar aprovação da Meta — um template sem o parâmetro obrigatório não
+ * entra na disputa por "o aprovado", mesmo que esteja `APPROVED`.
+ */
+export function templateUsavel(def: TemplateDef, linha: LinhaParaTemplate): boolean {
+  if (!def.paramsObrigatorios || def.paramsObrigatorios.length === 0) return true;
+  return def.paramsObrigatorios.every((chave) => !!linha.params?.[chave]?.trim());
+}
+
+/** O primeiro parâmetro obrigatório que falta nesta linha, ou `null`. */
+export function parametroObrigatorioFaltando(def: TemplateDef, linha: LinhaParaTemplate): string | null {
+  return def.paramsObrigatorios?.find((chave) => !linha.params?.[chave]?.trim()) ?? null;
 }
 
 /** Parâmetros do corpo na ordem de `{{1}}`, `{{2}}`… */

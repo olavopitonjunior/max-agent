@@ -16,6 +16,8 @@ import {
   KINDS_COM_ACEITE,
   botoesEmOrdem,
   templatesDoKind,
+  templateUsavel,
+  parametroObrigatorioFaltando,
   parametrosDoCorpo,
   type TemplateDef,
 } from "./templates/catalog";
@@ -48,15 +50,30 @@ export const MARCA_FORA_DA_REGUA =
   "fora_da_regua: tipo sem template e janela de 24h fechada — não enviado";
 
 /**
+ * Igual ao `fora_da_regua` acima — falha terminal, janela fechada, nenhum
+ * template usável — mas a causa é outra: o `kind` TEM template(s), só que
+ * nenhum candidato tem o parâmetro obrigatório desta linha (`paramsObrigatorios`
+ * em `templates/catalog.ts`). Marca PRÓPRIA, com o nome do parâmetro, porque o
+ * conselho é diferente: aqui falta o EMISSOR mandar o `params`, não aprovar
+ * template nenhum. Hoje é o caso das notificações de proposta — o
+ * contractmaker ainda não manda `proposta`/`quem` (PR separado).
+ */
+export function marcaParametroAusente(param: string): string {
+  return `parametro_ausente: ${param} — falta o parâmetro obrigatório do template, não enviado`;
+}
+
+/**
  * Botões na ordem do template, preenchidos para ESTA linha. O id da linha é o
  * que o redirecionador `/r/<id>` resolve e o que volta no payload do toque.
  */
 export function botoesDaLinha(def: TemplateDef, rowId: string): BotaoEnviado[] {
-  return botoesEmOrdem(def.botao).map((b) =>
-    b.tipo === "url"
-      ? { tipo: "url", param: rowId }
-      : { tipo: "quick_reply", payload: `${b.prefixo}:${rowId}` }
-  );
+  return botoesEmOrdem(def.botao).map((b) => {
+    if (b.tipo === "url") return { tipo: "url", param: rowId };
+    if (b.tipo === "quick_reply") return { tipo: "quick_reply", payload: `${b.prefixo}:${rowId}` };
+    // `quick_reply_acao`: o payload que o toque devolve no webhook
+    // (`acao:<id>:<ação>`, interceptado em `lib/aceite.ts`).
+    return { tipo: "quick_reply", payload: `acao:${rowId}:${b.acao}` };
+  });
 }
 
 /** A Meta recusou o template na hora do envio (132xxx: parâmetro, pausa…). */
@@ -524,8 +541,8 @@ export async function dispatchDue(
      */
     let envioTemplate: TemplateDef | null = null;
     if (provider() === "meta" && !(await janelaAberta(row.phone))) {
-      const candidatos = templatesDoKind(row.kind);
-      if (candidatos.length === 0) {
+      const candidatosDoKind = templatesDoKind(row.kind);
+      if (candidatosDoKind.length === 0) {
         await query(
           `UPDATE outbox
               SET status = 'failed', last_error = $2, send_started_at = NULL,
@@ -537,7 +554,30 @@ export async function dispatchDue(
         totals.failed += 1;
         continue;
       }
-      // Entre as versões do kind ([v3, v2, v1]), o APROVADO — de preferência o que a Meta não
+      // Candidatos cujo `paramsObrigatorios` está satisfeito por ESTA linha
+      // (`templateUsavel`) — sem isso o template nem entra na disputa por "o
+      // aprovado", e NUNCA sai com um fallback genérico (ver `catalog.ts`).
+      const candidatos = candidatosDoKind.filter((c) => templateUsavel(c, row));
+      if (candidatos.length === 0) {
+        const faltando = parametroObrigatorioFaltando(candidatosDoKind[0], row) ?? "?";
+        const marca = marcaParametroAusente(faltando);
+        await query(
+          `UPDATE outbox
+              SET status = 'failed', last_error = $2, send_started_at = NULL,
+                  reported_at = NULL
+            WHERE id = $1 AND status = 'sending'`,
+          [row.id, marca]
+        );
+        log.info("outbox.parametro_ausente", {
+          rowId: row.id,
+          orgId: row.org_id,
+          kind: row.kind,
+          param: faltando,
+        });
+        totals.failed += 1;
+        continue;
+      }
+      // Entre as versões do kind ([v4, v3, v2, v1]), o APROVADO — de preferência o que a Meta não
       // classificou como MARKETING (limite de frequência por pessoa, 131049).
       // O template que a Meta acabou de recusar NESTA linha (marca
       // `template_invalido` com o nome) fica de fora enquanto houver outro:
