@@ -1,3 +1,5 @@
+import { semCredencial } from "./redigir";
+
 /**
  * fetch com prazo — o único jeito de chamar upstream neste serviço.
  *
@@ -70,7 +72,10 @@ export async function fetchWithTimeout(
     return await fetch(url, { cache: "no-store", ...init, signal: AbortSignal.timeout(timeoutMs) });
   } catch (err) {
     if (err instanceof Error && err.name === "TimeoutError") {
-      throw new Error(`timeout de ${timeoutMs}ms em ${new URL(url).host}${new URL(url).pathname}`);
+      // Sem credencial: a mensagem vai para `last_error` e para o painel, e a
+      // Z-API levava o token no caminho (achado de 05/10).
+      const { host, pathname } = new URL(url);
+      throw new Error(`timeout de ${timeoutMs}ms em ${host}${semCredencial(pathname)}`);
     }
     throw err;
   }

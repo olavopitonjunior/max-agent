@@ -66,6 +66,7 @@ import { TOOLS_DE_LEITURA, selecionarTools } from "./tools";
 import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
 import { chaveDePolitica } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
+import { SEM_ORG } from "@/lib/sem-org";
 
 /**
  * Grafo de conversa do Max.
@@ -1295,7 +1296,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     reply,
     afterReply: async () => {
       await registrarTurn({
-        orgId: extra.orgId ?? "(sem org)",
+        orgId: extra.orgId ?? SEM_ORG,
         phone: inbound.fromPhone,
         messageId: inbound.messageId,
         kind: inbound.kind,
@@ -1325,7 +1326,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
       return await fn();
     } catch (err) {
       await registrarTurn({
-        orgId: orgId ?? "(sem org)",
+        orgId: orgId ?? SEM_ORG,
         phone: inbound.fromPhone,
         messageId: inbound.messageId,
         kind: inbound.kind,

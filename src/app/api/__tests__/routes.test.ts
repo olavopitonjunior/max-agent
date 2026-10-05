@@ -564,6 +564,48 @@ describe("GET /api/admin/status — a query entra na assinatura", () => {
   it("sem assinatura é 401", async () => {
     expect((await adminStatus(statusReq("", null))).status).toBe(401);
   });
+
+  it("credencial da Z-API não sai: nem no last_error da fila, nem no bloco do provedor", async () => {
+    vi.stubEnv("WHATSAPP_PROVIDER", "zapi");
+    checaConexao.mockResolvedValueOnce({
+      connected: false,
+      raw: {
+        body: '{"url":"https:\\/\\/api.z-api.io\\/instances\\/INSTRAW789\\/token\\/TOKRAW789"}',
+        // `?token=` dentro de JSON citado: redigir não pode engolir o escape.
+        corpo: '{"url":"https://api.z-api.io/x?token=TOKQS789"}',
+        ts: 1791201679702,
+      },
+      inoperante: { motivo: "credencial", detalhe: "401 em api.z-api.io/instances/INSTDET789/token/TOKDET789/status" },
+    });
+    const { query } = await import("@/lib/db");
+    const consulta = query as unknown as ReturnType<typeof vi.fn>;
+    consulta.mockImplementation(async (sql: string) =>
+      sql.includes("attempts, last_error")
+        ? [{
+            id: "o1",
+            last_error:
+              "timeout de 10000ms em api.z-api.io/instances/INSTSECRETA123/token/TOKENSECRETO456/send-text",
+          }]
+        : []
+    );
+    try {
+      const res = await adminStatus(statusReq("", "GET./api/admin/status"));
+      const texto = await res.text();
+      expect(texto).not.toContain("INSTSECRETA123");
+      expect(texto).not.toContain("TOKENSECRETO456");
+      expect(res.status).toBe(200);
+      for (const segredo of ["INSTRAW789", "TOKRAW789", "TOKQS789", "INSTDET789", "TOKDET789"]) {
+        expect(texto).not.toContain(segredo);
+      }
+      const corpo = JSON.parse(texto);
+      expect(corpo.provider).toBe("zapi");
+      // Número que não é telefone (timestamp) passa intacto e o JSON continua válido.
+      expect(corpo.zapi.raw.ts).toBe(1791201679702);
+    } finally {
+      consulta.mockReset();
+      consulta.mockResolvedValue([]);
+    }
+  });
 });
 
 describe("GET /api/admin/costs", () => {

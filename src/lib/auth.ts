@@ -57,7 +57,16 @@ export async function requireHmac(
   const timestamp = req.headers.get("x-max-timestamp");
   const signature = req.headers.get("x-max-signature");
 
-  const verdict = verifySignature({ timestamp, signature, rawBody: signedPayload, secret });
+  let verdict = verifySignature({ timestamp, signature, rawBody: signedPayload, secret });
+  if (!verdict.ok && verdict.reason === "bad_signature" && opts.signQuery) {
+    // Segunda forma aceita: a MESMA query, normalizada. Ver `queryCanonica`.
+    const canonico = `${req.method}.${req.nextUrl.pathname}${queryCanonica(req.nextUrl.search)}`;
+    if (canonico !== signedPayload) {
+      verdict = verifySignature({ timestamp, signature, rawBody: canonico, secret });
+      // Sem valores: só para saber qual grafia chega em produção.
+      if (verdict.ok) console.info(`[auth] aceita pela query canônica em ${req.nextUrl.pathname}`);
+    }
+  }
 
   if (!verdict.ok) {
     // Sem detalhe no corpo: para quem não tem o segredo, "assinatura inválida"
@@ -70,6 +79,22 @@ export async function requireHmac(
   }
 
   return { ok: true, rawBody };
+}
+
+/**
+ * A query como o ImobPro a assina: `URLSearchParams.toString()` (o cliente monta
+ * a URL com `url.searchParams.set` e assina `url.search`).
+ *
+ * Os bytes que chegam aqui nem sempre são os que saíram de lá: entre o fetch e
+ * o handler, `%28sem+org%29` pode virar `(sem+org)` ou `+` virar `%20`. Era o
+ * que dava 401 só nas conversas sem imobiliária (`orgId=(sem org)`), no cursor
+ * que carrega esse rótulo e na busca com parêntese (05/10/2026). Decodificar e
+ * reserializar devolve a forma assinada sem aceitar NADA além dela: os pares
+ * chave/valor são os mesmos, só a grafia muda.
+ */
+export function queryCanonica(search: string): string {
+  const s = new URLSearchParams(search).toString();
+  return s ? `?${s}` : "";
 }
 
 /** Auth dos crons: `Authorization: Bearer $CRON_SECRET`, mandado pela Vercel. */

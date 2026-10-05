@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireHmac } from "@/lib/auth";
 import { maskPhone } from "@/lib/phone";
+import { erroSemSegredo } from "@/lib/redigir";
 import { linhaDoTempo, resolverTelefone, type EventoLinhaDoTempo } from "@/lib/threads";
 
 export const dynamic = "force-dynamic";
@@ -92,7 +93,7 @@ function formatar(e: EventoLinhaDoTempo) {
       tools: e.tools_json,
       usage: e.usage_json,
       latencyMs: e.latency_ms,
-      error: semTelefone(e.error),
+      error: erroSemSegredo(e.error),
       entrega: {
         status: e.reply_delivery_status,
         deliveredAt: e.reply_delivered_at,
@@ -119,22 +120,6 @@ function formatar(e: EventoLinhaDoTempo) {
       clickedAt: e.clicked_at,
     },
     errorCode: e.error_code,
-    lastError: semTelefone(e.last_error),
+    lastError: erroSemSegredo(e.last_error),
   };
-}
-
-/**
- * Mensagem de erro vem do provedor (`err.message`), e provedor costuma citar o
- * destinatário. Texto da conversa fica como está (é o conteúdo que o painel
- * existe para mostrar); o erro é metadado, e nele o número não tem função.
- */
-function semTelefone(texto: unknown): string | null {
-  if (typeof texto !== "string") return null;
-  // Dígitos com separadores no meio: provedor formata ("55 11 98765-0003",
-  // "(11) 98765-0003"). Casa o trecho largo e só mascara se, sem os
-  // separadores, tiver cara de telefone (10 a 13 dígitos).
-  return texto.replace(/\+?\(?\d[\d\s().-]{8,20}\d/g, (m) => {
-    const digitos = m.replace(/\D/g, "");
-    return digitos.length >= 10 && digitos.length <= 13 ? maskPhone(digitos) : m;
-  });
 }
