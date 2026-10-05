@@ -15,11 +15,21 @@ const { query } = await import("../db");
 const DEF = CATALOGO.form_completed;
 const NOMES = todosOsTemplates().map((t) => t.name);
 
-/** Responde a Graph por nome: `porNome[name]` = lista que a Meta devolveria. */
-function graph(porNome: Record<string, unknown[]>) {
-  return vi.fn(async (url: string) => {
-    const nome = new URL(url).searchParams.get("name") ?? "";
-    return new Response(JSON.stringify({ data: porNome[nome] ?? [] }), { status: 200 });
+/**
+ * A Graph da listagem: `porNome[name]` = o que a Meta tem com aquele nome. Sem
+ * `name` na URL (a listagem que o refresh usa), devolve tudo junto — numa
+ * página só, ou em páginas de `porPagina` itens ligadas por `paging.next`.
+ */
+function graph(porNome: Record<string, unknown[]>, porPagina = 0) {
+  return vi.fn(async (url: string, _init?: RequestInit) => {
+    const u = new URL(url);
+    const nome = u.searchParams.get("name");
+    if (nome !== null) return new Response(JSON.stringify({ data: porNome[nome] ?? [] }), { status: 200 });
+    const todos = Object.values(porNome).flat();
+    if (!porPagina) return new Response(JSON.stringify({ data: todos }), { status: 200 });
+    const de = Number(u.searchParams.get("after") ?? 0);
+    const next = de + porPagina < todos.length ? `${u.origin}${u.pathname}?after=${de + porPagina}` : undefined;
+    return new Response(JSON.stringify({ data: todos.slice(de, de + porPagina), paging: { next } }), { status: 200 });
   });
 }
 
@@ -110,15 +120,88 @@ d("refreshTemplates", () => {
     expect(await status(def.name)).toBe("APPROVED");
   });
 
-  it("token sem permissão: para no primeiro erro, sem 11 chamadas iguais", async () => {
+  it("token sem permissão: uma chamada só, e nenhum template afirmado", async () => {
     const f = vi.fn(
       async () => new Response(JSON.stringify({ error: { code: 200, message: "permission" } }), { status: 403 })
     );
     vi.stubGlobal("fetch", f);
     const r = await refreshTemplates();
     expect(f).toHaveBeenCalledTimes(1);
-    expect(r).toHaveLength(1);
-    expect(r[0].acao).toBe("erro");
+    expect(r).toHaveLength(NOMES.length);
+    expect(r.every((x) => x.acao === "erro")).toBe(true);
+  });
+
+  it("uma listagem por passada (não uma busca por template), seguindo a paginação", async () => {
+    await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'PENDING')`, [DEF.name]);
+    const outros = Array.from({ length: 5 }, (_, i) => naMeta({ name: `fincasa_outro_${i}`, id: `x${i}` }));
+    // O nosso template só aparece na ÚLTIMA página.
+    const f = graph({ outros, [DEF.name]: [naMeta()] }, 2);
+    vi.stubGlobal("fetch", f);
+    const r = await refreshTemplates();
+    expect(f).toHaveBeenCalledTimes(3);
+    for (const c of f.mock.calls) {
+      expect(new URL(String(c[0])).searchParams.get("name")).toBeNull();
+      // Sem isto o Next guarda a resposta no Data Cache — a causa do "ausente" de 03/10.
+      expect((c[1] as RequestInit).cache).toBe("no-store");
+    }
+    expect(r.find((x) => x.name === DEF.name)?.acao).toBe("atualizado");
+    expect(await status(DEF.name)).toBe("APPROVED");
+  });
+
+  it("listagem além do teto de páginas: nada é afirmado (um 'ausente' apagaria APPROVED)", async () => {
+    await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [DEF.name]);
+    const muitos = Array.from({ length: 25 }, (_, i) => naMeta({ name: `fincasa_outro_${i}`, id: `x${i}` }));
+    vi.stubGlobal("fetch", graph({ muitos }, 1));
+    const r = await refreshTemplates();
+    expect(r.every((x) => x.acao === "erro")).toBe(true);
+    expect(await status(DEF.name)).toBe("APPROVED");
+  });
+
+  it("página do meio falha: nada é gravado, nem o APPROVED some", async () => {
+    await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [DEF.name]);
+    let chamada = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        chamada += 1;
+        if (chamada === 1) {
+          return new Response(
+            JSON.stringify({
+              data: [naMeta({ name: "fincasa_outro" })],
+              paging: { next: "https://graph.facebook.com/v24.0/x?after=1" },
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response(JSON.stringify({ error: { message: "falhou" } }), { status: 500 });
+      })
+    );
+    const r = await refreshTemplates();
+    expect(r.every((x) => x.acao === "erro")).toBe(true);
+    expect(await status(DEF.name)).toBe("APPROVED");
+  });
+
+  it("paginação apontando para outro host não é seguida (o token vai no header)", async () => {
+    const f = vi.fn(
+      async () => new Response(JSON.stringify({ data: [], paging: { next: "https://evil.example/next" } }), { status: 200 })
+    );
+    vi.stubGlobal("fetch", f);
+    const r = await refreshTemplates();
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(r.every((x) => x.acao === "erro")).toBe(true);
+  });
+
+  it("submetido e não listado: avisa com quantos vieram", async () => {
+    await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'PENDING')`, [DEF.name]);
+    const aviso = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const info = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", graph({ outro: [naMeta({ name: "fincasa_outro" })] }));
+    const r = await refreshTemplates();
+    expect(r.find((x) => x.name === DEF.name)?.acao).toBe("ausente");
+    const tudo = [...aviso.mock.calls, ...info.mock.calls].flat().join(" ");
+    expect(tudo).toContain("templates.ausente_na_lista");
+    aviso.mockRestore();
+    info.mockRestore();
   });
 
   it("só o idioma do catálogo e o nome exato valem (o filtro da Graph é por prefixo)", async () => {

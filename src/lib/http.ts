@@ -63,7 +63,11 @@ export async function fetchWithTimeout(
   timeoutMs: number
 ): Promise<Response> {
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    // `no-store` por padrão: no Next 14, GET de rota só-GET (os crons) vai
+    // para o Data Cache da Vercel e fica lá entre deploys — um template
+    // consultado antes de existir na Meta ficou "ausente" por dias (05/10).
+    // Nada deste serviço quer resposta de API em cache.
+    return await fetch(url, { cache: "no-store", ...init, signal: AbortSignal.timeout(timeoutMs) });
   } catch (err) {
     if (err instanceof Error && err.name === "TimeoutError") {
       throw new Error(`timeout de ${timeoutMs}ms em ${new URL(url).host}${new URL(url).pathname}`);

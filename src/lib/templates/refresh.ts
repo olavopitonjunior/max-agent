@@ -8,7 +8,7 @@
  * `templates-sync --refresh`.
  *
  * Cuidados (code review de 02/10):
- *  - consulta POR NOME do catálogo e só aceita o idioma do catálogo — o WABA
+ *  - lista os templates da WABA e casa pelo NOME e idioma do catálogo — o WABA
  *    é compartilhado com o app da FINCasa, e o resto dele não é deste serviço;
  *  - só grava APPROVED se o BODY na Meta for o texto do catálogo (espaços e
  *    aspas normalizados) e os botões tiverem os tipos na ordem do catálogo;
@@ -32,7 +32,7 @@ export type ResultadoRefresh =
   | { name: string; acao: "ausente"; de: string | null }
   | { name: string; acao: "erro"; erro: string };
 
-/** Erro de credencial/permissão da Graph: repetir para os outros nomes só gera ruído. */
+/** Erro de credencial/permissão da Graph (token vencido, sem escopo). */
 class ErroDeAcesso extends Error {}
 
 /**
@@ -61,29 +61,60 @@ interface TemplateNaMeta {
   components?: Array<{ type: string; text?: string; buttons?: Array<{ type: string }> }>;
 }
 
-async function lerDaMeta(def: TemplateDef): Promise<TemplateNaMeta | null> {
+/** Teto de páginas da listagem (100 por página): a WABA é compartilhada. */
+const MAX_PAGINAS = 20;
+
+/**
+ * TODOS os templates da WABA numa listagem paginada — uma leitura por passada,
+ * casada por nome e idioma aqui.
+ *
+ * Era uma busca `?name=` por template (22 chamadas por hora). Em produção, a
+ * de `max_formulario_pendente_v3` voltou `ausente` em toda passada desde 03/10
+ * enquanto a mesma consulta, de fora, achava o template APPROVED. Causa
+ * provável (code review de 05/10): o Data Cache do Next 14 — GET de rota só-GET
+ * fica em cache indefinidamente mesmo com `force-dynamic`, e a primeira busca
+ * foi feita antes de o template existir. O `no-store` (aqui e no
+ * `fetchWithTimeout`) é o conserto; a listagem custa 1–2 chamadas em vez de 22.
+ */
+async function lerListaDaMeta(): Promise<TemplateNaMeta[]> {
   const waba = (process.env.META_WABA_ID ?? "").trim();
   const token = (process.env.META_ACCESS_TOKEN ?? "").trim();
   if (!waba || !token) throw new Error("META_WABA_ID/META_ACCESS_TOKEN ausentes");
-  const url =
+  let url: string | null =
     `${graphBase()}/${waba}/message_templates` +
-    `?name=${encodeURIComponent(def.name)}` +
-    `&fields=name,status,language,id,rejected_reason,category,components&limit=50`;
-  const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, META_TIMEOUT_MS);
-  const corpo = (await res.json().catch(() => ({}))) as {
-    data?: TemplateNaMeta[];
-    error?: { message?: string; code?: number };
-  };
-  if (!res.ok || !corpo.data) {
-    const msg = `Graph API: ${corpo.error?.message ?? `HTTP ${res.status}`}`;
-    const code = corpo.error?.code;
-    if (res.status === 401 || res.status === 403 || code === 190 || code === 200 || code === 10) {
-      throw new ErroDeAcesso(msg);
+    `?fields=name,status,language,id,rejected_reason,category,components&limit=100`;
+  const todos: TemplateNaMeta[] = [];
+  for (let pagina = 0; url && pagina < MAX_PAGINAS; pagina++) {
+    const res = await fetchWithTimeout(
+      url,
+      { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" },
+      META_TIMEOUT_MS
+    );
+    const corpo = (await res.json().catch(() => ({}))) as {
+      data?: TemplateNaMeta[];
+      paging?: { next?: string };
+      error?: { message?: string; code?: number };
+    };
+    if (!res.ok || !corpo.data) {
+      const msg = `Graph API: ${corpo.error?.message ?? `HTTP ${res.status}`}`;
+      const code = corpo.error?.code;
+      if (res.status === 401 || res.status === 403 || code === 190 || code === 200 || code === 10) {
+        throw new ErroDeAcesso(msg);
+      }
+      throw new Error(msg);
     }
-    throw new Error(msg);
+    todos.push(...corpo.data);
+    const next = corpo.paging?.next ?? null;
+    // O token vai no header: nunca segui-lo para um host que veio do corpo.
+    if (next && new URL(next).host !== new URL(graphBase()).host) {
+      throw new Error("paginação da Graph apontou para outro host — nada gravado");
+    }
+    url = next;
   }
-  // `name` na Graph é filtro por prefixo: o nome exato e o idioma decidem.
-  return corpo.data.find((t) => t.name === def.name && t.language === def.lang) ?? null;
+  // Página que sobrou além do teto: a lista estaria INCOMPLETA, e um template
+  // que só aparece depois viraria "ausente" (e DELETED se estava APPROVED).
+  if (url) throw new Error(`listagem de templates com mais de ${MAX_PAGINAS} páginas — nada gravado`);
+  return todos;
 }
 
 /** Escreve só se o status local ainda é o lido antes (`antes`). */
@@ -120,10 +151,23 @@ export async function refreshTemplates(): Promise<ResultadoRefresh[]> {
     ])
   );
   const out: ResultadoRefresh[] = [];
+  let lista: TemplateNaMeta[];
+  try {
+    lista = await lerListaDaMeta();
+  } catch (err) {
+    // Sem a lista, nada é afirmado sobre nenhum template: um "ausente" aqui
+    // apagaria APPROVED de verdade.
+    const erro = err instanceof Error ? err.message : String(err);
+    return todosOsTemplates().map((def) => ({ name: def.name, acao: "erro" as const, erro }));
+  }
   for (const def of todosOsTemplates()) {
     const antes = locais.get(def.name) ?? null;
     try {
-      const t = await lerDaMeta(def);
+      const t = lista.find((x) => x.name === def.name && x.language === def.lang) ?? null;
+      if (!t && antes !== null) {
+        // Submetido e não listado: o diagnóstico que faltou em 03/10.
+        log.warn("templates.ausente_na_lista", { name: def.name, listados: lista.length, antes });
+      }
       if (!t) {
         // Sumiu da Meta (ou nunca foi submetido): o que estava APPROVED aqui
         // deixa de ser usado. Não submetido e ausente = nada a fazer.
@@ -170,8 +214,6 @@ export async function refreshTemplates(): Promise<ResultadoRefresh[]> {
       }
     } catch (err) {
       out.push({ name: def.name, acao: "erro", erro: err instanceof Error ? err.message : String(err) });
-      // Token sem permissão: as outras 10 chamadas dariam o mesmo erro.
-      if (err instanceof ErroDeAcesso) break;
     }
   }
   return out;

@@ -96,7 +96,11 @@ export async function GET(req: NextRequest) {
         });
         await custos;
         const mudou = r.filter((x) => x.acao !== "igual");
-        if (mudou.length > 0) {
+        const erros = new Set(r.map((x) => (x.acao === "erro" ? x.erro : null)));
+        if (r.length > 0 && r.every((x) => x.acao === "erro") && erros.size === 1) {
+          // A listagem falhou: o mesmo erro para todos — uma linha, não 22.
+          console.warn(`[cron/inbound] templates: listagem falhou (${[...erros][0]})`);
+        } else if (mudou.length > 0) {
           const problema = mudou.some((x) => x.acao === "erro" || x.acao === "diverge");
           (problema ? console.warn : console.log)(
             `[cron/inbound] templates: ${mudou
