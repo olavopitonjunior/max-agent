@@ -24,17 +24,18 @@ vi.mock("@/graph/graph", () => ({
 vi.mock("../identity", () => ({
   resolveIdentity: vi.fn().mockResolvedValue({ kind: "unknown" }),
 }));
-vi.mock("../zapi", () => ({
+vi.mock("../meta", async (orig) => ({
+  ...(await orig<typeof import("../meta")>()),
   sendText: vi.fn().mockResolvedValue({ messageId: "MID" }),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 
 const { enqueue, dispatchDue, renderMessage } = await import("../outbox");
 const { reprocessarFalhasDeCanal } = await import("../outbox-reprocesso");
-// Não mockado de propósito: é o erro REAL que o `post()` da Z-API lança.
-const { ZapiHttpError } = await import("../zapi-erro");
+// Não mockado de propósito: é o erro REAL que a Graph API lança.
+const { MetaHttpError } = await import("../transport/erro");
 const { query, db } = await import("../db");
-const { sendText, connectionStatus } = await import("../zapi");
+const { sendText, connectionStatus } = await import("../meta");
 
 const sent = sendText as unknown as ReturnType<typeof vi.fn>;
 const status = connectionStatus as unknown as ReturnType<typeof vi.fn>;
@@ -61,10 +62,20 @@ d("outbox (Postgres real)", () => {
     sent.mockResolvedValue({ messageId: "MID" });
     status.mockResolvedValue({ connected: true, raw: {} });
     await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
+    // Provedor é sempre `meta` desde a migração: sem janela de 24h aberta,
+    // `dispatchDue` represaria por template — o assunto deste bloco é a FILA,
+    // não a régua de template (que tem suíte própria em
+    // `meta-canal.integration.test.ts`).
+    await query(
+      `INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now())
+       ON CONFLICT (phone) DO UPDATE SET last_inbound_at = now()`,
+      ["5511987654321"]
+    );
   });
 
   afterAll(async () => {
     await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
+    await query(`DELETE FROM conversation_window WHERE phone = '5511987654321'`);
   });
 
   it("enfileira e devolve o horário de entrega", async () => {
@@ -133,7 +144,7 @@ d("outbox (Postgres real)", () => {
    * ImobPro.
    */
   it("falha reagenda em vez de descartar, e só desiste no fim das tentativas", async () => {
-    sent.mockRejectedValue(new Error("Z-API 500"));
+    sent.mockRejectedValue(new Error("Meta 500"));
     await enqueue(args({ dedupeKey: "k-fail" }));
     await query(
       `UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = 'k-fail'`
@@ -145,7 +156,7 @@ d("outbox (Postgres real)", () => {
     );
     expect(row[0].status).toBe("pending");
     expect(row[0].attempts).toBe(1);
-    expect(row[0].last_error).toContain("Z-API 500");
+    expect(row[0].last_error).toContain("Meta 500");
 
     // Esgota as tentativas.
     for (let i = 0; i < 3; i++) {
@@ -314,10 +325,18 @@ d2("instância fora do ar (Postgres real)", () => {
     sent.mockResolvedValue({ messageId: "MID" });
     status.mockResolvedValue({ connected: true, raw: {} });
     await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
+    // Mesmo motivo do bloco de cima: abre a janela para não represar por
+    // template — o assunto aqui é a checagem de conexão antes do envio.
+    await query(
+      `INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now())
+       ON CONFLICT (phone) DO UPDATE SET last_inbound_at = now()`,
+      ["5511987654321"]
+    );
   });
 
   afterAll(async () => {
     await query(`DELETE FROM outbox WHERE org_id = 'org-test'`);
+    await query(`DELETE FROM conversation_window WHERE phone = '5511987654321'`);
   });
 
   it("desconectada: não envia nada e reporta represado", async () => {
@@ -391,12 +410,12 @@ d2("instância fora do ar (Postgres real)", () => {
   });
 
   /**
-   * O caso de 10/09. Inoperante (assinatura cancelada, credencial trocada) é
-   * a Z-API AFIRMANDO que não vai enviar — e até então era exceção, que caía
-   * no fail-open acima: o `send-text` recusava, três tentativas queimavam e a
-   * linha virava `failed` para sempre. Represar é o mesmo tratamento do
-   * desemparelhamento, pelo mesmo motivo: o problema é do canal, não da
-   * mensagem.
+   * O caso de 10/09 (então Z-API; hoje o equivalente é a Meta recusando por
+   * 131042/credencial). Inoperante é o CANAL AFIRMANDO que não vai enviar —
+   * e até então era exceção, que caía no fail-open acima: o envio recusava,
+   * três tentativas queimavam e a linha virava `failed` para sempre. Represar
+   * é o mesmo tratamento do desemparelhamento, pelo mesmo motivo: o problema
+   * é do canal, não da mensagem.
    */
   it("inoperante (assinatura): represa, não queima tentativa, e o motivo está na tabela", async () => {
     const r = await enfileirarVencido();
@@ -404,7 +423,7 @@ d2("instância fora do ar (Postgres real)", () => {
     status.mockResolvedValue({
       connected: false,
       raw: { status: 400 },
-      inoperante: { motivo: "assinatura", detalhe: "Z-API /status 400: must subscribe" },
+      inoperante: { motivo: "assinatura", detalhe: "Meta /phone_number_id 400 (#131042): must subscribe" },
     });
 
     const totals = await dispatchDue();
@@ -435,7 +454,7 @@ d2("instância fora do ar (Postgres real)", () => {
     const b = await enfileirarVencido();
     if (a.status !== "queued" || b.status !== "queued") throw new Error("esperava queued");
     sent.mockRejectedValue(
-      new ZapiHttpError("/send-text", 400, '{"error":"you must subscribe to this instance again"}')
+      new MetaHttpError("/messages", 400, '{"error":{"code":131042,"message":"you must subscribe to this instance again"}}')
     );
 
     const totals = await dispatchDue();
@@ -459,7 +478,7 @@ d2("instância fora do ar (Postgres real)", () => {
   it("envio recusado por outro motivo continua contando tentativa", async () => {
     const r = await enfileirarVencido();
     if (r.status !== "queued") throw new Error("esperava queued");
-    sent.mockRejectedValue(new ZapiHttpError("/send-text", 400, '{"error":"invalid phone"}'));
+    sent.mockRejectedValue(new MetaHttpError("/messages", 400, '{"error":{"code":131026,"message":"invalid phone"}}'));
 
     const totals = await dispatchDue();
 
@@ -485,7 +504,7 @@ d2("instância fora do ar (Postgres real)", () => {
     status.mockResolvedValue({
       connected: false,
       raw: {},
-      inoperante: { motivo: "assinatura", detalhe: "Z-API /status 400" },
+      inoperante: { motivo: "assinatura", detalhe: "Meta /phone_number_id 400 (#131042)" },
     });
 
     await dispatchDue();

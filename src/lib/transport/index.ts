@@ -1,22 +1,19 @@
 /**
  * A porta única do Max para o WhatsApp.
  *
- * Até 2026-09-22, dez módulos importavam `@/lib/zapi` direto. Com a migração
- * para a Cloud API da Meta, o provedor passa a ser escolhido por env
- * (`WHATSAPP_PROVIDER`) e o resto do código deixa de saber qual é: o outbox, a
- * fila de inbound, o grafo e as rotas de admin chamam ESTAS funções.
+ * Até 2026-09-22 o canal era a Z-API; dez módulos importavam `@/lib/zapi`
+ * direto. Com a migração para a Cloud API da Meta (concluída em 28/09, Z-API
+ * cancelada em 10/09), o provedor é só a Meta — mas a camada fica: o outbox, a
+ * fila de inbound, o grafo e as rotas de admin continuam chamando ESTAS
+ * funções, e não `@/lib/meta` direto, porque um teste que mocka `./index`
+ * continua valendo se um segundo provedor voltar a existir um dia.
  *
  * O que continua específico de provedor — e por isso NÃO passa por aqui — são
  * as rotas de webhook: cada provedor tem a sua, com a própria autenticação e o
  * próprio parser, e todas desembocam nos tipos de `./types`.
- *
- * Delegação por chamada, não por import: o provedor é lido no momento do uso,
- * então trocar a env na Vercel troca o canal sem deploy — e um teste que mocka
- * `../zapi` continua valendo, porque esta camada só repassa.
  */
 
 import * as meta from "../meta";
-import * as zapi from "../zapi";
 import type { BotaoEnviado, ConnectionState, ProviderName, SendResult } from "./types";
 
 export type {
@@ -29,18 +26,27 @@ export type {
   StatusCallback,
 } from "./types";
 
+/** Para não repetir o `console.warn` em TODA chamada de um processo que nunca corrige a env. */
+let avisouProvedorInvalido = false;
+
 /**
- * Qual provedor está valendo. Ausente = `zapi` (o único que existia).
+ * Qual provedor está valendo. Só existe um: `meta`.
  *
- * Valor DESCONHECIDO lança em vez de cair no default: um erro de digitação na
- * env faria o Max falar pelo canal errado em silêncio — e o canal errado, na
- * migração, é justamente o que foi desligado.
+ * `WHATSAPP_PROVIDER` ausente ou com qualquer valor que não seja `"meta"` NÃO
+ * lança — a Z-API foi desligada em 10/09 e não há para onde cair. Lançar aqui
+ * derrubaria outbox, inbound e admin por uma env desatualizada ou ausente;
+ * um `console.warn` (uma vez por processo) é o suficiente para alguém notar e
+ * corrigir a env sem silenciar o Max inteiro.
  */
 export function provider(): ProviderName {
   const v = (process.env.WHATSAPP_PROVIDER ?? "").trim().toLowerCase();
-  if (v === "" || v === "zapi") return "zapi";
-  if (v === "meta") return "meta";
-  throw new Error(`WHATSAPP_PROVIDER inválido: "${v}" (aceitos: zapi, meta)`);
+  if (v !== "meta" && !avisouProvedorInvalido) {
+    avisouProvedorInvalido = true;
+    console.warn(
+      `[transport] WHATSAPP_PROVIDER="${v}" — só "meta" existe desde a migração; seguindo com meta`
+    );
+  }
+  return "meta";
 }
 
 export async function sendText(params: {
@@ -48,15 +54,13 @@ export async function sendText(params: {
   body: string;
   quoteMessageId?: string;
 }): Promise<SendResult> {
-  if (provider() === "meta") return meta.sendText(params);
-  const res = await zapi.sendText(params);
-  return { messageId: res.messageId ?? res.id ?? null };
+  provider();
+  return meta.sendText(params);
 }
 
 /**
- * Envio por template aprovado — só existe na Meta (ver `zapi.sendTemplate`,
- * que lança). `dispatchDue` só chama isto com a janela de 24h fechada e o
- * template confirmado `APPROVED` em `wa_template`.
+ * Envio por template aprovado. `dispatchDue` só chama isto com a janela de
+ * 24h fechada e o template confirmado `APPROVED` em `wa_template`.
  */
 export async function sendTemplate(params: {
   to: string;
@@ -65,22 +69,18 @@ export async function sendTemplate(params: {
   bodyParams: string[];
   botoes: BotaoEnviado[];
 }): Promise<SendResult> {
-  if (provider() === "meta") return meta.sendTemplate(params);
-  return zapi.sendTemplate();
+  provider();
+  return meta.sendTemplate(params);
 }
 
 export async function connectionStatus(): Promise<ConnectionState> {
-  return provider() === "meta" ? meta.connectionStatus() : zapi.connectionStatus();
+  provider();
+  return meta.connectionStatus();
 }
 
-/**
- * `ref` é o `mediaUrl` do `InboundMessage`, opaco. Roteado pelo FORMATO da
- * referência, e não pela env: uma mensagem da Z-API ainda na fila no minuto do
- * cutover guarda uma URL pública, e tem que continuar baixando por ela.
- */
 export async function downloadMedia(
   ref: string
 ): Promise<{ data: Buffer; contentType: string | null } | null> {
   provider();
-  return ref.startsWith(meta.META_MEDIA_PREFIX) ? meta.downloadMedia(ref) : zapi.downloadMedia(ref);
+  return meta.downloadMedia(ref);
 }

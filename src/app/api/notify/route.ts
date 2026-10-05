@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireHmac } from "@/lib/auth";
 import { enqueue } from "@/lib/outbox";
-import { toZapiPhone } from "@/lib/phone";
+import { toE164NoPlus } from "@/lib/phone";
 import { isOrgKnown } from "@/lib/orgs";
 
 export const dynamic = "force-dynamic";
@@ -93,10 +93,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "unknown_org" }, { status: 403 });
   }
 
-  // Já no formato que a Z-API quer (E.164 sem "+"): `toZapiPhone` é null
+  // Já no formato que a Cloud API quer (E.164 sem "+"): `toE164NoPlus` é null
   // exatamente quando a normalização falha, então um só passo cobre o 422 e
   // o valor entregue à fila.
-  const phone = toZapiPhone(p.phone);
+  const phone = toE164NoPlus(p.phone);
   if (!phone) {
     return NextResponse.json({ error: "invalid_phone" }, { status: 422 });
   }
