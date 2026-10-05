@@ -26,8 +26,15 @@ vi.mock("../zapi", async (orig) => ({
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 
-const { enqueue, dispatchDue, MARCA_TEMPLATE_PENDENTE, MARCA_FORA_DA_REGUA, MARCA_TEMPLATE_INVALIDO } =
-  await import("../outbox");
+const {
+  enqueue,
+  dispatchDue,
+  MARCA_TEMPLATE_PENDENTE,
+  MARCA_FORA_DA_REGUA,
+  MARCA_TEMPLATE_INVALIDO,
+  MARCA_EXPIRADO,
+  MARCA_ENVIO_INCERTO,
+} = await import("../outbox");
 const { MetaHttpError } = await import("../transport/erro");
 const { enqueueInbound } = await import("../inbound");
 const { janelaAberta } = await import("../janela24h");
@@ -125,6 +132,87 @@ d("canal Meta (Postgres real)", () => {
       expect(l.attempts).toBe(0);
       expect(l.last_error).toBe(MARCA_TEMPLATE_PENDENTE);
       expect(new Date(l.deliver_after).getTime()).toBeGreaterThan(Date.now() + 50 * 60_000);
+    });
+
+    /**
+     * Decisão de 05/10/2026: represado passa de 72h, vira `dropped` e não sai
+     * mais. Sem isso, a aprovação de um template dias depois soltava avisos
+     * velhos de uma vez.
+     */
+    it("represado há mais de 72h expira (dropped), e não sai nem quando o template é aprovado depois", async () => {
+      await linhaVencida("k-velho");
+      await query(`UPDATE outbox SET created_at = now() - interval '73 hours' WHERE dedupe_key = 'k-velho'`);
+      const totals = await dispatchDue();
+      expect(totals.expired).toBe(1);
+      expect(metaSendTemplate).not.toHaveBeenCalled();
+      const l = await linha("k-velho");
+      expect(l.status).toBe("dropped");
+      expect(l.last_error).toBe(MARCA_EXPIRADO);
+
+      // Aprovado depois: a linha expirada não é mais pega.
+      await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [TPL]);
+      await dispatchDue();
+      expect(metaSendTemplate).not.toHaveBeenCalled();
+      expect((await linha("k-velho")).status).toBe("dropped");
+    });
+
+    it("linha reprocessada pelo operador não expira na hora, mesmo velha", async () => {
+      await linhaVencida("k-reproc");
+      await query(
+        `UPDATE outbox SET created_at = now() - interval '10 days', last_error = 'reprocessada em 2026-10-05'
+          WHERE dedupe_key = 'k-reproc'`
+      );
+      const totals = await dispatchDue();
+      expect(totals.expired).toBe(0);
+      expect((await linha("k-reproc")).status).toBe("pending");
+    });
+
+    it("represado com menos de 72h continua esperando a aprovação", async () => {
+      await linhaVencida("k-71h");
+      await query(`UPDATE outbox SET created_at = now() - interval '71 hours' WHERE dedupe_key = 'k-71h'`);
+      const totals = await dispatchDue();
+      expect(totals.expired).toBe(0);
+      const l = await linha("k-71h");
+      expect(l.status).toBe("pending");
+      expect(l.last_error).toBe(MARCA_TEMPLATE_PENDENTE);
+    });
+
+    /**
+     * Decisão de 05/10/2026: timeout no envio de TEMPLATE não reenvia — a
+     * Meta pode ter aceitado, e o reenvio cobraria e entregaria duas vezes.
+     */
+    it("timeout no template: liquida como sent incerto (sem wamid), não reenvia na passada seguinte", async () => {
+      await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [TPL]);
+      await linhaVencida("k-timeout");
+      metaSendTemplate.mockRejectedValueOnce(
+        new Error("timeout de 10000ms em graph.facebook.com/v24.0/1262291353641244/messages")
+      );
+      await dispatchDue();
+      const l = await linha("k-timeout");
+      // `sent`: o OK de uma mensagem que chegou precisa achar o texto, e o
+      // ImobPro não pode mostrar "falhou" e convidar a reenviar.
+      expect(l.status).toBe("sent");
+      expect(l.provider_message_id).toBeNull();
+      expect(l.template_name).toBe(TPL);
+      expect(l.last_error).toBe(MARCA_ENVIO_INCERTO);
+
+      await query(`UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = 'k-timeout'`);
+      await dispatchDue();
+      expect(metaSendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    it("timeout no texto livre (janela aberta) continua com a retentativa de sempre", async () => {
+      await query(
+        `INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now())
+         ON CONFLICT (phone) DO UPDATE SET last_inbound_at = now()`,
+        [PHONE]
+      );
+      await linhaVencida("k-timeout-texto");
+      metaSend.mockRejectedValueOnce(new Error("timeout de 10000ms em graph.facebook.com/v24.0/x/messages"));
+      await dispatchDue();
+      const l = await linha("k-timeout-texto");
+      expect(l.status).toBe("pending");
+      expect(l.last_error).toMatch(/^timeout de/);
     });
 
     it("janela fechada, template APROVADO: sai por template, não por texto livre", async () => {

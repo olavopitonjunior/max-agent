@@ -66,6 +66,31 @@ export const MARCA_TEMPLATE_PENDENTE =
   "template_pendente: sem template aprovado para este tipo — aguardando aprovação da Meta";
 
 /**
+ * Represado há mais de `HORAS_PARA_EXPIRAR` sem template aprovado: vira
+ * `dropped` e não sai mais (decisão do Olavo, 05/10/2026). Antes ficava
+ * pendente sem prazo e, quando a Meta aprovava dias depois, saía tudo de uma
+ * vez — inclusive aviso de algo que já tinha acontecido.
+ */
+export const HORAS_PARA_EXPIRAR = 72;
+export const MARCA_EXPIRADO =
+  `expirado: ${HORAS_PARA_EXPIRAR}h sem template aprovado fora da janela de 24h — não enviado`;
+
+/**
+ * Timeout no envio de TEMPLATE: a Meta pode ter aceitado e só a resposta
+ * demorou. Reenviar arriscava a pessoa receber o aviso duas vezes, pago em
+ * dobro; a decisão do Olavo (05/10/2026) é não duplicar.
+ *
+ * Liquida como a órfã com envio iniciado: `sent`, sem `wamid`, com esta marca
+ * à vista. `failed` seria pior nas duas pontas — o OK de uma mensagem que
+ * chegou não acharia o texto (o aceite só entrega `sent`), e o ImobPro
+ * mostraria "falhou" e convidaria a reenviar. Sem o `wamid` o webhook de
+ * entrega não acha a linha; a reconciliação a marca `unconfirmed`, que é a
+ * verdade.
+ */
+export const MARCA_ENVIO_INCERTO =
+  "envio_incerto: timeout no envio do template — não reenviado para não duplicar";
+
+/**
  * Fila de saída das notificações proativas.
  *
  * Existe porque o ImobPro passou a entregar a qualquer hora: os call-sites de
@@ -186,6 +211,8 @@ export interface DispatchTotals {
    * texto livre agora.
    */
   held: number;
+  /** Represados que passaram de `HORAS_PARA_EXPIRAR` e viraram `dropped`. */
+  expired: number;
 }
 
 interface OutboxRow extends Record<string, unknown> {
@@ -207,6 +234,8 @@ interface OutboxRow extends Record<string, unknown> {
   params: Record<string, string> | null;
   /** Desfecho da tentativa anterior — diz qual template a Meta acabou de recusar. */
   last_error: string | null;
+  /** Quando o aviso nasceu — conta o prazo do represado (`HORAS_PARA_EXPIRAR`). */
+  created_at: string | Date;
 }
 
 /**
@@ -282,7 +311,7 @@ export async function dispatchDue(
   /** `Date.now()` do início da requisição — âncora do prazo de seed. */
   iniciadoEm?: number
 ): Promise<DispatchTotals> {
-  const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0, held: 0 };
+  const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0, held: 0, expired: 0 };
 
   /**
    * ── A checagem que faltava ─────────────────────────────────────────────
@@ -386,7 +415,8 @@ export async function dispatchDue(
          FOR UPDATE SKIP LOCKED
       )
       RETURNING id, org_id, audience, phone, title, body, link_url, org_name,
-                recipient_name, attempts, send_started_at, kind, params, last_error`,
+                recipient_name, attempts, send_started_at, kind, params, last_error,
+                created_at`,
     [limit, String(SENDING_ORPHAN_MINUTES)]
   );
   totals.claimed = rows.length;
@@ -513,7 +543,9 @@ export async function dispatchDue(
       // `template_invalido` com o nome) fica de fora enquanto houver outro:
       // sem isso o v2 pausado se repetia de 5 em 5 minutos com o v1 aprovado
       // ao lado. Fail-closed: erro de leitura = nenhum aprovado.
+      let leituraFalhou = false;
       const aprovados = await templatesAprovados(candidatos.map((c) => c.name)).catch((err) => {
+        leituraFalhou = true;
         console.warn(
           `[outbox] não deu pra checar aprovação dos templates de ${row.kind}:`,
           err instanceof Error ? err.message : String(err)
@@ -527,6 +559,22 @@ export async function dispatchDue(
       const pool = semRecusa.length > 0 ? semRecusa : usaveis;
       const def: TemplateDef | null = pool.find((c) => aprovados.get(c.name) !== "MARKETING") ?? pool[0] ?? null;
       if (!def) {
+        const idadeMs = Date.now() - new Date(row.created_at).getTime();
+        // Só expira com a leitura de aprovação BEM-SUCEDIDA (falha transitória
+        // não é "nenhum aprovado") e nunca a linha que o operador acabou de
+        // reprocessar — ela nasce velha de propósito.
+        const reprocessada = !!row.last_error?.startsWith("reprocessada em ");
+        if (!leituraFalhou && !reprocessada && idadeMs > HORAS_PARA_EXPIRAR * 3_600_000) {
+          await query(
+            `UPDATE outbox
+                SET status = 'dropped', last_error = $2, send_started_at = NULL
+              WHERE id = $1 AND status = 'sending'`,
+            [row.id, MARCA_EXPIRADO]
+          );
+          log.info("outbox.expirado", { rowId: row.id, orgId: row.org_id, kind: row.kind });
+          totals.expired += 1;
+          continue;
+        }
         await query(
           `UPDATE outbox
               SET status = 'pending',
@@ -703,6 +751,30 @@ export async function dispatchDue(
       }
 
       const message = err instanceof Error ? err.message : String(err);
+      // Template + timeout: pode ter saído. Não reenvia (ver MARCA_ENVIO_INCERTO).
+      if (envioTemplate && /^timeout de \d+ms em /.test(message)) {
+        const incerto = () =>
+          query(
+            `UPDATE outbox
+                SET status = 'sent', sent_at = now(), provider_message_id = NULL,
+                    last_error = $2, send_started_at = NULL
+              WHERE id = $1`,
+            [row.id, MARCA_ENVIO_INCERTO]
+          );
+        await incerto().catch(async () => {
+          await new Promise((r) => setTimeout(r, 500));
+          await incerto().catch((e) =>
+            console.error(
+              `[outbox] envio incerto NÃO registrado (${row.id}) — a retomada de órfã ` +
+                `liquida como 'sent' sem reenviar:`,
+              e instanceof Error ? e.message : String(e)
+            )
+          );
+        });
+        log.warn("outbox.envio_incerto", { rowId: row.id, orgId: row.org_id, template: envioTemplate.name });
+        totals.sent += 1;
+        continue;
+      }
       // Esgotou as tentativas → `failed` (terminal, visível no painel). Ainda
       // tem crédito → volta pra `pending` com backoff, e o próximo cron pega.
       const exhausted = row.attempts >= MAX_ATTEMPTS;

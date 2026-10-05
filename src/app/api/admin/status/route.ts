@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
 
   const orgId = req.nextUrl.searchParams.get("orgId");
 
-  const [counts, recent, zapi, inboundCounts, oldestPending, delivery] = await Promise.all([
+  const [counts, recent, zapi, inboundCounts, oldestPending, delivery, represados, expirados] = await Promise.all([
     query<{ status: string; n: string }>(
       `SELECT status, COUNT(*)::text AS n
          FROM outbox
@@ -86,6 +86,26 @@ export async function GET(req: NextRequest) {
         GROUP BY 1`,
       [orgId]
     ).catch(() => []),
+    // Represados sem template aprovado há mais de 24h: o que a Mission Control
+    // destaca (e o alerta lê). Depois de 72h viram `dropped` (outbox.ts).
+    query<{ n: string; mais_antigo: string | null }>(
+      `SELECT count(*)::text AS n, min(created_at)::text AS mais_antigo
+         FROM outbox
+        WHERE status = 'pending'
+          AND last_error LIKE 'template_pendente:%'
+          AND created_at < now() - interval '24 hours'
+          AND ($1::text IS NULL OR org_id = $1)`,
+      [orgId]
+    ).catch(() => []),
+    // Expirados NOS últimos 7 dias (o `last_attempt_at` é a passada que
+    // expirou), só pela regra das 72h — não pelo `created_at`.
+    query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM outbox
+        WHERE status = 'dropped' AND last_error LIKE 'expirado:%'
+          AND last_attempt_at > now() - interval '7 days'
+          AND ($1::text IS NULL OR org_id = $1)`,
+      [orgId]
+    ).catch(() => []),
   ]);
 
   const byStatus = Object.fromEntries(counts.map((c) => [c.status, Number(c.n)]));
@@ -119,6 +139,9 @@ export async function GET(req: NextRequest) {
       failed: byStatus.failed ?? 0,
       delivery7d: deliveryByStatus,
       unconfirmed: deliveryByStatus.unconfirmed ?? 0,
+      represados24h: Number(represados[0]?.n ?? 0),
+      represadoMaisAntigo: represados[0]?.mais_antigo ?? null,
+      expirados7d: Number(expirados[0]?.n ?? 0),
       // `last_error` antigo da Z-API tem a credencial no caminho da URL.
       recent: recent.map((r) => ({ ...r, last_error: erroSemSegredo(r.last_error) })),
     },
