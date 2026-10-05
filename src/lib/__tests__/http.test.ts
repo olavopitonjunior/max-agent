@@ -20,3 +20,23 @@ describe("fetchWithTimeout — sem cache do Next", () => {
     expect((f.mock.calls[1] as unknown[])[1]).toMatchObject({ cache: "force-cache" });
   });
 });
+
+describe("fetchWithTimeout — timeout", () => {
+  it("a mensagem diz quem estourou, sem a credencial que a Z-API levava no caminho", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      })
+    );
+    const erro = await fetchWithTimeout(
+      "https://api.z-api.io/instances/INSTX123/token/TOKX456/send-text",
+      {},
+      10_000
+    ).catch((e: Error) => e);
+    expect(erro).toBeInstanceOf(Error);
+    expect((erro as Error).message).toBe(
+      "timeout de 10000ms em api.z-api.io/instances/***/token/***/send-text"
+    );
+  });
+});

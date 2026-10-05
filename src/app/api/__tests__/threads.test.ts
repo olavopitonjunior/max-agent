@@ -31,6 +31,10 @@ const TEL_AMBAS = "5511987650001";
 const TEL_SO_A = "5511987650002";
 const TEL_SO_B = "5511987650003";
 const TELS = [TEL_AMBAS, TEL_SO_A, TEL_SO_B];
+// Número que nenhuma imobiliária reconhece: o Max grava org_id "(sem org)".
+const TEL_SEM_ORG = "5511987650004";
+const TEL_SEM_ORG_2 = "5511987650005";
+const { SEM_ORG } = await import("@/lib/sem-org");
 
 function assinada(path: string, secret = SECRET) {
   const ts = String(Date.now());
@@ -81,6 +85,11 @@ async function aviso(org: string, phone: string, p: {
 
 async function limpar() {
   await query(`DELETE FROM conversation_turn WHERE org_id = ANY($1)`, [ORGS]);
+  // Por telefone: "(sem org)" é compartilhado com outras suítes.
+  await query(
+    `DELETE FROM conversation_turn WHERE org_id = $1 AND phone = ANY($2)`,
+    [SEM_ORG, [TEL_SEM_ORG, TEL_SEM_ORG_2]]
+  );
   await query(`DELETE FROM outbox WHERE org_id = ANY($1)`, [ORGS]);
   await query(`DELETE FROM inbound_queue WHERE message_id LIKE 'thr-msg-%'`);
   await query(`DELETE FROM conversation_window WHERE phone = ANY($1)`, [TELS]);
@@ -284,5 +293,111 @@ d("GET /api/admin/threads/<key>", () => {
     }
     expect(ids).toHaveLength(5);
     expect(new Set(ids).size).toBe(5);
+  });
+
+  /**
+   * O ImobPro assina `url.search` montado por `URLSearchParams` (`%28sem+org%29`),
+   * e em produção os bytes chegavam com outra grafia: 401 só nas conversas sem
+   * imobiliária (05/10/2026). Aqui a URL chega com a grafia "decodificada".
+   */
+  // Duas grafias plausíveis do que chega: o `+` cru, e a do `url.format` do
+  // Next na Vercel (`%20`, parêntese, `~` e `|` crus).
+  const GRAFIAS: Record<string, (v: string) => string> = {
+    mais: (v) => v.replace(/ /g, "+"),
+    porcento20: (v) => encodeURIComponent(v).replace(/%28/g, "(").replace(/%29/g, ")").replace(/%7C/g, "|"),
+  };
+
+  function comGrafiaTrocada(path: string, query: Record<string, string>, grafia = GRAFIAS.mais) {
+    const assinada = `?${new URLSearchParams(query).toString()}`;
+    const chegou = `?${Object.entries(query).map(([k, v]) => `${k}=${grafia(v)}`).join("&")}`;
+    expect(chegou).not.toBe(assinada);
+    const ts = String(Date.now());
+    return new NextRequest(`http://max.test${path}${chegou}`, {
+      headers: {
+        "x-max-timestamp": ts,
+        "x-max-signature": sign(ts, `GET.${path}${assinada}`, SECRET),
+      },
+    });
+  }
+
+  it("conversa sem imobiliária abre mesmo com a query chegando em outra grafia", async () => {
+    await turn(SEM_ORG, TEL_SEM_ORG, { texto: "sou cliente e gostaria de tirar dúvidas" });
+    await turn(ORG_A, TEL_SO_A);
+    const { GET } = await import("@/app/api/admin/threads/[key]/route");
+    const key = phoneTag(TEL_SEM_ORG);
+    const path = `/api/admin/threads/${key}`;
+    for (const grafia of Object.values(GRAFIAS)) {
+      const r = await GET(comGrafiaTrocada(path, { orgId: SEM_ORG, limit: "100" }, grafia), { params: { key } });
+      expect(r.status).toBe(200);
+      expect((await r.json()).eventos[0].inboundText).toBe("sou cliente e gostaria de tirar dúvidas");
+    }
+
+    // O rótulo não abre thread de org de verdade, nem o inverso.
+    const real = phoneTag(TEL_SO_A);
+    expect((await detalhe(real, `?${new URLSearchParams({ orgId: SEM_ORG })}`)).status).toBe(404);
+    expect((await detalhe(key, `?orgId=${ORG_A}`)).status).toBe(404);
+  });
+
+  it("lista sem imobiliária pagina com o cursor que carrega o rótulo", async () => {
+    await turn(SEM_ORG, TEL_SEM_ORG, { em: "2026-10-01T10:00:00.000001Z" });
+    await turn(SEM_ORG, TEL_SEM_ORG_2, { em: "2026-10-01T09:00:00.000001Z" });
+    await turn(ORG_A, TEL_SO_A);
+    const { GET } = await import("@/app/api/admin/threads/route");
+    const path = "/api/admin/threads";
+    // `limit=1`: toda página depois da primeira manda o cursor com "(sem org)".
+    const vistos: string[] = [];
+    let cursor: string | null = null;
+    for (let pagina = 0; pagina < 50; pagina++) {
+      const q: Record<string, string> = { orgId: SEM_ORG, limit: "1" };
+      if (cursor) q.cursor = cursor;
+      const r = await GET(comGrafiaTrocada(path, q, GRAFIAS.porcento20));
+      expect(r.status).toBe(200);
+      const corpo = await r.json();
+      vistos.push(...corpo.threads.map((t: { key: string }) => t.key));
+      cursor = corpo.nextCursor;
+      if (cursor) expect(cursor).toContain(SEM_ORG);
+      if (!cursor || vistos.includes(phoneTag(TEL_SEM_ORG_2))) break;
+    }
+    expect(vistos).toContain(phoneTag(TEL_SEM_ORG));
+    expect(vistos).toContain(phoneTag(TEL_SEM_ORG_2));
+    // A thread da ORG_A não aparece no filtro.
+    expect(vistos).not.toContain(phoneTag(TEL_SO_A));
+  });
+
+  it("a grafia canônica não amplia nada: o que muda o VALOR lido continua 401", async () => {
+    const { GET } = await import("@/app/api/admin/threads/route");
+    // [assinado, enviado]: cada par lê valores diferentes no handler.
+    const casos: Array<[Record<string, string>, string]> = [
+      // Um valor com "&" e "=" codificados não vira dois parâmetros.
+      [{ orgId: "a&orgId=b" }, "orgId=a&orgId=b"],
+      // `%2B` é "+"; `+` cru é espaço.
+      [{ orgId: ORG_A, q: "+5511" }, `orgId=${ORG_A}&q=+5511`],
+      // Outra org, mesma grafia.
+      [{ orgId: "(org threads a)" }, "orgId=(org+threads+b)"],
+    ];
+    for (const [assinado, enviado] of casos) {
+      const ts = String(Date.now());
+      const req = new NextRequest(`http://max.test/api/admin/threads?${enviado}`, {
+        headers: {
+          "x-max-timestamp": ts,
+          "x-max-signature": sign(ts, `GET./api/admin/threads?${new URLSearchParams(assinado)}`, SECRET),
+        },
+      });
+      expect((await GET(req)).status, enviado).toBe(401);
+    }
+  });
+
+  it("URL da Z-API com credencial no erro sai mascarada", async () => {
+    const instancia = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const token = "BBBBBBBBBBBBBBBBBBBBBBBB";
+    await aviso(ORG_A, TEL_SO_A, {
+      status: "failed",
+      lastError: `timeout de 10000ms em api.z-api.io/instances/${instancia}/token/${token}/send-text`,
+    });
+    await turn(ORG_A, TEL_SO_A, { erro: `GET https://graph.facebook.com/v22.0/x?access_token=${token}` });
+    const texto = await (await detalhe(phoneTag(TEL_SO_A), `?orgId=${ORG_A}&limit=100`)).text();
+    expect(texto).not.toContain(instancia);
+    expect(texto).not.toContain(token);
+    expect(texto).toContain("api.z-api.io/instances/***/token/***/send-text");
   });
 });

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { requireHmac } from "@/lib/auth";
+import { erroSemSegredo } from "@/lib/redigir";
 import { maskPhone } from "@/lib/phone";
 
 export const dynamic = "force-dynamic";
@@ -162,7 +163,7 @@ export async function GET(req: NextRequest) {
       tools: l.tools_json,
       usage: l.usage_json,
       latencyMs: l.latency_ms,
-      error: l.error,
+      error: erroSemSegredo(l.error),
       createdAt: l.created_at,
     })),
     // `null` quando a página não encheu: não há mais o que buscar.

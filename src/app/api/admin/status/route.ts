@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { connectionStatus } from "@/lib/transport";
+import { connectionStatus, provider } from "@/lib/transport";
+import { erroSemSegredo, folhasSemCredencial } from "@/lib/redigir";
 import { requireHmac } from "@/lib/auth";
 import { isWithinWindow, nextDeliveryTime } from "@/lib/window";
 
@@ -97,7 +98,17 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     service: "max-agent",
-    zapi,
+    /**
+     * Qual canal está ligado (`WHATSAPP_PROVIDER`). O bloco continua se
+     * chamando `zapi` por compatibilidade com o painel já publicado; é o
+     * estado do canal ATUAL, seja qual for.
+     */
+    provider: provedorAtual(),
+    // O bloco inteiro: `error`, `inoperante.detalhe` e `raw.body` trazem texto
+    // do provedor, e é o mesmo tipo de texto que vazava a credencial.
+    // Só credencial nas folhas: mascarar "telefone" ali pegaria número de
+    // 10-13 dígitos (timestamp). O `error` é texto e leva as duas máscaras.
+    zapi: semErroCru(folhasSemCredencial(zapi)),
     window: {
       open: isWithinWindow(),
       nextDelivery: nextDeliveryTime().toISOString(),
@@ -108,7 +119,8 @@ export async function GET(req: NextRequest) {
       failed: byStatus.failed ?? 0,
       delivery7d: deliveryByStatus,
       unconfirmed: deliveryByStatus.unconfirmed ?? 0,
-      recent,
+      // `last_error` antigo da Z-API tem a credencial no caminho da URL.
+      recent: recent.map((r) => ({ ...r, last_error: erroSemSegredo(r.last_error) })),
     },
     inbound: {
       // A fila de entrada não tem org_id (migration 004): este bloco é SEMPRE
@@ -122,4 +134,20 @@ export async function GET(req: NextRequest) {
       oldestPending: oldestPending[0]?.oldest ?? null,
     },
   });
+}
+
+/** Env inválida não derruba a tela de diagnóstico: é nela que se descobre. */
+function provedorAtual(): string | null {
+  try {
+    return provider();
+  } catch {
+    return null;
+  }
+}
+
+function semErroCru<T>(estado: T): T {
+  if (estado && typeof estado === "object" && "error" in estado) {
+    return { ...estado, error: erroSemSegredo((estado as { error: unknown }).error) };
+  }
+  return estado;
 }
