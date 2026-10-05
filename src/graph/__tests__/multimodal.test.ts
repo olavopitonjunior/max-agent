@@ -18,11 +18,11 @@ vi.mock("@/lib/cm", () => ({
   reportUsage: vi.fn().mockResolvedValue(undefined),
   transcribeMedia: vi.fn(),
 }));
-// Espalha o módulo real: o grafo chega à Z-API pela porta `transport`, e um
+// Espalha o módulo real: o grafo chega à Meta pela porta `transport`, e um
 // mock só com `downloadMedia` deixaria os demais exports `undefined` para
 // qualquer caminho futuro que os tocasse (achado do review do PR #32).
-vi.mock("@/lib/zapi", async (orig) => ({
-  ...(await orig<typeof import("@/lib/zapi")>()),
+vi.mock("@/lib/transport", async (orig) => ({
+  ...(await orig<typeof import("@/lib/transport")>()),
   downloadMedia: vi.fn(),
 }));
 vi.mock("@/lib/llm", () => ({
@@ -42,7 +42,7 @@ vi.mock("@/lib/identity", async (orig) => ({
 const { runTurn } = await import("../graph");
 const { buildSystemPrompt } = await import("../prompt");
 const { transcribeMedia } = await import("@/lib/cm");
-const { downloadMedia } = await import("@/lib/zapi");
+const { downloadMedia } = await import("@/lib/transport");
 const { resolveIdentity } = await import("@/lib/identity");
 
 const transcrever = transcribeMedia as unknown as ReturnType<typeof vi.fn>;
@@ -72,7 +72,7 @@ function midia(kind: "audio" | "image", over: Record<string, unknown> = {}) {
     groupId: null,
     kind,
     text: null,
-    mediaUrl: "https://media.z-api.io/abc",
+    mediaUrl: "meta:MEDIA1",
     mimeType: kind === "audio" ? "audio/ogg; codecs=opus" : "image/jpeg",
     timestampMs: null,
     senderName: "Marcia",
@@ -92,7 +92,7 @@ describe("mídia vira o turno da pessoa", () => {
   itDb("áudio é baixado e transcrito com a org já resolvida", async () => {
     await runTurn(midia("audio"));
 
-    expect(baixar).toHaveBeenCalledWith("https://media.z-api.io/abc");
+    expect(baixar).toHaveBeenCalledWith("meta:MEDIA1");
     expect(transcrever).toHaveBeenCalledWith(
       "org1",
       expect.objectContaining({ kind: "audio", mimeType: "audio/ogg; codecs=opus" })

@@ -1582,7 +1582,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   };
 }
 
-/** Baixa da Z-API e manda transcrever no ImobPro. `null` em qualquer tropeço. */
+/** Baixa da Meta e manda transcrever no ImobPro. `null` em qualquer tropeço. */
 async function transcreverMidia(
   orgId: string,
   inbound: InboundMessage
