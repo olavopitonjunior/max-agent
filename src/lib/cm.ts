@@ -751,7 +751,20 @@ export type AlertaDeCanal =
        */
       canal?: "meta";
     }
-  | { evento: "zapi_reconectada"; at: string; foraPorMs: number; canal?: "meta" };
+  | { evento: "zapi_reconectada"; at: string; foraPorMs: number; canal?: "meta" }
+  /**
+   * Avisos represados há mais de 24h sem template aprovado (05/10/2026). O
+   * receptor do ImobPro aceita desde `feat/max-alerta-represados` — emitir
+   * antes dele em produção daria 400 e uma retentativa por hora sem e-mail.
+   */
+  | {
+      evento: "avisos_represados";
+      at: string;
+      represadas: number;
+      maisAntigo: string;
+      expirados: number;
+      canal: "meta";
+    };
 
 export async function reportAlert(alerta: AlertaDeCanal): Promise<boolean> {
   const secret = process.env.MAX_WEBHOOK_SECRET;
