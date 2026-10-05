@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { sign, verifySignature } from "../hmac";
 import { reportAlert } from "../cm";
+import { alertaDeRepresados } from "../alerta-represados";
 
 /**
  * Vetor fixo do HMAC do `/notify` — a metade daqui de um contrato de DOIS repos.
@@ -50,6 +51,12 @@ const ALERTA_COM_MOTIVO_RAW_BODY =
   '{"evento":"zapi_desconectada","at":"2026-08-22T03:14:00.000Z","represadas":4,"motivo":"assinatura"}';
 const ALERTA_COM_MOTIVO_ASSINATURA =
   "99c7234d3ec865486e338044db473ad302725e31930931f7a311d4eec68c6234";
+
+/** Avisos represados (05/10/2026) — mesmo literal no Contractmaker. */
+const REPRESADOS_RAW_BODY =
+  '{"evento":"avisos_represados","at":"2026-10-06T13:00:00.000Z","represadas":3,"maisAntigo":"2026-10-04T18:20:00.000Z","expirados":2,"canal":"meta"}';
+const REPRESADOS_ASSINATURA =
+  "450635a901f3fc2dfd0e7e94d44c7acf6063674dcf9a3b39dde2d0344be12b04";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -165,6 +172,32 @@ describe("paridade do HMAC com o ImobPro", () => {
     const [, init] = fetchSpy.mock.calls[0];
     expect(init.body).toBe(ALERTA_COM_MOTIVO_RAW_BODY);
     expect(init.headers["x-max-signature"]).toBe(ALERTA_COM_MOTIVO_ASSINATURA);
+  });
+
+  /**
+   * Quinto vetor: o alerta de represados, montado pelo MESMO construtor que o
+   * cron usa. Renomear ou reordenar uma chave quebra aqui, e não em produção
+   * (400 e retentativa diária sem e-mail).
+   */
+  it("represados: o corpo do construtor e a assinatura batem com o vetor dos dois lados", async () => {
+    vi.stubEnv("MAX_WEBHOOK_SECRET", SECRET);
+    vi.stubEnv("CONTRACTMAKER_API_URL", "https://cm.test");
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    vi.setSystemTime(Number(TIMESTAMP));
+
+    await reportAlert(
+      alertaDeRepresados({
+        at: new Date("2026-10-06T13:00:00.000Z"),
+        represadas: 3,
+        maisAntigo: new Date("2026-10-04T18:20:00.000Z"),
+        expirados: 2,
+      })
+    );
+
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(init.body).toBe(REPRESADOS_RAW_BODY);
+    expect(init.headers["x-max-signature"]).toBe(REPRESADOS_ASSINATURA);
   });
 
   it("é hex minúsculo de 64 caracteres (sha256)", () => {

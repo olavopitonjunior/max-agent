@@ -4,6 +4,7 @@ import { dispatchDue } from "@/lib/outbox";
 import { reconcile } from "@/lib/delivery";
 import { connectionStatus } from "@/lib/transport";
 import { observeConnection } from "@/lib/connection";
+import { alertarRepresados } from "@/lib/alerta-represados";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -94,6 +95,9 @@ export async function GET(req: NextRequest) {
       console.error("[cron/outbox] reconcile falhou:", message);
       return { error: message };
     });
+    // Represados há mais de 24h: no máximo um e-mail por dia. Nunca lança. O
+    // prazo é o que sobra do `maxDuration` (60s) desta passada.
+    const represados = await alertarRepresados(60_000 - (Date.now() - iniciadoEm));
     if (totals.blocked > 0) {
       // Nível de erro, e não info: fila represada por canal fora do ar é o
       // estado que precisa acordar alguém. `dispatchDue` já logou o detalhe.
@@ -107,7 +111,7 @@ export async function GET(req: NextRequest) {
         `[cron/outbox] ${totals.sent} enviadas, ${totals.failed} falhas de ${totals.claimed}`
       );
     }
-    return NextResponse.json({ ...totals, reconcile: rec });
+    return NextResponse.json({ ...totals, reconcile: rec, ...(represados ? { alertaRepresados: true } : {}) });
   } catch (err) {
     // Nunca 500 silencioso: o cron da Vercel não repete no mesmo minuto, e um
     // erro engolido aqui é fila parada sem ninguém saber.
