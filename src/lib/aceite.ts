@@ -26,6 +26,7 @@ import { enqueue } from "./outbox";
 import { log } from "./log";
 import { KINDS_COM_ACEITE, templatesDoKind } from "./templates/catalog";
 import type { InboundMessage } from "./transport";
+import { SEM_ORG } from "./sem-org";
 
 /** Kinds cujo texto só é entregue depois do OK (ver o catálogo). */
 export { KINDS_COM_ACEITE };
@@ -71,6 +72,104 @@ const TETO_ENTREGA = 3500;
 
 /** Repasses de dúvida por pessoa em 24h — cada um é um template pago. */
 const TETO_REPASSES_DIA = 3;
+
+/**
+ * Número que nenhuma imobiliária reconhece: UM repasse por dia (decisão do
+ * Olavo, 05/10/2026). Ele já recebeu a apresentação ("fale com seu
+ * corretor"); se insiste, a segunda mensagem vai para a equipe, e o resto do
+ * dia segue em silêncio — visível em Conversas → "Sem imobiliária".
+ */
+const TETO_REPASSES_DESCONHECIDO_DIA = 1;
+
+/**
+ * Teto GLOBAL de repasses de desconhecidos por dia: o teto por número não
+ * segura quem tem muitos números (ou uma onda de spam), e cada repasse é um
+ * template pago para a equipe.
+ */
+const TETO_REPASSES_DESCONHECIDOS_DIA_TOTAL = 10;
+
+/** Como o repasse aparece no template ("{{2}}, da {{3}}, mandou…"). */
+const ORG_DO_DESCONHECIDO = "imobiliária não identificada";
+
+/**
+ * Repassa a mensagem de um número desconhecido para a equipe, pelo MESMO
+ * caminho da dúvida de onboarding (`support_handoff`, telefone do time). Antes
+ * (até 05/10) o Max só silenciava: quem procurava um corretor ficava sem
+ * resposta nenhuma (o caso do Luiz Gustavo, 8 mensagens em 03/09).
+ *
+ * `null` = segue o silêncio (sem texto, sem destino, ou teto do dia usado).
+ */
+export async function repassarDesconhecido(
+  inbound: InboundMessage
+): Promise<{ reply: string; marca: string } | null> {
+  const texto = inbound.text?.trim() ?? "";
+  if (!texto) return null;
+  const destino = (process.env.MAX_ESCALATION_PHONE ?? "").replace(/\D/g, "");
+  if (!destino) return null;
+  // O próprio telefone da equipe sem cadastro não repassa para si mesmo.
+  if (inbound.fromPhone.replace(/\D/g, "") === destino) return null;
+
+  const dedupeKey = `handoff:${inbound.messageId}`;
+  const total = await query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM outbox
+      WHERE kind = 'support_handoff' AND params->>'desconhecido' = '1'
+        AND dedupe_key <> $1
+        AND created_at > now() - interval '1 day'`,
+    [dedupeKey]
+  );
+  if ((total[0]?.n ?? 0) >= TETO_REPASSES_DESCONHECIDOS_DIA_TOTAL) {
+    log.warn("aceite.desconhecido_teto_global", { phone: inbound.fromPhone });
+    return null;
+  }
+  const recentes = await query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM outbox
+      WHERE kind = 'support_handoff' AND params->>'de' = $1
+        AND dedupe_key <> $2
+        AND created_at > now() - interval '1 day'`,
+    [inbound.fromPhone, dedupeKey]
+  );
+  if ((recentes[0]?.n ?? 0) >= TETO_REPASSES_DESCONHECIDO_DIA) return null;
+
+  /**
+   * Parte de negócio também é `unknown` para a identidade, mas recebeu aviso
+   * de uma imobiliária: o repasse leva o nome dela, para a equipe saber a
+   * quem encaminhar.
+   */
+  const origem = await query<{ org_id: string; org_name: string }>(
+    `SELECT org_id, org_name FROM outbox
+      WHERE phone = $1 AND org_id <> $2
+        AND created_at > now() - interval '30 days'
+      ORDER BY created_at DESC LIMIT 1`,
+    [inbound.fromPhone, SEM_ORG]
+  );
+  const org = origem[0];
+  const quem = (inbound.senderName?.trim() || "Um contato").slice(0, 40);
+  await enqueue({
+    orgId: org?.org_id ?? SEM_ORG,
+    // Idempotente pela mensagem: a reentrega do webhook não repassa duas vezes.
+    dedupeKey,
+    audience: "platform_user",
+    phone: destino,
+    recipientName: process.env.MAX_ESCALATION_NAME || "equipe",
+    title: "Mensagem de número sem cadastro",
+    body: org
+      ? `${quem} (+${inbound.fromPhone}), que recebeu aviso da ${org.org_name}, escreveu ao Max ` +
+        `de um número sem cadastro:\n\n${texto}`
+      : `${quem} (+${inbound.fromPhone}) escreveu ao Max de um número que nenhuma ` +
+        `imobiliária reconhece:\n\n${texto}`,
+    linkUrl: null,
+    dealId: null,
+    orgName: org?.org_name || ORG_DO_DESCONHECIDO,
+    kind: "support_handoff",
+    // `desconhecido` conta o teto global; `de` deixa o esquecimento alcançar a linha.
+    params: { quem, de: inbound.fromPhone, desconhecido: "1" },
+  });
+  log.info("aceite.desconhecido_repassado", { phone: inbound.fromPhone });
+  return {
+    reply: "Passei sua mensagem para a nossa equipe, que vai falar com você em breve.",
+    marca: "desconhecido_repassado",
+  };
+}
 
 /**
  * Entrega o que estava guardado para este telefone, do mais antigo ao mais

@@ -8,7 +8,8 @@ import { describe, it, expect, beforeEach, afterAll, afterEach, vi } from "vites
 const hasDb = Boolean(process.env.DATABASE_URL);
 const d = hasDb ? describe : describe.skip;
 
-const { interceptar, ehOk, ehPedidoDeDuvida } = await import("../aceite");
+const { interceptar, ehOk, ehPedidoDeDuvida, repassarDesconhecido } = await import("../aceite");
+const { SEM_ORG } = await import("../sem-org");
 const { enqueue } = await import("../outbox");
 const { query } = await import("../db");
 import type { InboundMessage } from "../transport";
@@ -364,5 +365,121 @@ d("apresentação do Max na primeira resposta (boas-vindas por template)", () =>
       `SELECT released_at FROM outbox WHERE dedupe_key = 'ap-6'`
     );
     expect(row.released_at).not.toBeNull();
+  });
+});
+
+/**
+ * Número que nenhuma imobiliária reconhece e que insiste depois da
+ * apresentação (decisão de 05/10/2026): a primeira insistência do dia vai para
+ * a equipe; o resto do dia segue em silêncio.
+ */
+d("repasse de número sem cadastro", () => {
+  const DESCONHECIDO = "5511900004444";
+
+  async function repasses() {
+    return query<{
+      org_id: string;
+      phone: string;
+      kind: string;
+      body: string;
+      org_name: string;
+      params: Record<string, string>;
+    }>(
+      `SELECT org_id, phone, kind, body, org_name, params FROM outbox
+        WHERE kind = 'support_handoff' AND params->>'de' = $1`,
+      [DESCONHECIDO]
+    );
+  }
+  async function limparDesconhecido() {
+    await query(`DELETE FROM outbox WHERE params->>'de' = $1 OR phone = $1`, [DESCONHECIDO]);
+    await query(`DELETE FROM outbox WHERE params->>'de' IN ('5511900005555', $1)`, [TIME]);
+  }
+
+  beforeEach(async () => {
+    vi.stubEnv("MAX_ESCALATION_PHONE", TIME);
+    await limparDesconhecido();
+  });
+  afterEach(() => vi.unstubAllEnvs());
+  afterAll(limparDesconhecido);
+
+  it("primeira insistência vai para a equipe, com o texto e o número; a segunda do dia, não", async () => {
+    const r1 = await repassarDesconhecido(
+      msg({ fromPhone: DESCONHECIDO, senderName: "Luiz", text: "Quero falar com o Fabio, é esse número?" })
+    );
+    expect(r1?.marca).toBe("desconhecido_repassado");
+    expect(r1?.reply).toContain("nossa equipe");
+    const [linha] = await repasses();
+    expect(linha.org_id).toBe(SEM_ORG);
+    expect(linha.phone).toBe(TIME);
+    expect(linha.body).toContain("Quero falar com o Fabio");
+    expect(linha.body).toContain(DESCONHECIDO);
+    expect(linha.org_name).toBe("imobiliária não identificada");
+    expect(linha.params.quem).toBe("Luiz");
+
+    const r2 = await repassarDesconhecido(msg({ fromPhone: DESCONHECIDO, text: "Consigo falar com ele?" }));
+    expect(r2).toBeNull();
+    expect(await repasses()).toHaveLength(1);
+  });
+
+  it("reentrega da MESMA mensagem repete a resposta sem enfileirar de novo", async () => {
+    const m = msg({ fromPhone: DESCONHECIDO, text: "Oi, alguém aí?" });
+    expect((await repassarDesconhecido(m))?.marca).toBe("desconhecido_repassado");
+    expect((await repassarDesconhecido(m))?.marca).toBe("desconhecido_repassado");
+    expect(await repasses()).toHaveLength(1);
+  });
+
+  it("depois de 24h, repassa de novo", async () => {
+    await repassarDesconhecido(msg({ fromPhone: DESCONHECIDO, text: "primeira" }));
+    await query(`UPDATE outbox SET created_at = now() - interval '25 hours' WHERE params->>'de' = $1`, [
+      DESCONHECIDO,
+    ]);
+    expect((await repassarDesconhecido(msg({ fromPhone: DESCONHECIDO, text: "segunda" })))?.marca).toBe(
+      "desconhecido_repassado"
+    );
+    expect(await repasses()).toHaveLength(2);
+  });
+
+  it("parte de negócio (recebeu aviso de uma org) é repassada com o nome dessa org", async () => {
+    await enviada("parte-aviso", { kind: "form_reminder", phone: DESCONHECIDO });
+    await repassarDesconhecido(msg({ fromPhone: DESCONHECIDO, text: "não consigo abrir o link" }));
+    const linhas = await query<{ org_id: string; org_name: string; body: string }>(
+      `SELECT org_id, org_name, body FROM outbox WHERE kind = 'support_handoff' AND params->>'de' = $1`,
+      [DESCONHECIDO]
+    );
+    expect(linhas).toHaveLength(1);
+    expect(linhas[0].org_id).toBe(ORG);
+    expect(linhas[0].org_name).toBe("RE/MAX Trio");
+    expect(linhas[0].body).toContain("recebeu aviso da RE/MAX Trio");
+  });
+
+  it("teto global: com 10 repasses de desconhecidos no dia, o 11º número fica em silêncio", async () => {
+    for (let i = 0; i < 10; i++) {
+      await enqueue({
+        orgId: SEM_ORG,
+        dedupeKey: `handoff:global-${i}-${Date.now()}`,
+        audience: "platform_user",
+        phone: TIME,
+        recipientName: "equipe",
+        title: "x",
+        body: "x",
+        linkUrl: null,
+        dealId: null,
+        orgName: "x",
+        kind: "support_handoff",
+        params: { quem: "x", de: DESCONHECIDO, desconhecido: "1" },
+      });
+    }
+    expect(await repassarDesconhecido(msg({ fromPhone: "5511900005555", text: "oi" }))).toBeNull();
+  });
+
+  it("o telefone da própria equipe não repassa para si mesmo", async () => {
+    expect(await repassarDesconhecido(msg({ fromPhone: TIME, text: "teste" }))).toBeNull();
+  });
+
+  it("sem texto (áudio, figurinha) ou sem MAX_ESCALATION_PHONE: silêncio, nada enfileirado", async () => {
+    expect(await repassarDesconhecido(msg({ fromPhone: DESCONHECIDO, kind: "audio", text: null }))).toBeNull();
+    vi.stubEnv("MAX_ESCALATION_PHONE", "");
+    expect(await repassarDesconhecido(msg({ fromPhone: DESCONHECIDO, text: "oi" }))).toBeNull();
+    expect(await repasses()).toHaveLength(0);
   });
 });

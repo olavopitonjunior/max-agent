@@ -1,4 +1,4 @@
-import { interceptar } from "@/lib/aceite";
+import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
@@ -1357,7 +1357,20 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     // Uma apresentação por ciclo do cache negativo, e depois silêncio:
     // responder cada mensagem de um número estranho consome cota da Z-API e
     // confirma ao spammer que o número é vivo.
-    if (identity.alreadyGreeted) return sair(null, { error: "desconhecido_silenciado" });
+    if (identity.alreadyGreeted) {
+      // Insistiu: a primeira insistência do dia vai para a equipe (decisão de
+      // 05/10/2026); o resto segue em silêncio. Falha no repasse = silêncio,
+      // como antes — nunca derruba o turno.
+      const repasse = await repassarDesconhecido(inbound).catch((err) => {
+        console.warn(
+          "[graph] repasse do desconhecido falhou:",
+          err instanceof Error ? err.message : String(err)
+        );
+        return null;
+      });
+      if (repasse) return sair(repasse.reply, { orgId: SEM_ORG, error: repasse.marca });
+      return sair(null, { error: "desconhecido_silenciado" });
+    }
     // Falhar em marcar só significa reapresentar na próxima — nunca vale
     // derrubar a resposta por isso.
     await markGreeted(inbound.fromPhone).catch(() => undefined);
