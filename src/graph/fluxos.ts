@@ -194,6 +194,8 @@ export const TEXTO_ESCRITA_INCERTA =
 const TEXTO_SEM_PERMISSAO =
   "Sua conta não tem permissão para isso pelo Max. Fale com o administrador da imobiliária.";
 
+const TEXTO_NAO_ENCONTREI = "Não encontrei essa proposta para você no sistema.";
+
 const TEXTO_POLITICA_INDISPONIVEL =
   "Não consegui conferir sua permissão agora. Tenta de novo em instantes.";
 
@@ -386,8 +388,16 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
   };
 }
 
-/** Os argumentos de `proposal.create`/`proposal.update` — a língua do `buildProposalPayload`. */
-export function argsDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta }): Record<string, unknown> {
+/**
+ * Os argumentos de `proposal.create`/`proposal.update` — a língua do `buildProposalPayload`.
+ *
+ * Na ATUALIZAÇÃO o `canal` só vai quando a pessoa o disse: o padrão deduzido
+ * desfaria em silêncio uma troca de canal feita pela tela.
+ */
+export function argsDaProposta(
+  f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta },
+  opcoes: { atualizacao?: boolean } = {}
+): Record<string, unknown> {
   const d = f.dados;
   const schemaType =
     f.natureza === "locacao"
@@ -401,7 +411,7 @@ export function argsDaProposta(f: { natureza?: "venda" | "locacao"; dados: Dados
     proponente: d.proponente,
     imovel: d.imovel,
     valor: d.valor,
-    canal: d.canal ?? canalPadrao(d),
+    canal: opcoes.atualizacao ? d.canal : (d.canal ?? canalPadrao(d)),
     ...(d.vendedor?.nome ? { vendedor: d.vendedor } : {}),
     ...(d.pagamento?.sinal || d.pagamento?.forma ? { pagamento: d.pagamento } : {}),
     ...(d.comissao?.percentual || d.comissao?.valor ? { comissao: d.comissao } : {}),
@@ -732,7 +742,9 @@ async function criarNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: DepsDoF
     { tipo: f.tipo, campos: { ...camposParaCriar(f.valores), ...(f.forcar ? { force: true } : {}) } },
     chave.valor
   );
-  if (!r) return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_form_create" };
+  if (!r || (r.status === 409 && r.body.error === "em_andamento")) {
+    return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_form_create" };
+  }
   if (r.status === 409 && r.body.error === "duplicate_recent") {
     return {
       reply: "Já existe um formulário recente com esse título. Quer criar outro mesmo assim? Responda *SIM*.",
@@ -741,8 +753,25 @@ async function criarNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: DepsDoF
     };
   }
   if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  const recusa = recusaDoServidor(r);
+  if (recusa || r.status === 422 || r.status === 400) {
+    return {
+      reply: `${recusa ?? "Faltou algum campo obrigatório do formulário."} Me mande e eu tento de novo.`,
+      fluxo: { ...f, etapa: "campos", chave: undefined, atualizadoEm: ctx.agora },
+      evento: "form_create_recusado",
+    };
+  }
   const link = (r.body.formulario as { link?: unknown } | undefined)?.link;
-  if (r.status !== 201 || typeof link !== "string" || !link.startsWith("http")) {
+  if (r.status === 201 && !(typeof link === "string" && link.startsWith("http"))) {
+    // Criado, mas sem um link utilizável: dizer "não consegui" levaria a
+    // pessoa a pedir de novo e duplicar o formulário.
+    return {
+      reply: "Pronto, formulário criado. O link está no negócio, no sistema.",
+      fluxo: null,
+      evento: "negocio_criado_sem_link",
+    };
+  }
+  if (r.status !== 201 || typeof link !== "string") {
     return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: `form_create_${r.status}` };
   }
   return {
@@ -860,8 +889,13 @@ function textoRascunho(codigo: string | undefined, pdf: ReturnType<typeof pdfDe>
 
 /** 422/400 do servidor com frase de negócio (`buildProposalPayload`) → a frase dele. */
 function recusaDoServidor(r: RespostaDoServidor): string | null {
-  const m = r.body.message ?? r.body.motivo;
-  return r.status === 422 || r.status === 400 ? (typeof m === "string" ? m.replace(/\s+/g, " ").slice(0, 300) : null) : null;
+  if (r.status !== 422 && r.status !== 400) return null;
+  // O servidor responde `{ error: código, message: frase }` — só a FRASE vai à
+  // pessoa; o código (`dados_invalidos`, "Bad Request") nunca.
+  const frase = [r.body.message, r.body.motivo].find(
+    (m): m is string => typeof m === "string" && m.trim().length > 0
+  );
+  return frase ? frase.replace(/\s+/g, " ").trim().slice(0, 300) : null;
 }
 
 async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
@@ -874,8 +908,12 @@ async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsD
   }
   if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
   const recusa = recusaDoServidor(r);
-  if (recusa) {
-    return { reply: `${recusa}\nMe mande e eu ajusto.`, fluxo: { ...f, etapa: "coleta", chave: undefined }, evento: "proposta_recusada" };
+  if (recusa || r.status === 422 || r.status === 400) {
+    return {
+      reply: `${recusa ?? "Algum dado não foi aceito pelo sistema."}\nMe mande e eu ajusto.`,
+      fluxo: { ...f, etapa: "coleta", chave: undefined },
+      evento: "proposta_recusada",
+    };
   }
   const proposta = r.body.proposal as { id?: string; codigo?: string } | undefined;
   if (r.status !== 201 || !proposta?.id) {
@@ -897,9 +935,32 @@ async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsD
 
 async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const chave = chaveDe(f, "proposal.update", ctx);
-  const r = await deps.acao("proposal.update", { proposta_id: f.propostaId, ...argsDaProposta(f) }, chave.valor);
-  if (!r) return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_proposal_update" };
+  const r = await deps.acao(
+    "proposal.update",
+    { proposta_id: f.propostaId, ...argsDaProposta(f, { atualizacao: true }) },
+    chave.valor
+  );
+  if (!r || (r.status === 409 && r.body.error === "em_andamento")) {
+    return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_proposal_update" };
+  }
   if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
+  if (r.status === 409 && r.body.error === "edicao_pela_tela") {
+    return {
+      reply:
+        `Essa proposta${f.codigo ? ` ${f.codigo}` : ""} foi editada pela tela (texto, mais de um comprador ou empresa), ` +
+        "então o ajuste precisa ser feito por lá. O rascunho continua salvo.",
+      fluxo: null,
+      evento: "edicao_pela_tela",
+    };
+  }
+  if (r.status === 409 && r.body.error === "signatarios_duplicados") {
+    return {
+      reply: "Esse contato já está em outro assinante da proposta. Me mande um telefone ou e-mail diferente.",
+      fluxo: { ...f, etapa: "ajustes", chave: undefined, atualizadoEm: ctx.agora },
+      evento: "signatarios_duplicados",
+    };
+  }
   if (r.status === 409) {
     return {
       reply: "Essa proposta já saiu do rascunho e não pode mais ser ajustada por aqui.",
@@ -928,21 +989,29 @@ function textoMetodos(metodos: MetodoDeAssinatura[]): string {
 }
 
 const PAPEL: Record<string, string> = {
-  proponente: "comprador",
-  comprador: "comprador",
   vendedor: "vendedor",
   proprietario: "vendedor",
   conjuge: "cônjuge",
   testemunha: "testemunha",
 };
 
+/** Papel do servidor (com ou sem acento) → palavra do corretor, por natureza. */
+function papelDe(papel: string | undefined, natureza?: "venda" | "locacao"): string {
+  const p = normalizar(papel ?? "");
+  if (p === "proponente" || p === "comprador" || p === "locatario" || p === "inquilino") {
+    return natureza === "locacao" ? "inquilino" : "comprador";
+  }
+  return PAPEL[p] ?? papel ?? "assinante";
+}
+
 function textoEnvio(f: FluxoProposta): string {
   const lista = (f.assinantes ?? [])
-    .map((a, i) => `${i + 1}. ${a.nome} — ${PAPEL[a.papel] ?? a.papel}`)
+    .map((a, i) => `${i + 1}. ${a.nome} — ${papelDe(a.papel, f.natureza)}`)
     .join("\n");
   const n = f.assinantes?.length ?? 0;
+  const como = f.metodo ? ` por *${f.metodo.rotulo}*` : "";
   return (
-    `Vou enviar a proposta${f.codigo ? ` ${f.codigo}` : ""} para assinatura por *${f.metodo?.rotulo ?? ""}*:\n` +
+    `Vou enviar a proposta${f.codigo ? ` ${f.codigo}` : ""} para assinatura${como}:\n` +
     `${lista}\n\n${n === 1 ? "1 assinatura será cobrada" : `${n} assinaturas serão cobradas`}. ` +
     "Confirma? Responda *SIM* para enviar."
   );
@@ -960,6 +1029,7 @@ async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: Dep
   const r = await deps.acao("proposal.options", { proposta_id: f.propostaId });
   if (!r) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: "falha_proposal_options" };
   if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
   if (r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: `proposal_options_${r.status}` };
   const metodos = (Array.isArray(r.body.metodos) ? (r.body.metodos as MetodoDeAssinatura[]) : []).filter(
     (m) => m && typeof m.valor === "string" && typeof m.rotulo === "string"
@@ -975,7 +1045,9 @@ async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: Dep
   }
   const g = { ...f, metodos, assinantes, chave: manterChaveDeEnvio(f), atualizadoEm: ctx.agora };
   if (metodos.length === 1) {
-    const h = { ...g, metodo: metodos[0], etapa: "envio" as const };
+    // Só um tipo liberado: não há escolha a fazer, e mandar `metodo` trocaria
+    // a autenticação por canal que a imobiliária configurou. Vai o padrão.
+    const h = { ...g, metodo: undefined, etapa: "envio" as const };
     return { reply: textoEnvio(h), fluxo: h, evento: "proposta_envio" };
   }
   return { reply: textoMetodos(metodos), fluxo: { ...g, etapa: "metodo" }, evento: "proposta_metodo" };
@@ -983,6 +1055,8 @@ async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: Dep
 
 const CAMPO_FALTANDO: Record<string, string> = {
   nome: "nome completo",
+  name: "nome completo",
+  documento: "dados do documento",
   cpf: "CPF",
   telefone: "telefone com DDD",
   phone: "telefone com DDD",
@@ -992,7 +1066,9 @@ const CAMPO_FALTANDO: Record<string, string> = {
 async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const chave = chaveDe(f, "proposal.send", ctx);
   const r = await deps.acao("proposal.send", { proposta_id: f.propostaId, metodo: f.metodo?.valor }, chave.valor);
-  if (!r) return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_proposal_send" };
+  if (!r || (r.status === 409 && (r.body.error === "em_andamento" || r.body.error === "ja_enviando"))) {
+    return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_proposal_send" };
+  }
   if (r.status === 200) {
     return {
       reply: `Proposta${f.codigo ? ` ${f.codigo}` : ""} enviada para assinatura.`,
@@ -1001,6 +1077,7 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
     };
   }
   if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
   if (r.status === 402) {
     return { reply: "O plano de assinaturas da imobiliária esgotou. Fale com o administrador.", fluxo: null, evento: "plano_esgotado" };
   }
@@ -1012,8 +1089,24 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
     };
   }
   if (r.body.error === "pendencias" && Array.isArray(r.body.faltando)) {
-    const itens = (r.body.faltando as { signatario?: { papel?: string } | null; campo?: string }[])
-      .map((x) => `${CAMPO_FALTANDO[x.campo ?? ""] ?? x.campo ?? "dado"}${x.signatario?.papel ? ` do ${PAPEL[x.signatario.papel] ?? x.signatario.papel}` : ""}`)
+    const faltando = r.body.faltando as { signatario?: { papel?: string } | null; campo?: string }[];
+    // O ajuste pelo Max só mexe em comprador e vendedor. Pendência de outro
+    // assinante (cônjuge, testemunha) seria escrita no comprador pelo extrator.
+    const deOutro = faltando.some((x) => {
+      const p = papelDe(x.signatario?.papel, f.natureza);
+      return x.signatario?.papel && !["comprador", "inquilino", "vendedor"].includes(p);
+    });
+    if (deOutro) {
+      return {
+        reply:
+          `Para enviar falta completar dados de um assinante que eu não edito por aqui (cônjuge ou testemunha). ` +
+          `Complete pela tela; o rascunho${f.codigo ? ` ${f.codigo}` : ""} continua salvo.`,
+        fluxo: null,
+        evento: "envio_pendencia_outro_papel",
+      };
+    }
+    const itens = faltando
+      .map((x) => `${CAMPO_FALTANDO[x.campo ?? ""] ?? x.campo ?? "dado"}${x.signatario?.papel ? ` (${papelDe(x.signatario.papel, f.natureza)})` : ""}`)
       .slice(0, 5);
     return {
       reply: `Para enviar ainda falta: ${itens.join("; ")}. Me mande e eu ajusto o rascunho.`,

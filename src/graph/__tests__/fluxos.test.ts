@@ -333,7 +333,7 @@ describe("fluxo de PROPOSTA", () => {
       metodo: { valor: "email", rotulo: "E-mail" }, assinantes: [], atualizadoEm: agora,
     };
     const p = await F.conduzirFluxo(f, ctx("sim"), d);
-    expect(p.reply).toContain("CPF do vendedor");
+    expect(p.reply).toContain("CPF (vendedor)");
     expect(p.fluxo).toMatchObject({ etapa: "ajustes" });
   });
 
@@ -487,5 +487,113 @@ describe("saídas e travas", () => {
   it("locação usa o schema de locação e chama o valor de aluguel", () => {
     expect(F.argsDaProposta({ natureza: "locacao", dados: DADOS_OK }).schemaType).toBe("locacao_residencial_v1");
     expect(F.resumoDaProposta({ natureza: "locacao", dados: DADOS_OK })).toContain("Aluguel");
+  });
+});
+
+describe("contrato com o PR A (revisão lado a lado)", () => {
+  const base = { natureza: "venda" as const, dados: DADOS_OK, propostaId: "p1", codigo: "P-3", atualizadoEm: agora };
+
+  it("form.create 201 com link relativo: diz que criou (não 'não consegui', que levaria a duplicar)", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 201, body: { formulario: { link: "/f/tok/x" } } }) });
+    const f: Fluxo = { kind: "negocio", etapa: "revisao", tipo: "venda", campos: [], valores: {}, atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).toContain("formulário criado");
+    expect(p.fluxo).toBeNull();
+  });
+
+  it("update 409 edicao_pela_tela: manda ajustar pela tela e não promete nada", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 409, body: { error: "edicao_pela_tela" } }) });
+    const p = await F.conduzirFluxo({ kind: "proposta", etapa: "revisao_ajuste", ...base }, ctx("sim"), d);
+    expect(p.reply).toContain("pela tela");
+    expect(p.fluxo).toBeNull();
+  });
+
+  it("update 409 em_andamento é incerto e guarda a chave", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 409, body: { error: "em_andamento" } }) });
+    const p = await F.conduzirFluxo({ kind: "proposta", etapa: "revisao_ajuste", ...base }, ctx("sim", { messageId: "u1" }), d);
+    expect(p.reply).toBe(F.TEXTO_ESCRITA_INCERTA);
+    expect(p.fluxo).toMatchObject({ chave: { verbo: "proposal.update", valor: "u1" } });
+  });
+
+  it("send 409 em_andamento é incerto e guarda a chave do envio", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 409, body: { error: "em_andamento" } }) });
+    const f: Fluxo = { kind: "proposta", etapa: "envio", ...base, metodo: { valor: "email", rotulo: "E-mail" }, assinantes: [] };
+    const p = await F.conduzirFluxo(f, ctx("sim", { messageId: "e1" }), d);
+    expect(p.reply).toBe(F.TEXTO_ESCRITA_INCERTA);
+    expect(p.fluxo).toMatchObject({ chave: { verbo: "proposal.send", valor: "e1" } });
+  });
+
+  it("o método escolhido é anunciado; um só método liberado não manda `metodo`", async () => {
+    const opcoes = (metodos: unknown[]) =>
+      vi.fn().mockImplementation(async (verb: string) =>
+        verb === "proposal.options"
+          ? { status: 200, body: { metodos, signatarios: [{ nome: "Letícia G N", papel: "proponente" }, { nome: "Carlos S", papel: "proprietário" }] } }
+          : { status: 200, body: {} }
+      );
+    let acao = opcoes([{ valor: "email", rotulo: "E-mail" }, { valor: "whatsapp", rotulo: "WhatsApp" }]);
+    let p = await F.conduzirFluxo({ kind: "proposta", etapa: "ajustes", ...base }, ctx("ok"), deps({ acao }));
+    p = await F.conduzirFluxo(p.fluxo!, ctx("2"), deps({ acao }));
+    expect(p.reply).toContain("por *WhatsApp*");
+    expect(p.reply).toContain("Carlos S — vendedor");
+
+    acao = opcoes([{ valor: "email", rotulo: "E-mail" }]);
+    p = await F.conduzirFluxo({ kind: "proposta", etapa: "ajustes", ...base }, ctx("ok"), deps({ acao }));
+    await F.conduzirFluxo(p.fluxo!, ctx("sim", { messageId: "s" }), deps({ acao }));
+    expect(acao).toHaveBeenLastCalledWith("proposal.send", { proposta_id: "p1", metodo: undefined }, "s");
+  });
+
+  it("pendência com campo/papel do servidor ('name', 'proprietário') sai em português", async () => {
+    const d = deps({
+      acao: vi.fn().mockResolvedValue({
+        status: 422,
+        body: { error: "pendencias", faltando: [{ signatario: { posicao: 2, papel: "proprietário" }, campo: "name" }] },
+      }),
+    });
+    const f: Fluxo = { kind: "proposta", etapa: "envio", ...base, metodo: { valor: "email", rotulo: "E-mail" }, assinantes: [] };
+    const p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).toContain("nome completo (vendedor)");
+  });
+});
+
+describe("canal na atualização", () => {
+  it("só vai quando a pessoa disse; o padrão deduzido não desfaz troca feita pela tela", () => {
+    expect(F.argsDaProposta({ natureza: "venda", dados: DADOS_OK }, { atualizacao: true }).canal).toBeUndefined();
+    expect(F.argsDaProposta({ natureza: "venda", dados: { ...DADOS_OK, canal: "email" } }, { atualizacao: true }).canal).toBe("email");
+    expect(F.argsDaProposta({ natureza: "venda", dados: DADOS_OK }).canal).toBe("whatsapp");
+  });
+});
+
+describe("pendência de quem o Max não edita", () => {
+  it("cônjuge/testemunha faltando: orienta a tela, não volta aos ajustes", async () => {
+    const d = deps({
+      acao: vi.fn().mockResolvedValue({
+        status: 422,
+        body: { error: "pendencias", faltando: [{ signatario: { posicao: 3, papel: "testemunha" }, campo: "cpf" }] },
+      }),
+    });
+    const f: Fluxo = {
+      kind: "proposta", etapa: "envio", natureza: "venda", dados: DADOS_OK, propostaId: "p1", codigo: "P-4",
+      metodo: { valor: "email", rotulo: "E-mail" }, assinantes: [], atualizadoEm: agora,
+    };
+    const p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).toContain("pela tela");
+    expect(p.fluxo).toBeNull();
+  });
+});
+
+describe("recusa do servidor", () => {
+  it("create inválido (422 dados_invalidos + message) vira a frase de negócio e volta à coleta", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 422, body: { error: "dados_invalidos", message: "Falta o endereço do imóvel." } }) });
+    const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "venda", dados: DADOS_OK, atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).toContain("Falta o endereço do imóvel.");
+    expect(p.fluxo).toMatchObject({ etapa: "coleta" });
+  });
+
+  it("código sem frase (dados_invalidos) não vai para a pessoa", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 422, body: { error: "dados_invalidos" } }) });
+    const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "venda", dados: DADOS_OK, atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).not.toContain("dados_invalidos");
   });
 });
