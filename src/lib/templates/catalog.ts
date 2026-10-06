@@ -439,6 +439,22 @@ V3.manual_message = MENSAGEM_V3;
 V3.manual_message_parte = MENSAGEM_V3;
 
 /**
+ * `proposal_completed` v2 (decisão do Olavo, 06/10/2026): a Meta aprovou o v1
+ * como MARKETING — o convite "escolha se quer converter agora" + "Agora não"
+ * leu como promoção. O v2 escreve como o `max_proposta_recusada` (UTILITY):
+ * fato + o que dá para fazer pelo botão, com "Abrir proposta" no lugar do
+ * "Agora não". Mesmas variáveis e params obrigatórios do v1.
+ */
+V2.proposal_completed = t(
+  "max_proposta_assinada_v2",
+  "Olá, {{1}}! A proposta {{2}}, da {{3}}, foi assinada por todos os signatários. Você pode converter a proposta em negócio pelo botão abaixo.",
+  [NOME, PROPOSTA, ORG],
+  ["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio"],
+  { tipo: "acao_e_url", acao: CONVERTER, urlTexto: "Abrir proposta" },
+  ["proposta"]
+);
+
+/**
  * Versão 4 — só do `welcome` (decisão do Olavo, 05/10/2026). Troca a
  * apresentação por uma instrução de AGENDA ("salve este número como Max"):
  * diz quem está falando sem reintroduzir o texto que levou o v1 a MARKETING.
