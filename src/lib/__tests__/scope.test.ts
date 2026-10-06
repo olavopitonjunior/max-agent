@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 vi.mock("../orgs", () => ({ orgById: vi.fn() }));
 
 const { orgById } = await import("../orgs");
-const { consultarEscopo, descartarSeVazou, subjectDe } = await import("../scope");
+const { consultarEscopo, descartarSeVazou, limparArgs, subjectDe } = await import("../scope");
 const { CAMPOS_PROIBIDOS_AO_BROKER } = await import("@/graph/scope-contract");
 const mockOrgById = vi.mocked(orgById);
 
@@ -159,5 +159,42 @@ describe("subjectDe", () => {
       .toEqual({ kind: "user", userId: "u1" });
     expect(subjectDe({ kind: "broker", splitRecipientId: "sr1", orgId: "o", orgName: "n", label: "W" }))
       .toEqual({ kind: "broker", splitRecipientId: "sr1" });
+  });
+});
+
+describe("limparArgs — filtro vazio do modelo não derruba a leitura", () => {
+  it("estado vazio some — era o 400 de 2026-10-06 (\"status das minhas propostas\")", () => {
+    expect(limparArgs({ estado: "", limite: 10 })).toEqual({ limite: 10 });
+  });
+
+  it("só espaço, null e undefined também somem; string válida vai aparada", () => {
+    expect(limparArgs({ estado: "  ", negocio_id: null, proposta_id: undefined })).toEqual({});
+    expect(limparArgs({ estado: " enviada " })).toEqual({ estado: "enviada" });
+  });
+
+  it("limite que não é inteiro positivo some; o válido passa", () => {
+    expect(limparArgs({ limite: 0 })).toEqual({});
+    expect(limparArgs({ limite: -3 })).toEqual({});
+    expect(limparArgs({ limite: 2.5 })).toEqual({});
+    expect(limparArgs({ limite: "5" })).toEqual({});
+    expect(limparArgs({ limite: 5 })).toEqual({ limite: 5 });
+  });
+
+  it("não inventa nem valida domínio: estado fora do enum continua indo", () => {
+    expect(limparArgs({ estado: "qualquer" })).toEqual({ estado: "qualquer" });
+    expect(limparArgs(undefined)).toEqual({});
+  });
+
+  it("o corpo enviado ao servidor já vai limpo", async () => {
+    responde({ ok: true, status: 200, body: { items: [], truncated: false } });
+    await consultarEscopo({
+      orgId: "org1",
+      rawPhone: PHONE,
+      subject: SUJEITO,
+      verb: "proposal.list",
+      args: { estado: "", limite: 10 },
+    });
+    const init = vi.mocked(fetch).mock.calls[0]![1] as { body: string };
+    expect(JSON.parse(init.body).args).toEqual({ limite: 10 });
   });
 });
