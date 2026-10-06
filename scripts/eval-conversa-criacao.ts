@@ -1,90 +1,114 @@
 /**
- * A conversa real de 2026-10-06 em que o Max "criou" uma proposta sem criar.
+ * Os dois fluxos de criação contra o modelo de PRODUÇÃO (conversa real de 06/10).
  *
- * "Pode gerar uma proposta pra mim?" → "venda ou locação?" → "Venda". No
- * terceiro turn a ferramenta tinha sumido (o prefiltro só olhava "Venda"), e o
- * nano improvisou cinco turns de coleta até dizer "proposta criada".
+ * Mede as duas únicas coisas que o modelo faz nos fluxos:
+ *  1. ENTRADA — num pedido de criação, chamar `propor_criacao` NA HORA (sem
+ *     perguntar antes; quem pergunta é o fluxo), com o tipo certo: "proposta"
+ *     para proposta, "venda"/"locacao" para formulário de negócio.
+ *  2. EXTRAÇÃO — dentro do fluxo, preencher `preencher_proposta` com o que a
+ *     mensagem diz (números como número, sem inventar, cliente ≠ quem fala).
  *
- * Mede, no turn da resposta à desambiguação, se o modelo PROPÕE a criação com
- * os argumentos certos (`tipo: proposta`, natureza venda, nome quando dito).
- * `--antes` reproduz a oferta antiga (sem a mensagem anterior), para comparar.
- *
- * Uso:  OPENROUTER_API_KEY=... npx tsx scripts/eval-conversa-criacao.ts [--antes] [--n 10]
- * Custo: ~3×n chamadas de ~2k tokens. Centavos.
+ * Uso:  OPENROUTER_API_KEY=... npx tsx scripts/eval-conversa-criacao.ts [--n 5]
+ * Custo: ~(entradas + extrações) × n chamadas curtas. Centavos.
  */
 
 import { complete, DEFAULT_MODEL } from "../src/lib/llm";
 import { buildSystemPrompt, comoMensagemDoUsuario } from "../src/graph/prompt";
-import { ferramentasDoTurno, pedidoEmAberto } from "../src/graph/tools";
+import { ferramentasDoTurno } from "../src/graph/tools";
 import { argsDaCriacao } from "../src/graph/despachante";
-import type { ChatMessage } from "../src/graph/graph";
+import { SYSTEM_DA_EXTRACAO, TOOL_EXTRAIR_PROPOSTA, sanearDados } from "../src/graph/fluxos";
 import type { Capability } from "../src/graph/policy";
 
-const POLITICA: Capability[] = ["deal.list", "deal.pending", "proposal.list", "form.create", "proposal.create"];
+const POLITICA: Capability[] = ["deal.list", "deal.pending", "proposal.list", "form.create", "proposal.create", "proposal.send"];
 const OLAVO = { orgId: "org1", orgName: "FINCasa", kind: "user" as const, userId: "u1", userName: "Olavo" };
 
-const PERGUNTA: ChatMessage[] = [
-  { role: "user", content: "Pode gerar uma proposta pra mim?" },
-  { role: "assistant", content: "Posso sim, Olavo. É proposta de **venda** ou de **locação**?" },
+const ENTRADAS: { texto: string; tipo: "proposta" | "venda" | "locacao" }[] = [
+  { texto: "Pode gerar uma proposta pra mim?", tipo: "proposta" },
+  { texto: "preciso fazer uma proposta pro meu cliente", tipo: "proposta" },
+  { texto: "quero criar um formulário de negócio de venda", tipo: "venda" },
+  { texto: "me manda o link do formulário de locação", tipo: "locacao" },
 ];
 
-const CASOS: { resposta: string; natureza: "venda" | "locacao"; nome?: string }[] = [
-  { resposta: "Venda", natureza: "venda" },
-  { resposta: "Locação", natureza: "locacao" },
-  { resposta: "Venda. Compradora Letícia Gonçalves Nogueira", natureza: "venda", nome: "Letícia" },
+const EXTRACOES: { texto: string; confere: (d: ReturnType<typeof sanearDados>) => string | null }[] = [
+  {
+    texto:
+      "Rua Senador godoi, 606, Vila São geraldo. Comprador Letícia Gonçalves Nogueira. Valor de 1.500.000, sendo 200.000 financiado e o restante a vista no contrato de financiamento.",
+    confere: (d) =>
+      !d.proponente?.nome?.includes("Letícia")
+        ? "nome do comprador"
+        : d.valor !== 1_500_000
+          ? `valor=${d.valor}`
+          : !(d.imovel?.endereco ?? "").normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase().includes("godoi")
+            ? "endereço"
+            : null,
+  },
+  {
+    texto: "o comprador é o João Pereira da Silva, telefone 11 98765-4321, CPF 123.456.789-09, proposta de 1,2 milhão",
+    confere: (d) =>
+      d.valor !== 1_200_000
+        ? `valor=${d.valor}`
+        : (d.proponente?.telefone ?? "").replace(/\D/g, "").endsWith("987654321")
+          ? null
+          : "telefone",
+  },
+  {
+    texto: "o valor muda pra 1,4 milhão",
+    confere: (d) => (d.valor === 1_400_000 && !d.proponente?.nome ? null : `valor=${d.valor} nome=${d.proponente?.nome}`),
+  },
 ];
 
 async function main() {
-  const antes = process.argv.includes("--antes");
   const iN = process.argv.indexOf("--n");
-  const n = iN > 0 && Number(process.argv[iN + 1]) > 0 ? Number(process.argv[iN + 1]) : 10;
+  const n = iN > 0 && Number(process.argv[iN + 1]) > 0 ? Number(process.argv[iN + 1]) : 5;
   const model = DEFAULT_MODEL;
-  const system = buildSystemPrompt({
-    orgName: OLAVO.orgName,
-    userName: OLAVO.userName,
-    hits: [],
-    criacao: "disponivel",
-  });
-
-  console.log(`modelo: ${model}  modo: ${antes ? "ANTES (só a mensagem atual)" : "DEPOIS (com a anterior)"}  n=${n}\n`);
+  const system = buildSystemPrompt({ orgName: OLAVO.orgName, userName: OLAVO.userName, hits: [], criacao: "disponivel" });
   let ok = 0;
   let total = 0;
-  for (const caso of CASOS) {
-    const oferta = ferramentasDoTurno({
-      policy: POLITICA,
-      texto: caso.resposta,
-      identity: OLAVO,
-      textoAnterior: antes ? null : pedidoEmAberto(PERGUNTA),
-    });
-    const tools = oferta.entradas.map((e) => e.def);
+
+  console.log(`modelo: ${model}  n=${n}\n── ENTRADA`);
+  for (const e of ENTRADAS) {
+    const tools = ferramentasDoTurno({ policy: POLITICA, texto: e.texto, identity: OLAVO }).entradas.map((x) => x.def);
     let acertos = 0;
-    const amostras: string[] = [];
+    const erros: string[] = [];
     for (let i = 0; i < n; i++) {
       const r = await complete({
         system,
-        messages: [...PERGUNTA, { role: "user" as const, content: caso.resposta }].map((m) =>
-          m.role === "user" ? { ...m, content: comoMensagemDoUsuario(m.content) } : m
-        ),
+        messages: [{ role: "user", content: comoMensagemDoUsuario(e.texto) }],
         model,
-        tools: tools.length > 0 ? tools : undefined,
+        tools: tools.length ? tools : undefined,
       });
       const c = r.toolCalls.find((t) => t.name === "propor_criacao");
-      const a = (c?.args ?? {}) as Record<string, unknown>;
-      // O que vira pendência de fato: com a trava do nome do falante aplicada.
-      const final = c ? argsDaCriacao(a, OLAVO.userName) : null;
-      const natureza = final?.natureza ?? "venda";
-      const certo =
-        !!final &&
-        final.tipo === "proposta" &&
-        natureza === caso.natureza &&
-        (caso.nome ? String(final.nomeCliente ?? "").includes(caso.nome) : !final.nomeCliente);
-      if (certo) acertos++;
-      else amostras.push(c ? `chamou ${JSON.stringify(a)}` : `texto: ${(r.text ?? "").slice(0, 120).replace(/\n/g, " ")}`);
+      const a = c ? argsDaCriacao(c.args, OLAVO.userName) : null;
+      if (a?.tipo === e.tipo) acertos++;
+      else erros.push(c ? `chamou ${JSON.stringify(c.args)}` : `texto: ${(r.text ?? "").slice(0, 100).replace(/\n/g, " ")}`);
     }
     ok += acertos;
     total += n;
-    console.log(`${JSON.stringify(caso.resposta)}: ${acertos}/${n}  (tools oferecidas: ${tools.map((t) => t.name).join(", ") || "nenhuma"})`);
-    for (const s of amostras.slice(0, 3)) console.log(`   ✗ ${s}`);
+    console.log(`${JSON.stringify(e.texto)}: ${acertos}/${n}`);
+    for (const x of erros.slice(0, 2)) console.log(`   ✗ ${x}`);
+  }
+
+  console.log(`\n── EXTRAÇÃO`);
+  for (const e of EXTRACOES) {
+    let acertos = 0;
+    const erros: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const r = await complete({
+        system: SYSTEM_DA_EXTRACAO,
+        messages: [{ role: "user", content: comoMensagemDoUsuario(e.texto) }],
+        model,
+        tools: [TOOL_EXTRAIR_PROPOSTA as never],
+        toolChoice: TOOL_EXTRAIR_PROPOSTA.name,
+      });
+      const args = r.toolCalls.find((t) => t.name === TOOL_EXTRAIR_PROPOSTA.name)?.args ?? {};
+      const falha = e.confere(sanearDados(args));
+      if (!falha) acertos++;
+      else erros.push(`${falha} ← ${JSON.stringify(args).slice(0, 160)}`);
+    }
+    ok += acertos;
+    total += n;
+    console.log(`${JSON.stringify(e.texto.slice(0, 50))}…: ${acertos}/${n}`);
+    for (const x of erros.slice(0, 2)) console.log(`   ✗ ${x}`);
   }
   console.log(`\nTOTAL: ${ok}/${total} (${Math.round((100 * ok) / total)}%)`);
 }

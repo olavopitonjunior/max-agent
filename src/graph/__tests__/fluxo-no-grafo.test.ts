@@ -1,0 +1,187 @@
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+/**
+ * O fluxo de criação no GRAFO: o nó `conduzir` responde por template, sem o
+ * modelo de resposta, e o que a pessoa ditou (CPF, telefone) não vai para a
+ * trilha do turn. Mesmo padrão de mocks do `formbuilder.test.ts`.
+ */
+
+vi.mock("@/lib/cm", async (orig) => ({
+  ...(await orig<typeof import("@/lib/cm")>()),
+  chaveDePolitica: vi.fn().mockResolvedValue("admin"),
+  fetchProfile: vi.fn(),
+  searchKnowledge: vi.fn(),
+  reportUsage: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/lib/llm", () => ({ complete: vi.fn(), DEFAULT_MODEL: "openai/gpt-5.4-nano" }));
+vi.mock("@/lib/acao", () => ({ executarAcao: vi.fn() }));
+
+const { buildGraph } = await import("../graph");
+const { fetchProfile, searchKnowledge } = await import("@/lib/cm");
+const { complete } = await import("@/lib/llm");
+const { executarAcao } = await import("@/lib/acao");
+
+const llm = complete as unknown as ReturnType<typeof vi.fn>;
+const acao = executarAcao as unknown as ReturnType<typeof vi.fn>;
+
+const usuario = { orgId: "org1", orgName: "FINCasa", kind: "user" as const, userId: "u1", userName: "Olavo" };
+const POLITICA = {
+  byRole: { "*": ["deal.list", "deal.pending", "proposal.list", "form.create", "proposal.create", "proposal.send"] },
+  byRecipient: {},
+  brokerDefault: ["deal.list", "deal.pending"],
+};
+const uso = { model: "openai/gpt-5.4-nano", promptTokens: 10, completionTokens: 5, latencyMs: 5, success: true };
+
+function run(text: string, state: Record<string, unknown> = {}, messageId = "m1") {
+  return buildGraph()
+    .compile()
+    .invoke({
+      inbound: {
+        messageId,
+        fromPhone: "5511987654321",
+        groupId: null,
+        kind: "text" as const,
+        text,
+        mediaUrl: null,
+        mimeType: null,
+        timestampMs: null,
+        senderName: "Olavo",
+        replyToMessageId: null,
+      },
+      identity: usuario,
+      reply: null,
+      halt: null,
+      propostaDescartada: false,
+      ...state,
+    });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: POLITICA } as never);
+  vi.mocked(searchKnowledge).mockResolvedValue([]);
+});
+
+describe("fluxo no grafo", () => {
+  it("turn com fluxo ativo: só a extração chama modelo, resposta é template, trilha sem dado pessoal", async () => {
+    llm.mockResolvedValue({
+      text: "",
+      toolCalls: [
+        {
+          name: "preencher_proposta",
+          args: { proponente: { nome: "Letícia Gonçalves Nogueira", cpf: "12345678909", telefone: "11999990000" } },
+        },
+      ],
+      usage: uso,
+    });
+
+    const s = await run("Letícia Gonçalves Nogueira, CPF 123.456.789-09, tel 11 99999-0000", {
+      fluxo: { kind: "proposta", etapa: "coleta", natureza: "venda", dados: {}, atualizadoEm: Date.now() },
+    });
+
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(llm.mock.calls[0][0].toolChoice).toBe("preencher_proposta");
+    expect(s.reply).toContain("endereço do imóvel");
+    expect(s.fluxo?.kind === "proposta" && s.fluxo.dados.proponente?.nome).toBe("Letícia Gonçalves Nogueira");
+    expect(JSON.stringify(s.toolLog)).not.toContain("12345678909");
+    expect(JSON.stringify(s.toolLog)).not.toContain("99999");
+    expect(acao).not.toHaveBeenCalled();
+  });
+
+  it("B3 — kill switch no meio do envio: o próximo SIM não envia (fluxo volta aos ajustes)", async () => {
+    vi.mocked(fetchProfile).mockResolvedValue({ enabled: false, model: "x", instructions: null, maxPolicy: POLITICA } as never);
+    const s = await run("sim", {
+      fluxo: {
+        kind: "proposta", etapa: "envio", natureza: "venda", dados: {}, propostaId: "p1",
+        metodo: { valor: "email", rotulo: "E-mail" }, assinantes: [], atualizadoEm: Date.now(),
+      },
+    });
+    expect(acao).not.toHaveBeenCalled();
+    expect(s.fluxo).toMatchObject({ kind: "proposta", etapa: "ajustes" });
+  });
+
+  it("pergunta no meio da coleta vai para o atendimento normal e o fluxo fica", async () => {
+    llm
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "preencher_proposta", args: {} }], usage: uso })
+      .mockResolvedValueOnce({ text: "A assinatura é eletrônica.", toolCalls: [], usage: uso });
+    const fluxo = { kind: "proposta", etapa: "coleta", natureza: "venda", dados: {}, atualizadoEm: Date.now() };
+    const s = await run("como funciona a assinatura?", { fluxo });
+    expect(s.reply).toBe("A assinatura é eletrônica.");
+    expect(s.fluxo).toMatchObject({ kind: "proposta", etapa: "coleta" });
+  });
+
+  it("N1 — pergunta no ENVIO é liberada e o fluxo sai da etapa em que o SIM envia", async () => {
+    llm.mockResolvedValueOnce({ text: "É eletrônica. Quer que eu explique o split?", toolCalls: [], usage: uso });
+    const s = await run("a assinatura é eletrônica?", {
+      fluxo: {
+        kind: "proposta", etapa: "envio", natureza: "venda", dados: {}, propostaId: "p1",
+        metodo: { valor: "email", rotulo: "E-mail" }, assinantes: [], atualizadoEm: Date.now(),
+      },
+    });
+    expect(s.reply).toContain("É eletrônica.");
+    expect(s.fluxo).toMatchObject({ etapa: "ajustes" });
+    expect(acao).not.toHaveBeenCalled();
+  });
+
+  it("pedido novo de criação com fluxo em andamento não o apaga", async () => {
+    llm
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "preencher_proposta", args: {} }], usage: uso })
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "proposta" } }], usage: uso });
+    const fluxo = { kind: "proposta", etapa: "ajustes", natureza: "venda", dados: {}, propostaId: "p1", atualizadoEm: Date.now() };
+    const s = await run("gera uma proposta nova", { fluxo });
+    expect(s.reply).toContain("já tem uma proposta em andamento");
+    expect(s.fluxo).toMatchObject({ propostaId: "p1" });
+  });
+
+  it("fluxo vencido é descartado e o turn segue normal", async () => {
+    llm.mockResolvedValue({ text: "Oi! Como posso ajudar?", toolCalls: [], usage: uso });
+    const s = await run("oi", { fluxo: { kind: "escolha", atualizadoEm: Date.now() - 31 * 60 * 1000 } });
+    expect(s.fluxo).toBeNull();
+    expect(s.reply).toBe("Oi! Como posso ajudar?");
+  });
+
+  it("a conversa de 06/10 de ponta a ponta até o PDF: pedido → 1 → venda → dados → SIM", async () => {
+    // Turn 1: o modelo reconhece o pedido e chama a ferramenta.
+    llm.mockResolvedValueOnce({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "proposta" } }], usage: uso });
+    let s = await run("Pode gerar uma proposta pra mim?", {}, "t1");
+    expect(s.reply).toContain("proposta rápida");
+
+    s = await run("1", { fluxo: s.fluxo, messages: s.messages }, "t2");
+    expect(s.reply).toContain("venda");
+
+    s = await run("Venda", { fluxo: s.fluxo, messages: s.messages }, "t3");
+    expect(s.reply).toContain("Comprador");
+
+    llm.mockResolvedValueOnce({
+      text: "",
+      toolCalls: [
+        {
+          name: "preencher_proposta",
+          args: {
+            proponente: { nome: "Letícia Gonçalves Nogueira", telefone: "11999990000" },
+            imovel: { endereco: "Rua Senador Godoi, 606", bairro: "Vila São Geraldo" },
+            valor: 1500000,
+            pagamento: { forma: "200 mil financiado, restante à vista" },
+          },
+        },
+      ],
+      usage: uso,
+    });
+    s = await run(
+      "Rua Senador godoi, 606, Vila São geraldo. Compradora Letícia Gonçalves Nogueira, 11 99999-0000. 1.500.000, sendo 200.000 financiado",
+      { fluxo: s.fluxo, messages: s.messages },
+      "t4"
+    );
+    expect(s.reply).toContain("Está correto?");
+    expect(s.reply).toContain("R$");
+
+    acao.mockResolvedValueOnce({
+      status: 201,
+      body: { proposal: { id: "p1", codigo: "P-7" }, pdf: { link: "https://imobpro.ia.br/api/public/proposal-pdf/abc" } },
+    });
+    s = await run("sim", { fluxo: s.fluxo, messages: s.messages }, "t5");
+    expect(acao).toHaveBeenCalledWith(expect.objectContaining({ verb: "proposal.create", idempotencyKey: "t5" }));
+    expect(s.reply).toContain("https://imobpro.ia.br/api/public/proposal-pdf/abc");
+    expect(s.fluxo?.kind).toBe("proposta");
+  });
+});

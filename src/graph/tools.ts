@@ -174,7 +174,7 @@ export function shouldOfferTools(text: string): boolean {
  *
  * Emoji sobrevive de propósito — "👍" é uma confirmação legítima no WhatsApp.
  */
-function normalizar(texto: string): string {
+export function normalizar(texto: string): string {
   return texto
     .trim()
     .toLowerCase()

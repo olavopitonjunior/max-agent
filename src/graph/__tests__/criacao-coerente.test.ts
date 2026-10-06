@@ -34,7 +34,7 @@ const corretor = { orgId: "org1", orgName: "RE/MAX Trio", kind: "broker" as cons
 const uso = { model: "x", promptTokens: 1, completionTokens: 1, latencyMs: 1, success: true };
 
 /** Marcas de cada variante da seção de criação. */
-const DIZ_USE_A_FERRAMENTA = "use a ferramenta para propor a criação";
+const DIZ_USE_A_FERRAMENTA = "chame a ferramenta NA HORA";
 const DIZ_INDISPONIVEL = "não está disponível para esta pessoa";
 const DIZ_SO_COM_LOGIN = "só quem tem login";
 

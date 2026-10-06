@@ -132,6 +132,8 @@ export interface CompleteParams {
    * oportunidade de chamar sem motivo.
    */
   tools?: LlmTool[];
+  /** Nome de uma das `tools` que o modelo É OBRIGADO a chamar (extração). */
+  toolChoice?: string;
   /**
    * Prazo da chamada. Default `LLM_TIMEOUT_MS` (o teto do `answer`); as
    * chamadas curtas (compactação, extração de memória) passam
@@ -306,7 +308,11 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
               // `auto` e não `required`: a esmagadora maioria dos turns é
               // pergunta de processo, e forçar chamada transformaria "como
               // funciona a assinatura?" numa proposta de criar formulário.
-              tool_choice: "auto",
+              // A exceção é a EXTRAÇÃO dentro de um fluxo (`fluxos.ts`): lá a
+              // mensagem já é dado de um formulário, e texto livre é falha.
+              tool_choice: p.toolChoice
+                ? { type: "function", function: { name: p.toolChoice } }
+                : "auto",
             }
           : {}),
       }),
