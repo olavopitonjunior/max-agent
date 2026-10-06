@@ -50,20 +50,6 @@ export interface PendingAction {
 export const TOOL_PROPOR_FORM = "propor_criacao";
 
 /**
- * O catálogo, por NOME.
- *
- * Existe para o sanitizador da saída (`compose.ts`) saber o que nunca pode
- * aparecer na conversa. Manter aqui, e não lá, é o que faz a tool que o PR 6
- * acrescentar nascer bloqueada sem ninguém lembrar de editar dois arquivos.
- */
-export const NOMES_DE_TOOL: string[] = [
-  TOOL_PROPOR_FORM,
-  "listar_negocios",
-  "pendencias_do_negocio",
-  "listar_propostas",
-];
-
-/**
  * UMA ferramenta com um parâmetro, e não três ferramentas parecidas.
  *
  * Modelo pequeno erra mais escolhendo entre ferramentas de descrição vizinha
@@ -224,6 +210,25 @@ export function lerConfirmacao(texto: string): Confirmacao {
   return "nenhum";
 }
 
+/**
+ * G6 — a pessoa quer o resto da resposta cortada?
+ *
+ * Casamento ANCORADO, e com lista PRÓPRIA, mais estreita que a do
+ * `lerConfirmacao` (achado do review de segurança do PR 2): "ok", "beleza",
+ * "certo", "👍", "tá", "vai" são o jeito de ENCERRAR um assunto no WhatsApp,
+ * não de pedir mais — aceitá-los mandava um segundo bloco a quem só agradeceu.
+ * Só "sim"/"s" (a resposta à pergunta que fizemos) e frases que pedem
+ * continuação explicitamente. Só é consultado quando há resto guardado.
+ */
+const QUER_O_RESTO =
+  /^(sim|s|quero( ver)?( o resto| mais)?|continua|continue|continuar|mais|o resto|resto|ver o resto|manda o resto|pode mandar( o resto)?|manda mais)$/;
+
+export function querVerOResto(texto: string): boolean {
+  const t = normalizar(texto);
+  if (!t) return false;
+  return QUER_O_RESTO.test(t);
+}
+
 export function propostaExpirou(pending: PendingAction, agora: number): boolean {
   return agora - pending.askedAt > PENDING_TTL_MS;
 }
@@ -311,6 +316,19 @@ export function textoModuloDesligado(args: PendingAction["args"]): string {
 export const TEXTO_CANCELADO = "Beleza, não criei nada.";
 
 /**
+ * A política desta org não concede a criação pedida (G4).
+ *
+ * Diz que NADA foi criado e de quem é a decisão: "tenta de novo" mandaria a
+ * pessoa bater na mesma parede, como no módulo desligado.
+ */
+export function textoSemPermissao(args: Pick<PendingAction["args"], "tipo" | "natureza" | "finalidade">): string {
+  return (
+    `Criar ${descreverPendencia(args)} pelo Max não está liberado para você. ` +
+    "Nada foi criado. Dá pra fazer pelo sistema, ou fala com quem administra a conta."
+  );
+}
+
+/**
  * A escrita falhou DEPOIS de a pessoa confirmar.
  *
  * Precisa dizer que não criou. Um "tive um problema" genérico deixaria dúvida
@@ -338,22 +356,112 @@ export function textoFalhou(args: Pick<PendingAction["args"], "tipo">): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Definição única: uma tool, dois consumidores (o prompt e o executor).
+ * O REGISTRO de tools — uma entrada declarativa por tool, leitura ou escrita.
  *
- * `capability` é o que a política governa; `verb` é o que o `scope-query`
+ * Antes eram dois mundos: as leituras num `ToolDef` passado pela política, e a
+ * `propor_criacao` solta no `graph.ts`, oferecida sem política e tratada à mão.
+ * Duas portas de entrada são duas listas de checagem que divergem no primeiro
+ * ajuste — e a próxima tool de escrita (PR 6: enviar, cancelar, recriar
+ * proposta) é exatamente a que não pode cair na porta sem checagem. Agora:
+ * **tool nova = uma entrada aqui + o executor + os casos da eval**, e o
+ * despachante (`despachante.ts`) aplica as mesmas travas a qualquer uma.
+ *
+ * `capability` é o que a política governa; `verbo` é o que o servidor
  * executa. Separados de propósito — a política diz o que se pode OFERECER, o
  * servidor decide o que VOLTA. Confundir os dois produz vazamento que nenhum
  * teste deste repo pega (`docs/max.md` §11.4).
  */
-export interface ToolDef {
+interface EntradaBase {
+  /** Igual a `def.name` — o teste do registro confere. */
+  nome: string;
   def: LlmTool;
-  capability: Capability;
-  verb: ScopeQueryVerb;
   /** Menor = entra primeiro quando o teto de 5 corta. */
   prioridade: number;
   /** Prefiltro barato por intenção. Generoso de propósito — ver abaixo. */
   combina: (texto: string) => boolean;
 }
+
+/**
+ * O que a lista de uma leitura PRODUZ, para as referências numeradas (G2):
+ * o código numera os itens e guarda número → id; o modelo só vê o número.
+ */
+export type TipoDeReferencia = "negocio" | "proposta";
+
+export interface EntradaDeLeitura extends EntradaBase {
+  tipo: "leitura";
+  capability: Capability;
+  verb: ScopeQueryVerb;
+  /** Leitura não muda nada, não custa nada e não pede confirmação. */
+  risco: "nenhum";
+  confirmacao: false;
+  refs?: { produz?: TipoDeReferencia };
+}
+
+/**
+ * Escrita: a capability pode depender dos ARGUMENTOS — `propor_criacao` cria
+ * formulário (`form.create`) ou proposta (`proposal.create`) conforme o
+ * `tipo`. Por isso duas perguntas separadas:
+ *  - `capabilities`: a OFERTA — basta a política conceder uma delas para a
+ *    tool entrar no prompt;
+ *  - `capabilityDaChamada`: a EXECUÇÃO — o que ESTA chamada exige. `null` =
+ *    argumento inválido, e chamada inválida é descartada, nunca adivinhada.
+ *
+ * `confirmacao: true` é a G3: a tool só REGISTRA a pendência; quem executa é o
+ * `confirm`, no turn seguinte, depois do "sim" — e ele passa de novo pelo
+ * despachante, porque a política pode ter mudado entre os dois turns.
+ */
+export interface EntradaDeEscrita extends EntradaBase {
+  tipo: "escrita";
+  capabilities: readonly Capability[];
+  capabilityDaChamada: (args: Record<string, unknown>) => Capability | null;
+  /** O verbo no servidor coincide com a capability da chamada (plano, PR 1). */
+  risco: "nenhum" | "pago" | "irreversivel";
+  confirmacao: boolean;
+  refs?: { consome?: TipoDeReferencia; produz?: TipoDeReferencia };
+}
+
+export type EntradaDeTool = EntradaDeLeitura | EntradaDeEscrita;
+
+/**
+ * Nome antigo, mantido: era o tipo das tools de leitura e os testes da
+ * seleção montam catálogos falsos com ele.
+ */
+export type ToolDef = EntradaDeLeitura;
+
+/** Todas as capabilities que podem fazer uma entrada ser OFERECIDA. */
+export function capabilitiesDeOferta(e: EntradaDeTool): readonly Capability[] {
+  return e.tipo === "leitura" ? [e.capability] : e.capabilities;
+}
+
+/**
+ * A capability que a CRIAÇÃO exige, pelo `tipo`.
+ *
+ * Proposta é `proposal.create`; formulário de venda ou de locação é
+ * `form.create` (o formulário nasce junto de um negócio — é o "form.create"
+ * do catálogo do ImobPro, que o `POLITICA_PADRAO` concede a todo papel).
+ * `tipo` fora do enum → `null`: o despachante descarta, não adivinha.
+ */
+export function capabilityDaCriacao(tipo: unknown): Capability | null {
+  const t = lerTipo(tipo);
+  if (!t) return null;
+  return t === "proposta" ? "proposal.create" : "form.create";
+}
+
+export const PROPOR_CRIACAO: EntradaDeEscrita = {
+  nome: TOOL_PROPOR_FORM,
+  def: FORM_TOOL,
+  tipo: "escrita",
+  capabilities: ["form.create", "proposal.create"],
+  capabilityDaChamada: (args) => capabilityDaCriacao(args.tipo),
+  // Rascunho/formulário em branco: nada é cobrado nem apagado. A confirmação
+  // existe porque é escrita no tenant, não porque custa.
+  risco: "nenhum",
+  confirmacao: true,
+  // Fora do teto de leitura: ela não compete por vaga com as leituras, é
+  // somada à parte (ver `TETO_DE_TOOLS`).
+  prioridade: 0,
+  combina: (t) => shouldOfferTools(t),
+};
 
 /**
  * Teto do catálogo de LEITURA por chamada. A `propor_criacao` é somada por
@@ -371,8 +479,13 @@ const PEDE_NEGOCIO =
   /\b(neg[oó]cio|neg[oó]cios|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid\w*|documentos?)\b/i;
 
 export const LISTAR_NEGOCIOS: ToolDef = {
+  nome: "listar_negocios",
+  tipo: "leitura",
   capability: "deal.list",
   verb: "deal.list",
+  risco: "nenhum",
+  confirmacao: false,
+  refs: { produz: "negocio" },
   prioridade: 10,
   combina: (t) => PEDE_NEGOCIO.test(normalizar(t)),
   def: {
@@ -416,8 +529,13 @@ const PEDE_PENDENCIA =
  * algo nos meus negócios?", sem apontar negócio nenhum.
  */
 export const PENDENCIAS_DO_NEGOCIO: ToolDef = {
+  nome: "pendencias_do_negocio",
+  tipo: "leitura",
   capability: "deal.pending",
   verb: "deal.pending",
+  risco: "nenhum",
+  confirmacao: false,
+  refs: { produz: "negocio" },
   prioridade: 20,
   combina: (t) => PEDE_PENDENCIA.test(normalizar(t)),
   def: {
@@ -480,8 +598,13 @@ export function ehPedidoDeCriacao(texto: string): boolean {
  * comissionado sem login recebe lista vazia: proposta se liga a `User`.
  */
 export const LISTAR_PROPOSTAS: ToolDef = {
+  nome: "listar_propostas",
+  tipo: "leitura",
   capability: "proposal.list",
   verb: "proposal.list",
+  risco: "nenhum",
+  confirmacao: false,
+  refs: { produz: "proposta" },
   prioridade: 30,
   combina: (t) => PEDE_PROPOSTA.test(normalizar(t)),
   def: {
@@ -523,20 +646,32 @@ export const LISTAR_PROPOSTAS: ToolDef = {
 export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS];
 
 /**
- * Quais tools entram no prompt deste turn.
+ * O registro inteiro: a escrita e as leituras. É a ÚNICA lista que o
+ * despachante consulta — nome fora daqui é `tool_desconhecida`.
+ */
+export const REGISTRO_DE_TOOLS: EntradaDeTool[] = [PROPOR_CRIACAO, ...TOOLS_DE_LEITURA];
+
+export function buscarNoRegistro(nome: string): EntradaDeTool | undefined {
+  return REGISTRO_DE_TOOLS.find((e) => e.nome === nome);
+}
+
+/**
+ * O catálogo, por NOME.
  *
- * ── ⚠️ Por que `propor_criacao` NÃO passa por aqui ────────────────────────
+ * Existe para o sanitizador da saída (`compose.ts`) saber o que nunca pode
+ * aparecer na conversa. Derivado do registro, e não escrito à mão: é o que faz
+ * a tool que o PR 6 acrescentar nascer bloqueada sem ninguém lembrar de editar
+ * dois arquivos.
+ */
+export const NOMES_DE_TOOL: string[] = REGISTRO_DE_TOOLS.map((e) => e.nome);
+
+/**
+ * Quais tools de LEITURA entram no prompt deste turn.
  *
- * Ela é oferecida por `podeEscrever(identity) && shouldOfferTools(texto)`, SEM
- * consultar a política — exatamente como antes deste PR. Gateá-la agora a faria
- * exigir `form.create`, que **nenhuma org concede** (não existe editor nem rota
- * de escrita da política), e o Max **pararia de propor formulário em produção**,
- * em silêncio. Seria regressão da única capability que ele exerce hoje — o
- * cenário que a mensagem do PR 4 descreve como "regressão, não inércia".
- *
- * O gate dela entra no PR 6c, junto do editor que torna `form.create`
- * concedível. Os dois testes de `policy.test.ts` que trancam isso continuam
- * verdes sem alteração, e é assim que tem que ser.
+ * A `propor_criacao` não passa por aqui porque não disputa o teto das
+ * leituras — ela é somada por `ferramentasDoTurno`, que agora também a
+ * passa pela política (PR 2 do plano de 05/10; antes era oferecida sem
+ * política, enquanto `form.create` não era concedível).
  *
  * ── A fórmula ─────────────────────────────────────────────────────────────
  *
@@ -573,3 +708,99 @@ export function selecionarTools(params: {
     cortadas: elegiveis.length - TETO_DE_TOOLS,
   };
 }
+
+/**
+ * TUDO que entra no prompt deste turn — escrita e leitura —, já cruzado com a
+ * política e com a identidade (G4).
+ *
+ * A escrita entra se: quem fala PODE escrever (`podeEscrever`: corretor sem
+ * login nunca), a política concede ao menos uma das capabilities dela, e o
+ * prefiltro casa. **Política ausente ou perfil fora do ar = sem escrita** —
+ * fail-closed, e é o que os testes trancados de `policy.test.ts` afirmam desde
+ * este PR.
+ *
+ * A ordem `[...escrita, ...leitura]` é a de sempre: para um nano a posição da
+ * vizinha pesa, e a eval mede nesta ordem.
+ */
+export function ferramentasDoTurno(params: {
+  policy: Capability[];
+  texto: string;
+  identity: Candidate;
+}): { entradas: EntradaDeTool[]; cortadas: number } {
+  const escrita = REGISTRO_DE_TOOLS.filter(
+    (e): e is EntradaDeEscrita =>
+      e.tipo === "escrita" &&
+      escritaPermitida(e, params.identity, params.policy) &&
+      e.combina(params.texto)
+  );
+  const leitura = selecionarTools({ policy: params.policy, texto: params.texto });
+  return { entradas: [...escrita, ...leitura.tools], cortadas: leitura.cortadas };
+}
+
+/**
+ * A escrita pode ser OFERECIDA a esta pessoa com esta política? (Sem o
+ * prefiltro de texto — isso é do turn, não da pessoa.)
+ *
+ * UM predicado para dois consumidores: a oferta da tool (`ferramentasDoTurno`)
+ * e a seção de criação do prompt (`modoDeCriacao`). Achado do review de
+ * segurança do PR 2: o prompt dizia "use a ferramenta para propor a criação"
+ * olhando só `podeEscrever`, enquanto a oferta já olhava a política — sem a
+ * tool e com a instrução, o nano improvisava "pronto, criei". Dois predicados
+ * divergem; um não.
+ */
+export function escritaPermitida(
+  e: EntradaDeEscrita,
+  identity: Candidate,
+  policy: readonly Capability[]
+): boolean {
+  return podeEscrever(identity) && capabilitiesDeOferta(e).some((c) => policy.includes(c));
+}
+
+/**
+ * O que o prompt diz sobre criar formulário/proposta — derivado do MESMO
+ * predicado da oferta:
+ *  - `disponivel`: a tool pode ser oferecida;
+ *  - `sem_login`: corretor comissionado (sem `User`), nunca cria;
+ *  - `sem_politica`: usuário da plataforma, mas a política deste turn não
+ *    concede nenhuma criação (inclusive perfil fora do ar — fail-closed).
+ */
+export type ModoDeCriacao = "disponivel" | "sem_login" | "sem_politica";
+
+export function modoDeCriacao(identity: Candidate, policy: readonly Capability[]): ModoDeCriacao {
+  if (!podeEscrever(identity)) return "sem_login";
+  return escritaPermitida(PROPOR_CRIACAO, identity, policy) ? "disponivel" : "sem_politica";
+}
+
+/**
+ * Pedido EXPLÍCITO de criação a quem não pode criar agora: template, sem modelo.
+ *
+ * O prompt já diz a verdade nesses casos, mas um pedido direto ("cria uma
+ * proposta pro Carlos") é exatamente onde o nano mais tende a encenar a ação.
+ * Responder por template custa zero token e não depende de ele obedecer.
+ * Pedido ambíguo (que só o prefiltro largo pega) continua no modelo, com a
+ * seção do prompt correspondente.
+ */
+export function textoCriacaoIndisponivel(modo: Exclude<ModoDeCriacao, "disponivel">, falhaTransitoria: boolean): string {
+  if (modo === "sem_login") {
+    return (
+      "Criar formulário ou proposta por aqui é só para quem tem login na " +
+      "imobiliária. Fala com o gerente, que gera o link pelo sistema."
+    );
+  }
+  if (falhaTransitoria) return TEXTO_INDISPONIVEL_AGORA;
+  return (
+    "Criar formulário ou proposta pelo Max não está disponível para você " +
+    "agora. Nada foi criado — dá pra criar pelo sistema."
+  );
+}
+
+/**
+ * Falha TRANSITÓRIA ao conferir a permissão (perfil ou chave de papel fora do
+ * ar). Vale para os dois momentos — o "sim" de uma pendência e o primeiro
+ * pedido de criação —, por isso "verificar" e não "confirmar". Texto próprio, distinto de "não está liberado": dizer a quem TEM a
+ * permissão que ela não tem mandaria a pessoa ao administrador por causa de
+ * uma oscilação de rede (achado D4 do review). A pendência cai mesmo assim —
+ * o "sim" não pode valer depois sem nova pergunta.
+ */
+export const TEXTO_INDISPONIVEL_AGORA =
+  "Não consegui verificar agora — nada foi criado. Tente de novo em instantes.";

@@ -498,6 +498,12 @@ describe("compose no grafo", () => {
   it("link de formulário sai intacto no caminho de template", async () => {
     const url = "https://imobpro.ia.br/f/cfakefakefakefakefake0001/joao-silva";
     criar.mockResolvedValue({ token: "cfakefakefakefakefake0001", url, dealId: "d1" });
+    // A escrita passa pela política desde o PR 2 (padrão do ImobPro).
+    profile.mockResolvedValue({
+      enabled: true,
+      model: "x",
+      maxPolicy: { byRole: { "*": ["form.create", "proposal.create"] } },
+    });
 
     const r = await run("sim", {
       pendingAction: {

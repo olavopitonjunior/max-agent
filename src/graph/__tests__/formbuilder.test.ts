@@ -143,9 +143,21 @@ function pendenciaDe(
   };
 }
 
+/**
+ * A política que o ImobPro emite para org sem linha própria (`POLITICA_PADRAO`,
+ * 05/10/2026): o curinga concede as duas criações. Desde o PR 2 a escrita
+ * passa pela política — sem isto, este arquivo testaria a recusa, não a
+ * máquina de estado.
+ */
+const POLITICA_PADRAO = {
+  byRole: { "*": ["deal.list", "deal.pending", "proposal.list", "form.create", "proposal.create", "proposal.send"] },
+  byRecipient: {},
+  brokerDefault: ["deal.list", "deal.pending"],
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
-  profile.mockResolvedValue({ enabled: true, model: "x", instructions: null });
+  profile.mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: POLITICA_PADRAO });
   search.mockResolvedValue([]);
   llm.mockResolvedValue(llmTexto("resposta qualquer"));
   criar.mockResolvedValue({
@@ -335,15 +347,21 @@ describe("confirmar", () => {
    * proposta cai no comportamento antigo (nasce do usuário de serviço), em vez
    * de mandar um id que não é de `User`.
    */
-  it("identidade virou corretor entre propor e confirmar: sem responsibleUserId", async () => {
-    await run(
+  /**
+   * Antes: criava sem `responsibleUserId` (o fallback defensivo do
+   * `executar`). Desde o PR 2 o `confirm` reconfere a identidade no turn do
+   * "sim" (trava d do despachante): corretor sem login não escreve, nem com
+   * pendência herdada. Nada é criado, e a pendência some.
+   */
+  it("identidade virou corretor entre propor e confirmar: recusa, nada criado", async () => {
+    const s = await run(
       "sim",
       { pendingAction: pendenciaDe("Carlos", Date.now(), { tipo: "proposta" }) },
       corretorSemLogin
     );
-    expect(criarProposta).toHaveBeenCalledTimes(1);
-    expect(criarProposta.mock.calls[0][1]).not.toHaveProperty("responsibleUserId", expect.anything());
-    expect(criarProposta.mock.calls[0][1].responsibleUserId).toBeUndefined();
+    expect(criarProposta).not.toHaveBeenCalled();
+    expect(s.reply).toContain("Nada foi criado");
+    expect(s.pendingAction).toBeNull();
   });
 
   /** Dizer "formulário" quando foi proposta deixava a pessoa achando que pediu errado. */

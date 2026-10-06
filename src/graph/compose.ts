@@ -232,3 +232,61 @@ export function sanitizar(bruto: string): Saida {
 
   return { texto, bloqueios: [...bloqueios] };
 }
+
+// ─── G6 — teto de tamanho, imposto no código ────────────────────────────────
+
+/**
+ * ≤ 500 caracteres e ≤ 6 linhas, contando o "Quer ver o resto?".
+ *
+ * No código, e não só no prompt: o prompt já pede "curto", e o nano obedece
+ * quase sempre — o "quase" é o que a métrica 4 do plano mede (respostas acima
+ * do teto: 0). Um teto que depende de o modelo obedecer não é teto.
+ */
+export const TETO_CARACTERES = 500;
+export const TETO_LINHAS = 6;
+export const SUFIXO_RESTO = "Quer ver o resto?";
+
+/**
+ * Corta no último limite NATURAL que cabe: fim de linha ou fim de frase; na
+ * falta, o último espaço; e só em último caso no meio. Frase cortada no meio
+ * parece resposta e não é — o mesmo defeito que o sanitizador evita cortando
+ * por linha.
+ *
+ * Devolve o `resto` para quem chama guardar e mandar se a pessoa pedir. `null`
+ * = coube inteiro, e aí o texto volta INTACTO (nem o espaço das pontas muda).
+ */
+export function limitarTamanho(texto: string): { texto: string; resto: string | null } {
+  const t = texto.trim();
+  if (t.length <= TETO_CARACTERES && t.split("\n").length <= TETO_LINHAS) {
+    return { texto, resto: null };
+  }
+
+  // O sufixo ocupa uma linha e seus caracteres: o orçamento do corpo desconta.
+  const orcamentoChars = TETO_CARACTERES - SUFIXO_RESTO.length - 1;
+  const orcamentoLinhas = TETO_LINHAS - 1;
+
+  // Primeiro por linhas — o prefixo de linhas inteiras é prefixo do texto.
+  let candidato = t.split("\n").slice(0, orcamentoLinhas).join("\n");
+  let corte = candidato.length;
+
+  if (candidato.length > orcamentoChars) {
+    candidato = candidato.slice(0, orcamentoChars);
+    // Um limite natural só vale se não deixar a parte minúscula: cortar em 20
+    // caracteres para "respeitar a frase" jogaria quase tudo no resto.
+    const minimo = Math.floor(orcamentoChars * 0.3);
+    const fimDeFrase = Math.max(
+      ...[...candidato.matchAll(/[.!?…](?=\s|$)/g)].map((m) => (m.index ?? -1) + 1),
+      -1
+    );
+    const fimDeLinha = candidato.lastIndexOf("\n");
+    const natural = Math.max(fimDeFrase, fimDeLinha);
+    const espaco = candidato.lastIndexOf(" ");
+    corte =
+      natural >= minimo ? natural : espaco >= minimo ? espaco : orcamentoChars;
+  }
+
+  const parte = t.slice(0, corte).trimEnd();
+  const resto = t.slice(corte).trim();
+  if (!resto) return { texto: parte, resto: null };
+  return { texto: `${parte}\n${SUFIXO_RESTO}`, resto };
+}

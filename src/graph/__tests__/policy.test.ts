@@ -26,7 +26,7 @@ vi.mock("@/lib/llm", () => ({
 
 const { resolverPolitica, permite, CAPABILITIES } = await import("../policy");
 const { buildGraph } = await import("../graph");
-const { TOOL_PROPOR_FORM } = await import("../tools");
+const { TOOL_PROPOR_FORM, TEXTO_INDISPONIVEL_AGORA } = await import("../tools");
 const { fetchProfile } = await import("@/lib/cm");
 const { complete } = await import("@/lib/llm");
 
@@ -319,7 +319,11 @@ describe("resolução no gate", () => {
     };
   }
 
-  async function run(text: string, identity: typeof gerente | typeof corretorSemLogin = gerente) {
+  async function run(
+    text: string,
+    identity: typeof gerente | typeof corretorSemLogin = gerente,
+    extra: Record<string, unknown> = {}
+  ) {
     const app = buildGraph().compile();
     return app.invoke({
       inbound: inbound(text),
@@ -329,6 +333,7 @@ describe("resolução no gate", () => {
       draft: null,
       bloqueios: [],
       policy: [],
+      ...extra,
     });
   }
 
@@ -362,50 +367,31 @@ describe("resolução no gate", () => {
   });
 
   /**
-   * **A garantia anti-regressão da janela de deploy — o teste mais importante
-   * deste PR.**
+   * **Os dois testes que trancavam `propor_criacao` FORA da política —
+   * invertidos no PR 2 do plano de 05/10, como o texto anterior previa.**
    *
-   * Este repo entra antes do ImobPro (regra 2), então em produção a política
-   * chega AUSENTE por um tempo, e ausente é fail-closed. `propor_criacao` é a
-   * única capability que o Max exerce hoje: se a oferta de tool passasse a
-   * consultar a política agora, o Max **pararia de propor criação de
-   * formulário** nessa janela — em silêncio, sem erro, sem teste vermelho, e só
-   * descoberto por conversa real.
+   * Antes eles afirmavam que a política NÃO tirava a tool: gateá-la exigiria
+   * `form.create`, que nenhuma org concedia, e o Max pararia de propor
+   * formulário em produção em silêncio. Isso deixou de ser verdade: o
+   * `POLITICA_PADRAO` do ImobPro (PR 1, em produção) concede `form.create`,
+   * `proposal.create` e `proposal.send` a todo papel via `"*"`, e org sem
+   * linha própria recebe esse padrão. Agora a escrita obedece à política
+   * como as leituras — e o que se tranca é o FAIL-CLOSED: sem política, sem
+   * escrita.
    *
-   * ── ATUALIZADO NO PR 6a: a alegação ESTREITOU, não afrouxou ────────────
-   *
-   * Antes: "`state.policy` é resolvido e NÃO é consumido". Isso deixou de ser
-   * verdade — o 6a consome a política para as tools de LEITURA, que nascem
-   * gateadas (regra 3).
-   *
-   * O que continua verdadeiro, e é o que este teste trava: **`propor_criacao`
-   * NÃO passa pela política.** Ela é oferecida por `podeEscrever &&
-   * shouldOfferTools`, como sempre foi. Gateá-la exigiria `form.create`, que
-   * nenhuma org concede — não existe editor nem rota de escrita da política —,
-   * e o Max pararia de propor formulário em produção, em silêncio.
-   *
-   * O gate dela é do **PR 6c**, junto do editor que torna `form.create`
-   * concedível. Só lá estes dois testes mudam. Quem chegar antes disso achando
-   * que "está faltando ligar" vai encontrar este parágrafo.
+   * O custo aceito: perfil fora do ar no turn = sem criação naquele turn.
    */
-  it("política ausente NÃO tira propor_criacao do prompt", async () => {
+  it("política ausente TIRA propor_criacao do prompt (fail-closed)", async () => {
     profile.mockResolvedValue({ enabled: true, model: "x" });
 
     const r = await run("me manda o link do formulário pro João");
 
     expect(r.policy).toEqual([]);
     const tools = llm.mock.calls[0][0].tools;
-    expect(tools?.map((t: { name: string }) => t.name)).toContain(TOOL_PROPOR_FORM);
+    expect(tools?.map((t: { name: string }) => t.name) ?? []).not.toContain(TOOL_PROPOR_FORM);
   });
 
-  /**
-   * E o mesmo vale com política presente porém sem `form.create`.
-   *
-   * O `(ainda)` do nome tem vencimento: **PR 6c**, quando o editor tornar
-   * `form.create` concedível. Sem este ponteiro o "ainda" vira permanente — é a
-   * mesma classe de dívida que a §6.3 da spec teve o cuidado de nomear.
-   */
-  it("política que NÃO concede form.create também não tira a tool (ainda)", async () => {
+  it("política que NÃO concede form.create nem proposal.create tira a tool", async () => {
     profile.mockResolvedValue({
       enabled: true,
       model: "x",
@@ -416,6 +402,43 @@ describe("resolução no gate", () => {
 
     expect(permite(r.policy, "form.create")).toBe(false);
     const tools = llm.mock.calls[0][0].tools;
+    expect(tools?.map((t: { name: string }) => t.name) ?? []).not.toContain(TOOL_PROPOR_FORM);
+  });
+
+  /** O par permitido: com o padrão do ImobPro, a tool volta a ser oferecida. */
+  it("com o padrão do ImobPro (form.create no curinga), a tool é oferecida", async () => {
+    profile.mockResolvedValue({
+      enabled: true,
+      model: "x",
+      maxPolicy: { byRole: { "*": ["deal.list", "form.create", "proposal.create"] } },
+    });
+
+    await run("me manda o link do formulário pro João");
+
+    const tools = llm.mock.calls[0][0].tools;
     expect(tools?.map((t: { name: string }) => t.name)).toContain(TOOL_PROPOR_FORM);
+  });
+
+  /**
+   * Perfil fora do ar no turn do "sim": a pendência NÃO executa com a
+   * política do turn anterior. Recusa, nada criado, pendência limpa.
+   */
+  it("perfil indisponível no turn do SIM não executa a pendência", async () => {
+    profile.mockRejectedValue(new Error("502"));
+
+    const r = await run("sim", gerente, {
+      pendingAction: {
+        kind: "criar_documento",
+        args: { tipo: "venda" },
+        askedAt: Date.now(),
+        askedForMessageId: "m0",
+      },
+    });
+
+    // D4: falha transitória tem texto PRÓPRIO — não "não está liberado".
+    expect(r.reply).toBe(TEXTO_INDISPONIVEL_AGORA);
+    expect(r.reply).not.toContain("não está liberado");
+    expect(r.pendingAction).toBeNull();
+    expect(r.toolLog.map((t: { outcome: string }) => t.outcome)).toContain("politica_indisponivel");
   });
 });

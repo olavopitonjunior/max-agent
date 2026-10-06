@@ -99,15 +99,17 @@ describe("mídia vira o turno da pessoa", () => {
     );
   }, 30_000);
 
-  itDb("imagem segue o mesmo caminho", async () => {
-    transcrever.mockResolvedValue("Uma matrícula de imóvel.");
-    await runTurn(midia("image"));
+  /**
+   * G5 (PR 2, 05/10): imagem NÃO é lida — nem baixada. Frase fixa apontando o
+   * ImobPro, sem modelo. Antes ela era descrita pelo Gemini e virava texto.
+   */
+  it("imagem NÃO é transcrita: frase fixa aponta o sistema", async () => {
+    const { reply } = await runTurn(midia("image"));
 
-    expect(transcrever).toHaveBeenCalledWith(
-      "org1",
-      expect.objectContaining({ kind: "image" })
-    );
-  }, 30_000);
+    expect(reply).toBe("Não leio imagens nem documentos por aqui. Para anexar, use o ImobPro.");
+    expect(baixar).not.toHaveBeenCalled();
+    expect(transcrever).not.toHaveBeenCalled();
+  });
 
   /**
    * Silêncio é o pior resultado: no WhatsApp a pessoa não distingue "ignorou"
@@ -122,11 +124,10 @@ describe("mídia vira o turno da pessoa", () => {
     expect(transcrever).not.toHaveBeenCalled();
   });
 
-  it("transcrição falha vira aviso, com o verbo certo pra imagem", async () => {
+  it("transcrição falha vira aviso", async () => {
     transcrever.mockResolvedValue(null);
 
     expect((await runTurn(midia("audio"))).reply).toContain("Não consegui ouvir");
-    expect((await runTurn(midia("image"))).reply).toContain("Não consegui ver");
   });
 
   it("mensagem sem mediaUrl não tenta baixar", async () => {

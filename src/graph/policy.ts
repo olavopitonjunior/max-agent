@@ -22,9 +22,15 @@ import type { Candidate } from "@/lib/identity";
  *
  * ── Fail-closed é sobre o que a política CONCEDE ──────────────────────────
  *
- * Ausência de política = nenhuma capability (regra 3 da governança). Não
- * confundir com "nenhuma tool": a oferta de tool hoje é decidida por
- * `podeEscrever` + `shouldOfferTools`, e continua sendo até o PR 6.
+ * Ausência de política = nenhuma capability (regra 3 da governança).
+ *
+ * ⚠️ **Desde o PR 2 do plano de 05/10 isto vale também para a ESCRITA.** A
+ * `propor_criacao` passou pelo despachante (`despachante.ts`) e exige
+ * `form.create` (venda/locação) ou `proposal.create` (proposta). O que tornava
+ * isso regressão no PR 4 — nenhuma org conceder `form.create` — deixou de ser
+ * verdade: o `POLITICA_PADRAO` do ImobPro concede as duas a todo papel (`"*"`).
+ * Perfil indisponível, porém, AGORA tira a criação do turn: fail-closed é o
+ * preço aceito de a escrita obedecer à política.
  *
  * ── ⚠️ Duas coisas que quem escrever o PR 6 PRECISA ler antes ─────────────
  *
@@ -81,6 +87,16 @@ export const CAPABILITIES = [
   "proposal.list",
   "proposal.detail",
   "proposal.create",
+  /**
+   * Disparo da proposta para assinatura (05/10/2026, decisão do Olavo). Entra
+   * no catálogo ANTES de existir tool que a declare: o ImobPro já a emite no
+   * padrão (`POLITICA_PADRAO`), e sem o nome aqui ela seria descartada como
+   * desconhecida — o que hoje é inofensivo, mas faria o PR 6 nascer com a
+   * política "sem efeito" em produção até alguém lembrar deste arquivo. Mesma
+   * posição da lista do ImobPro (`lib/max/capabilities.ts`), que o teste de
+   * paridade compara literal a literal.
+   */
+  "proposal.send",
   "form.create",
   "notify.manual",
   "audio.reply",
