@@ -236,6 +236,12 @@ describe("o estado do laço NAO atravessa turns", () => {
 // ── A CAPABILITY E RECONFERIDA NA EXECUCAO ─────────────────────────────────
 
 describe("execucao revalida a capability", () => {
+  /**
+   * Desde o PR 2 quem recusa é o despachante, e a PRIMEIRA trava que esta
+   * chamada encontra é a (b): sem a capability a tool nem foi oferecida, então
+   * o desfecho é `nao_oferecida`. A trava (c) isolada — oferecida, mas a
+   * política não concede — é exercida em `despachante.test.ts`.
+   */
   it("chamada sem a capability NAO executa a consulta", async () => {
     profile.mockResolvedValue({ enabled: true, model: "x" } as never);
     llm
@@ -247,7 +253,7 @@ describe("execucao revalida a capability", () => {
     const r = await run("como estão meus negócios?");
 
     expect(escopo).not.toHaveBeenCalled();
-    expect(r.toolLog.map((t: { outcome: string }) => t.outcome)).toContain("capability_negada");
+    expect(r.toolLog.map((t: { outcome: string }) => t.outcome)).toContain("nao_oferecida");
   });
 });
 

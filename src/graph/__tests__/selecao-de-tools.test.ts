@@ -49,13 +49,9 @@ describe("capability ausente = tool ausente", () => {
 
 describe("propor_criacao fica FORA desta seleção", () => {
   /**
-   * Ela é oferecida por `podeEscrever && shouldOfferTools`, sem política.
-   * Gateá-la agora a faria exigir `form.create`, que nenhuma org concede — o
-   * Max pararia de propor formulário em produção, em silêncio. É o cenário que
-   * a mensagem do PR 4 chama de "regressão, não inércia".
-   *
-   * O gate dela é do PR 6c, junto do editor. Este teste existe para que
-   * ninguém a "conserte" para dentro daqui antes disso.
+   * Ela não disputa o teto das LEITURAS: é somada à parte por
+   * `ferramentasDoTurno`, que desde o PR 2 (05/10) também a passa pela
+   * política (`form.create`/`proposal.create`) — ver `despachante.test.ts`.
    */
   it("não está no catálogo de leitura", () => {
     expect(TOOLS_DE_LEITURA.map((t) => t.def.name)).not.toContain(TOOL_PROPOR_FORM);

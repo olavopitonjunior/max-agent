@@ -24,7 +24,7 @@
  */
 
 import { complete, DEFAULT_MODEL } from "../src/lib/llm";
-import { buildSystemPrompt } from "../src/graph/prompt";
+import { buildSystemPrompt, comoMensagemDoUsuario } from "../src/graph/prompt";
 import { FORM_TOOL, TOOL_PROPOR_FORM, shouldOfferTools } from "../src/graph/tools";
 
 interface Caso {
@@ -117,7 +117,8 @@ async function main() {
     if (ofereceu) {
       const r = await complete({
         system,
-        messages: [{ role: "user", content: caso.texto }],
+        // Cercada como em produção (G7): a eval mede o prompt que roda.
+        messages: [{ role: "user", content: comoMensagemDoUsuario(caso.texto) }],
         model,
         tools: [FORM_TOOL],
       });

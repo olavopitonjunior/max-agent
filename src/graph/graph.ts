@@ -14,18 +14,22 @@ import {
   type KnowledgeHit,
 } from "@/lib/cm";
 import {
-  FORM_TOOL,
   TOOL_PROPOR_FORM,
+  PENDING_TTL_MS,
+  buscarNoRegistro,
+  ferramentasDoTurno,
   lerConfirmacao,
-  lerFinalidade,
-  lerNatureza,
-  lerTipo,
   podeEscrever,
   propostaExpirou,
-  shouldOfferTools,
+  querVerOResto,
   textoCriado,
   textoModuloDesligado,
   textoProposta,
+  textoSemPermissao,
+  modoDeCriacao,
+  ehPedidoDeCriacao,
+  textoCriacaoIndisponivel,
+  TEXTO_INDISPONIVEL_AGORA,
   TEXTO_CANCELADO,
   textoFalhou,
   type PendingAction,
@@ -57,13 +61,22 @@ import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
 import {
   assuntoBloqueado,
   buildSystemPrompt,
+  comoMensagemDoUsuario,
+  pedeLeituraDeAnexo,
   shouldSearch,
+  textoSemLeituraDeMidia,
   TEXTO_ASSUNTO_BLOQUEADO,
 } from "./prompt";
-import { sanitizar } from "./compose";
+import { limitarTamanho, sanitizar } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
-import { TOOLS_DE_LEITURA, selecionarTools } from "./tools";
-import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
+import {
+  argsDaCriacao,
+  autorizarChamada,
+  autorizarPendencia,
+  despacharLeituras,
+  type ResultadoDeTool,
+} from "./despachante";
+import type { MapaDeReferencias } from "./referencias";
 import { chaveDePolitica } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
 import { SEM_ORG } from "@/lib/sem-org";
@@ -115,18 +128,8 @@ export interface ChatMessage {
  */
 type MessagesUpdate = ChatMessage[] | { replace: ChatMessage[] };
 
-/**
- * O que uma tool de leitura devolveu, pronto para a cerca do prompt.
- *
- * `items: null` é FALHA explícita, e não lista vazia: "não consegui consultar"
- * e "você não tem negócio" são respostas diferentes, e apresentar a primeira
- * como a segunda mentiria para a pessoa sobre a carteira dela.
- */
-export interface ResultadoDeTool {
-  tool: string;
-  items: unknown[] | null;
-  truncated: boolean;
-}
+// Mora no despachante, que é quem o produz. Reexportado: era daqui.
+export type { ResultadoDeTool };
 
 export const MaxState = Annotation.Root({
   inbound: Annotation<InboundMessage>,
@@ -328,6 +331,51 @@ export const MaxState = Annotation.Root({
   }),
 
   /**
+   * Nomes das tools OFERECIDAS neste turn — a trava (b) do despachante.
+   *
+   * Do turn, não da volta: a oferta acontece só na volta 0, e as voltas
+   * seguintes ainda executam o que foi oferecido nela. Zerado no
+   * `RESET_DO_TURN`; substitui (lista vazia aqui é "nada oferecido", não
+   * reset).
+   */
+  toolsOferecidas: Annotation<string[]>({
+    reducer: (_prev, next) => next,
+    default: () => [],
+  }),
+
+  /**
+   * G2 — número → id da última lista mostrada. ATRAVESSA turns de propósito:
+   * "e a 2?" chega na mensagem seguinte. O prazo é o `REFERENCIA_TTL_MS`,
+   * conferido por `resolverReferencia` na hora do uso — mapa vencido continua
+   * no checkpoint e é recusado, até a próxima lista substituí-lo.
+   */
+  referencias: Annotation<MapaDeReferencias | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+
+  /**
+   * G6 — o que o teto de tamanho cortou da última resposta. Atravessa UM turn
+   * (como a pendência): se a mensagem seguinte pede o resto, o `continuar`
+   * manda; qualquer outra coisa o descarta.
+   */
+  restoDaResposta: Annotation<{ texto: string; criadoEm: number } | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+
+  /**
+   * A política deste turn é `[]` por FALHA (perfil ou chave de papel fora do
+   * ar), e não por decisão da org. Fail-closed do mesmo jeito — muda só o
+   * TEXTO: "não consegui verificar agora" em vez de "não está liberado para
+   * você" (achado D4). Do turn: zerado no `RESET_DO_TURN`.
+   */
+  politicaIndisponivel: Annotation<boolean>({
+    reducer: (_prev, next) => next,
+    default: () => false,
+  }),
+
+  /**
    * Havia proposta pendente e esta mensagem não foi sim nem não.
    *
    * Só vale para o turn atual (o `answer` lê e o `compact` não guarda). Serve
@@ -402,8 +450,10 @@ export async function seedNotification(
  * reconsultam.
  */
 async function gate(state: MaxStateType): Promise<MaxUpdate> {
+  let perfilFalhou = false;
   const profile = await fetchProfile(state.identity.orgId).catch((err) => {
     console.warn("[graph] perfil indisponível, seguindo:", err?.message ?? err);
+    perfilFalhou = true;
     return null;
   });
 
@@ -426,6 +476,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
     return {
       halt: "desligado",
       pendingAction: null,
+      restoDaResposta: null,
       reply:
         "No momento estou indisponível. Fale com seu corretor por enquanto — " +
         "sua imobiliária já foi avisada.",
@@ -458,7 +509,23 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       // Ver o descarte no kill switch acima: `halt` desvia do `confirm`, e uma
       // pendência que atravessa o turn vira escrita confirmada por engano.
       pendingAction: null,
+      restoDaResposta: null,
       reply: TEXTO_ASSUNTO_BLOQUEADO,
+    };
+  }
+
+  /**
+   * G5 — pedido por TEXTO para ler foto/PDF enviado: mesma frase fixa da
+   * mídia, sem modelo (ver `pedeLeituraDeAnexo`). Mesmo lugar e mesmas regras
+   * da deny-list: custo zero, descarta pendência e resto, não entra no
+   * histórico nem na memória (`halt`).
+   */
+  if (pedeLeituraDeAnexo(state.inbound.text ?? "")) {
+    return {
+      halt: "pede_leitura_de_anexo",
+      pendingAction: null,
+      restoDaResposta: null,
+      reply: textoSemLeituraDeMidia(null),
     };
   }
 
@@ -527,7 +594,51 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
   // `profile.instructions` também não é mais lido: o prompt do Max é GLOBAL da
   // plataforma (decisão 1 do PRD do copiloto). O perfil continua sendo buscado
   // porque dele vêm `enabled` e, no PR 7, a seleção de modelo.
-  return { policy };
+  /**
+   * `null` na chave de um USUÁRIO é tratado como indisponibilidade: o
+   * `chaveDePolitica` devolve `null` tanto em falha de rede quanto em
+   * membership degenerada, e para quem o Max já identificou como usuário a
+   * segunda é anomalia. Nos dois casos o texto certo é "tente de novo", não
+   * "você não pode". Só muda a mensagem — a política continua `[]`.
+   */
+  const politicaIndisponivel =
+    perfilFalhou || !profile || (state.identity.kind === "user" && chave === null);
+
+  return { policy, politicaIndisponivel };
+}
+
+/**
+ * G6 — manda o resto de uma resposta cortada, se a pessoa pediu. **Sem modelo.**
+ *
+ * Roda antes do `confirm` e nunca disputa com ele: o turn que cria pendência
+ * responde por template (sem corte, sem resto), e o resto de um turn anterior
+ * já foi descartado aqui quando a mensagem não pedia continuação. Os dois
+ * nunca coexistem.
+ *
+ * O resto sobrevive no máximo UM turn, com o mesmo prazo da pendência: "sim"
+ * três horas depois responde outra coisa na cabeça da pessoa.
+ */
+async function continuar(state: MaxStateType): Promise<MaxUpdate> {
+  const guardado = state.restoDaResposta;
+  if (!guardado) return {};
+
+  const vale =
+    !state.pendingAction &&
+    Date.now() - guardado.criadoEm <= PENDING_TTL_MS &&
+    querVerOResto(state.inbound.text ?? "");
+  if (!vale) return { restoDaResposta: null };
+
+  // O resto passa pelo MESMO teto: um texto de 1500 caracteres sai em três
+  // pedaços, cada um com o seu "Quer ver o resto?".
+  const { texto, resto } = limitarTamanho(guardado.texto);
+  return {
+    reply: texto,
+    restoDaResposta: resto ? { texto: resto, criadoEm: Date.now() } : null,
+    messages: [
+      { role: "user", content: state.inbound.text?.trim() || "" },
+      { role: "assistant", content: texto },
+    ],
+  };
 }
 
 /**
@@ -593,6 +704,23 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
       { name: TOOL_PROPOR_FORM, args: { ...pending.args }, outcome },
     ],
   });
+
+  // A política é do turn do "sim", não do turn da pergunta (ver
+  // `autorizarPendencia`). Recusa limpa a pendência e diz que nada foi criado.
+  const auth = autorizarPendencia({
+    pending,
+    policy: state.policy,
+    identity: state.identity,
+  });
+  if (!auth.ok) {
+    console.warn(`[confirm] escrita recusada (${auth.motivo}) em ${state.identity.orgId}`);
+    // Falha transitória ao conferir ≠ "não liberado". A pendência cai nos
+    // dois casos: um "sim" não pode valer depois sem pergunta nova.
+    if (auth.motivo === "capability_negada" && state.politicaIndisponivel) {
+      return responder(TEXTO_INDISPONIVEL_AGORA, "politica_indisponivel");
+    }
+    return responder(textoSemPermissao(pending.args), auth.motivo);
+  }
 
   try {
     const url = await executar(
@@ -707,6 +835,30 @@ async function retrieve(state: MaxStateType): Promise<MaxUpdate> {
 }
 
 async function answer(state: MaxStateType): Promise<MaxUpdate> {
+  /**
+   * B1 — a seção de criação do prompt e a oferta da tool vêm do MESMO
+   * predicado (`modoDeCriacao` → `escritaPermitida`, o que `ferramentasDoTurno`
+   * usa). Antes o prompt olhava só `podeEscrever`: sem política, ele mandava
+   * "use a ferramenta" sem ferramenta nenhuma, e o nano encenava "pronto,
+   * criei".
+   */
+  const criacao = modoDeCriacao(state.identity, state.policy);
+  const pedidoBruto = state.inbound.text?.trim() || "";
+
+  // Pedido EXPLÍCITO de criação a quem não pode criar agora: template, sem
+  // modelo — é onde o nano mais tende a encenar a ação. Só na volta 0.
+  if (state.toolRounds === 0 && criacao !== "disponivel" && ehPedidoDeCriacao(pedidoBruto)) {
+    const texto = textoCriacaoIndisponivel(criacao, state.politicaIndisponivel);
+    return {
+      toolsOferecidas: [],
+      messages: [
+        { role: "user", content: pedidoBruto },
+        { role: "assistant", content: texto },
+      ],
+      reply: texto,
+    };
+  }
+
   const system = buildSystemPrompt({
     orgName: state.identity.orgName,
     userName: displayName(state.identity),
@@ -715,10 +867,10 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     fromMedia: state.fromMedia,
     facts: renderFacts(state.facts),
     propostaDescartada: state.propostaDescartada,
-    // Quem não pode escrever recebe um prompt que não descreve a ferramenta —
-    // e diz de quem é o caminho. Descrever capacidade que não está no pedido é
+    // Quem não pode criar recebe um prompt que não descreve a ferramenta — e
+    // diz de quem é o caminho. Descrever capacidade que não está no pedido é
     // a forma mais barata de um modelo pequeno prometer o que não entrega.
-    podeEscrever: podeEscrever(state.identity),
+    criacao,
     // Vazio na primeira volta; preenchido quando o `tools` já rodou.
     toolResults: state.toolResults,
   });
@@ -727,50 +879,50 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   const history = state.messages.slice(-MAX_HISTORY);
 
   /**
-   * A ferramenta só entra quando a mensagem plausivelmente pede escrita E quem
-   * fala pode escrever. As duas condições são baratas e cortam o caso comum:
-   * expor em todo turn custaria os tokens da definição sempre e daria ao nano
-   * mais chance de chamar sem motivo.
-   */
-  const escrita =
-    podeEscrever(state.identity) && shouldOfferTools(userText)
-      ? [FORM_TOOL]
-      : [];
-
-  /**
-   * As de LEITURA passam pela política; a de ESCRITA não — e isso não é
-   * esquecimento.
+   * O que entra no prompt deste turn — escrita E leitura pelo MESMO crivo
+   * (`ferramentasDoTurno`): política, identidade e prefiltro (G4).
    *
-   * `propor_criacao` é oferecida hoje sem consultar a política. Gateá-la agora
-   * a faria exigir `form.create`, que NENHUMA org concede (não existe editor
-   * nem rota de escrita da política), e o Max pararia de propor formulário em
-   * produção, em silêncio — regressão da única capability que ele exerce. O
-   * gate dela entra no PR 6c, junto do editor. Ver `selecionarTools`.
+   * A `propor_criacao` passou a obedecer à política neste PR. Antes era
+   * oferecida por `podeEscrever && shouldOfferTools`, sem política, porque
+   * nenhuma org concedia `form.create`; o `POLITICA_PADRAO` do ImobPro agora
+   * concede `form.create` e `proposal.create` a todo papel. Perfil fora do ar
+   * = sem escrita neste turn (fail-closed).
    *
    * Nas voltas seguintes do laço nada de novo é oferecido: o modelo já tem o
-   * resultado e o que se espera dele é a resposta, não outra chamada.
+   * resultado e o que se espera dele é a resposta, não outra chamada. O que
+   * foi oferecido na volta 0 continua valendo para o despachante (trava b).
    */
-  const leitura =
+  const oferta =
     state.toolRounds === 0
-      ? selecionarTools({ policy: state.policy, texto: userText })
-      : { tools: [], cortadas: 0 };
+      ? ferramentasDoTurno({ policy: state.policy, texto: userText, identity: state.identity })
+      : { entradas: [], cortadas: 0 };
 
-  if (leitura.cortadas > 0) {
+  if (oferta.cortadas > 0) {
     // Corte silencioso viraria "a feature não funciona às vezes".
     console.info(
-      `[answer] teto de tools cortou ${leitura.cortadas} em ${state.identity.orgId}`
+      `[answer] teto de tools cortou ${oferta.cortadas} em ${state.identity.orgId}`
     );
   }
 
-  const defsDeLeitura = leitura.tools.map((t) => t.def);
-  const todas = [...escrita, ...defsDeLeitura];
-  const tools = todas.length > 0 ? todas : undefined;
+  const oferecidas =
+    state.toolRounds === 0 ? oferta.entradas.map((e) => e.nome) : state.toolsOferecidas;
+  // Só a volta 0 grava: as seguintes herdam a oferta do turn.
+  const daOferta = state.toolRounds === 0 ? { toolsOferecidas: oferecidas } : {};
+  const defs = oferta.entradas.map((e) => e.def);
+  const tools = defs.length > 0 ? defs : undefined;
 
   let result;
   try {
     result = await complete({
       system,
-      messages: [...history, { role: "user", content: userText }],
+      // G7: todo texto da PESSOA vai escapado (não forja cerca nossa) — o do
+      // histórico também, porque uma injeção de três turns atrás continua no
+      // prompt. Sem etiqueta em volta: medido, ela derrubava a escolha de
+      // tool (ver `comoMensagemDoUsuario`). O histórico guarda o texto cru.
+      messages: [...history, { role: "user" as const, content: userText }].map(
+        (m): ChatMessage =>
+          m.role === "user" ? { ...m, content: comoMensagemDoUsuario(m.content) } : m
+      ),
       model: state.model,
       tools,
     });
@@ -781,6 +933,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     if (usage) void reportUsage(state.identity.orgId, usage);
     console.error("[graph] modelo falhou:", err instanceof Error ? err.message : err);
     return {
+      ...daOferta,
       messages: [{ role: "user", content: userText }],
       // O turn que falhou também custou, e a auditoria precisa mostrar isso —
       // um agente que só erra não pode aparecer como um agente que não gasta.
@@ -809,58 +962,83 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    * a partir dos argumentos: é mais barato, e sobretudo confiável — o que a
    * pessoa lê para confirmar precisa ser exatamente o que será feito, e um nano
    * parafraseando isso anularia o sentido de confirmar.
-   */
-  const chamada = result.toolCalls.find((c) => c.name === TOOL_PROPOR_FORM);
-  const tipo = chamada ? lerTipo(chamada.args.tipo) : null;
-
-  /**
-   * `tipo` fora do enum é chamada DESCARTADA, não adivinhada.
    *
-   * O nano às vezes inventa um valor ("aluguel", "form"). Escolher o mais
-   * parecido criaria a coisa errada com a confirmação da pessoa em cima —
-   * ela leria "formulário de venda" e teria dito "aluguel". Sem tipo, o turn
-   * cai no caminho de texto e ela repete o pedido.
+   * Passa pelo despachante como qualquer chamada: existe, foi oferecida, a
+   * política concede a capability DESTE tipo, e quem fala pode escrever.
    */
   const trilha: ToolLogEntry[] = [];
-  if (chamada && !tipo) {
-    console.warn(`[answer] tipo inválido na chamada: ${JSON.stringify(chamada.args)}`);
-    // Chamada DESCARTADA vale tanto quanto a aceita: hoje isto só existe como
-    // um console.warn que ninguém correlaciona com a conversa.
-    trilha.push({ name: chamada.name, args: chamada.args, outcome: "tipo_invalido" });
+  for (const c of result.toolCalls) {
+    // Nome fora do registro: registrado e ignorado, como antes (sem volta de
+    // laço por ele). Antes sumia sem rastro.
+    if (!buscarNoRegistro(c.name)) {
+      trilha.push({ name: c.name, args: c.args, outcome: "tool_desconhecida" });
+    }
   }
 
-  if (chamada && tipo) {
-    const bruto = chamada.args.nome_cliente;
-    const nomeCliente =
-      typeof bruto === "string" && bruto.trim() ? bruto.trim().slice(0, 80) : undefined;
+  const chamada = result.toolCalls.find((c) => buscarNoRegistro(c.name)?.tipo === "escrita");
+  if (chamada) {
+    const auth = autorizarChamada({
+      chamada,
+      oferecidas,
+      policy: state.policy,
+      identity: state.identity,
+    });
 
-    const args: PendingAction["args"] = {
-      tipo,
-      nomeCliente,
-      natureza: lerNatureza(chamada.args.natureza),
-      finalidade: lerFinalidade(chamada.args.finalidade),
-    };
-    const pending: PendingAction = {
-      kind: "criar_documento",
-      args,
-      askedAt: Date.now(),
-      askedForMessageId: state.inbound.messageId,
-    };
-    const texto = textoProposta(args);
+    if (auth.ok) {
+      // `auth.ok` garante tipo válido (`capabilityDaChamada` não foi null).
+      const args = argsDaCriacao(chamada.args)!;
+      const pending: PendingAction = {
+        kind: "criar_documento",
+        args,
+        askedAt: Date.now(),
+        askedForMessageId: state.inbound.messageId,
+      };
+      const texto = textoProposta(args);
 
-    return {
-      pendingAction: pending,
-      messages: [
-        { role: "user", content: userText },
-        { role: "assistant", content: texto },
-      ],
-      reply: texto,
-      usage: usageDoTurn,
-      toolLog: [
-        ...trilha,
-        { name: chamada.name, args: chamada.args, outcome: "proposta" },
-      ],
-    };
+      return {
+        ...daOferta,
+        pendingAction: pending,
+        messages: [
+          { role: "user", content: userText },
+          { role: "assistant", content: texto },
+        ],
+        reply: texto,
+        usage: usageDoTurn,
+        toolLog: [
+          ...trilha,
+          { name: chamada.name, args: chamada.args, outcome: "proposta" },
+        ],
+      };
+    }
+
+    /**
+     * Recusada. `tipo_invalido` é o caso antigo: o nano inventou um valor
+     * ("aluguel", "form") e escolher o mais parecido criaria a coisa errada
+     * com a confirmação da pessoa em cima — cai no caminho de texto e ela
+     * repete o pedido.
+     */
+    if (auth.motivo === "tipo_invalido") {
+      console.warn(`[answer] tipo inválido na chamada: ${JSON.stringify(chamada.args)}`);
+    }
+    trilha.push({ name: chamada.name, args: chamada.args, outcome: auth.motivo });
+
+    // Política que não concede ESTE tipo (ex.: `form.create` sim,
+    // `proposal.create` não): resposta de template, que diz que nada foi
+    // criado. Deixar o modelo improvisar aqui era convite a "pronto, criei".
+    const args = argsDaCriacao(chamada.args);
+    if (auth.motivo === "capability_negada" && args) {
+      const texto = textoSemPermissao(args);
+      return {
+        ...daOferta,
+        messages: [
+          { role: "user", content: userText },
+          { role: "assistant", content: texto },
+        ],
+        reply: texto,
+        usage: usageDoTurn,
+        toolLog: trilha,
+      };
+    }
   }
 
   /**
@@ -870,11 +1048,12 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    * ferramenta é preâmbulo ("deixa eu ver..."), não resposta, e mandá-lo para
    * o `compose` faria a pessoa receber duas mensagens por turn.
    */
-  const deLeitura = result.toolCalls.filter((c) =>
-    TOOLS_DE_LEITURA.some((t) => t.def.name === c.name)
+  const deLeitura = result.toolCalls.filter(
+    (c) => buscarNoRegistro(c.name)?.tipo === "leitura"
   );
   if (deLeitura.length > 0) {
     return {
+      ...daOferta,
       messages: [{ role: "user", content: userText }],
       pendingToolCalls: deLeitura,
       usage: usageDoTurn,
@@ -891,6 +1070,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    * vazado como exemplo do que fazer.
    */
   return {
+    ...daOferta,
     messages: [{ role: "user", content: userText }],
     draft: result.text,
     usage: usageDoTurn,
@@ -930,71 +1110,33 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
   const chamadas = state.pendingToolCalls;
   if (chamadas.length === 0) return { pendingToolCalls: [] };
 
-  const subject = subjectDe(state.identity);
-  const resultados: ResultadoDeTool[] = [];
-  const trilha: ToolLogEntry[] = [];
-
-  for (const chamada of chamadas) {
-    const def = TOOLS_DE_LEITURA.find((t) => t.def.name === chamada.name);
-    if (!def) {
-      // O modelo inventou um nome. Descartada, e REGISTRADA: chamada
-      // descartada vale tanto quanto a aceita para quem depura. E devolve
-      // FALHA ao modelo em vez de sumir — "sempre sinalize" é a disciplina do
-      // resto deste nó, e queimar uma volta em silêncio a quebraria.
-      trilha.push({ name: chamada.name, args: chamada.args, outcome: "tool_desconhecida" });
-      resultados.push({ tool: chamada.name, items: null, truncated: false });
-      continue;
-    }
-
-    /**
-     * ⚠️ **A capability é reconferida na EXECUÇÃO, não só na oferta.**
-     *
-     * `selecionarTools` gateia o que o modelo VÊ. Isto gateia o que ele
-     * CONSEGUE. São coisas diferentes: o modelo pode emitir uma chamada com o
-     * nome de qualquer tool do catálogo — por alucinação, ou porque uma
-     * instrução injetada num resultado anterior mandou (a própria cerca
-     * `fenceToolResults` nomeia essa superfície de ataque).
-     *
-     * Hoje é dormente: o catálogo tem uma tool e nenhuma org tem política. No
-     * 6b, com cinco tools em capabilities diferentes, uma org que só recebeu
-     * `deal.list` ficaria sem proteção nenhuma contra uma chamada nomeando a
-     * tool de `proposal.list` — executada ao vivo contra o dado do tenant.
-     *
-     * É a mesma classe do `descartarSeVazou`, uma camada acima: lá o campo,
-     * aqui o verbo.
-     */
-    if (!state.policy.includes(def.capability)) {
-      console.warn(
-        `[tools] ${chamada.name} chamada SEM a capability ${def.capability} na org ${state.identity.orgId}`
-      );
-      trilha.push({ name: chamada.name, args: chamada.args, outcome: "capability_negada" });
-      resultados.push({ tool: chamada.name, items: null, truncated: false });
-      continue;
-    }
-
-    const r = await consultarEscopo({
-      orgId: state.identity.orgId,
-      rawPhone: state.inbound.fromPhone,
-      subject,
-      verb: def.verb,
-      args: chamada.args,
-    });
-
-    if (!r) {
-      resultados.push({ tool: chamada.name, items: null, truncated: false });
-      trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
-      continue;
-    }
-
-    // Rede de segurança da regra 5 — a projeção que VALE é a do servidor.
-    const items = descartarSeVazou(r.items, state.identity.kind);
-    resultados.push({ tool: chamada.name, items, truncated: r.truncated });
-    trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
-  }
+  /**
+   * ⚠️ **A capability é reconferida na EXECUÇÃO, não só na oferta** — agora
+   * dentro do despachante, junto das outras travas.
+   *
+   * A oferta gateia o que o modelo VÊ; o despachante gateia o que ele
+   * CONSEGUE. O modelo pode emitir uma chamada com o nome de qualquer tool do
+   * catálogo — por alucinação, ou porque uma instrução injetada num resultado
+   * anterior mandou (a própria cerca `fenceToolResults` nomeia essa
+   * superfície). Mesma classe do `descartarSeVazou`, uma camada acima: lá o
+   * campo, aqui o verbo.
+   */
+  const { resultados, trilha, referencias } = await despacharLeituras({
+    chamadas,
+    oferecidas: state.toolsOferecidas,
+    policy: state.policy,
+    identity: state.identity,
+    fromPhone: state.inbound.fromPhone,
+    referencias: state.referencias,
+    turno: state.inbound.messageId,
+  });
 
   return {
     pendingToolCalls: [],
     toolRounds: state.toolRounds + 1,
+    // Só quando mudou: uma volta sem lista não pode apagar a numeração que a
+    // pessoa acabou de ler.
+    ...(referencias !== state.referencias ? { referencias } : {}),
     // Condicional: ver o aviso do cabeçalho. `resultados` é vazio quando toda
     // chamada tinha nome inventado.
     ...(resultados.length > 0 ? { toolResults: resultados } : {}),
@@ -1050,14 +1192,19 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
     );
   }
 
+  // G6: o teto vale DEPOIS do sanitizador — cortar antes contaria linha que
+  // ia cair de qualquer jeito. O resto fica guardado para o "quer ver?".
+  const final = limitarTamanho(texto);
+
   return {
-    reply: texto,
+    reply: final.texto,
+    restoDaResposta: final.resto ? { texto: final.resto, criadoEm: Date.now() } : null,
     // Consumido: se sobrasse no checkpoint, o turno seguinte que respondesse
     // por template encontraria um `draft` velho e o `compose` publicaria a
     // resposta do turno passado por cima.
     draft: null,
     bloqueios,
-    messages: [{ role: "assistant", content: texto }],
+    messages: [{ role: "assistant", content: final.texto }],
   };
 }
 
@@ -1123,8 +1270,13 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
  * escapasse dessa montagem entregaria o kill switch por um formato e o resto
  * por outro.
  */
-function afterGate(state: MaxStateType): "confirm" | "compose" {
-  return state.halt ? "compose" : "confirm";
+function afterGate(state: MaxStateType): "continuar" | "compose" {
+  return state.halt ? "compose" : "continuar";
+}
+
+/** O `continuar` mandou o resto? Então o turn está resolvido. */
+function afterContinuar(state: MaxStateType): "confirm" | "compose" {
+  return state.reply ? "compose" : "confirm";
 }
 
 /**
@@ -1154,6 +1306,7 @@ function afterCompose(state: MaxStateType): "compact" | typeof END {
 export function buildGraph() {
   return new StateGraph(MaxState)
     .addNode("gate", gate)
+    .addNode("continuar", continuar)
     .addNode("confirm", confirm)
     .addNode("retrieve", retrieve)
     .addNode("answer", answer)
@@ -1162,6 +1315,10 @@ export function buildGraph() {
     .addNode("compact", compact)
     .addEdge(START, "gate")
     .addConditionalEdges("gate", afterGate, {
+      continuar: "continuar",
+      compose: "compose",
+    })
+    .addConditionalEdges("continuar", afterContinuar, {
       confirm: "confirm",
       compose: "compose",
     })
@@ -1240,7 +1397,8 @@ export interface TurnResult {
  * reaparecer em todo prompt seguinte. Nenhum teste pegou, porque o defeito só
  * existe ATRAVÉS de turns.
  *
- * **Só `messages`, `summary` e `pendingAction` atravessam turns de propósito.**
+ * **Só `messages`, `summary`, `pendingAction`, `referencias` (G2, com TTL
+ * próprio) e `restoDaResposta` (G6, um turn) atravessam turns de propósito.**
  * Qualquer outro campo de `MaxState` pertence aqui.
  */
 export const RESET_DO_TURN = {
@@ -1272,6 +1430,10 @@ export const RESET_DO_TURN = {
     pendingToolCalls: [],
     toolRounds: 0,
     toolResults: [],
+    // A oferta é do turn: herdada, deixaria o despachante aceitar chamada de
+    // uma tool que este turn nem mostrou ao modelo.
+    toolsOferecidas: [],
+    politicaIndisponivel: false,
 };
 
 export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
@@ -1415,7 +1577,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   }
 
   /**
-   * Áudio e imagem viram texto ANTES do grafo.
+   * Áudio vira texto ANTES do grafo.
    *
    * Aqui, e não num nó: o transcrito passa a ser o turno da pessoa no histórico
    * e tudo depois dele — decidir se busca no RAG, montar o prompt, compactar —
@@ -1428,35 +1590,51 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   let turnText = texto;
   let fromMedia: "audio" | "image" | null = null;
 
-  // Documento (e o que o parse não reconheceu) não tem transcrição — mas
-  // silêncio é pior, e passar pelo modelo com "(mensagem sem texto)" pagava um
-  // turn por uma resposta genérica. Template, sem LLM.
-  if (!turnText && (inbound.kind === "document" || inbound.kind === "unknown")) {
+  /**
+   * G5 — imagem e documento NÃO são lidos (sem OCR, sem transporte de
+   * documento; plano de 05/10). Até aqui a imagem era descrita pelo Gemini e
+   * virava texto: além do custo, era o Max "lendo" matrícula, RG e
+   * comprovante que deveriam entrar pelo sistema, com trilha e dono. Agora:
+   * frase fixa apontando o ImobPro, sem LLM e sem download.
+   *
+   * Com legenda, a LEGENDA é a mensagem (como sempre foi) — a mídia continua
+   * não lida, e o prompt diz ao modelo que ele não lê anexo.
+   */
+  if (!turnText && (inbound.kind === "image" || inbound.kind === "document")) {
+    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+    return sair(textoSemLeituraDeMidia(null), {
+      orgId: identity.candidate.orgId,
+      error: `sem_texto_${inbound.kind}`,
+    });
+  }
+
+  // O que o parse não reconheceu: silêncio é pior, e passar pelo modelo com
+  // "(mensagem sem texto)" pagava um turn por uma resposta genérica.
+  if (!turnText && inbound.kind === "unknown") {
+    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
     return sair(
-      inbound.kind === "document"
-        ? "Ainda não consigo ler documentos por aqui. Me conta por escrito o " +
-          "que você precisa?"
-        : "Não consegui entender esse tipo de mensagem. Pode mandar por escrito?",
+      "Não consegui entender esse tipo de mensagem. Pode mandar por escrito?",
       { orgId: identity.candidate.orgId, error: `sem_texto_${inbound.kind}` }
     );
   }
 
-  if (!turnText && (inbound.kind === "audio" || inbound.kind === "image")) {
-    fromMedia = inbound.kind;
+  if (!turnText && inbound.kind === "audio") {
+    fromMedia = "audio";
     const transcrito = inbound.mediaUrl
       ? await transcreverMidia(identity.candidate.orgId, inbound)
       : null;
 
     if (!transcrito) {
+      // A pessoa pode ter dito "sim" NESTE áudio — e não ouvimos. A pendência
+      // não pode sobreviver a um turn que não a confirmou (D3).
+      await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
       // Dizer que não deu, sempre. Silêncio faria a pessoa esperar resposta de
       // uma coisa que o agente nunca recebeu — e no WhatsApp ela não tem como
       // saber a diferença entre "ignorou" e "não chegou".
-      return sair(
-        fromMedia === "audio"
-          ? "Não consegui ouvir esse áudio. Pode me mandar por escrito?"
-          : "Não consegui ver essa imagem. Pode me contar por escrito?",
-        { orgId: identity.candidate.orgId, error: `transcricao_falhou_${fromMedia}` }
-      );
+      return sair("Não consegui ouvir esse áudio. Pode me mandar por escrito?", {
+        orgId: identity.candidate.orgId,
+        error: `transcricao_falhou_${fromMedia}`,
+      });
     }
     turnText = transcrito;
   }
@@ -1486,7 +1664,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
        * que já tinha sido respondido. `halt` e `propostaDescartada` têm o mesmo
        * defeito, menos visível.
        *
-       * Só `messages`, `summary` e `pendingAction` atravessam turns de propósito.
+       * O que atravessa turns de propósito está listado no `RESET_DO_TURN`.
        */
       ...RESET_DO_TURN,
     },
@@ -1580,6 +1758,38 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
       })();
     },
   };
+}
+
+/**
+ * D3 — saída antecipada também é um TURN, e "a pendência sobrevive no máximo
+ * um turn" vale para ela.
+ *
+ * As saídas por mídia (`sair()`) não passam pelo grafo, então nem o `confirm`
+ * nem o `continuar` rodam e a pendência atravessava intacta: "Crio o
+ * formulário?" → foto → "sim" horas depois (dentro do TTL) criava. Limpa as
+ * duas coisas que atravessam turns por UM turn: a pendência de escrita e o
+ * resto da resposta. As referências numeradas (G2) ficam: têm TTL próprio e
+ * não executam nada sozinhas.
+ *
+ * Falha aqui NÃO derruba a resposta (o turn já tem texto pronto), mas é erro,
+ * não aviso: a pendência sobreviveu, e quem lê o log precisa saber disso. O
+ * TTL de 30 min continua sendo o teto.
+ */
+async function descartarPendencias(orgId: string, phone: string): Promise<void> {
+  try {
+    const app = buildGraph().compile({ checkpointer: await getCheckpointer() });
+    const config = { configurable: { thread_id: threadIdFor(orgId, phone) } };
+    const atual = await app.getState(config);
+    const v = atual.values as Partial<MaxStateType> | undefined;
+    // Thread sem nada a descartar não ganha checkpoint novo à toa.
+    if (!v?.pendingAction && !v?.restoDaResposta) return;
+    await app.updateState(config, { pendingAction: null, restoDaResposta: null });
+  } catch (err) {
+    console.error(
+      "[graph] não consegui descartar a pendência na saída antecipada:",
+      err instanceof Error ? err.message : String(err)
+    );
+  }
 }
 
 /** Baixa da Z-API e manda transcrever no ImobPro. `null` em qualquer tropeço. */

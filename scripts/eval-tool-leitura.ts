@@ -18,7 +18,7 @@
  */
 
 import { complete, DEFAULT_MODEL } from "../src/lib/llm";
-import { buildSystemPrompt } from "../src/graph/prompt";
+import { buildSystemPrompt, comoMensagemDoUsuario } from "../src/graph/prompt";
 import { FORM_TOOL, TOOLS_DE_LEITURA, selecionarTools, shouldOfferTools } from "../src/graph/tools";
 import type { Capability } from "../src/graph/policy";
 
@@ -114,7 +114,8 @@ async function main() {
     const tools = toolsDoTurn(caso.texto);
     const r =
       tools.length > 0
-        ? await complete({ system, messages: [{ role: "user", content: caso.texto }], model, tools })
+        ? // Cercada como em produção (G7): a eval mede o prompt que roda.
+          await complete({ system, messages: [{ role: "user", content: comoMensagemDoUsuario(caso.texto) }], model, tools })
         : { toolCalls: [] as { name: string }[], usage: { promptTokens: 0 } };
     tokensIn += r.usage?.promptTokens ?? 0;
     const chamada = r.toolCalls[0]?.name ?? null;

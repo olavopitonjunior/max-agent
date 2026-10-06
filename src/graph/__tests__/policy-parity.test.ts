@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolverPolitica, type MaxPolicy } from "../policy";
+import { CAPABILITIES, resolverPolitica, type MaxPolicy } from "../policy";
 
 /**
  * Vetor fixo do contrato de `GET /api/agents/profile` — a metade daqui.
@@ -264,5 +264,51 @@ describe("paridade do curinga `*` (lado max-agent)", () => {
   it("política sem curinga se comporta como antes", () => {
     const semCuringa = JSON.parse(VETOR_SERIALIZADO) as MaxPolicy;
     expect(resolverPolitica({ politica: semCuringa, sujeito: gerente, role: "custom:cr_diretor" })).toEqual([]);
+  });
+});
+
+/**
+ * O CATÁLOGO, nome a nome, contra o do ImobPro
+ * (`contractmaker/apps/web/src/lib/max/capabilities.ts::MAX_CAPABILITIES`).
+ *
+ * Literal copiado de lá, e não importado: são dois repos, e um fixture
+ * derivado daqui acompanharia uma divergência em silêncio. O modo de falha é
+ * o mesmo do resto deste arquivo — quieto: capability que o ImobPro emite e
+ * este lado não conhece é DESCARTADA na leitura, e a concessão simplesmente
+ * não acontece. `proposal.send` (05/10/2026) foi exatamente esse caso: o
+ * padrão de lá já a emitia, e aqui ela sumia.
+ */
+const CATALOGO_DO_IMOBPRO = [
+  "deal.list",
+  "deal.detail",
+  "deal.pending",
+  "proposal.list",
+  "proposal.detail",
+  "proposal.create",
+  "proposal.send",
+  "form.create",
+  "notify.manual",
+  "audio.reply",
+];
+
+describe("paridade do catálogo de capabilities", () => {
+  it("é o mesmo catálogo, na mesma ordem, dos dois lados", () => {
+    expect([...CAPABILITIES]).toEqual(CATALOGO_DO_IMOBPRO);
+  });
+
+  /** O padrão do ImobPro (`POLITICA_PADRAO`) passa inteiro por este lado. */
+  it("o padrão emitido pelo ImobPro resolve sem perder nenhuma capability", () => {
+    const padrao = JSON.parse(
+      '{"byRole":{"*":["deal.list","deal.pending","proposal.list","form.create","proposal.create","proposal.send"]},' +
+        '"byRecipient":{},"brokerDefault":["deal.list","deal.pending"]}'
+    ) as MaxPolicy;
+    expect(resolverPolitica({ politica: padrao, sujeito: gerente, role: "sales" })).toEqual([
+      "deal.list",
+      "deal.pending",
+      "proposal.list",
+      "form.create",
+      "proposal.create",
+      "proposal.send",
+    ]);
   });
 });
