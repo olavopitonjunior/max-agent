@@ -94,8 +94,9 @@ export const FORM_TOOL: LlmTool = {
       nome_cliente: {
         type: "string",
         description:
-          "Nome do cliente, se a pessoa disse. Omita se ela não disse — " +
-          "não invente nem deduza.",
+          "Nome do CLIENTE (comprador, inquilino, proponente) que a pessoa citou " +
+          "— 'compradora Letícia Souza' → 'Letícia Souza'. Nunca o nome de quem " +
+          "está falando com você. Omita se ela não citou — não invente nem deduza.",
       },
       natureza: {
         type: "string",
@@ -720,20 +721,52 @@ export function selecionarTools(params: {
  *
  * A ordem `[...escrita, ...leitura]` é a de sempre: para um nano a posição da
  * vizinha pesa, e a eval mede nesta ordem.
+ *
+ * ── `textoAnterior`: o pedido de criação atravessa UMA resposta ───────────
+ *
+ * Conversa real de 2026-10-06: "Pode gerar uma proposta pra mim?" → o Max
+ * perguntou "venda ou locação?" (como o prompt manda) → "Venda". O prefiltro
+ * olhava só "Venda", não casava, e a ferramenta SUMIU do turn em que era
+ * finalmente chamável. Sem ela, o nano improvisou cinco turns colhendo
+ * endereço, valor e forma de pagamento e terminou com "proposta criada" —
+ * nada foi criado. O pedido que o Max deixou em aberto com uma pergunta
+ * (`pedidoEmAberto`) conta para a ESCRITA — só ela: a leitura não tem pergunta
+ * de desambiguação no meio. Continua exigindo política e identidade, e a
+ * criação continua exigindo o "sim".
  */
 export function ferramentasDoTurno(params: {
   policy: Capability[];
   texto: string;
   identity: Candidate;
+  /** O pedido que o Max deixou em aberto com uma pergunta (`pedidoEmAberto`). */
+  textoAnterior?: string | null;
 }): { entradas: EntradaDeTool[]; cortadas: number } {
   const escrita = REGISTRO_DE_TOOLS.filter(
     (e): e is EntradaDeEscrita =>
       e.tipo === "escrita" &&
       escritaPermitida(e, params.identity, params.policy) &&
-      e.combina(params.texto)
+      (e.combina(params.texto) || (!!params.textoAnterior && e.combina(params.textoAnterior)))
   );
   const leitura = selecionarTools({ policy: params.policy, texto: params.texto });
   return { entradas: [...escrita, ...leitura.tools], cortadas: leitura.cortadas };
+}
+
+/**
+ * O pedido da pessoa que o Max deixou EM ABERTO com uma pergunta.
+ *
+ * Só vale quando a última mensagem do fio é do Max e pergunta algo ("venda ou
+ * locação?"): aí a resposta curta da pessoa completa aquele pedido. Sem a
+ * pergunta, um "gera uma proposta" de ontem reabriria a escrita num "oi" de
+ * hoje (code review do #55).
+ */
+export function pedidoEmAberto(
+  history: readonly { role: string; content: unknown }[]
+): string | null {
+  const ultima = history[history.length - 1];
+  const anterior = history[history.length - 2];
+  if (ultima?.role !== "assistant" || typeof ultima.content !== "string") return null;
+  if (!ultima.content.includes("?")) return null;
+  return anterior?.role === "user" && typeof anterior.content === "string" ? anterior.content : null;
 }
 
 /**

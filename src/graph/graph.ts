@@ -18,6 +18,7 @@ import {
   PENDING_TTL_MS,
   buscarNoRegistro,
   ferramentasDoTurno,
+  pedidoEmAberto,
   lerConfirmacao,
   podeEscrever,
   propostaExpirou,
@@ -67,7 +68,7 @@ import {
   textoSemLeituraDeMidia,
   TEXTO_ASSUNTO_BLOQUEADO,
 } from "./prompt";
-import { limitarTamanho, sanitizar } from "./compose";
+import { limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
 import {
   argsDaCriacao,
@@ -894,7 +895,12 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    */
   const oferta =
     state.toolRounds === 0
-      ? ferramentasDoTurno({ policy: state.policy, texto: userText, identity: state.identity })
+      ? ferramentasDoTurno({
+          policy: state.policy,
+          texto: userText,
+          identity: state.identity,
+          textoAnterior: pedidoEmAberto(history),
+        })
       : { entradas: [], cortadas: 0 };
 
   if (oferta.cortadas > 0) {
@@ -986,7 +992,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
 
     if (auth.ok) {
       // `auth.ok` garante tipo válido (`capabilityDaChamada` não foi null).
-      const args = argsDaCriacao(chamada.args)!;
+      const args = argsDaCriacao(chamada.args, displayName(state.identity))!;
       const pending: PendingAction = {
         kind: "criar_documento",
         args,
@@ -1025,7 +1031,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     // Política que não concede ESTE tipo (ex.: `form.create` sim,
     // `proposal.create` não): resposta de template, que diz que nada foi
     // criado. Deixar o modelo improvisar aqui era convite a "pronto, criei".
-    const args = argsDaCriacao(chamada.args);
+    const args = argsDaCriacao(chamada.args, displayName(state.identity));
     if (auth.motivo === "capability_negada" && args) {
       const texto = textoSemPermissao(args);
       return {
@@ -1192,9 +1198,19 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
     );
   }
 
+  // Antes do teto: afirmação de criação no texto livre é falsa por construção
+  // (escrita real sai por template) — ver `travarCriacaoFalsa`.
+  const trava = travarCriacaoFalsa(texto, {
+    houveLeitura: state.toolResults.some((r) => r.items !== null),
+    podeCriar: modoDeCriacao(state.identity, state.policy) === "disponivel",
+  });
+  if (trava.travou) {
+    console.warn(`[compose] afirmação de criação sem escrita em ${state.identity.orgId}`);
+  }
+
   // G6: o teto vale DEPOIS do sanitizador — cortar antes contaria linha que
   // ia cair de qualquer jeito. O resto fica guardado para o "quer ver?".
-  const final = limitarTamanho(texto);
+  const final = limitarTamanho(trava.texto);
 
   return {
     reply: final.texto,
