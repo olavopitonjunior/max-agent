@@ -13,10 +13,7 @@ import { semCredencial } from "./redigir";
  * provedor, muda aqui:
  */
 
-/** Z-API: API de mensageria, responde em ms; 10s já é generosidade. */
-export const ZAPI_TIMEOUT_MS = 10_000;
-
-/** Graph API da Meta: mesma classe da Z-API (mensageria, responde em ms). */
+/** Graph API da Meta: API de mensageria, responde em ms; 10s já é generosidade. */
 export const META_TIMEOUT_MS = 10_000;
 
 /** ImobPro: consultas de identidade/RAG/escrita. A transcrição é a exceção —

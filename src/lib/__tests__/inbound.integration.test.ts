@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
  * Integração de verdade, contra o Postgres.
  *
  * Como no outbox, o que está sob teste é SQL, não TypeScript: o
- * `ON CONFLICT DO NOTHING` que transforma reentrega da Z-API em duplicata, e o
+ * `ON CONFLICT DO NOTHING` que transforma reentrega do webhook em duplicata, e o
  * claim com mudança de estado que impede o caminho rápido e o cron de
  * responderem a mesma mensagem. Mock não prova nenhum dos dois — ele devolve o
  * que eu mandar.
@@ -15,7 +15,8 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 const hasDb = Boolean(process.env.DATABASE_URL);
 const d = hasDb ? describe : describe.skip;
 
-vi.mock("../zapi", () => ({
+vi.mock("../meta", async (orig) => ({
+  ...(await orig<typeof import("../meta")>()),
   sendText: vi.fn().mockResolvedValue({ messageId: "REPLY-MID" }),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
@@ -40,8 +41,8 @@ const { enqueueInbound, sweepInbound, processInboundNow } = await import(
   "../inbound"
 );
 const { query, db } = await import("../db");
-const { sendText, connectionStatus } = await import("../zapi");
-const { ZapiHttpError } = await import("../zapi-erro");
+const { sendText, connectionStatus } = await import("../meta");
+const { MetaHttpError } = await import("../transport/erro");
 const { observeConnection } = await import("../connection");
 const { runTurn } = await import("@/graph/graph");
 
@@ -103,7 +104,7 @@ d("inbound_queue (Postgres real)", () => {
   });
 
   /**
-   * A Z-API reentrega em timeout. A reentrega não pode virar um segundo turn —
+   * A Meta reentrega em timeout. A reentrega não pode virar um segundo turn —
    * era este o motivo do `inbound_seen`, e a fila herdou a responsabilidade.
    */
   it("mesmo messageId é duplicata, não segundo turn", async () => {
@@ -146,7 +147,7 @@ d("inbound_queue (Postgres real)", () => {
     const r = await enqueueInbound(msg());
     if (r.status !== "queued") throw new Error("esperava queued");
     sent.mockRejectedValueOnce(
-      new ZapiHttpError("/send-text", 400, '{"error":"you must subscribe to this instance again"}')
+      new MetaHttpError("/messages", 400, '{"error":{"code":131042,"message":"you must subscribe to this instance again"}}')
     );
 
     const totals = await sweepInbound();
@@ -173,7 +174,7 @@ d("inbound_queue (Postgres real)", () => {
     const r = await enqueueInbound(msg());
     if (r.status !== "queued") throw new Error("esperava queued");
     sent.mockRejectedValue(
-      new ZapiHttpError("/send-text", 400, '{"error":"you must subscribe to this instance again"}')
+      new MetaHttpError("/messages", 400, '{"error":{"code":131042,"message":"you must subscribe to this instance again"}}')
     );
 
     await processInboundNow(r.id);
@@ -189,7 +190,7 @@ d("inbound_queue (Postgres real)", () => {
   it("envio falho por outro motivo conta tentativa e não toca na máquina de estado", async () => {
     const r = await enqueueInbound(msg());
     if (r.status !== "queued") throw new Error("esperava queued");
-    sent.mockRejectedValueOnce(new ZapiHttpError("/send-text", 400, '{"error":"invalid phone"}'));
+    sent.mockRejectedValueOnce(new MetaHttpError("/messages", 400, '{"error":{"code":131026,"message":"invalid phone"}}'));
 
     await sweepInbound();
 
@@ -203,7 +204,7 @@ d("inbound_queue (Postgres real)", () => {
     const r = await enqueueInbound(msg());
     if (r.status !== "queued") throw new Error("esperava queued");
 
-    sent.mockRejectedValueOnce(new Error("z-api fora do ar"));
+    sent.mockRejectedValueOnce(new Error("upstream fora do ar"));
     await processInboundNow(r.id);
 
     const meio = await statusDe(r.id);

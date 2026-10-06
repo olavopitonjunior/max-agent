@@ -1,6 +1,6 @@
 # Max Agent
 
-Agente de WhatsApp dos tenants **RE/MAX** do ImobPro. LangGraph + Z-API, na Vercel.
+Agente de WhatsApp dos tenants **RE/MAX** do ImobPro. LangGraph + WhatsApp Cloud API (Meta), na Vercel.
 
 O Newton (OpenClaw, `agentpro.ia.br`) atende os demais tenants e continua como
 está. Documentação do lado da plataforma: [`docs/max.md`](../contractmaker/docs/max.md)
@@ -22,7 +22,7 @@ As quatro fases estão **em produção** (a 4 fechou em 2026-08-21):
 4. **Memória cross-sessão e reconciliação de entrega** — fatos por pessoa com
    TTL, notificação enviada semeada no thread (para "o que é isso?" ter
    contexto), e o desfecho de cada notificação (entregue / lida / sem
-   confirmação) reconciliado a partir dos callbacks de status da Z-API e
+   confirmação) reconciliado a partir dos callbacks de status da Meta e
    reportado de volta ao ImobPro.
 
 Também entende **áudio e imagem** (transcritos no ImobPro, com o token da org)
@@ -30,11 +30,12 @@ e responde por template quando não consegue — silêncio nunca.
 
 ## Por que Vercel, e não VPS
 
-A decisão mudou quando o transporte virou Z-API. O Baileys (que o Max antigo
-usava) exige **websocket persistente** — daí precisar de um processo sempre
-vivo. Z-API é **webhook**: cada mensagem é um POST independente, que é
-exatamente o formato serverless. Somado a isso, a bridge do Newton já roda na
-Vercel e a conta já é Pro.
+A decisão mudou quando o transporte deixou de ser o Baileys do Max antigo, que
+exige **websocket persistente** — daí precisar de um processo sempre vivo. O
+transporte desde então — primeiro a Z-API (até 28/09), hoje a Cloud API da
+Meta — é **webhook**: cada mensagem é um POST independente, que é exatamente
+o formato serverless. Somado a isso, a bridge do Newton já roda na Vercel e a
+conta já é Pro.
 
 O que precisa de continuidade — histórico de conversa, fila de saída — vive no
 Postgres, não na memória do processo.
@@ -43,12 +44,12 @@ Postgres, não na memória do processo.
 
 ```
                                                       ┌─ semeia o thread
-ImobPro ──POST /notify (HMAC)──► outbox ──cron 1/min──┴─► Z-API ──► WhatsApp
-                                    │                                  │
-                          adia fora de 7h–22h SP                       │
-                                    ▲                                  ▼
-       POST /api/webhooks/max ◄── reconcile ◄── /api/zapi-status ◄── callback
-       (desfecho, pela dedupeKey)   (cron)      (SENT/RECEIVED/READ)
+ImobPro ──POST /notify (HMAC)──► outbox ──cron 1/min──┴─► Meta ──► WhatsApp
+                                    │                                 │
+                          adia fora de 7h–22h SP                      │
+                                    ▲                                 ▼
+       POST /api/webhooks/max ◄── reconcile ◄── /api/meta-webhook ◄── callback
+       (desfecho, pela dedupeKey)   (cron)      (sent/delivered/read)
 
 WhatsApp ──webhook──► inbound_queue ──► grafo LangGraph ──► resposta
                       (dedupe messageId)   (checkpointer Postgres)
@@ -59,7 +60,7 @@ WhatsApp ──webhook──► inbound_queue ──► grafo LangGraph ──�
 **Duas filas, não uma.** A de saída (`outbox`) existe porque o ImobPro entrega
 a qualquer hora; a de entrada (`inbound_queue`) existe porque o turn ficou mais
 lento que o timeout do webhook quando o grafo passou a chamar modelo — sem ela,
-a Z-API reentregava, o dedupe já tinha consumido o `messageId`, e a pessoa
+o provedor reentregava, o dedupe já tinha consumido o `messageId`, e a pessoa
 ficava sem resposta e sem rastro. Em ambas o claim MUDA O ESTADO (não é só
 `SKIP LOCKED`), e um marcador de "envio iniciado" impede que uma execução
 morta entre o envio e a liquidação vire mensagem repetida.
@@ -87,9 +88,7 @@ de `deal-events` de lá não tem cron de reconciliação.
 | `POST /api/notify` | HMAC (`MAX_NOTIFY_SECRET`) | ImobPro enfileira uma notificação. 202 = assumi; 409 = duplicata |
 | `GET /api/cron/outbox` | `Bearer $CRON_SECRET` | Despacha o que venceu. Cron da Vercel, 1×/min |
 | `GET /api/cron/inbound` | `Bearer $CRON_SECRET` | Rede de segurança do turn: retoma o que o `waitUntil` não fechou. 1×/min |
-| `POST /api/zapi-webhook/[secret]` | segredo no path + `instanceId` | Inbound do WhatsApp — só aceita e enfileira |
-| `POST /api/zapi-status/[secret]` | idem | Callbacks de status (SENT/RECEIVED/READ) → reconciliação |
-| `POST/GET /api/zapi-connection/[secret]` | idem | Callbacks de conexão (caiu/voltou) → alerta por e-mail. **Não lê o corpo**: o POST é gatilho e o estado vem do `/status` |
+| `POST/GET /api/meta-webhook` | `X-Hub-Signature-256` (app secret) | Inbound do WhatsApp, status de entrega (sent/delivered/read/failed) e aprovação de template, tudo no mesmo POST; `GET` é o handshake de verificação da Meta |
 | `POST\|DELETE /api/orgs` | HMAC (mesmo do `/notify`) | Provisiona/desativa tenant (token cifrado em `org_config`) |
 | `POST /api/admin/forget` | HMAC (mesmo do `/notify`) | Direito ao esquecimento: apaga tudo sobre um telefone |
 | `GET /api/admin/status` | HMAC (`method.path?query` assinados) | Alimenta o Mission Control no admin do ImobPro |
@@ -111,10 +110,12 @@ que decide a urgência de quem lê às 3 da manhã.
 de "já avisei" só acontece quando o e-mail SAI, então um POST que falha é
 reenviado na passada seguinte — sem fila nova e sem código de retry (é por isso
 que o receptor devolve 500 quando o e-mail não sai). O caminho rápido é o
-callback de conexão da Z-API, em segundos; o cron é a rede de segurança para o
-callback que se perde na rede, e exige **duas** passadas discordando antes de
-acreditar. Antes da F7 esta checagem só acontecia com fila vencida, e por isso
-uma queda com a fila vazia era invisível — mas o inbound para do mesmo jeito.
+callback de conexão que a Z-API mandava (legado; a rota foi removida com o
+resto do cliente). Hoje a detecção é só o cron, a cada minuto, e exige
+**duas** passadas discordando antes de acreditar — mais rápido é o envio
+RECUSADO por inoperância (fonte `envio`), que age na primeira discordância.
+Antes da F7 esta checagem só acontecia com fila vencida, e por isso uma queda
+com a fila vazia era invisível — mas o inbound para do mesmo jeito.
 
 **A regra que vale sobre todas as outras: nenhuma queda fica sem notícia.** O
 debounce de 1h evita spam de flapping, mas não pode virar silêncio — uma queda
@@ -159,55 +160,37 @@ Segredos:
 ```bash
 openssl rand -hex 32      # MAX_NOTIFY_SECRET (o MESMO no Contractmaker)
 openssl rand -base64 32   # MAX_ENCRYPTION_KEY (32 bytes)
-openssl rand -hex 24      # ZAPI_WEBHOOK_SECRET
 ```
 
 Cadastrar um tenant é `POST /api/orgs` (o ImobPro faz isso sozinho ao ligar
 `vendas.max` na org — o token nasce lá, cifrado aqui). Não há INSERT à mão.
 
-Na Z-API, quatro callbacks — o segundo fecha a Fase 4, o terceiro e o quarto
-fecham a F7 (alerta de queda):
-
-| Campo no painel | URL |
-|---|---|
-| Ao receber | `.../api/zapi-webhook/<ZAPI_WEBHOOK_SECRET>` |
-| Ao alterar status da mensagem | `.../api/zapi-status/<ZAPI_WEBHOOK_SECRET>` |
-| Ao desconectar | `.../api/zapi-connection/<ZAPI_WEBHOOK_SECRET>` |
-| Ao conectar | `.../api/zapi-connection/<ZAPI_WEBHOOK_SECRET>` |
-
-Os quatro aceitam configuração por API — um `PUT` por callback, com
-`Client-Token` no header e `{"value": "<url>"}` no corpo:
-
-```
-PUT .../update-webhook-received            PUT .../update-webhook-connected
-PUT .../update-webhook-message-status      PUT .../update-webhook-disconnected
-```
-
-**Nunca use `update-every-webhooks`.** Ele aceita o mesmo corpo e aponta TODOS
-os callbacks para a mesma URL — o que mataria o inbound e a reconciliação da
-Fase 4 de uma vez só. Confira o resultado no `GET /me`, que lista os quatro.
-
-E **"notificar mensagens enviadas por mim" fica DESLIGADO** — senão cada
-resposta volta como mensagem nova e o bot conversa sozinho.
-
-Os dois de conexão apontam para a MESMA rota de propósito: ela não lê o corpo
-do callback. O POST é gatilho, e o estado de verdade vem do `/status` — o que a
-torna imune ao formato do payload, a reentrega e a callback fora de ordem.
-**Sem eles o alerta continua funcionando**, só que pela rede de segurança do
-cron (até dois minutos em vez de segundos).
+Webhook da Meta: um único callback, configurado no app do WhatsApp Business
+(Webhooks → `https://<max-agent>/api/meta-webhook`), inscrito em `messages` e
+`message_template_status_update`. A verificação inicial é um `GET` com
+`hub.verify_token` (o valor que você escolher para `META_WEBHOOK_VERIFY_TOKEN`
+no `.env.example`); todo POST depois é autenticado por `X-Hub-Signature-256`
+(HMAC do corpo cru com `META_APP_SECRET`) — sem assinatura válida, 401, sem
+segredo nenhum no path. Mensagens recebidas, status de entrega
+(sent/delivered/read/failed) e aprovação de template chegam no MESMO POST,
+onde a Z-API usava quatro callbacks separados.
 
 ## Armadilhas já pagas (não redescobrir)
 
-1. **Z-API desemparelhada responde HTTP 200 com `messageId` válido e não
-   entrega nada.** Status code não é prova de entrega — por isso o painel mostra
-   `zapi.connected` em destaque, lido de `/status`.
+1. **(era Z-API) Instância desemparelhada respondia HTTP 200 com `messageId`
+   válido e não entregava nada.** Status code não é prova de entrega — a
+   lição ficou no desenho da reconciliação de entrega (Fase 4), e o painel
+   ainda mostra `zapi.connected` em destaque (nome do campo mantido por
+   compatibilidade; hoje é o estado da Meta).
 2. **Menção em grupo chega como LID, não como telefone.** Um gate que compare
    com E.164 nunca dispara.
-3. **Uma instância Z-API = um número.** O Max precisa de instância própria; usar
-   a do Newton exigiria desemparelhá-lo.
+3. **(era Z-API) Uma instância = um número.** O Max precisava de instância
+   própria; usar a do Newton exigiria desemparelhá-lo. Não existe no modelo da
+   Meta (`META_PHONE_NUMBER_ID` por tenant seria o equivalente).
 4. **O `phone` do webhook é do GRUPO quando `isGroup`** — quem falou está em
    `participantPhone`.
-5. **O JID da Z-API varia no 9º dígito.** O mesmo aparelho pode chegar como
+5. **O telefone do WhatsApp varia no 9º dígito** (era assim na Z-API e o
+   `wa_id` da Meta também chega sem o 9 em celular brasileiro). O mesmo aparelho pode chegar como
    `5511987654321` ou `551187654321`; quem apaga ou busca por telefone tem que
    cobrir as duas formas (ver `/api/admin/forget`).
 6. **Log estruturado, telefone despersonalizado.** Use o helper `lib/log.ts`:
@@ -301,10 +284,11 @@ Use SEMPRE este, e não a URL gerada `max-agent-<hash>-<team>.vercel.app`. A
 URLs geradas e os previews mas **não** o alias de produção — testar na URL
 gerada dá 302 e leva a concluir, errado, que a proteção precisa ser desligada.
 Ela não precisa: o alias de produção responde 200 com ela ligada, e é por ele
-que o webhook da Z-API e o `/notify` do Contractmaker entram.
+que o webhook da Meta e o `/notify` do Contractmaker entram.
 
-O rollout foi concluído: instância Z-API pareada (número próprio), banco Neon
-migrado, envs preenchidas, tenants provisionados e os dois callbacks
-apontados. Os dois interruptores que restam são de PRODUTO, no ImobPro: a
+O rollout da Cloud API da Meta foi concluído em 28/09/2026 (a Z-API, cancelada
+em 10/09, não existe mais): número próprio registrado na WABA da FINCasa,
+banco Neon migrado, envs preenchidas, tenants provisionados e o webhook
+apontado. Os dois interruptores que restam são de PRODUTO, no ImobPro: a
 feature `vendas.max`/`locacao.max` por org e o `AgentProfile.enabled` — nenhum
 exige deploy daqui.

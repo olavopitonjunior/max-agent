@@ -1,11 +1,12 @@
 /**
  * O vocabulário do Max para falar com o WhatsApp, sem nome de provedor.
  *
- * Nasceu dentro de `zapi.ts`, quando a Z-API era o único canal. Saiu daqui em
- * 2026-09-22 porque o Max passa a poder falar pela Cloud API oficial da Meta:
- * o grafo, a fila de inbound, o outbox e a reconciliação de entrega consomem
- * ESTES tipos, e cada provedor traduz o próprio webhook para eles. Nada aqui
- * pode ter campo que só um provedor entende.
+ * Nasceu dentro do antigo cliente da Z-API, quando ela era o único canal.
+ * Saiu dali em 2026-09-22 com a migração para a Cloud API oficial da Meta
+ * (concluída em 28/09; Z-API cancelada em 10/09): o grafo, a fila de inbound,
+ * o outbox e a reconciliação de entrega consomem ESTES tipos, e o provedor
+ * traduz o próprio webhook para eles. Nada aqui pode ter campo que só um
+ * provedor entende.
  */
 
 import type { Inoperancia } from "./erro";
@@ -21,8 +22,8 @@ export interface InboundMessage {
   kind: InboundKind;
   text: string | null;
   /**
-   * Referência OPACA à mídia: quem a interpreta é o `downloadMedia` do mesmo
-   * provedor que a produziu (URL pública na Z-API, `meta:<media-id>` na Meta).
+   * Referência OPACA à mídia, no formato `meta:<media-id>`: quem a interpreta
+   * é o `downloadMedia` do provedor que a produziu.
    */
   mediaUrl: string | null;
   mimeType: string | null;
@@ -33,8 +34,8 @@ export interface InboundMessage {
   replyToMessageId: string | null;
   /**
    * Payload do botão de resposta rápida tocado (`ok:<id>`, `duvida:<id>`),
-   * quando a mensagem é um toque em botão de template. Opcional: a Z-API não
-   * tem, e o texto visível do botão continua em `text`.
+   * quando a mensagem é um toque em botão de template. Opcional: ausente
+   * quando não é toque em botão, e o texto visível continua em `text`.
    */
   buttonPayload?: string | null;
 }
@@ -49,15 +50,15 @@ export type BotaoEnviado =
  * nosso vocabulário (`sent`/`delivered`/`read`) é da reconciliação de entrega.
  */
 export interface StatusCallback {
-  /** Como o provedor mandar, sem normalizar (SENT/RECEIVED/READ/PLAYED na Z-API). */
+  /** Como o provedor mandar, sem normalizar (`sent`/`delivered`/`read` na Meta). */
   status: string;
   /** Ids das mensagens a que o status se refere. */
   messageIds: string[];
   phone: string | null;
   momment: number | null;
   /**
-   * Cobrança da mensagem, como a Meta informa no status (`pricing`). Só a
-   * Cloud API manda; ausente = sem informação (Z-API, ou status sem o bloco).
+   * Cobrança da mensagem, como a Meta informa no status (`pricing`). Ausente
+   * quando o status não traz o bloco.
    */
   pricing?: {
     billable: boolean | null;
@@ -73,7 +74,7 @@ export interface ConnectionState {
   /**
    * Presente quando `connected` é `false` por INOPERÂNCIA (assinatura,
    * credencial ou número, ver `transport/erro.ts`), e não por queda de sessão.
-   * Ausente na queda de sessão comum da Z-API — "repareie por QR".
+   * Ausente na queda de sessão comum.
    */
   inoperante?: Inoperancia;
 }
@@ -84,4 +85,4 @@ export interface SendResult {
   messageId: string | null;
 }
 
-export type ProviderName = "zapi" | "meta";
+export type ProviderName = "meta";

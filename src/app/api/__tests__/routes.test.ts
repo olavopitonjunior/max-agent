@@ -41,8 +41,8 @@ vi.mock("@/lib/delivery", () => ({
   applyStatusCallback: vi.fn().mockResolvedValue({ outbox: 1, replies: 0 }),
   reconcile: vi.fn().mockResolvedValue({ unconfirmed: 0, reported: 0, reportFailed: 0 }),
 }));
-vi.mock("@/lib/zapi", async (orig) => ({
-  ...(await orig<typeof import("@/lib/zapi")>()),
+vi.mock("@/lib/transport", async (orig) => ({
+  ...(await orig<typeof import("@/lib/transport")>()),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 vi.mock("@/lib/connection", () => ({
@@ -55,11 +55,6 @@ vi.mock("@/lib/connection", () => ({
   }),
 }));
 
-const { POST: webhookPost } = await import("../zapi-webhook/[secret]/route");
-const { POST: statusPost } = await import("../zapi-status/[secret]/route");
-const { POST: connPost, GET: connGet } = await import(
-  "../zapi-connection/[secret]/route"
-);
 const { POST: notifyPost } = await import("../notify/route");
 const { GET: cronInbound } = await import("../cron/inbound/route");
 const { GET: cronOutbox } = await import("../cron/outbox/route");
@@ -67,7 +62,7 @@ const { GET: adminStatus } = await import("../admin/status/route");
 const { GET: adminCosts } = await import("../admin/costs/route");
 const { sign } = await import("@/lib/hmac");
 const { observeConnection } = await import("@/lib/connection");
-const { connectionStatus } = await import("@/lib/zapi");
+const { connectionStatus } = await import("@/lib/transport");
 const { enqueueInbound } = await import("@/lib/inbound");
 const { applyStatusCallback } = await import("@/lib/delivery");
 const { enqueue: enqueueOutbox, dispatchDue } = await import("@/lib/outbox");
@@ -83,116 +78,10 @@ const SECRET = "hmac-secret-de-teste";
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubEnv("ZAPI_WEBHOOK_SECRET", "hook-secret");
-  vi.stubEnv("ZAPI_INSTANCE_ID", "INST");
   vi.stubEnv("MAX_NOTIFY_SECRET", SECRET);
   vi.stubEnv("CRON_SECRET", "cron-secret");
 });
 afterEach(() => vi.unstubAllEnvs());
-
-function webhookReq(body: unknown, secret = "hook-secret") {
-  return [
-    new NextRequest(`http://max.test/api/zapi-webhook/${secret}`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-    { params: { secret } },
-  ] as const;
-}
-
-const MSG = {
-  instanceId: "INST",
-  messageId: "M1",
-  phone: "5511987654321",
-  text: { message: "oi" },
-};
-
-describe("POST /api/zapi-webhook/[secret]", () => {
-  it("segredo errado é 404 — o endpoint não deve nem existir para quem sonda", async () => {
-    const res = await webhookPost(...webhookReq(MSG, "errado"));
-    expect(res.status).toBe(404);
-  });
-
-  it("sem ZAPI_WEBHOOK_SECRET é 500, nunca 200 silencioso", async () => {
-    vi.stubEnv("ZAPI_WEBHOOK_SECRET", "");
-    const res = await webhookPost(...webhookReq(MSG));
-    expect(res.status).toBe(500);
-    expect(enfileira).not.toHaveBeenCalled();
-  });
-
-  it("mensagem válida é aceita e enfileirada", async () => {
-    const res = await webhookPost(...webhookReq(MSG));
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ accepted: true });
-    expect(enfileira).toHaveBeenCalledOnce();
-  });
-
-  it("reação/sticker/status não viram linha na fila", async () => {
-    for (const payload of [
-      { ...MSG, reaction: { value: "👍" } },
-      { ...MSG, sticker: { stickerUrl: "https://x/s.webp" } },
-      { ...MSG, type: "MessageStatusCallback", status: "READ", ids: ["M1"] },
-    ]) {
-      const res = await webhookPost(...webhookReq(payload));
-      expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ ignored: true });
-    }
-    expect(enfileira).not.toHaveBeenCalled();
-  });
-
-  it("instanceId de outra instância é ignorado", async () => {
-    const res = await webhookPost(...webhookReq({ ...MSG, instanceId: "OUTRA" }));
-    expect(res.status).toBe(200);
-    expect(enfileira).not.toHaveBeenCalled();
-  });
-});
-
-describe("POST /api/zapi-status/[secret]", () => {
-  function statusCbReq(body: unknown, secret = "hook-secret") {
-    return [
-      new NextRequest(`http://max.test/api/zapi-status/${secret}`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      }),
-      { params: { secret } },
-    ] as const;
-  }
-
-  const CB = {
-    instanceId: "INST",
-    type: "MessageStatusCallback",
-    status: "READ",
-    ids: ["PROV-1"],
-  };
-
-  it("segredo errado é 404", async () => {
-    expect((await statusPost(...statusCbReq(CB, "errado"))).status).toBe(404);
-  });
-
-  it("callback válido aplica o status", async () => {
-    const res = await statusPost(...statusCbReq(CB));
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ applied: { outbox: 1 } });
-    expect(aplicaStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ status: "READ", messageIds: ["PROV-1"] })
-    );
-  });
-
-  it("payload que não é status é ignorado sem tocar o banco", async () => {
-    const res = await statusPost(
-      ...statusCbReq({ instanceId: "INST", messageId: "M1", phone: "551199", text: { message: "oi" } })
-    );
-    expect(await res.json()).toMatchObject({ ignored: true });
-    expect(aplicaStatus).not.toHaveBeenCalled();
-  });
-
-  it("falha do banco ainda responde 200 — reentrega não resolveria", async () => {
-    aplicaStatus.mockRejectedValueOnce(new Error("db fora"));
-    const res = await statusPost(...statusCbReq(CB));
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ error: true });
-  });
-});
 
 function notifyReq(body: string, headers: Record<string, string>) {
   return new NextRequest("http://max.test/api/notify", {
@@ -237,7 +126,7 @@ describe("POST /api/notify", () => {
     expect(res.status).toBe(202);
     // O VALOR entregue à fila, não só a chamada: telefone cru no gateway já
     // custou perda silenciosa em produção (#189 e o ramo de corretor do
-    // Newton em 2026-08). A Z-API quer E.164 SEM "+".
+    // Newton em 2026-08). A Cloud API quer E.164 SEM "+".
     // Valor E arity: sem a segunda, um /notify que enfileirasse duas vezes
     // (retry mal fechado) passaria neste teste e no de baixo.
     expect(enfileiraOut).toHaveBeenCalledOnce();
@@ -246,7 +135,7 @@ describe("POST /api/notify", () => {
     );
   });
 
-  it("telefone formatado chega à fila no formato da Z-API", async () => {
+  it("telefone formatado chega à fila em E.164 sem \"+\"", async () => {
     // O caso que distingue o helper do replace inline: com "+5511..." os dois
     // coincidem; com telefone sujo, só a normalização acerta.
     const body = JSON.stringify({
@@ -422,7 +311,7 @@ describe("crons", () => {
     const inoperante = {
       connected: false,
       raw: { status: 400 },
-      inoperante: { motivo: "assinatura", detalhe: "Z-API /status 400: must subscribe" },
+      inoperante: { motivo: "assinatura", detalhe: "Meta /phone_number_id 400 (#131042): must subscribe" },
     };
     checaConexao.mockResolvedValueOnce(inoperante);
     expect((await cronOutbox(comAuth)).status).toBe(200);
@@ -445,7 +334,7 @@ describe("crons", () => {
       sent: 0,
       failed: 0,
       blocked: 2,
-      inoperante: { motivo: "assinatura", detalhe: "Z-API /send-text 400" },
+      inoperante: { motivo: "assinatura", detalhe: "Meta /messages 400 (#131042)" },
     });
     expect((await cronOutbox(comAuth)).status).toBe(200);
     expect(observa).toHaveBeenCalledWith({ connected: true, fonte: "cron" });
@@ -454,69 +343,6 @@ describe("crons", () => {
       fonte: "envio",
       motivo: "assinatura",
     });
-  });
-});
-
-describe("POST /api/zapi-connection/[secret]", () => {
-  function req(secret: string) {
-    return [
-      new NextRequest(`http://max.test/api/zapi-connection/${secret}`, {
-        method: "POST",
-        body: JSON.stringify({ instanceId: "INST", connected: false }),
-        headers: { "content-type": "application/json" },
-      }),
-      { params: { secret } },
-    ] as const;
-  }
-
-  it("segredo errado é 404 — para quem sonda, a rota não existe", async () => {
-    const res = await connPost(...req("errado"));
-    expect(res.status).toBe(404);
-    expect(observa).not.toHaveBeenCalled();
-  });
-
-  /**
-   * A rota NÃO confia no corpo: o POST é gatilho, e o estado vem de
-   * `connectionStatus()`. O payload acima diz `connected: false` e o que vale
-   * é o `true` da checagem — é o que a torna imune ao formato do callback, a
-   * reentrega e a callback fora de ordem.
-   */
-  it("ignora o corpo e observa o que a checagem disser", async () => {
-    const res = await connPost(...req("hook-secret"));
-    expect(res.status).toBe(200);
-    expect(checaConexao).toHaveBeenCalledTimes(1);
-    expect(observa).toHaveBeenCalledWith({ connected: true, fonte: "push" });
-  });
-
-  it("checagem falhando responde 200 sem observar — o cron cobre depois", async () => {
-    checaConexao.mockRejectedValueOnce(new Error("timeout"));
-    const res = await connPost(...req("hook-secret"));
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, checked: false });
-    expect(observa).not.toHaveBeenCalled();
-  });
-
-  /** Inoperante também é `connected:false` — e o motivo vai para o e-mail. */
-  it("checagem dizendo inoperante observa a queda com o motivo", async () => {
-    checaConexao.mockResolvedValueOnce({
-      connected: false,
-      raw: {},
-      inoperante: { motivo: "credencial", detalhe: "Z-API /status 401" },
-    });
-    const res = await connPost(...req("hook-secret"));
-    expect(res.status).toBe(200);
-    expect(observa).toHaveBeenCalledWith({
-      connected: false,
-      fonte: "push",
-      motivo: "credencial",
-    });
-  });
-
-  it("o GET confere a URL do painel sem mandar evento", async () => {
-    const res = await connGet(...req("hook-secret"));
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ handler: "connection" });
-    expect(observa).not.toHaveBeenCalled();
   });
 });
 
@@ -565,8 +391,7 @@ describe("GET /api/admin/status — a query entra na assinatura", () => {
     expect((await adminStatus(statusReq("", null))).status).toBe(401);
   });
 
-  it("credencial da Z-API não sai: nem no last_error da fila, nem no bloco do provedor", async () => {
-    vi.stubEnv("WHATSAPP_PROVIDER", "zapi");
+  it("credencial histórica da Z-API não sai: nem no last_error da fila, nem no bloco do provedor", async () => {
     checaConexao.mockResolvedValueOnce({
       connected: false,
       raw: {
@@ -598,7 +423,7 @@ describe("GET /api/admin/status — a query entra na assinatura", () => {
         expect(texto).not.toContain(segredo);
       }
       const corpo = JSON.parse(texto);
-      expect(corpo.provider).toBe("zapi");
+      expect(corpo.provider).toBe("meta");
       // Número que não é telefone (timestamp) passa intacto e o JSON continua válido.
       expect(corpo.zapi.raw.ts).toBe(1791201679702);
     } finally {

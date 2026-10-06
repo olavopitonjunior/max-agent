@@ -4,8 +4,8 @@
  * Cópia deliberada de `apps/web/src/lib/validators/phone-br.ts` do ImobPro. Os
  * dois lados normalizam: lá para que o motivo da recusa fique no log do
  * negócio (onde alguém procura quando "o corretor não recebeu"), aqui porque
- * este serviço também recebe telefone de fora do `/notify` — o webhook da
- * Z-API, por exemplo.
+ * este serviço também recebe telefone de fora do `/notify` — o webhook do
+ * WhatsApp, por exemplo.
  *
  * Não é sobre desconfiar do chamador: é que mandar telefone cru pro gateway já
  * causou perda SILENCIOSA de mensagem em produção (#189, e de novo no ramo de
@@ -27,8 +27,8 @@ export function normalizeBrPhone(raw: string): string | null {
   return `+55${d}`;
 }
 
-/** Formato que a Z-API espera: E.164 sem "+". */
-export function toZapiPhone(raw: string): string | null {
+/** E.164 sem "+" — o formato que a Cloud API da Meta espera no `to`. */
+export function toE164NoPlus(raw: string): string | null {
   const e164 = normalizeBrPhone(raw);
   return e164 ? e164.replace(/^\+/, "") : null;
 }
@@ -40,9 +40,9 @@ export function toZapiPhone(raw: string): string | null {
  * Existe porque a ausência dela causou um bug real, encontrado no primeiro dia
  * de conversa em produção (21/08): `threadIdFor` e as funções de memória
  * recebiam o telefone CRU do chamador, e o formato varia por porta de entrada —
- * a Z-API entrega sem "+", o `normalizeBrPhone` devolve com. Resultado: a mesma
- * pessoa ganhou DUAS threads e DUAS memórias, sem erro, sem log, sem nada que
- * apontasse para o problema. Só se percebe olhando a tabela.
+ * o webhook entrega sem "+", o `normalizeBrPhone` devolve com. Resultado: a
+ * mesma pessoa ganhou DUAS threads e DUAS memórias, sem erro, sem log, sem
+ * nada que apontasse para o problema. Só se percebe olhando a tabela.
  *
  * **Por que sem "+" e não E.164 canônico**, já que `identity_cache` e
  * `phone_org_choice` usam com "+":
@@ -62,7 +62,7 @@ export function toZapiPhone(raw: string): string | null {
  * resolve identidade, então não chega a abrir thread.
  */
 export function conversationKey(raw: string): string {
-  return toZapiPhone(raw) ?? onlyDigits(raw ?? "");
+  return toE164NoPlus(raw) ?? onlyDigits(raw ?? "");
 }
 
 /**

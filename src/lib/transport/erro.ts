@@ -1,8 +1,9 @@
 /**
  * A pergunta "isso é o CANAL recusando, ou a mensagem?", feita a um erro de
- * envio de qualquer provedor — num módulo sem `fetch`, pelo mesmo motivo de
- * `zapi-erro.ts`: os testes que mockam os clientes não precisam reexportar
- * funções puras.
+ * envio da Meta — num módulo sem `fetch`, de propósito: os testes que mockam
+ * `../meta` (para não bater na rede) não precisam reexportar funções puras
+ * também, ou veriam `undefined is not a function` no primeiro `catch`. Puro
+ * aqui, mockável lá.
  *
  * A resposta decide o destino da fila. Inoperância REPRESA (o outbox devolve a
  * tentativa e o inbound para de consumir, ver `dispatchDue`/`podeResponder`);
@@ -11,17 +12,14 @@
  * do provedor descreve como a conta ou o número recusando.
  */
 
-import { ZapiHttpError, classificarInoperancia } from "../zapi-erro";
-
 /**
  * Por que o canal está fora de serviço sem ser queda de sessão. Cada valor
  * muda o conselho do alerta:
  *
- *  · `assinatura` — cobrança: Z-API 400 "must subscribe"; Meta 131042
- *    (forma de pagamento da conta WhatsApp Business);
- *  · `credencial` — token recusado: Z-API 401/403; Meta 0/3/10/190/200/131005;
- *  · `numero` — só Meta: o número foi restrito, bloqueado ou saiu do registro
- *    da Cloud API (368, 131031, 131045, 133010, ou `status` ≠ CONNECTED).
+ *  · `assinatura` — 131042: forma de pagamento da conta WhatsApp Business;
+ *  · `credencial` — token recusado: 0/3/10/190/200/131005;
+ *  · `numero` — o número foi restrito, bloqueado ou saiu do registro da
+ *    Cloud API (368, 131031, 131045, 133010, ou `status` ≠ CONNECTED).
  */
 export type MotivoInoperante = "assinatura" | "credencial" | "numero";
 
@@ -116,12 +114,8 @@ export function falhaDaMensagemMeta(err: unknown): FalhaDaMensagem | null {
   return FALHA_META[err.code] ?? null;
 }
 
-/** A mesma pergunta, feita a um erro de ENVIO já lançado — de qualquer provedor. */
+/** A mesma pergunta, feita a um erro de ENVIO já lançado pela Meta. */
 export function inoperanciaDoErro(err: unknown): Inoperancia | null {
-  if (err instanceof ZapiHttpError) {
-    const motivo = classificarInoperancia(err.status, err.body);
-    return motivo ? { motivo, detalhe: err.message.slice(0, 300) } : null;
-  }
   if (err instanceof MetaHttpError) {
     const motivo = classificarMeta(err.code);
     return motivo ? { motivo, detalhe: err.message.slice(0, 300) } : null;

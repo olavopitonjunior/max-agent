@@ -5,7 +5,6 @@ import {
   inoperanciaDoErro,
   MetaHttpError,
 } from "../transport/erro";
-import { ZapiHttpError } from "../zapi-erro";
 
 const metaErro = (status: number, code: number) =>
   new MetaHttpError("/123/messages", status, JSON.stringify({ error: { code, message: "m" } }));
@@ -57,18 +56,12 @@ describe("falhaDaMensagemMeta", () => {
   });
 });
 
-describe("inoperanciaDoErro — os dois provedores", () => {
-  it("Meta: canal recusando vira inoperância com motivo e detalhe", () => {
+describe("inoperanciaDoErro", () => {
+  it("canal recusando vira inoperância com motivo e detalhe", () => {
     expect(inoperanciaDoErro(metaErro(401, 190))).toMatchObject({ motivo: "credencial" });
     expect(inoperanciaDoErro(metaErro(403, 368))).toMatchObject({ motivo: "numero" });
     expect(inoperanciaDoErro(metaErro(402, 131042))?.detalhe).toContain("#131042");
     expect(inoperanciaDoErro(metaErro(400, 131047))).toBeNull();
-  });
-  it("Z-API continua como era", () => {
-    expect(inoperanciaDoErro(new ZapiHttpError("/send-text", 400, "you must subscribe"))).toMatchObject({
-      motivo: "assinatura",
-    });
-    expect(inoperanciaDoErro(new ZapiHttpError("/send-text", 500, "x"))).toBeNull();
   });
   it("erro genérico não é inoperância", () => {
     expect(inoperanciaDoErro(new Error("timeout"))).toBeNull();
