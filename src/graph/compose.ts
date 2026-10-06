@@ -290,3 +290,59 @@ export function limitarTamanho(texto: string): { texto: string; resto: string | 
   if (!resto) return { texto: parte, resto: null };
   return { texto: `${parte}\n${SUFIXO_RESTO}`, resto };
 }
+
+// ─── Afirmação de criação que não aconteceu ─────────────────────────────────
+
+/**
+ * A resposta que substitui um "criei" que não aconteceu — por MODO de criação:
+ * oferecer "me diga criar proposta" a quem não pode criar mandaria a pessoa a
+ * um caminho fechado.
+ */
+export const TEXTO_NADA_CRIADO =
+  'Ainda não criei nada por aqui. Se quiser o rascunho, me diga "criar proposta ' +
+  'de venda" (ou de locação) e eu preparo para você confirmar.';
+export const TEXTO_NADA_CRIADO_SEM_CRIACAO =
+  "Ainda não criei nada por aqui: a criação é feita pelo sistema.";
+
+/**
+ * Toda escrita de verdade sai por TEMPLATE (`textoCriado`, `textoProposta`) e
+ * não passa pelo `compose`. Logo, afirmação de CONCLUSÃO em `draft` é falsa
+ * por construção. Conversa real de 2026-10-06: "Ok, proposta de venda rascunho
+ * criada" sem nenhuma proposta no banco.
+ *
+ * Estreito de propósito (code review do #55): o Max EXPLICA o processo o tempo
+ * todo — "a proposta é criada em rascunho", "a ficha precisa ser criada pela
+ * imobiliária", "o link que te enviei" —, e trocar essas respostas por "não
+ * criei nada" seria a mentira do outro lado. Por isso:
+ *  - primeira pessoa só com verbo de criação, nunca "enviei/mandei" (o link
+ *    real foi enviado por template e o modelo o cita depois), e não negada;
+ *  - particípio só colado no objeto sem verbo genérico/passivo no meio ("é",
+ *    "será", "precisa ser", "quando", "não"...).
+ */
+const AFIRMA_EM_PRIMEIRA_PESSOA = /(?<!\bnao )\b(criei|gerei|cadastrei|registrei)\b/;
+const AFIRMA_OBJETO_CRIADO =
+  /\b(?:proposta|formulario|ficha|rascunho|cadastro)\b(?:(?!\b(?:e|sera|seja|ser|sao|quando|pode|podem|precisa|precisam|deve|nao|depois|antes|vai|vou)\b)[^.\n]){0,40}\b(?:criad[oa]s?|gerad[oa]s?)\b/;
+
+/** O texto do modelo AFIRMA ter concluído uma criação? */
+export function afirmaCriacao(texto: string): boolean {
+  const t = texto.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  return AFIRMA_EM_PRIMEIRA_PESSOA.test(t) || AFIRMA_OBJETO_CRIADO.test(t);
+}
+
+/**
+ * Troca a afirmação falsa pelo texto honesto.
+ *
+ * Não troca quando o turn LEU dados com sucesso: "proposta criada em 05/10"
+ * pode ser fato de um item listado. Leitura que FALHOU não conta — senão a
+ * falha desligaria a trava justamente no turn em que o modelo improvisa.
+ */
+export function travarCriacaoFalsa(
+  texto: string,
+  ctx: { houveLeitura: boolean; podeCriar: boolean }
+): { texto: string; travou: boolean } {
+  if (ctx.houveLeitura || !afirmaCriacao(texto)) return { texto, travou: false };
+  return {
+    texto: ctx.podeCriar ? TEXTO_NADA_CRIADO : TEXTO_NADA_CRIADO_SEM_CRIACAO,
+    travou: true,
+  };
+}

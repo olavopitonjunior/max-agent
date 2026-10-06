@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 vi.mock("../orgs", () => ({ orgById: vi.fn() }));
 
 const { orgById } = await import("../orgs");
-const { consultarEscopo, descartarSeVazou, subjectDe } = await import("../scope");
+const { consultarEscopo, descartarSeVazou, limparArgs, subjectDe } = await import("../scope");
 const { CAMPOS_PROIBIDOS_AO_BROKER } = await import("@/graph/scope-contract");
 const mockOrgById = vi.mocked(orgById);
 
@@ -159,5 +159,54 @@ describe("subjectDe", () => {
       .toEqual({ kind: "user", userId: "u1" });
     expect(subjectDe({ kind: "broker", splitRecipientId: "sr1", orgId: "o", orgName: "n", label: "W" }))
       .toEqual({ kind: "broker", splitRecipientId: "sr1" });
+  });
+});
+
+describe("limparArgs — filtro vazio do modelo não derruba a leitura", () => {
+  it("estado vazio some — era o 400 de 2026-10-06 (\"status das minhas propostas\")", () => {
+    expect(limparArgs({ estado: "", limite: 10 })).toEqual({ limite: 10 });
+  });
+
+  it("só espaço, null e undefined também somem; string válida vai aparada", () => {
+    expect(limparArgs({ estado: "  ", negocio_id: null, proposta_id: undefined })).toEqual({});
+    expect(limparArgs({ estado: " enviada " })).toEqual({ estado: "enviada" });
+  });
+
+  it("limite que não é inteiro positivo some; o válido passa", () => {
+    expect(limparArgs({ limite: 0 })).toEqual({});
+    expect(limparArgs({ limite: -3 })).toEqual({});
+    expect(limparArgs({ limite: 2.5 })).toEqual({});
+    expect(limparArgs({ limite: "5" })).toEqual({});
+    expect(limparArgs({ limite: 5 })).toEqual({ limite: 5 });
+  });
+
+  it("estado de negócio é nome de etapa (texto livre): segue intocado", () => {
+    expect(limparArgs({ estado: "Em análise" }, "deal.list")).toEqual({ estado: "Em análise" });
+    expect(limparArgs({ estado: "qualquer" })).toEqual({ estado: "qualquer" });
+    expect(limparArgs(undefined)).toEqual({});
+  });
+
+  it("estado de PROPOSTA inventado some — senão a lista vazia vira \"você não tem propostas\"", () => {
+    expect(limparArgs({ estado: "todas", limite: 10 }, "proposal.list")).toEqual({ limite: 10 });
+    expect(limparArgs({ estado: "pendente" }, "proposal.list")).toEqual({});
+  });
+
+  it("estado de proposta válido passa, normalizado", () => {
+    expect(limparArgs({ estado: "Enviada" }, "proposal.list")).toEqual({ estado: "enviada" });
+    expect(limparArgs({ estado: "falha envio" }, "proposal.list")).toEqual({ estado: "falha_envio" });
+    expect(limparArgs({ estado: "expirada" }, "proposal.list")).toEqual({ estado: "expirada" });
+  });
+
+  it("o corpo enviado ao servidor já vai limpo", async () => {
+    responde({ ok: true, status: 200, body: { items: [], truncated: false } });
+    await consultarEscopo({
+      orgId: "org1",
+      rawPhone: PHONE,
+      subject: SUJEITO,
+      verb: "proposal.list",
+      args: { estado: "", limite: 10 },
+    });
+    const init = vi.mocked(fetch).mock.calls[0]![1] as { body: string };
+    expect(JSON.parse(init.body).args).toEqual({ limite: 10 });
   });
 });

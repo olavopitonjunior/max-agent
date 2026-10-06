@@ -3,6 +3,7 @@ import { normalizeBrPhone } from "./phone";
 import { fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS } from "./http";
 import {
   CAMPOS_PROIBIDOS_AO_BROKER,
+  ESTADOS_DE_PROPOSTA,
   type ScopeQueryVerb,
   type ScopeSubject,
 } from "@/graph/scope-contract";
@@ -67,7 +68,7 @@ export async function consultarEscopo(params: {
           verb: params.verb,
           subject: params.subject,
           phone: e164,
-          args: params.args ?? {},
+          args: limparArgs(params.args, params.verb),
         }),
       },
       IMOBPRO_TIMEOUT_MS
@@ -94,6 +95,48 @@ export async function consultarEscopo(params: {
     );
     return null;
   }
+}
+
+/**
+ * Os argumentos do modelo, sem o que ele preencheu "por preencher".
+ *
+ * O nano manda o filtro opcional VAZIO em vez de omiti-lo
+ * (`{"estado":"","limite":10}`, 12 de 12 tentativas em 2026-10-06), e o
+ * `bodySchema` do servidor recusa `estado: ""` (`min(1)`) com 400 — o pedido
+ * inteiro cai e o Max responde "não consegui" para a pergunta mais básica.
+ * Vazio aqui significa "sem filtro", que é o que a pessoa pediu. Pelo mesmo
+ * motivo, `limite` que não é inteiro positivo (nem o "5" em texto) some (o servidor aplica o padrão).
+ *
+ * Só LIMPA: não inventa valor. A única checagem de domínio é a do `estado` de
+ * PROPOSTA: lá o servidor não recusa valor inventado ("todas", "pendente"),
+ * devolve lista vazia — e "você não tem propostas" seria mentira. Fora da
+ * lista, o filtro some e a pessoa recebe todas. O `estado` de negócio é nome
+ * de etapa (texto livre por org) e segue intocado.
+ */
+export function limparArgs(
+  args: Record<string, unknown> | undefined,
+  verb?: ScopeQueryVerb
+): Record<string, unknown> {
+  const limpos: Record<string, unknown> = {};
+  for (const [chave, valor] of Object.entries(args ?? {})) {
+    if (valor === null || valor === undefined) continue;
+    if (chave === "limite") {
+      if (Number.isInteger(valor) && (valor as number) > 0) limpos[chave] = valor;
+      continue;
+    }
+    if (typeof valor === "string") {
+      const t = valor.trim();
+      if (t) limpos[chave] = t;
+      continue;
+    }
+    limpos[chave] = valor;
+  }
+  if (verb?.startsWith("proposal.") && typeof limpos.estado === "string") {
+    const estado = limpos.estado.toLowerCase().replace(/\s+/g, "_");
+    if ((ESTADOS_DE_PROPOSTA as readonly string[]).includes(estado)) limpos.estado = estado;
+    else delete limpos.estado;
+  }
+  return limpos;
 }
 
 /** O `subject` que o servidor vai reconferir, derivado da identidade do turn. */

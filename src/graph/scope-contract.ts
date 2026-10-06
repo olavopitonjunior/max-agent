@@ -42,6 +42,32 @@ export const VERBOS_DE_LEITURA = [
 
 export type ScopeQueryVerb = (typeof VERBOS_DE_LEITURA)[number];
 
+/**
+ * Os status de `Proposal` — espelha o `ProposalStatus` de
+ * `contractmaker/apps/web/src/lib/proposals/status.ts`.
+ *
+ * Existe porque `Proposal.status` é `String` no banco, não enum: um `estado`
+ * inventado pelo modelo ("todas", "pendente") NÃO dá erro no servidor — vira
+ * `where.status = "todas"`, lista vazia, e o Max afirma "você não tem
+ * propostas". Filtro fora desta lista é descartado no cliente (`limparArgs`).
+ */
+export const ESTADOS_DE_PROPOSTA = [
+  "rascunho",
+  "aguardando_aprovacao",
+  "enviada",
+  "entregue",
+  "visualizada",
+  "assinada_proponente",
+  "aguardando_vendedor",
+  "completa",
+  "convertida",
+  "recusada_proponente",
+  "recusada_vendedor",
+  "expirada",
+  "cancelada",
+  "falha_envio",
+] as const;
+
 export interface ScopeQueryRequest {
   verb: ScopeQueryVerb;
   subject: ScopeSubject;

@@ -18,6 +18,7 @@ import {
   PENDING_TTL_MS,
   buscarNoRegistro,
   ferramentasDoTurno,
+  pedidoEmAberto,
   lerConfirmacao,
   podeEscrever,
   propostaExpirou,
@@ -67,7 +68,7 @@ import {
   textoSemLeituraDeMidia,
   TEXTO_ASSUNTO_BLOQUEADO,
 } from "./prompt";
-import { limitarTamanho, sanitizar } from "./compose";
+import { limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
 import {
   argsDaCriacao,
@@ -77,6 +78,19 @@ import {
   type ResultadoDeTool,
 } from "./despachante";
 import type { MapaDeReferencias } from "./referencias";
+import {
+  conduzirFluxo,
+  fluxoExpirou,
+  iniciarFluxo,
+  rebaixarFluxo,
+  SYSTEM_DA_EXTRACAO,
+  TOOL_EXTRAIR_PROPOSTA,
+  toolExtrairCampos,
+  type DepsDoFluxo,
+  type Fluxo,
+} from "./fluxos";
+import { executarAcao, type VerboDeAcao } from "@/lib/acao";
+import { subjectDe } from "@/lib/scope";
 import { chaveDePolitica } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
 import { SEM_ORG } from "@/lib/sem-org";
@@ -257,6 +271,18 @@ export const MaxState = Annotation.Root({
    * mais comum deste campo, e um `next ?? prev` a tornaria impossível.
    */
   pendingAction: Annotation<PendingAction | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+
+  /**
+   * O fluxo de criação em andamento (proposta ou negócio — `fluxos.ts`).
+   *
+   * ATRAVESSA turns de propósito, como `pendingAction`: a coleta de uma
+   * proposta leva várias mensagens. Por isso NÃO está no `RESET_DO_TURN`. O
+   * teto é o `FLUXO_TTL_MS` de inatividade, conferido no nó `conduzir`.
+   */
+  fluxo: Annotation<Fluxo | null>({
     reducer: (_prev, next) => next,
     default: () => null,
   }),
@@ -477,6 +503,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       halt: "desligado",
       pendingAction: null,
       restoDaResposta: null,
+      fluxo: rebaixarFluxo(state.fluxo),
       reply:
         "No momento estou indisponível. Fale com seu corretor por enquanto — " +
         "sua imobiliária já foi avisada.",
@@ -510,6 +537,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       // pendência que atravessa o turn vira escrita confirmada por engano.
       pendingAction: null,
       restoDaResposta: null,
+      fluxo: rebaixarFluxo(state.fluxo),
       reply: TEXTO_ASSUNTO_BLOQUEADO,
     };
   }
@@ -525,6 +553,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       halt: "pede_leitura_de_anexo",
       pendingAction: null,
       restoDaResposta: null,
+      fluxo: rebaixarFluxo(state.fluxo),
       reply: textoSemLeituraDeMidia(null),
     };
   }
@@ -638,6 +667,94 @@ async function continuar(state: MaxStateType): Promise<MaxUpdate> {
       { role: "user", content: state.inbound.text?.trim() || "" },
       { role: "assistant", content: texto },
     ],
+  };
+}
+
+/**
+ * As dependências do fluxo neste turn: o `scope-action` como ESTA pessoa
+ * (sujeito + telefone, reconferidos no servidor) e o extrator por ferramenta
+ * obrigatória. O consumo das extrações entra em `usage` do turn.
+ */
+function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
+  const orgId = state.identity.orgId;
+  const extrair = async (texto: string, tool: { name: string; description: string; parameters: Record<string, unknown> }) => {
+    try {
+      const r = await complete({
+        system: SYSTEM_DA_EXTRACAO,
+        messages: [{ role: "user", content: comoMensagemDoUsuario(texto) }],
+        model: state.model,
+        tools: [tool],
+        toolChoice: tool.name,
+        timeoutMs: LLM_SHORT_TIMEOUT_MS,
+      });
+      usage.push(r.usage);
+      void reportUsage(orgId, r.usage);
+      return r.toolCalls.find((c) => c.name === tool.name)?.args ?? {};
+    } catch (err) {
+      console.error("[fluxo] extração falhou:", err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  };
+  return {
+    acao: (verb, args, idempotencyKey) =>
+      executarAcao({
+        orgId,
+        rawPhone: state.inbound.fromPhone,
+        subject: subjectDe(state.identity),
+        verb: verb as VerboDeAcao,
+        args,
+        idempotencyKey,
+      }),
+    extrairProposta: async (texto) => extrair(texto, TOOL_EXTRAIR_PROPOSTA as never),
+    extrairCampos: async (texto, campos) =>
+      (await extrair(texto, toolExtrairCampos(campos))) as Record<string, string> | null,
+  };
+}
+
+/**
+ * Um turn com fluxo de criação em andamento. Responde por template e decide o
+ * passo seguinte; sem fluxo (ou vencido), passa adiante sem tocar em nada.
+ */
+async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
+  const atual = state.fluxo;
+  if (!atual) return {};
+  const agora = Date.now();
+  if (fluxoExpirou(atual, agora)) return { fluxo: null };
+
+  const userText = state.inbound.text?.trim() || "";
+  const usage: LlmUsage[] = [];
+  const passo = await conduzirFluxo(
+    atual,
+    {
+      texto: userText,
+      messageId: state.inbound.messageId,
+      policy: state.policy,
+      politicaIndisponivel: state.politicaIndisponivel,
+      agora,
+    },
+    depsDoFluxo(state, usage)
+  );
+  if (passo.liberar) {
+    // A mensagem não era do fluxo (pergunta, conversa): segue para o
+    // atendimento normal — sem "Anotado" falso. O fluxo fica, mas REBAIXADO:
+    // se a resposta do modelo terminar em pergunta, o "sim" a ela não pode
+    // criar nem enviar (achado N1 do code review).
+    return {
+      fluxo: rebaixarFluxo(atual),
+      ...(usage.length > 0 ? { usage } : {}),
+      toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
+    };
+  }
+  return {
+    fluxo: passo.fluxo,
+    messages: [
+      { role: "user", content: userText },
+      { role: "assistant", content: passo.reply },
+    ],
+    reply: passo.reply,
+    ...(usage.length > 0 ? { usage } : {}),
+    // Sem os DADOS: o que a pessoa ditou (CPF, telefone) não vai para o log.
+    toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
   };
 }
 
@@ -894,7 +1011,12 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    */
   const oferta =
     state.toolRounds === 0
-      ? ferramentasDoTurno({ policy: state.policy, texto: userText, identity: state.identity })
+      ? ferramentasDoTurno({
+          policy: state.policy,
+          texto: userText,
+          identity: state.identity,
+          textoAnterior: pedidoEmAberto(history),
+        })
       : { entradas: [], cortadas: 0 };
 
   if (oferta.cortadas > 0) {
@@ -986,27 +1108,58 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
 
     if (auth.ok) {
       // `auth.ok` garante tipo válido (`capabilityDaChamada` não foi null).
-      const args = argsDaCriacao(chamada.args)!;
-      const pending: PendingAction = {
-        kind: "criar_documento",
-        args,
-        askedAt: Date.now(),
-        askedForMessageId: state.inbound.messageId,
-      };
-      const texto = textoProposta(args);
+      // O pedido de criação abre um FLUXO (`fluxos.ts`), não uma pendência de
+      // um passo: proposta pede escolha + coleta + rascunho + assinatura, e
+      // negócio pede os obrigatórios do popup. Todo texto daqui é template.
+      const args = argsDaCriacao(chamada.args, displayName(state.identity))!;
+      // Já há um fluxo em andamento (a mensagem passou por ele e foi liberada):
+      // começar outro apagaria o rascunho em curso e os dados colhidos.
+      if (state.fluxo) {
+        const emAndamento =
+          state.fluxo.kind === "negocio"
+            ? "um formulário de negócio"
+            : state.fluxo.kind === "proposta"
+              ? "uma proposta"
+              : "um pedido de criação";
+        const texto =
+          `Você já tem ${emAndamento} em andamento comigo. Continue por aqui, ` +
+          "ou diga CANCELAR para começar outro.";
+        return {
+          ...daOferta,
+          messages: [
+            { role: "user", content: userText },
+            { role: "assistant", content: texto },
+          ],
+          reply: texto,
+          usage: usageDoTurn,
+          toolLog: [...trilha, { name: chamada.name, args: { tipo: args.tipo }, outcome: "fluxo_em_andamento" }],
+        };
+      }
+      const extra: LlmUsage[] = [];
+      const passo = await iniciarFluxo(
+        {
+          tipo: args.tipo,
+          natureza: args.natureza ?? (args.tipo === "proposta" ? undefined : args.tipo),
+          pedido: userText,
+          policy: state.policy,
+          agora: Date.now(),
+        },
+        depsDoFluxo(state, extra)
+      );
 
       return {
         ...daOferta,
-        pendingAction: pending,
+        pendingAction: null,
+        fluxo: passo.fluxo,
         messages: [
           { role: "user", content: userText },
-          { role: "assistant", content: texto },
+          { role: "assistant", content: passo.reply },
         ],
-        reply: texto,
-        usage: usageDoTurn,
+        reply: passo.reply,
+        usage: [...usageDoTurn, ...extra],
         toolLog: [
           ...trilha,
-          { name: chamada.name, args: chamada.args, outcome: "proposta" },
+          { name: chamada.name, args: { tipo: args.tipo }, outcome: passo.evento },
         ],
       };
     }
@@ -1025,7 +1178,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     // Política que não concede ESTE tipo (ex.: `form.create` sim,
     // `proposal.create` não): resposta de template, que diz que nada foi
     // criado. Deixar o modelo improvisar aqui era convite a "pronto, criei".
-    const args = argsDaCriacao(chamada.args);
+    const args = argsDaCriacao(chamada.args, displayName(state.identity));
     if (auth.motivo === "capability_negada" && args) {
       const texto = textoSemPermissao(args);
       return {
@@ -1192,9 +1345,19 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
     );
   }
 
+  // Antes do teto: afirmação de criação no texto livre é falsa por construção
+  // (escrita real sai por template) — ver `travarCriacaoFalsa`.
+  const trava = travarCriacaoFalsa(texto, {
+    houveLeitura: state.toolResults.some((r) => r.items !== null),
+    podeCriar: modoDeCriacao(state.identity, state.policy) === "disponivel",
+  });
+  if (trava.travou) {
+    console.warn(`[compose] afirmação de criação sem escrita em ${state.identity.orgId}`);
+  }
+
   // G6: o teto vale DEPOIS do sanitizador — cortar antes contaria linha que
   // ia cair de qualquer jeito. O resto fica guardado para o "quer ver?".
-  const final = limitarTamanho(texto);
+  const final = limitarTamanho(trava.texto);
 
   return {
     reply: final.texto,
@@ -1230,7 +1393,8 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
       system:
         "Resuma a conversa abaixo em no máximo 5 linhas, em português, " +
         "preservando o que foi PEDIDO, o que foi RESPONDIDO e o que ficou " +
-        "pendente. Não invente nada que não esteja no texto.",
+        "pendente. Não invente nada que não esteja no texto. Não copie CPF, " +
+        "telefone, e-mail nem número de documento.",
       messages: [
         {
           role: "user",
@@ -1275,7 +1439,12 @@ function afterGate(state: MaxStateType): "continuar" | "compose" {
 }
 
 /** O `continuar` mandou o resto? Então o turn está resolvido. */
-function afterContinuar(state: MaxStateType): "confirm" | "compose" {
+function afterContinuar(state: MaxStateType): "conduzir" | "compose" {
+  return state.reply ? "compose" : "conduzir";
+}
+
+/** O fluxo de criação respondeu? Então o turn está resolvido. */
+function afterConduzir(state: MaxStateType): "confirm" | "compose" {
   return state.reply ? "compose" : "confirm";
 }
 
@@ -1307,6 +1476,7 @@ export function buildGraph() {
   return new StateGraph(MaxState)
     .addNode("gate", gate)
     .addNode("continuar", continuar)
+    .addNode("conduzir", conduzir)
     .addNode("confirm", confirm)
     .addNode("retrieve", retrieve)
     .addNode("answer", answer)
@@ -1319,6 +1489,10 @@ export function buildGraph() {
       compose: "compose",
     })
     .addConditionalEdges("continuar", afterContinuar, {
+      conduzir: "conduzir",
+      compose: "compose",
+    })
+    .addConditionalEdges("conduzir", afterConduzir, {
       confirm: "confirm",
       compose: "compose",
     })
@@ -1398,7 +1572,8 @@ export interface TurnResult {
  * existe ATRAVÉS de turns.
  *
  * **Só `messages`, `summary`, `pendingAction`, `referencias` (G2, com TTL
- * próprio) e `restoDaResposta` (G6, um turn) atravessam turns de propósito.**
+ * próprio), `fluxo` (criação em andamento, TTL de inatividade) e
+ * `restoDaResposta` (G6, um turn) atravessam turns de propósito.**
  * Qualquer outro campo de `MaxState` pertence aqui.
  */
 export const RESET_DO_TURN = {
@@ -1782,8 +1957,15 @@ async function descartarPendencias(orgId: string, phone: string): Promise<void> 
     const atual = await app.getState(config);
     const v = atual.values as Partial<MaxStateType> | undefined;
     // Thread sem nada a descartar não ganha checkpoint novo à toa.
-    if (!v?.pendingAction && !v?.restoDaResposta) return;
-    await app.updateState(config, { pendingAction: null, restoDaResposta: null });
+    const fluxoRebaixado = rebaixarFluxo(v?.fluxo);
+    const fluxoMudou = JSON.stringify(fluxoRebaixado ?? null) !== JSON.stringify(v?.fluxo ?? null);
+    if (!v?.pendingAction && !v?.restoDaResposta && !fluxoMudou) return;
+    await app.updateState(config, {
+      pendingAction: null,
+      restoDaResposta: null,
+      // O fluxo fica, mas fora de qualquer etapa em que o próximo "sim" escreve.
+      ...(fluxoMudou ? { fluxo: fluxoRebaixado } : {}),
+    });
   } catch (err) {
     console.error(
       "[graph] não consegui descartar a pendência na saída antecipada:",

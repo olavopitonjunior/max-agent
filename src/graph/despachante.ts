@@ -225,18 +225,42 @@ async function executarLeitura(params: {
  * produz é o que a pessoa vai CONFIRMAR. Nome do cliente cortado em 80 e
  * argumentos fora do enum descartados — valor estranho não vira locação.
  */
-export function argsDaCriacao(args: Record<string, unknown>): PendingAction["args"] | null {
+export function argsDaCriacao(
+  args: Record<string, unknown>,
+  /** Quem está falando com o Max. O cliente nunca é ele. */
+  falante?: string | null
+): PendingAction["args"] | null {
   const tipo = lerTipo(args.tipo);
   if (!tipo) return null;
   const bruto = args.nome_cliente;
-  const nomeCliente =
+  const nome =
     typeof bruto === "string" && bruto.trim() ? bruto.trim().slice(0, 80) : undefined;
+  // Medido em 2026-10-06 (eval-conversa-criacao): o nano punha o nome de QUEM
+  // FALA como cliente ("Olavo") mesmo com "compradora Letícia" na mensagem — o
+  // nome da pessoa está no prompt e é o mais à mão. Nome que coincide com o do
+  // falante some: proposta sem nome é recuperável na tela; com o nome do
+  // corretor no lugar do comprador, não é percebida.
+  const nomeCliente = nome && !mesmaPessoa(nome, falante) ? nome : undefined;
   return {
     tipo,
     nomeCliente,
     natureza: lerNatureza(args.natureza),
     finalidade: lerFinalidade(args.finalidade),
   };
+}
+
+/**
+ * O nome dado é o do FALANTE? Todo token do nome precisa estar no nome dele:
+ * "Olavo" e "Olavo Piton" caem contra "Olavo Piton"; "Maria Souza" contra
+ * "Maria Silva" passa — xará é cliente legítimo (code review do #55).
+ */
+function mesmaPessoa(nome: string, falante?: string | null): boolean {
+  if (!falante) return false;
+  const tokens = (t: string) =>
+    t.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  const doFalante = new Set(tokens(falante));
+  const doNome = tokens(nome);
+  return doNome.length > 0 && doNome.every((t) => doFalante.has(t));
 }
 
 /**

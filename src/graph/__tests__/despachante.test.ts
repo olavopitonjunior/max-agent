@@ -22,6 +22,9 @@ vi.mock("@/lib/cm", async (orig) => ({
   criarFormularioVenda: vi.fn(),
 }));
 vi.mock("@/lib/llm", () => ({ complete: vi.fn(), DEFAULT_MODEL: "openai/gpt-5.4-nano" }));
+vi.mock("@/lib/acao", () => ({
+  executarAcao: vi.fn().mockResolvedValue({ status: 200, body: { campos: [], gerente: { obrigatorio: false } } }),
+}));
 
 const { autorizarChamada, autorizarPendencia, despacharLeituras, argsDaCriacao } = await import(
   "../despachante"
@@ -312,9 +315,10 @@ describe("no grafo: escrita pelo despachante", () => {
     expect(r.toolLog.map((t: { outcome: string }) => t.outcome)).toContain("capability_negada");
   });
 
-  it("formulário com form.create: vira pendência (o permitido)", async () => {
+  it("formulário com form.create: abre o fluxo de negócio (o permitido)", async () => {
     const r = await rodar("cria um formulário de venda", gerente, { tipo: "venda" });
-    expect(r.pendingAction?.args.tipo).toBe("venda");
+    expect(r.fluxo?.kind).toBe("negocio");
+    expect(r.pendingAction).toBeNull();
   });
 
   /**

@@ -28,6 +28,8 @@ vi.mock("@/lib/llm", () => ({
   complete: vi.fn(),
   DEFAULT_MODEL: "openai/gpt-5.4-nano",
 }));
+// O pedido de criação abre um FLUXO (`fluxos.ts`) que fala com o `scope-action`.
+vi.mock("@/lib/acao", () => ({ executarAcao: vi.fn() }));
 
 const { buildGraph } = await import("../graph");
 const { TOOL_PROPOR_FORM, PENDING_TTL_MS, lerConfirmacao, shouldOfferTools } =
@@ -42,6 +44,9 @@ const {
   ModuloDesligadoError,
 } = await import("@/lib/cm");
 const { complete } = await import("@/lib/llm");
+const { executarAcao } = await import("@/lib/acao");
+const { TEXTO_ESCOLHA } = await import("../fluxos");
+const acao = executarAcao as unknown as ReturnType<typeof vi.fn>;
 
 const profile = fetchProfile as unknown as ReturnType<typeof vi.fn>;
 const search = searchKnowledge as unknown as ReturnType<typeof vi.fn>;
@@ -178,21 +183,30 @@ beforeEach(() => {
 });
 
 describe("propor", () => {
-  it("chamada de ferramenta vira pendência e pergunta — sem criar nada", async () => {
+  it("pedido de formulário abre o fluxo de NEGÓCIO com os obrigatórios do popup — sem criar nada", async () => {
     llm.mockResolvedValue(
       llmChamaFerramenta({ tipo: "venda", nome_cliente: "João Silva" })
     );
+    acao.mockResolvedValue({
+      status: 200,
+      body: {
+        campos: [
+          { chave: "titleParts.endereco", rotulo: "Endereço do imóvel", obrigatorio: true },
+          { chave: "title", rotulo: "Título", obrigatorio: false },
+        ],
+        gerente: { obrigatorio: false },
+      },
+    });
 
     const s = await run("me manda um link de formulário pro João Silva");
 
     expect(criar).not.toHaveBeenCalled();
-    expect(s.pendingAction?.kind).toBe("criar_documento");
-    expect(s.pendingAction?.args.tipo).toBe("venda");
-    expect(s.pendingAction?.args.nomeCliente).toBe("João Silva");
-    expect(s.reply).toContain("João Silva");
-    // A pergunta ensina a palavra que confirma — sem isso o casamento estrito
-    // do matcher viraria armadilha.
-    expect(s.reply).toContain("SIM");
+    expect(s.pendingAction).toBeNull();
+    expect(acao).toHaveBeenCalledWith(expect.objectContaining({ verb: "form.options", args: { tipo: "venda" } }));
+    expect(s.fluxo?.kind).toBe("negocio");
+    // Só os OBRIGATÓRIOS: o título opcional não é perguntado.
+    expect(s.reply).toContain("Endereço do imóvel");
+    expect(s.reply).not.toContain("Título");
   });
 
   /**
@@ -211,13 +225,15 @@ describe("propor", () => {
     expect(s.reply).not.toContain("TEXTO INVENTADO");
   });
 
-  it("nome ausente propõe sem nome, não inventa", async () => {
-    llm.mockResolvedValue(llmChamaFerramenta({ tipo: "venda" }));
+  it("pedido de PROPOSTA começa pela escolha proposta × negócio (decisão de 06/10)", async () => {
+    llm.mockResolvedValue(llmChamaFerramenta({ tipo: "proposta" }));
 
-    const s = await run("preciso de um formulário novo");
+    const s = await run("pode gerar uma proposta pra mim?");
 
-    expect(s.pendingAction?.args.nomeCliente).toBeUndefined();
-    expect(s.reply).toContain("Confirma?");
+    expect(s.reply).toBe(TEXTO_ESCOLHA);
+    expect(s.fluxo?.kind).toBe("escolha");
+    expect(criarProposta).not.toHaveBeenCalled();
+    expect(acao).not.toHaveBeenCalled();
   });
 
   /**
