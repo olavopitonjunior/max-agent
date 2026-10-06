@@ -116,6 +116,8 @@ async function limpar() {
   await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [
     [
       "max_proposta_assinada",
+      // v2 aprovado sobrando de outro teste seria escolhido no lugar do v1.
+      "max_proposta_assinada_v2",
       "max_proposta_recusada",
       "max_proposta_expirada",
       "max_proposta_entregue",
