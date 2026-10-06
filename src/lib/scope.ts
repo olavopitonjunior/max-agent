@@ -3,6 +3,7 @@ import { normalizeBrPhone } from "./phone";
 import { fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS } from "./http";
 import {
   CAMPOS_PROIBIDOS_AO_BROKER,
+  ESTADOS_DE_PROPOSTA,
   type ScopeQueryVerb,
   type ScopeSubject,
 } from "@/graph/scope-contract";
@@ -67,7 +68,7 @@ export async function consultarEscopo(params: {
           verb: params.verb,
           subject: params.subject,
           phone: e164,
-          args: limparArgs(params.args),
+          args: limparArgs(params.args, params.verb),
         }),
       },
       IMOBPRO_TIMEOUT_MS
@@ -106,10 +107,16 @@ export async function consultarEscopo(params: {
  * Vazio aqui significa "sem filtro", que é o que a pessoa pediu. Pelo mesmo
  * motivo, `limite` que não é inteiro positivo (nem o "5" em texto) some (o servidor aplica o padrão).
  *
- * Só LIMPA: não inventa valor nem valida domínio. Valor de `estado` fora do
- * enum continua indo, e quem decide é o servidor.
+ * Só LIMPA: não inventa valor. A única checagem de domínio é a do `estado` de
+ * PROPOSTA: lá o servidor não recusa valor inventado ("todas", "pendente"),
+ * devolve lista vazia — e "você não tem propostas" seria mentira. Fora da
+ * lista, o filtro some e a pessoa recebe todas. O `estado` de negócio é nome
+ * de etapa (texto livre por org) e segue intocado.
  */
-export function limparArgs(args: Record<string, unknown> | undefined): Record<string, unknown> {
+export function limparArgs(
+  args: Record<string, unknown> | undefined,
+  verb?: ScopeQueryVerb
+): Record<string, unknown> {
   const limpos: Record<string, unknown> = {};
   for (const [chave, valor] of Object.entries(args ?? {})) {
     if (valor === null || valor === undefined) continue;
@@ -123,6 +130,11 @@ export function limparArgs(args: Record<string, unknown> | undefined): Record<st
       continue;
     }
     limpos[chave] = valor;
+  }
+  if (verb?.startsWith("proposal.") && typeof limpos.estado === "string") {
+    const estado = limpos.estado.toLowerCase().replace(/\s+/g, "_");
+    if ((ESTADOS_DE_PROPOSTA as readonly string[]).includes(estado)) limpos.estado = estado;
+    else delete limpos.estado;
   }
   return limpos;
 }

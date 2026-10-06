@@ -1,6 +1,7 @@
 import type { LlmTool } from "@/lib/llm";
 import type { Capability } from "./policy";
 import type { ScopeQueryVerb } from "./scope-contract";
+import { ESTADOS_DE_PROPOSTA } from "./scope-contract";
 import type { Candidate } from "@/lib/identity";
 
 /**
@@ -619,10 +620,8 @@ export const LISTAR_PROPOSTAS: ToolDef = {
         estado: {
           type: "string",
           description:
-            "Filtra por status, só quando a pessoa pedir um. Valores: rascunho, " +
-            "aguardando_aprovacao, enviada, entregue, visualizada, assinada_proponente, " +
-            "aguardando_vendedor, completa, convertida, recusada_proponente, " +
-            "recusada_vendedor, expirada, cancelada, falha_envio.",
+            "Filtra por status, só quando a pessoa pedir um. Valores: " +
+            `${ESTADOS_DE_PROPOSTA.join(", ")}.`,
         },
         limite: {
           type: "integer",

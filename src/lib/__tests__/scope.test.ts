@@ -180,9 +180,21 @@ describe("limparArgs — filtro vazio do modelo não derruba a leitura", () => {
     expect(limparArgs({ limite: 5 })).toEqual({ limite: 5 });
   });
 
-  it("não inventa nem valida domínio: estado fora do enum continua indo", () => {
+  it("estado de negócio é nome de etapa (texto livre): segue intocado", () => {
+    expect(limparArgs({ estado: "Em análise" }, "deal.list")).toEqual({ estado: "Em análise" });
     expect(limparArgs({ estado: "qualquer" })).toEqual({ estado: "qualquer" });
     expect(limparArgs(undefined)).toEqual({});
+  });
+
+  it("estado de PROPOSTA inventado some — senão a lista vazia vira \"você não tem propostas\"", () => {
+    expect(limparArgs({ estado: "todas", limite: 10 }, "proposal.list")).toEqual({ limite: 10 });
+    expect(limparArgs({ estado: "pendente" }, "proposal.list")).toEqual({});
+  });
+
+  it("estado de proposta válido passa, normalizado", () => {
+    expect(limparArgs({ estado: "Enviada" }, "proposal.list")).toEqual({ estado: "enviada" });
+    expect(limparArgs({ estado: "falha envio" }, "proposal.list")).toEqual({ estado: "falha_envio" });
+    expect(limparArgs({ estado: "expirada" }, "proposal.list")).toEqual({ estado: "expirada" });
   });
 
   it("o corpo enviado ao servidor já vai limpo", async () => {
