@@ -24,6 +24,7 @@
 import { query } from "./db";
 import { enqueue } from "./outbox";
 import { log } from "./log";
+import { destinoPermitido } from "./redirect";
 import { KINDS_COM_ACEITE, templatesDoKind } from "./templates/catalog";
 import type { InboundMessage } from "./transport";
 import { SEM_ORG } from "./sem-org";
@@ -33,6 +34,96 @@ export { KINDS_COM_ACEITE };
 
 /** Quanto tempo um OK ainda entrega uma mensagem guardada. */
 const VALIDADE_ACEITE_DIAS = 7;
+
+/**
+ * As 3 ações dos botões de proposta (`catalog.ts`, PR 3) — mesmo enum do
+ * `AcaoBotao`, repetido aqui como literais para não importar o catálogo só
+ * por um tipo. A ação de VERDADE (converter, recriar) é o PR 6: por ora só
+ * valida o clique e responde com texto fixo.
+ */
+const ACOES_VALIDAS = ["converter", "agora_nao", "recriar"] as const;
+type AcaoBotaoPayload = (typeof ACOES_VALIDAS)[number];
+
+/**
+ * `kind`s compatíveis com cada ação. Mora aqui, não no catálogo: o catálogo
+ * diz qual BOTÃO existe no template; quem pode responder a ele é regra do
+ * aceite — um `acao:<id>:converter` só vale se a linha é mesmo
+ * `proposal_completed` (ver ponto 4 do PR 3).
+ */
+const KINDS_DA_ACAO: Record<AcaoBotaoPayload, readonly string[]> = {
+  converter: ["proposal_completed"],
+  agora_nao: ["proposal_completed"],
+  recriar: ["proposal_refused", "proposal_expired"],
+};
+
+/**
+ * `acao:<rowId>:<ação>` → `{ rowId, acao }`, ou `null` se malformado ou com
+ * ação fora do enum — tratado como payload desconhecido (ignora, cai no
+ * caminho normal da mensagem, igual a hoje).
+ */
+function parsePayloadDeAcao(payload: string): { rowId: string; acao: AcaoBotaoPayload } | null {
+  const m = /^acao:([^:]+):([a-z_]+)$/.exec(payload);
+  if (!m) return null;
+  const [, rowId, acao] = m;
+  if (!(ACOES_VALIDAS as readonly string[]).includes(acao)) return null;
+  return { rowId, acao: acao as AcaoBotaoPayload };
+}
+
+/**
+ * Texto FIXO — nunca chama o modelo. A ação de verdade (converter/recriar)
+ * chega no PR 6; por ora só orienta pelo link absoluto da linha.
+ */
+function respostaDaAcao(acao: AcaoBotaoPayload, linkUrl: string | null): string {
+  if (acao === "agora_nao") return "Tudo bem. A proposta continua no sistema.";
+  const verbo = acao === "converter" ? "converter a proposta em negócio" : "recriar a proposta";
+  // O mesmo filtro do redirecionador `/r/<id>`: só link nosso (o /notify
+  // aceita `linkUrl` livre). Fora disso, ou nulo, a resposta sai sem link.
+  const link = destinoPermitido(linkUrl);
+  return link
+    ? `Para ${verbo}, abra a proposta pelo link: ${link.toString()}`
+    : `Para ${verbo}, abra a proposta no ImobPro.`;
+}
+
+/**
+ * Clique num botão de AÇÃO. Valida, na mesma regra do `ok:` (ver `liberar`):
+ * (a) a linha existe; (b) foi enviada a ESTE telefone; (c) o `kind` da linha
+ * é compatível com a ação; (d) dentro da mesma janela de validade do OK
+ * (`VALIDADE_ACEITE_DIAS`). Fora disso, resposta neutra fixa — igual não
+ * revela SE a linha existe, se é de outro telefone, ou se já venceu.
+ *
+ * É uma LEITURA: nada é marcado como consumido, então a reentrega do mesmo
+ * clique (webhook duplicado) responde sempre igual — idempotente de
+ * propósito, sem precisar de trava.
+ */
+async function responderAcao(
+  inbound: InboundMessage,
+  rowId: string,
+  acao: AcaoBotaoPayload
+): Promise<Interceptado> {
+  const linhas = await query<{ kind: string | null; link_url: string | null; org_id: string }>(
+    `SELECT kind, link_url, org_id FROM outbox
+      WHERE id = $1 AND phone = $2
+        AND status = 'sent' AND template_name IS NOT NULL
+        AND sent_at > now() - ($3 || ' days')::interval`,
+    [rowId, inbound.fromPhone, String(VALIDADE_ACEITE_DIAS)]
+  );
+  const linha = linhas[0];
+  const valido = !!linha?.kind && KINDS_DA_ACAO[acao].includes(linha.kind);
+  if (!valido) {
+    log.info("aceite.acao_sem_pendencia", { phone: inbound.fromPhone, acao, rowId });
+    return {
+      reply: "Esse botão não está mais disponível.",
+      orgId: null,
+      marca: "acao_sem_pendencia",
+    };
+  }
+  log.info(`aceite.acao_${acao}_pendente`, { phone: inbound.fromPhone, orgId: linha.org_id, rowId });
+  return {
+    reply: respostaDaAcao(acao, linha.link_url),
+    orgId: linha.org_id,
+    marca: `acao_${acao}_pendente`,
+  };
+}
 /** Quanto tempo depois do lembrete a frase "tenho uma dúvida" vale. */
 const VALIDADE_LEMBRETE_DIAS = 3;
 /** Quanto tempo a pessoa tem para escrever a dúvida depois do toque. */
@@ -493,6 +584,12 @@ export async function interceptar(inbound: InboundMessage): Promise<Interceptado
   }
   if (payload?.startsWith("duvida:")) {
     return abrirRepasse(inbound.fromPhone, payload.slice(7));
+  }
+  if (payload?.startsWith("acao:")) {
+    const parsed = parsePayloadDeAcao(payload);
+    // Malformado ou ação fora do enum: ignora, como hoje ignora payload
+    // desconhecido — segue para o caminho normal da mensagem.
+    if (parsed) return responderAcao(inbound, parsed.rowId, parsed.acao);
   }
 
   // 2. O botão digitado à mão — ANTES do repasse, senão a própria frase

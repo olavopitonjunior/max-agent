@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   CATALOGO,
+  botoesEmOrdem,
+  parametroObrigatorioFaltando,
   parametrosDoCorpo,
   templateDoKind,
+  templateUsavel,
   todosOsTemplates,
 } from "../templates/catalog";
 import { botoesDaLinha } from "../outbox";
@@ -40,12 +43,11 @@ describe("regras da Meta sobre os textos", () => {
     for (const t of todos) for (const e of t.exemplos) expect(e.trim()).not.toBe("");
   });
 
-  it("textos de botão dentro do limite da Meta (25 caracteres)", () => {
+  it("textos de botão dentro do limite da Meta (25 caracteres) — todos os botões, em qualquer variante", () => {
     for (const t of todos) {
-      const b = t.botao;
-      if (!b) continue;
-      expect(b.texto.length, t.name).toBeLessThanOrEqual(25);
-      if (b.tipo === "url_e_ok") expect(b.ok.length, t.name).toBeLessThanOrEqual(25);
+      for (const b of botoesEmOrdem(t.botao)) {
+        expect(b.texto.length, t.name).toBeLessThanOrEqual(25);
+      }
     }
   });
 });
@@ -64,6 +66,10 @@ describe("a régua do Olavo (01/10/2026)", () => {
         "manual_message",
         "manual_message_parte",
         "onboarding_pending",
+        "proposal_completed",
+        "proposal_delivered",
+        "proposal_expired",
+        "proposal_refused",
         "support_handoff",
         "survey_invite",
         "survey_invite_parte",
@@ -74,9 +80,8 @@ describe("a régua do Olavo (01/10/2026)", () => {
 
   it("nenhum texto, nome ou botão cita o nome do sistema", () => {
     for (const t of todosOsTemplates()) {
-      const tudo = [t.name, t.body, t.botao?.texto, t.botao?.tipo === "url_e_ok" ? t.botao.ok : ""]
-        .join(" ")
-        .toLowerCase();
+      const textosDoBotao = botoesEmOrdem(t.botao).map((b) => b.texto);
+      const tudo = [t.name, t.body, ...textosDoBotao].join(" ").toLowerCase();
       expect(tudo, t.name).not.toMatch(/imob\s*pro|imobpro/);
     }
   });
@@ -133,6 +138,70 @@ describe("botões", () => {
       { tipo: "quick_reply", payload: "duvida:r1" },
     ]);
     expect(botoesDaLinha(CATALOGO.contract_signed_parte, "r1")).toEqual([]);
+  });
+
+  /**
+   * Regressão: os botões antigos (`url`, `ok`, `url_e_ok`) continuam
+   * idênticos depois da extensão com os botões de AÇÃO.
+   */
+  it("regressão: ok/dúvida/url continuam exatamente como antes", () => {
+    expect(botoesEmOrdem(CATALOGO.manual_message.botao)).toEqual([
+      { tipo: "quick_reply", texto: "OK", prefixo: "ok" },
+    ]);
+    expect(botoesEmOrdem(CATALOGO.onboarding_pending.botao)).toEqual([
+      { tipo: "url", texto: "Continuar configuração" },
+      { tipo: "quick_reply", texto: "Tenho uma dúvida", prefixo: "duvida" },
+    ]);
+    expect(botoesEmOrdem(CATALOGO.form_completed.botao)).toEqual([
+      { tipo: "url", texto: "Abrir negócio" },
+    ]);
+  });
+
+  it("botão de AÇÃO: 2 respostas rápidas (proposal_completed)", () => {
+    expect(CATALOGO.proposal_completed.botao).toEqual({
+      tipo: "acoes",
+      acoes: [
+        { texto: "Converter em negócio", acao: "converter" },
+        { texto: "Agora não", acao: "agora_nao" },
+      ],
+    });
+    expect(botoesDaLinha(CATALOGO.proposal_completed, "r1")).toEqual([
+      { tipo: "quick_reply", payload: "acao:r1:converter" },
+      { tipo: "quick_reply", payload: "acao:r1:agora_nao" },
+    ]);
+  });
+
+  it("botão de AÇÃO + URL: URL primeiro (regra da Meta), ação depois (proposal_refused/expired)", () => {
+    for (const def of [CATALOGO.proposal_refused, CATALOGO.proposal_expired]) {
+      expect(def.botao).toEqual({
+        tipo: "acao_e_url",
+        acao: { texto: "Recriar proposta", acao: "recriar" },
+        urlTexto: "Abrir proposta",
+      });
+      expect(botoesDaLinha(def, "r1"), def.name).toEqual([
+        { tipo: "url", param: "r1" },
+        { tipo: "quick_reply", payload: "acao:r1:recriar" },
+      ]);
+    }
+  });
+
+  it("proposal_delivered só tem o botão de URL", () => {
+    expect(CATALOGO.proposal_delivered.botao).toEqual({ tipo: "url", texto: "Abrir proposta" });
+    expect(botoesDaLinha(CATALOGO.proposal_delivered, "r1")).toEqual([{ tipo: "url", param: "r1" }]);
+  });
+
+  it("submissão (templates-sync) e envio (botoesDaLinha) usam a MESMA ordem — fonte única: botoesEmOrdem", () => {
+    for (const def of [
+      CATALOGO.proposal_completed,
+      CATALOGO.proposal_refused,
+      CATALOGO.proposal_expired,
+      CATALOGO.proposal_delivered,
+    ]) {
+      const ordem = botoesEmOrdem(def.botao);
+      const tiposDoEnvio = botoesDaLinha(def, "r1").map((b) => b.tipo);
+      const tiposDaOrdem = ordem.map((b) => (b.tipo === "url" ? "url" : "quick_reply"));
+      expect(tiposDoEnvio, def.name).toEqual(tiposDaOrdem);
+    }
   });
 });
 
@@ -200,13 +269,17 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
     "manual_message_parte",
   ];
 
+  /** Só o `welcome` tem v4 (PR 3, 05/10/2026). */
+  const comV4 = ["welcome"];
+
   it("ordem de preferência: versão mais nova primeiro; os outros só v1", async () => {
     const { templatesDoKind } = await import("../templates/catalog");
     const comV3 = ["form_reminder", "form_reminder_parte", "onboarding_pending", "manual_message", "manual_message_parte"];
     for (const k of comV2) {
       const lista = templatesDoKind(k);
       const v1 = lista[lista.length - 1];
-      const esperado = comV3.includes(k) ? [`${v1.name}_v3`, `${v1.name}_v2`, v1.name] : [`${v1.name}_v2`, v1.name];
+      const sufixos = [...(comV4.includes(k) ? ["_v4"] : []), ...(comV3.includes(k) ? ["_v3"] : []), "_v2"];
+      const esperado = [...sufixos.map((suf) => `${v1.name}${suf}`), v1.name];
       expect(lista.map((d) => d.name), k).toEqual(esperado);
     }
     for (const k of ["contract_signed", "contract_signed_parte", "form_completed_parte", "survey_invite"]) {
@@ -215,18 +288,23 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
     expect(templatesDoKind("stage_change")).toEqual([]);
   });
 
-  it("toda versão tem as MESMAS variáveis (em qualquer ordem) e os MESMOS botões do v1 — o envio não muda", async () => {
-    const { templatesDoKind } = await import("../templates/catalog");
-    for (const k of comV2) {
-      const lista = templatesDoKind(k);
-      const v1 = lista[lista.length - 1];
-      for (const d of lista) {
-        const chave = (v: unknown) => JSON.stringify(v);
-        expect(d.vars.map(chave).sort(), d.name).toEqual(v1.vars.map(chave).sort());
-        expect(d.botao, d.name).toEqual(v1.botao);
+  it(
+    "toda versão tem as MESMAS variáveis (em qualquer ordem); botões iguais ao v1 — " +
+      "exceto o TEXTO do botão no v4 do welcome (\"Criar senha\", decisão do Olavo, 05/10/2026)",
+    async () => {
+      const { templatesDoKind } = await import("../templates/catalog");
+      for (const k of comV2) {
+        const lista = templatesDoKind(k);
+        const v1 = lista[lista.length - 1];
+        for (const d of lista) {
+          const chave = (v: unknown) => JSON.stringify(v);
+          expect(d.vars.map(chave).sort(), d.name).toEqual(v1.vars.map(chave).sort());
+          if (d.name.endsWith("_v4")) continue;
+          expect(d.botao, d.name).toEqual(v1.botao);
+        }
       }
     }
-  });
+  );
 
   it("v3 sem lembrete nem suspense — o que manteve os v2 em MARKETING", async () => {
     const { templatesDoKind } = await import("../templates/catalog");
@@ -243,5 +321,73 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
       for (const d of templatesDoKind(k).slice(0, -1))
         expect(d.body, d.name).not.toMatch(/Eu sou o Max|Se quiser saber|é só perguntar|avisa:|tem uma mensagem para você/i);
     }
+  });
+});
+
+describe("parâmetro obrigatório (PR 3 — proposal_*, 05/10/2026)", () => {
+  const base = { recipient_name: "Carlos", org_name: "RE/MAX Trio", title: "x" };
+
+  it("templates antigos não têm paramsObrigatorios — sempre usáveis, mesmo sem params", () => {
+    expect(CATALOGO.form_completed.paramsObrigatorios).toBeUndefined();
+    expect(templateUsavel(CATALOGO.form_completed, { ...base, params: null })).toBe(true);
+    expect(templateUsavel(CATALOGO.support_handoff, { ...base, params: null })).toBe(true);
+  });
+
+  it("proposal_completed: sem `proposta` não é usável; com `proposta`, é", () => {
+    expect(CATALOGO.proposal_completed.paramsObrigatorios).toEqual(["proposta"]);
+    expect(templateUsavel(CATALOGO.proposal_completed, { ...base, params: null })).toBe(false);
+    expect(templateUsavel(CATALOGO.proposal_completed, { ...base, params: { proposta: "" } })).toBe(false);
+    expect(templateUsavel(CATALOGO.proposal_completed, { ...base, params: { proposta: "  " } })).toBe(false);
+    expect(
+      templateUsavel(CATALOGO.proposal_completed, { ...base, params: { proposta: "PROP-1" } })
+    ).toBe(true);
+  });
+
+  it("proposal_refused/proposal_delivered: faltando `proposta` OU `quem`, não é usável", () => {
+    for (const def of [CATALOGO.proposal_refused, CATALOGO.proposal_delivered]) {
+      expect(def.paramsObrigatorios, def.name).toEqual(["proposta", "quem"]);
+      expect(templateUsavel(def, { ...base, params: { proposta: "PROP-1" } }), def.name).toBe(false);
+      expect(templateUsavel(def, { ...base, params: { quem: "o proprietário" } }), def.name).toBe(false);
+      expect(
+        templateUsavel(def, { ...base, params: { proposta: "PROP-1", quem: "o proprietário" } }),
+        def.name
+      ).toBe(true);
+    }
+  });
+
+  it("parametroObrigatorioFaltando aponta a PRIMEIRA chave que falta", () => {
+    expect(parametroObrigatorioFaltando(CATALOGO.proposal_refused, { ...base, params: null })).toBe(
+      "proposta"
+    );
+    expect(
+      parametroObrigatorioFaltando(CATALOGO.proposal_refused, { ...base, params: { proposta: "PROP-1" } })
+    ).toBe("quem");
+    expect(
+      parametroObrigatorioFaltando(CATALOGO.proposal_refused, {
+        ...base,
+        params: { proposta: "PROP-1", quem: "o proprietário" },
+      })
+    ).toBeNull();
+    expect(parametroObrigatorioFaltando(CATALOGO.form_completed, { ...base, params: null })).toBeNull();
+  });
+
+  it("presente, os valores certos saem na ordem de {{1}}, {{2}}…", () => {
+    expect(
+      parametrosDoCorpo(CATALOGO.proposal_completed, {
+        recipient_name: "Carlos Souza",
+        org_name: "RE/MAX Trio",
+        title: "x",
+        params: { proposta: "PROP-0042 Apto Rua das Flores" },
+      })
+    ).toEqual(["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio"]);
+
+    expect(
+      parametrosDoCorpo(CATALOGO.proposal_refused, {
+        recipient_name: "Carlos Souza",
+        org_name: "RE/MAX Trio",
+        title: "x",
+        params: { proposta: "PROP-0042 Apto Rua das Flores", quem: "pelo proprietário" },
+      })
+    ).toEqual(["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio", "pelo proprietário"]);
   });
 });
