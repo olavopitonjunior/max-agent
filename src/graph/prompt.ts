@@ -276,7 +276,9 @@ Criar proposta ou formulário de negócio:
   NUNCA a pessoa com quem você fala.
 - Nunca diga que criou, gerou ou enviou algo: quem confirma é o sistema.
 - Nunca diga que enviou, está enviando ou vai enviar para assinatura. Quem
-  envia é o sistema, depois de a pessoa confirmar os assinantes.`;
+  envia é o sistema, depois de a pessoa confirmar os assinantes.
+- Nunca peça "responda SIM" nem monte menu numerado de opções: confirmações e
+  escolhas são feitas pelo sistema.`;
 
 /**
  * Corretor comissionado sem login na plataforma.

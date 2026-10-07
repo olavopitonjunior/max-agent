@@ -148,6 +148,21 @@ describe("fluxo no grafo", () => {
     expect(acao.mock.calls.map((c) => c[0].verb)).not.toContain("proposal.send");
   });
 
+  it("prod 07/10 16:34: escolha 1/2 aberta + 'Envie essa da Letícia' vai ao ENVIO, não à criação", async () => {
+    acao.mockImplementation(async (p: { verb: string }) =>
+      p.verb === "proposal.list"
+        ? { status: 200, body: { items: [{ id: "p1", codigo: "PROP-2026-0001", titulo: "Proposta — Letícia Gonçalves", estado: "Rascunho" }] } }
+        : { status: 200, body: { metodos: [{ valor: "email", rotulo: "E-mail" }, { valor: "whatsapp", rotulo: "WhatsApp" }], signatarios: [{ nome: "Letícia Gonçalves", papel: "proponente" }] } }
+    );
+    const s = await run("Envie essa da Letícia", { fluxo: { kind: "escolha", atualizadoEm: Date.now() } });
+    expect(llm).not.toHaveBeenCalled();
+    expect(s.reply).toContain("Retomando a proposta PROP-2026-0001");
+    expect(s.fluxo).toMatchObject({ kind: "proposta", propostaId: "p1", etapa: "metodo" });
+    const verbos = acao.mock.calls.map((c) => c[0].verb);
+    expect(verbos).not.toContain("form.create");
+    expect(verbos).not.toContain("proposal.send");
+  });
+
   it("fluxo vencido é descartado e o turn segue normal", async () => {
     llm.mockResolvedValue({ text: "Oi! Como posso ajudar?", toolCalls: [], usage: uso });
     const s = await run("oi", { fluxo: { kind: "escolha", atualizadoEm: Date.now() - 31 * 60 * 1000 } });

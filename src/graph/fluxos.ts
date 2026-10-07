@@ -128,7 +128,7 @@ export type Fluxo =
       kind: "proposta";
       etapa: "natureza" | "coleta" | "revisao" | "ajustes" | "revisao_ajuste" | "metodo" | "envio" | "selecao_envio";
       /** Rascunhos da pessoa quando ela pediu envio sem dizer qual (`retomarEnvio`). */
-      candidatos?: { id: string; codigo?: string }[];
+      candidatos?: { id: string; codigo?: string; titulo?: string }[];
       natureza?: "venda" | "locacao";
       dados: DadosDaProposta;
       pedido?: string;
@@ -176,7 +176,7 @@ export interface ContextoDoTurno {
  */
 export type PassoDoFluxo =
   | { reply: string; fluxo: Fluxo | null; evento: string; liberar?: false }
-  | { liberar: true; fluxo: Fluxo; evento: string; reply?: undefined };
+  | { liberar: true; fluxo: Fluxo | null; evento: string; reply?: undefined };
 
 // ─── Textos (templates) ───────────────────────────────────────────────────
 
@@ -547,18 +547,104 @@ const TEXTO_RESOLVER_ANTES =
 
 // ─── Pedido de envio fora do fluxo ──────────────────────────────────────────
 
-/** Só forma de PEDIDO (imperativo/infinitivo): "enviou"/"enviaram"/"seguro" não. */
-const PEDE_ENVIO =
-  /\b(envi(a|e|ar)|mand(a|e|ar)|dispar(a|e|ar)|encaminh(a|e|ar)|segue|seguir)\b[^.?!]{0,40}\bassinatura\b/;
+/** Verbo de envio no IMPERATIVO/infinitivo/substantivo, com "re" opcional ("reenvia"). */
+const VERBO_ENVIO = String.raw`(re)?(envi(a|e|ar|o)|mand(a|e|ar)|dispar(a|e|ar|o)|encaminh(a|e|ar)|segue|seguir)`;
+/** "manda pra assinatura", "reenvia para assinatura". */
+/** Só verbo de COMANDO aqui: "o envio para assinatura falhou" é relato. */
+const VERBO_COMANDO = String.raw`(re)?(envi(a|e|ar)|mand(a|e|ar)|dispar(a|e|ar)|encaminh(a|e|ar)|segue|seguir)`;
+const PEDE_ENVIO = new RegExp(String.raw`\b${VERBO_COMANDO}\b[^.?!]{0,40}\bassinatura\b`);
+/** "envie essa", "envio da proposta", "manda o rascunho" — o OBJETO colado ao verbo. */
+const PEDE_ENVIO_DA_PROPOSTA = new RegExp(
+  String.raw`\b${VERBO_ENVIO}\s+((a|o|essa|esta|da|do)\s+)?(proposta|essa|esta|ela|rascunho)\b`
+);
+/** A mensagem inteira é o pedido: "pode enviar", "envie novamente". */
+const SO_ENVIO = new RegExp(String.raw`^((sim|ok|ja)[,\s]+)?(pode\s+)?${VERBO_ENVIO}(\s+(novamente|de novo|agora|ela|essa|a proposta))?$`);
 /** Pergunta sobre o processo, no começo: "como envio…", "quando vai pra assinatura". */
 const PERGUNTA_DE_PROCESSO = /^(como|quando|onde|qual|quais|quanto|por que|o que)\b/;
+/** Criação ou pedido de LINK (formulário/ficha/cadastro) nunca é envio de proposta. */
+const E_CRIACAO = /\b(uma|nova|novo|um|outra)\s+(proposta|formulario|ficha)\b|\b(link|formulario|ficha|cadastro)\b/;
+/** Relato ou intenção ("me manda o telefone", "vou enviar depois", "já fiz o envio") — só para a regra do OBJETO. */
+const RELATO = /^(me|vou|ja|eu)\b/;
+/** Negação colada ao verbo: "não envie", "ainda não manda". */
+const NEGACAO = /\bnao\s+(re)?(envi|mand|dispar|encaminh)/;
 
-/** "pode enviar para assinatura", "manda pra assinatura", "segue para assinatura". */
+/**
+ * Pedido de ENVIO de uma proposta existente. Prod 07/10: "Envie essa da
+ * Letícia" e "Tente agora o envio da proposta novamente" viraram CRIAÇÃO. Do
+ * lado oposto (code review): "me manda o telefone dela", "ainda não envie a
+ * proposta" não podem sequestrar o turn.
+ */
 export function pedeEnvio(texto: string): boolean {
   if (texto.includes("?")) return false;
   const t = normalizar(texto);
-  if (/^nao\b/.test(t)) return false;
-  return PEDE_ENVIO.test(t) && !PERGUNTA_DE_PROCESSO.test(t);
+  if (NEGACAO.test(t) || PERGUNTA_DE_PROCESSO.test(t) || E_CRIACAO.test(t)) return false;
+  if (PEDE_ENVIO.test(t) || SO_ENVIO.test(t)) return true;
+  return !RELATO.test(t) && PEDE_ENVIO_DA_PROPOSTA.test(t);
+}
+
+const STOP = new Set([
+  "proposta", "essa", "esta", "ela", "dela", "rascunho", "assinatura", "agora", "novamente", "favor",
+  "whatsapp", "email", "e-mail", "mail", "novo", "mim", "venda", "locacao", "aluguel", "max", "sim", "selfie",
+]);
+
+/**
+ * O que a pessoa CITOU para escolher o rascunho: nomes (palavra com maiúscula
+ * fora do começo, ou depois de "da/do/de/pra/para") e códigos/números
+ * ("PROP-2026-0002", "0002"). Sem citação, `null`.
+ */
+export function citacaoDoRascunho(texto: string): string[] | null {
+  const palavras = texto.split(/\s+/).filter(Boolean);
+  const citados = new Set<string>();
+  palavras.forEach((p, i) => {
+    const limpa = p.replace(/[^\p{L}\p{N}-]/gu, "");
+    const n = normalizar(limpa);
+    if (!n || STOP.has(n)) return;
+    const anterior = normalizar(palavras[i - 1] ?? "");
+    const ehCodigo = /\d{3,}/.test(n);
+    const ehNome = (i > 0 && /^\p{Lu}/u.test(limpa) && n.length >= 3) || (/^(da|do|de|pra|para)$/.test(anterior) && n.length >= 3);
+    if (ehCodigo || ehNome) citados.add(n);
+  });
+  return citados.size > 0 ? [...citados] : null;
+}
+
+/** Rascunhos que batem com a citação. `citou` diz se havia o que procurar. */
+export function filtrarPorCitacao<T extends { titulo?: string; codigo?: string }>(
+  texto: string,
+  itens: T[]
+): { itens: T[]; citou: string[] | null } {
+  const citou = citacaoDoRascunho(texto);
+  if (!citou) return { itens, citou: null };
+  const achados = itens.filter((i) => {
+    const alvo = normalizar(`${i.titulo ?? ""} ${i.codigo ?? ""}`);
+    return citou.some((w) => (/\d/.test(w) ? alvo.includes(w) : new RegExp(`(^|[^a-z0-9])${w}($|[^a-z0-9])`).test(alvo)));
+  });
+  return { itens: achados, citou };
+}
+
+function rotuloDoRascunho(x: { codigo?: string; titulo?: string }): string {
+  return [x.codigo ?? "(sem código)", x.titulo].filter(Boolean).join(" — ");
+}
+
+function selecaoDeRascunhos(
+  rascunhos: { id: string; codigo?: string; titulo?: string }[],
+  cabeca: string,
+  agora: number
+): Extract<PassoDoFluxo, { reply: string }> {
+  const lista = rascunhos
+    .slice(0, 5)
+    .map((x, i) => `${i + 1}. ${rotuloDoRascunho(x)}`)
+    .join("\n");
+  return {
+    reply: `${cabeca}\n${lista}\n\nResponda com o número.`,
+    fluxo: {
+      kind: "proposta",
+      etapa: "selecao_envio",
+      dados: {},
+      candidatos: rascunhos.slice(0, 5).map((x) => ({ id: x.id, codigo: x.codigo, titulo: x.titulo })),
+      atualizadoEm: agora,
+    },
+    evento: "envio_selecao",
+  };
 }
 
 /**
@@ -584,10 +670,26 @@ export async function retomarEnvio(
   }
   const r = await deps.acao("proposal.list", {});
   if (!r || r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: "falha_proposal_list" };
-  const items = (Array.isArray(r.body.items) ? r.body.items : []) as { id?: unknown; codigo?: unknown; estado?: unknown }[];
-  const rascunhos = items.filter(
+  const items = (Array.isArray(r.body.items) ? r.body.items : []) as {
+    id?: unknown;
+    codigo?: unknown;
+    titulo?: unknown;
+    estado?: unknown;
+  }[];
+  const todos = items.filter(
     (i) => typeof i.id === "string" && typeof i.estado === "string" && normalizar(i.estado).startsWith("rascunho")
-  ) as { id: string; codigo?: string }[];
+  ) as { id: string; codigo?: string; titulo?: string }[];
+  const filtro = filtrarPorCitacao(ctx.texto, todos);
+  if (filtro.citou && filtro.itens.length === 0 && todos.length > 0) {
+    // Citou alguém que não tem rascunho: NUNCA cai no rascunho de outra pessoa
+    // (code review: "envie a da Maria" com só a da Letícia enviaria a errada).
+    return selecaoDeRascunhos(
+      todos,
+      `Não achei rascunho de "${filtro.citou.join(" ")}". Os seus rascunhos mais recentes:`,
+      ctx.agora
+    );
+  }
+  const rascunhos = filtro.citou ? filtro.itens : todos;
   if (rascunhos.length === 0) {
     return {
       reply:
@@ -598,21 +700,7 @@ export async function retomarEnvio(
     };
   }
   if (rascunhos.length > 1) {
-    const lista = rascunhos
-      .slice(0, 5)
-      .map((x, i) => `${i + 1}. ${x.codigo ?? "(sem código)"}`)
-      .join("\n");
-    return {
-      reply: `Você tem mais de uma proposta em rascunho (as mais recentes). Qual devo enviar?\n${lista}\n\nResponda com o número ou o código.`,
-      fluxo: {
-        kind: "proposta",
-        etapa: "selecao_envio",
-        dados: {},
-        candidatos: rascunhos.slice(0, 5).map((x) => ({ id: x.id, codigo: x.codigo })),
-        atualizadoEm: ctx.agora,
-      },
-      evento: "envio_selecao",
-    };
+    return selecaoDeRascunhos(rascunhos, "Você tem mais de uma proposta em rascunho (as mais recentes). Qual devo enviar?", ctx.agora);
   }
   const alvo = rascunhos[0]!;
   const chave =
@@ -626,7 +714,7 @@ export async function retomarEnvio(
   )) as Extract<PassoDoFluxo, { reply: string }>;
   // Diz QUAL rascunho foi retomado — a pessoa confere antes de qualquer "sim".
   return alvo.codigo && passo.fluxo
-    ? { ...passo, reply: `Retomando a proposta ${alvo.codigo}.\n${passo.reply}` }
+    ? { ...passo, reply: `Retomando a proposta ${rotuloDoRascunho(alvo)}.\n${passo.reply}` }
     : passo;
 }
 
@@ -758,7 +846,9 @@ export async function conduzirFluxo(
 
   if (fluxo.kind === "escolha") {
     const escolha = lerEscolha(ctx.texto);
-    if (!escolha) return { liberar: true, fluxo, evento: "escolha_liberada" };
+    // Pergunta de 1/2 sem resposta: ENCERRA. Pendurada, ela capturava um "2"
+    // dito minutos depois para outra coisa e criava um formulário (prod 07/10).
+    if (!escolha) return { liberar: true, fluxo: null, evento: "escolha_encerrada" };
     if (escolha === "proposta") return iniciarProposta(fluxo.natureza, fluxo.pedido, agora, deps);
     const tipo = fluxo.natureza ?? lerNatureza(ctx.texto) ?? undefined;
     if (!tipo) {
@@ -845,7 +935,7 @@ async function conduzirNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: Deps
   const agora = ctx.agora;
   if (f.etapa === "tipo" || !f.tipo) {
     const tipo = lerNatureza(ctx.texto);
-    if (!tipo) return { liberar: true, fluxo: f, evento: "tipo_liberado" };
+    if (!tipo) return { liberar: true, fluxo: null, evento: "tipo_encerrado" };
     return carregarCamposDoNegocio(tipo, agora, deps);
   }
 
@@ -933,15 +1023,15 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   if (f.etapa === "selecao_envio") {
     const n = /^(\d)$/.exec(normalizar(ctx.texto));
-    const t = normalizar(ctx.texto);
+    const porCitacao = filtrarPorCitacao(ctx.texto, f.candidatos ?? []);
     const escolhido = n
       ? f.candidatos?.[Number(n[1]) - 1]
-      : f.candidatos?.find((c) => {
-          if (!c.codigo) return false;
-          const alvo = normalizar(c.codigo).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          return new RegExp(`(^|[^\\w-])${alvo}($|[^\\w-])`).test(t);
-        });
-    if (!escolhido) return { liberar: true, fluxo: f, evento: "selecao_liberada" };
+      : porCitacao.citou && porCitacao.itens.length === 1
+        ? porCitacao.itens[0]
+        : undefined;
+    // Sem escolha legível: ENCERRA — pendurada, a lista capturaria um número
+    // dito depois para outra coisa (mesmo padrão da escolha 1/2).
+    if (!escolhido) return { liberar: true, fluxo: null, evento: "selecao_encerrada" };
     return oferecerMetodos(
       { ...f, etapa: "ajustes", propostaId: escolhido.id, codigo: escolhido.codigo, candidatos: undefined, atualizadoEm: agora },
       ctx,
@@ -951,7 +1041,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   if (f.etapa === "natureza" || (!f.natureza && !f.propostaId)) {
     const natureza = lerNatureza(ctx.texto);
-    if (!natureza) return { liberar: true, fluxo: f, evento: "natureza_liberada" };
+    if (!natureza) return { liberar: true, fluxo: null, evento: "natureza_encerrada" };
     return iniciarProposta(natureza, f.pedido, agora, deps);
   }
 
@@ -970,11 +1060,11 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   // Ajuste ainda não aplicado no servidor: o OK volta ao resumo do ajuste —
   // seguir para a assinatura enviaria o rascunho VELHO.
-  if (f.etapa === "ajustes" && f.ajustePendente && (resposta !== "nenhum" || pedeEnvio(ctx.texto))) {
+  if (f.etapa === "ajustes" && f.ajustePendente && resposta !== "nenhum") {
     return { reply: resumoDoAjuste(f), fluxo: { ...f, etapa: "revisao_ajuste", atualizadoEm: agora }, evento: "proposta_revisao_ajuste" };
   }
   // Depois do rascunho: "ok/sim/não" = nada a ajustar → assinatura.
-  if (f.etapa === "ajustes" && (resposta !== "nenhum" || pedeEnvio(ctx.texto))) return oferecerMetodos(f, ctx, deps);
+  if (f.etapa === "ajustes" && resposta !== "nenhum") return oferecerMetodos(f, ctx, deps);
 
   // "sim" na coleta com tudo preenchido = quer ver o resumo de novo (depois de
   // uma interrupção ou de uma pergunta no meio). Mostra; não escreve.
@@ -982,23 +1072,14 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     return { reply: resumoDaProposta(f), fluxo: { ...f, etapa: "revisao", atualizadoEm: agora }, evento: "proposta_revisao" };
   }
 
-  if (f.etapa === "metodo" && pedeEnvio(ctx.texto)) {
+  if (f.etapa === "metodo" && !lerMetodo(ctx.texto, f.metodos ?? []) && pedeEnvio(ctx.texto)) {
     return { reply: textoMetodos(f.metodos ?? []), fluxo: { ...f, atualizadoEm: agora }, evento: "metodo_repetido" };
   }
-  if (f.etapa === "envio" && pedeEnvio(ctx.texto)) {
+  if (f.etapa === "envio" && resposta !== "sim" && pedeEnvio(ctx.texto)) {
     // Pedido de envio NÃO é o "sim": mostra de novo quem assina e o custo.
     return { reply: textoEnvio(f), fluxo: { ...f, atualizadoEm: agora }, evento: "envio_repetido" };
   }
-  if (!f.propostaId && (f.etapa === "coleta" || f.etapa === "revisao") && pedeEnvio(ctx.texto)) {
-    const falta = faltandoNaProposta(f.dados);
-    return {
-      reply: falta.length
-        ? `Ainda não há rascunho para enviar. Falta: ${falta.join("; ")}.`
-        : `Ainda não há rascunho para enviar.\n\n${resumoDaProposta(f)}`,
-      fluxo: { ...f, etapa: falta.length ? "coleta" : "revisao", atualizadoEm: agora },
-      evento: "envio_sem_rascunho",
-    };
-  }
+
 
   if (f.etapa === "metodo") {
     const metodo = lerMetodo(ctx.texto, f.metodos ?? []);
@@ -1023,6 +1104,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // rascunho — extrair e mandar `proposal.update` sobrescreveria uma locação
   // com o schema de venda. Ajuste desse rascunho é pela tela.
   if (f.propostaId && !f.natureza) {
+    if (pedeEnvio(ctx.texto)) return oferecerMetodos(f, ctx, deps);
     const pareceAjuste = /\d|\b(valor|comprador|inquilino|vendedor|endereco|imovel|cpf|telefone|email|sinal|pagamento|comissao|matricula)\b/.test(
       normalizar(ctx.texto)
     );
@@ -1042,7 +1124,26 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   const dados = mesclarDados(f.dados, sanearDados(extraido));
   // Nada novo nesta mensagem: não é do fluxo (pergunta, conversa) — libera, e
   // nunca diz "Anotado" sem ter anotado (achado B5). Nenhuma escrita (B1).
-  if (igual(dados, f.dados)) return { liberar: true, fluxo: f, evento: "proposta_liberada" };
+  if (igual(dados, f.dados)) {
+    // Mensagem sem dado novo: aí sim um pedido de envio vale (com dado novo, o
+    // ajuste vem antes — "corrige o e-mail dela e manda" não perde a correção).
+    if (pedeEnvio(ctx.texto)) {
+      if (f.propostaId) {
+        return f.ajustePendente
+          ? { reply: resumoDoAjuste(f), fluxo: { ...f, etapa: "revisao_ajuste", atualizadoEm: agora }, evento: "proposta_revisao_ajuste" }
+          : oferecerMetodos(f, ctx, deps);
+      }
+      const falta = faltandoNaProposta(f.dados);
+      return {
+        reply: falta.length
+          ? `Ainda não há rascunho para enviar. Falta: ${falta.join("; ")}.`
+          : `Ainda não há rascunho para enviar.\n\n${resumoDaProposta(f)}`,
+        fluxo: { ...f, etapa: falta.length ? "coleta" : "revisao", atualizadoEm: agora },
+        evento: "envio_sem_rascunho",
+      };
+    }
+    return { liberar: true, fluxo: f, evento: "proposta_liberada" };
+  }
 
   // Dado mudou: o "sim" anterior (e a chave dele) não vale para o resumo novo.
   const g: FluxoProposta = { ...f, dados, chave: undefined, atualizadoEm: agora };
