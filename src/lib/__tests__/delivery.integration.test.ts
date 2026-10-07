@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vites
 const hasDb = Boolean(process.env.DATABASE_URL);
 const d = hasDb ? describe : describe.skip;
 
-const { applyStatusCallback, reconcile, mapZapiStatus } = await import("../delivery");
+const { applyFalhaDeEnvio, applyStatusCallback, reconcile, mapZapiStatus } = await import("../delivery");
 const { query, db } = await import("../db");
 
 const MID = "PROV-MSG-1";
@@ -147,6 +147,36 @@ d("entrega", () => {
       [id]
     );
     expect(r[0].reply_delivery_status).toBe("read");
+  });
+
+  it("resposta falha não regride para sent tardio e pode subir para delivered/read", async () => {
+    const id = crypto.randomUUID();
+    const replyId = `reply-${id}`;
+    await query(
+      `INSERT INTO inbound_queue (id, message_id, from_phone, kind, status, reply_message_id)
+       VALUES ($1, $2, '5511900000088', 'text', 'done', $3)`,
+      [id, `m-${id}`, replyId]
+    );
+    const estado = async () => (await query<{
+      status: string; reply_delivery_status: string | null; last_error: string | null;
+    }>(
+      `SELECT status, reply_delivery_status, last_error FROM inbound_queue WHERE id = $1`,
+      [id]
+    ))[0];
+
+    expect(await applyFalhaDeEnvio({ messageId: replyId, code: 131049, title: "Meta chose not to deliver" })).toBe(1);
+    expect(await estado()).toMatchObject({ status: "done", reply_delivery_status: "failed" });
+    expect((await estado()).last_error).toContain("#131049");
+
+    expect((await applyStatusCallback({ status: "sent", messageIds: [replyId], phone: null, momment: null })).replies).toBe(0);
+    expect((await estado()).reply_delivery_status).toBe("failed");
+
+    expect((await applyStatusCallback({ status: "delivered", messageIds: [replyId], phone: null, momment: null })).replies).toBe(1);
+    expect((await estado()).reply_delivery_status).toBe("delivered");
+    expect((await applyStatusCallback({ status: "read", messageIds: [replyId], phone: null, momment: null })).replies).toBe(1);
+    expect((await estado()).reply_delivery_status).toBe("read");
+    expect(await applyFalhaDeEnvio({ messageId: replyId, code: 131049, title: "late failure" })).toBe(0);
+    expect((await estado()).reply_delivery_status).toBe("read");
   });
 
   it("SENT sem RECEIVED também vira unconfirmed — número bloqueado não escapa", async () => {

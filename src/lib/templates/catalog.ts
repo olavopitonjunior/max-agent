@@ -285,6 +285,24 @@ export const CATALOGO: Record<string, TemplateDef> = {
     { tipo: "acoes", acoes: [CONVERTER, AGORA_NAO] },
     ["proposta"]
   ),
+  // Retorno solicitado em 07/10/2026. Texto preparado para aprovação do
+  // operador antes de templates-sync --apply; catálogo não submete à Meta.
+  proposal_sent: t(
+    "max_proposta_enviada",
+    "Olá, {{1}}! A proposta {{2}}, da {{3}}, foi enviada para assinatura. Acompanhe o andamento pelo botão abaixo.",
+    [NOME, PROPOSTA, ORG],
+    ["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio"],
+    { tipo: "url", texto: "Abrir proposta" },
+    ["proposta"]
+  ),
+  proposal_signed_proponente: t(
+    "max_proposta_assinada_proponente",
+    "Olá, {{1}}! O proponente assinou a proposta {{2}}, da {{3}}. A assinatura está registrada; consulte os próximos passos pelo botão abaixo.",
+    [NOME, PROPOSTA, ORG],
+    ["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio"],
+    { tipo: "url", texto: "Abrir proposta" },
+    ["proposta"]
+  ),
   // {{4}} vem com a preposição contraída ("pelo proponente"/"pelo
   // proprietário") — decisão do Olavo, 05/10/2026.
   proposal_refused: t(
@@ -314,6 +332,10 @@ export const CATALOGO: Record<string, TemplateDef> = {
     ["proposta", "quem"]
   ),
 };
+
+// Sem vendedor cadastrado, a assinatura do proponente NÃO significa que
+// todos assinaram. O mesmo fato usa o template parcial, nunca completed.
+CATALOGO.proposal_awaiting_decision = CATALOGO.proposal_signed_proponente;
 
 /**
  * Kinds cujo texto (`outbox.body`) só é entregue depois do OK — quando saem

@@ -33,7 +33,7 @@ describe("classificarMeta — o CANAL recusando", () => {
    * classificado como canal pararia todas as notificações por causa de uma.
    */
   it("erro de mensagem, limite e desconhecido NÃO são inoperância", () => {
-    for (const c of [131047, 131026, 132001, 130429, 131056, 131000, 1, 100]) {
+    for (const c of [131047, 131026, 132001, 130429, 131050, 131064, 131056, 131000, 1, 100]) {
       expect(classificarMeta(c)).toBeNull();
     }
     expect(classificarMeta(null)).toBeNull();
@@ -41,9 +41,14 @@ describe("classificarMeta — o CANAL recusando", () => {
 });
 
 describe("falhaDaMensagemMeta", () => {
-  it("131047 pede template; 130429/131048/131056 são limite", () => {
+  it("131047 pede template; 130429/131056 são limites transitórios", () => {
     expect(falhaDaMensagemMeta(metaErro(400, 131047))).toBe("requer_template");
-    for (const c of [130429, 131048, 131056]) expect(falhaDaMensagemMeta(metaErro(429, c))).toBe("limite");
+    for (const c of [130429, 131056]) expect(falhaDaMensagemMeta(metaErro(429, c))).toBe("limite");
+  });
+  it("131048/131049/131050/131064 são recusas sem retentativa automática", () => {
+    for (const code of [131048, 131049, 131050, 131064]) {
+      expect(falhaDaMensagemMeta(metaErro(400, code))).toBe("restricao_meta");
+    }
   });
   it("132000/132001/132012/132015/132016 são o TEMPLATE, não a mensagem", () => {
     for (const c of [132000, 132001, 132012, 132015, 132016]) {

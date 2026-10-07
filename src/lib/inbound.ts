@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, type InboundMessage } from "./transport";
-import { inoperanciaDoErro } from "./transport/erro";
+import { falhaDaMensagemMeta, inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
 import { abrirJanela } from "./janela24h";
 import { log } from "./log";
@@ -456,6 +456,21 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
     }
 
     const message = err instanceof Error ? err.message : String(err);
+    if (falhaDaMensagemMeta(err) === "restricao_meta") {
+      await query(
+        `UPDATE inbound_queue
+            SET status = 'failed', last_error = $2, settled_at = now()
+          WHERE id = $1`,
+        [row.id, message.slice(0, 500)]
+      );
+      log.error("inbound.meta_restricao", {
+        messageId: row.message_id,
+        rowId: row.id,
+        phone: row.from_phone,
+        erro: message.slice(0, 200),
+      });
+      return "failed";
+    }
     // Esgotou → `failed`, terminal e visível. Ainda tem crédito → volta pra
     // `pending` e o próximo cron pega.
     const exhausted = row.attempts >= MAX_ATTEMPTS;

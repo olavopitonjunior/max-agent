@@ -790,6 +790,34 @@ export async function dispatchDue(
         break;
       }
 
+      // 131048 é restrição de volume/qualidade do número; 131049 é recusa de
+      // entrega para este destinatário. Nenhum dos dois autoriza repetir a
+      // mesma mensagem no backoff genérico de 5 minutos.
+      if (falhaMsg === "restricao_meta") {
+        const codigo = err instanceof MetaHttpError ? err.code : null;
+        const detalhe = err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
+        const liquidarRecusa = () =>
+          query(
+            `UPDATE outbox
+                SET status = 'failed', error_code = $2, last_error = $3,
+                    send_started_at = NULL, reported_at = NULL
+              WHERE id = $1 AND status = 'sending'`,
+            [row.id, codigo, detalhe]
+          );
+        await liquidarRecusa().catch(async () => {
+          await new Promise((r) => setTimeout(r, 500));
+          await liquidarRecusa().catch((e) =>
+            console.error(
+              `[outbox] recusa Meta ${codigo ?? "?"} NÃO REGISTRADA (${row.id}) — ` +
+                `linha ainda em 'sending'; intervenção manual necessária. Motivo: ` +
+                (e instanceof Error ? e.message : String(e))
+            )
+          );
+        });
+        totals.failed += 1;
+        continue;
+      }
+
       const message = err instanceof Error ? err.message : String(err);
       // Template + timeout: pode ter saído. Não reenvia (ver MARCA_ENVIO_INCERTO).
       if (envioTemplate && /^timeout de \d+ms em /.test(message)) {
