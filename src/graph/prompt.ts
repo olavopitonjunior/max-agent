@@ -274,7 +274,9 @@ Criar proposta ou formulário de negócio:
   com o material da base e não chama a ferramenta.
 - Nunca invente o nome do cliente. O cliente é o comprador ou inquilino citado,
   NUNCA a pessoa com quem você fala.
-- Nunca diga que criou, gerou ou enviou algo: quem confirma é o sistema.`;
+- Nunca diga que criou, gerou ou enviou algo: quem confirma é o sistema.
+- Nunca diga que enviou, está enviando ou vai enviar para assinatura. Quem
+  envia é o sistema, depois de a pessoa confirmar os assinantes.`;
 
 /**
  * Corretor comissionado sem login na plataforma.

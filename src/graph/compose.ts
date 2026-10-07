@@ -323,6 +323,25 @@ const AFIRMA_EM_PRIMEIRA_PESSOA = /(?<!\bnao )\b(criei|gerei|cadastrei|registrei
 const AFIRMA_OBJETO_CRIADO =
   /\b(?:proposta|formulario|ficha|rascunho|cadastro)\b(?:(?!\b(?:e|sera|seja|ser|sao|quando|pode|podem|precisa|precisam|deve|nao|depois|antes|vai|vou)\b)[^.\n]){0,40}\b(?:criad[oa]s?|gerad[oa]s?)\b/;
 
+/**
+ * Afirmação de ENVIO para assinatura sem envio no turn (prod 07/10: "a proposta
+ * já foi enviada para assinatura" com o rascunho intacto e zero envelopes). O
+ * envio real sai por template (`fluxos.ts`), nunca por `draft`.
+ */
+const AFIRMA_ENVIO =
+  /(?<!\bnao )\b(enviei|encaminhei|disparei|mandei|enviamos|mandamos|encaminhamos)\b[^.\n]{0,40}\bassinatura\b|(?<!\bnao )\b(foi|ja foi|esta sendo)\s+(enviad|encaminhad|disparad)[oa]s?\b[^.\n]{0,40}\bassinatura\b|(?<!\bnao )\bfoi (pra|para) (a )?assinatura\b|\bseguindo (para|pra) (a )?assinatura\b|\bvou (enviar|encaminhar|disparar|mandar)\b[^.\n]{0,40}\bassinatura\b|\b(enviando|encaminhando)\b[^.\n]{0,40}\bassinatura\b/;
+
+export const TEXTO_NADA_ENVIADO =
+  'Ainda não enviei nada para assinatura. Para enviar, me diga "enviar proposta para assinatura" e eu confirmo os assinantes com você.';
+export const TEXTO_NADA_ENVIADO_SEM_ENVIO =
+  "Ainda não enviei nada para assinatura: o envio é feito pelo sistema.";
+
+/** O texto do modelo AFIRMA ter enviado (ou estar enviando) algo para assinatura? */
+export function afirmaEnvio(texto: string): boolean {
+  const t = texto.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  return AFIRMA_ENVIO.test(t);
+}
+
 /** O texto do modelo AFIRMA ter concluído uma criação? */
 export function afirmaCriacao(texto: string): boolean {
   const t = texto.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
@@ -338,9 +357,13 @@ export function afirmaCriacao(texto: string): boolean {
  */
 export function travarCriacaoFalsa(
   texto: string,
-  ctx: { houveLeitura: boolean; podeCriar: boolean }
+  ctx: { houveLeitura: boolean; podeCriar: boolean; podeEnviar?: boolean }
 ): { texto: string; travou: boolean } {
-  if (ctx.houveLeitura || !afirmaCriacao(texto)) return { texto, travou: false };
+  if (ctx.houveLeitura) return { texto, travou: false };
+  if (afirmaEnvio(texto)) {
+    return { texto: ctx.podeEnviar ? TEXTO_NADA_ENVIADO : TEXTO_NADA_ENVIADO_SEM_ENVIO, travou: true };
+  }
+  if (!afirmaCriacao(texto)) return { texto, travou: false };
   return {
     texto: ctx.podeCriar ? TEXTO_NADA_CRIADO : TEXTO_NADA_CRIADO_SEM_CRIACAO,
     travou: true,
