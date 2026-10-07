@@ -597,3 +597,65 @@ describe("recusa do servidor", () => {
     expect(p.reply).not.toContain("dados_invalidos");
   });
 });
+
+describe("sem modelo de proposta ativo (prod 07/10: FINCasa com modelos arquivados)", () => {
+  it("o preflight barra no INÍCIO, antes de pedir qualquer dado", async () => {
+    const acao = vi.fn().mockResolvedValue({ status: 200, body: { modelo: false } });
+    const d = deps({ acao });
+    const p = await F.conduzirFluxo({ kind: "proposta", etapa: "natureza", dados: {}, atualizadoEm: agora }, ctx("venda"), d);
+    expect(acao).toHaveBeenCalledWith("proposal.preflight", { schemaType: "compra_venda_v1" });
+    expect(p.reply).toContain("não tem um modelo de proposta de venda ativo");
+    expect(p.fluxo).toBeNull();
+    expect(d.extrairProposta).not.toHaveBeenCalled();
+  });
+
+  it("locação só é barrada quando NENHUM dos dois modelos existe (comercial-only segue)", async () => {
+    const soComercial = vi.fn().mockImplementation(async (_v: string, a: { schemaType: string }) => ({
+      status: 200,
+      body: { modelo: a.schemaType === "locacao_comercial_v1" },
+    }));
+    let p = await F.conduzirFluxo({ kind: "proposta", etapa: "natureza", dados: {}, atualizadoEm: agora }, ctx("locação"), deps({ acao: soComercial }));
+    expect(p.reply).toContain("Inquilino");
+    const nenhum = vi.fn().mockResolvedValue({ status: 200, body: { modelo: false } });
+    p = await F.conduzirFluxo({ kind: "proposta", etapa: "natureza", dados: {}, atualizadoEm: agora }, ctx("locação"), deps({ acao: nenhum }));
+    expect(p.reply).toContain("locação ativo");
+    expect(nenhum).toHaveBeenCalledTimes(2);
+  });
+
+  it("preflight 400 (sistema ainda sem o verbo) não bloqueia", async () => {
+    const acao = vi.fn().mockResolvedValue({ status: 400, body: { error: "invalid_body" } });
+    const p = await F.conduzirFluxo({ kind: "proposta", etapa: "natureza", dados: {}, atualizadoEm: agora }, ctx("venda"), deps({ acao }));
+    expect(p.reply).toContain("Comprador");
+  });
+
+  it("update com sem_modelo: avisa e manda terminar o rascunho pelo sistema (sem 2º rascunho)", async () => {
+    const d = deps({
+      acao: vi.fn().mockResolvedValue({ status: 200, body: { proposta: { id: "p1" }, pdf: null, pdfIndisponivel: "sem_modelo" } }),
+    });
+    const f: Fluxo = { kind: "proposta", etapa: "revisao_ajuste", natureza: "venda", dados: DADOS_OK, propostaId: "p1", codigo: "P-8", atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).toContain("termine o rascunho P-8 por lá");
+    expect(p.reply).not.toContain("me pedir de novo");
+    expect(p.fluxo).toBeNull();
+  });
+
+  it("preflight sem resposta não bloqueia (o create avisa depois)", async () => {
+    const p = await F.conduzirFluxo({ kind: "proposta", etapa: "natureza", dados: {}, atualizadoEm: agora }, ctx("locação"), deps());
+    expect(p.reply).toContain("Inquilino");
+  });
+
+  it("create com pdfIndisponivel=sem_modelo: diz que salvou, explica, não manda link falso", async () => {
+    const d = deps({
+      acao: vi.fn().mockResolvedValue({
+        status: 201,
+        body: { proposal: { id: "p1", codigo: "P-8" }, pdf: null, pdfIndisponivel: "sem_modelo" },
+      }),
+    });
+    const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "venda", dados: DADOS_OK, atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).toContain("P-8 salvo");
+    expect(p.reply).toContain("não tem um modelo");
+    expect(p.reply).not.toContain("http");
+    expect(p.fluxo).toBeNull();
+  });
+});
