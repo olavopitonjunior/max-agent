@@ -17,13 +17,14 @@ import type { StatusCallback } from "./transport";
 /**
  * Ordem de progresso. Upgrade MONOTÔNICO: os callbacks chegam fora de ordem
  * (READ pode vir antes do RECEIVED da mesma mensagem) e um SENT atrasado não
- * pode regredir um `read`. `unconfirmed` fica no degrau do `sent` de
- * propósito: é "sem notícia", não "não entregue" — um callback atrasado o
- * corrige para `delivered`/`read`.
+ * pode regredir um `read`. `unconfirmed` e `failed` ficam no degrau do `sent`:
+ * um SENT atrasado não apaga a falha, mas `delivered`/`read` podem corrigir
+ * qualquer um deles quando houver confirmação real.
  */
 const RANK: Record<string, number> = {
   sent: 1,
   unconfirmed: 1,
+  failed: 1,
   delivered: 2,
   read: 3,
 };
@@ -144,8 +145,8 @@ export async function applyStatusCallback(cb: StatusCallback): Promise<ApplyTota
  * e o report ao Contractmaker reabre para contar o desfecho verdadeiro — o
  * `sent` que ele assumiu no 202 era mentira.
  *
- * Só linhas `sent`: uma já `failed` não muda, e uma resposta de conversa
- * (`inbound_queue`) só é registrada em log — ela não tem report nem retry.
+ * Só linhas ainda sem entrega confirmada mudam. Respostas da conversa não têm
+ * report ao Contractmaker nem retry: guardamos a falha no próprio inbound.
  */
 export async function applyFalhaDeEnvio(f: {
   messageId: string;
@@ -153,6 +154,19 @@ export async function applyFalhaDeEnvio(f: {
   title: string | null;
 }): Promise<number> {
   const detalhe = `meta${f.code !== null ? ` #${f.code}` : ""}: ${f.title ?? "falha sem descrição"}`;
+
+  // O webhook já filtrou o phone_number_id desta instância. O wamid da
+  // RESPOSTA correlaciona com reply_message_id (não com o id do inbound nem
+  // com a org escolhida na conversa). `done` continua terminal: a Meta aceitou
+  // o envio inicialmente, mas depois recusou a entrega. Nunca reenviar aqui.
+  const replyRows = await query<{ id: string }>(
+    `UPDATE inbound_queue
+        SET reply_delivery_status = 'failed', last_error = $2
+      WHERE reply_message_id = $1 AND status = 'done'
+        AND (reply_delivery_status IS NULL OR reply_delivery_status IN ('sent', 'unconfirmed'))
+      RETURNING id`,
+    [f.messageId, detalhe.slice(0, 500)]
+  );
 
   /**
    * 131047 é o único código de `applyFalhaDeEnvio` que NÃO é falha permanente:
@@ -191,10 +205,10 @@ export async function applyFalhaDeEnvio(f: {
         RETURNING id`,
       [f.messageId, nextDeliveryTime(), detalhe.slice(0, 500)]
     );
-    if (rows.length === 0) {
+    if (rows.length === 0 && replyRows.length === 0) {
       console.warn(`[delivery] 131047 assíncrono não aplicado — sem linha 'sent' ou já entregue (${detalhe})`);
     }
-    return rows.length;
+    return rows.length + replyRows.length;
   }
 
   const rows = await query<{ id: string }>(
@@ -207,12 +221,12 @@ export async function applyFalhaDeEnvio(f: {
       RETURNING id`,
     [f.messageId, f.code, detalhe.slice(0, 500)]
   );
-  if (rows.length === 0) {
+  if (rows.length === 0 && replyRows.length === 0) {
     console.warn(
       `[delivery] falha de envio não aplicada — sem linha 'sent' ou já entregue (${detalhe})`
     );
   }
-  return rows.length;
+  return rows.length + replyRows.length;
 }
 
 /**

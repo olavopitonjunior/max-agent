@@ -87,8 +87,11 @@ export function classificarMeta(code: number | null): MotivoInoperante | null {
  *  · `requer_template` — 131047: passaram 24h desde a última mensagem da
  *    pessoa; texto livre não sai, só template aprovado. Não adianta
  *    retentar: a linha espera (ver `dispatchDue`);
- *  · `limite` — 130429/131048/131056: vazão ou par remetente-destinatário;
- *    retentar depois resolve;
+ *  · `limite` — 130429/131056: vazão ou par remetente-destinatário;
+ *  · `restricao_meta` — 131048 (restrição de volume por qualidade do número),
+ *    131049 (Meta optou por não entregar), 131050 (destinatário recusou
+ *    marketing) e 131064 (limite por classificação/violação): não entram no
+ *    retry automático. 131048 não prova bloqueio da conta ou do número;
  *  · `template_invalido` — 132000/132001/132012/132015/132016: a Meta
  *    recusou o TEMPLATE em si (parâmetro, idioma, pausado, desativado) numa
  *    corrida entre a checagem de `wa_template` e o envio (o status mudou
@@ -97,12 +100,15 @@ export function classificarMeta(code: number | null): MotivoInoperante | null {
  *    queimar as 3 tentativas — o webhook `message_template_status_update`
  *    corrige `wa_template` quando (se) o template voltar.
  */
-export type FalhaDaMensagem = "requer_template" | "limite" | "template_invalido";
+export type FalhaDaMensagem = "requer_template" | "limite" | "restricao_meta" | "template_invalido";
 
 const FALHA_META: Record<number, FalhaDaMensagem> = {
   131047: "requer_template",
   130429: "limite",
-  131048: "limite",
+  131048: "restricao_meta",
+  131049: "restricao_meta",
+  131050: "restricao_meta",
+  131064: "restricao_meta",
   131056: "limite",
   132000: "template_invalido",
   132001: "template_invalido",

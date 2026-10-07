@@ -70,6 +70,9 @@ describe("a régua do Olavo (01/10/2026)", () => {
         "proposal_delivered",
         "proposal_expired",
         "proposal_refused",
+        "proposal_sent",
+        "proposal_signed_proponente",
+        "proposal_awaiting_decision",
         "support_handoff",
         "survey_invite",
         "survey_invite_parte",
@@ -98,7 +101,6 @@ describe("a régua do Olavo (01/10/2026)", () => {
       "contract_sent",
       "deal_sla_breached",
       "charge_created",
-      "proposal_signed_proponente",
       "manual_documentos",
       "qualquer_coisa",
     ]) {
@@ -112,6 +114,20 @@ describe("a régua do Olavo (01/10/2026)", () => {
   it("pesquisa e mensagem da imobiliária usam o MESMO template para equipe e parte", () => {
     expect(templateDoKind("survey_invite")).toBe(templateDoKind("survey_invite_parte"));
     expect(templateDoKind("manual_message")).toBe(templateDoKind("manual_message_parte"));
+  });
+
+  it("envio e assinatura do proponente não afirmam conclusão nem oferecem conversão", () => {
+    const sent = templateDoKind("proposal_sent")!;
+    const partial = templateDoKind("proposal_signed_proponente")!;
+    expect(sent.body).toContain("foi enviada para assinatura");
+    expect(partial.body).toContain("O proponente assinou");
+    expect(templateDoKind("proposal_awaiting_decision")).toBe(partial);
+    for (const def of [sent, partial]) {
+      expect(def.body).not.toMatch(/todos os signatários|converter/i);
+      expect(def.botao).toEqual({ tipo: "url", texto: "Abrir proposta" });
+      expect(def.paramsObrigatorios).toEqual(["proposta"]);
+      expect(templateUsavel(def, { recipient_name: "Ana", org_name: "Imob", title: "Proposta", params: {} })).toBe(false);
+    }
   });
 });
 
