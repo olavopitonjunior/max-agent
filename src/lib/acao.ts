@@ -1,6 +1,6 @@
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
-import { fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS } from "./http";
+import { fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS, IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS } from "./http";
 import type { ScopeSubject } from "@/graph/scope-contract";
 
 /**
@@ -70,7 +70,7 @@ export async function executarAcao(params: {
           args: params.args,
         }),
       },
-      IMOBPRO_TIMEOUT_MS
+      params.verb === "proposal.send" ? IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS : IMOBPRO_TIMEOUT_MS
     );
     const body = (await res.json().catch(() => ({}))) as unknown;
     if (res.status >= 500) {
