@@ -194,6 +194,28 @@ export const TEXTO_ESCRITA_INCERTA =
 const TEXTO_SEM_PERMISSAO =
   "Sua conta não tem permissão para isso pelo Max. Fale com o administrador da imobiliária.";
 
+/**
+ * A imobiliária não tem modelo de proposta ATIVO daquele tipo: sem modelo não
+ * há PDF nem envio (o envio também é bloqueado pelo `template-guard`). Achado
+ * em produção em 2026-10-07: FINCasa com os três modelos arquivados — o Max
+ * colheu tudo e entregou um link de PDF que respondia 404.
+ */
+export function textoSemModelo(natureza: "venda" | "locacao", codigo?: string): string {
+  const base =
+    `Sua imobiliária não tem um modelo de proposta de ${natureza === "locacao" ? "locação" : "venda"} ativo, ` +
+    "então ainda não dá para gerar o PDF nem enviar para assinatura. Um administrador ativa o modelo " +
+    "em Modelos, no sistema; ";
+  // Com rascunho já salvo, "me peça de novo" criaria um SEGUNDO rascunho.
+  return codigo || codigo === ""
+    ? `${base}depois termine o rascunho${codigo ? ` ${codigo}` : ""} por lá.`
+    : `${base}depois é só me pedir de novo.`;
+}
+
+/** O servidor criou/atualizou, mas avisou que o PDF não sai por falta de modelo. */
+function semModelo(body: Record<string, unknown>): boolean {
+  return body.pdfIndisponivel === "sem_modelo";
+}
+
 const TEXTO_NAO_ENCONTREI = "Não encontrei essa proposta para você no sistema.";
 
 const TEXTO_POLITICA_INDISPONIVEL =
@@ -570,6 +592,24 @@ async function iniciarProposta(
       evento: "fluxo_proposta",
     };
   }
+  // Antes de pedir qualquer dado: há modelo ativo para gerar o PDF? Sem
+  // resposta do servidor o fluxo segue — o `proposal.create` avisa de novo.
+  // Locação: a finalidade (residencial/comercial) ainda não é conhecida aqui —
+  // só barra quando NENHUM dos dois modelos de locação existe. O caso restante
+  // (modelo só do outro tipo) o `proposal.create` avisa com `sem_modelo`.
+  const tipos =
+    natureza === "locacao" ? ["locacao_residencial_v1", "locacao_comercial_v1"] : ["compra_venda_v1"];
+  let semNenhum = true;
+  for (const schemaType of tipos) {
+    const pre = await deps.acao("proposal.preflight", { schemaType });
+    if (!(pre?.status === 200 && pre.body.modelo === false)) {
+      semNenhum = false;
+      break;
+    }
+  }
+  if (semNenhum) {
+    return { reply: textoSemModelo(natureza), fluxo: null, evento: "proposta_sem_modelo" };
+  }
   // O pedido original pode já trazer dados ("proposta pra Letícia, 1,5 mi"):
   // extraídos agora, para a lista de campos não pedir o que já foi dito.
   let dados: DadosDaProposta = {};
@@ -919,6 +959,13 @@ async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsD
   if (r.status !== 201 || !proposta?.id) {
     return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: `proposal_create_${r.status}` };
   }
+  if (semModelo(r.body)) {
+    return {
+      reply: `Rascunho${proposta.codigo ? ` ${proposta.codigo}` : ""} salvo no sistema. ${textoSemModelo(f.natureza ?? "venda", proposta.codigo ?? "")}`,
+      fluxo: null,
+      evento: "proposta_criada_sem_modelo",
+    };
+  }
   return {
     reply: textoRascunho(proposta.codigo, pdfDe(r.body), false),
     fluxo: {
@@ -973,6 +1020,13 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
     return { reply: `${recusa}\nMe mande e eu ajusto.`, fluxo: { ...f, etapa: "ajustes", chave: undefined }, evento: "ajuste_recusado" };
   }
   if (r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: { ...f, etapa: "ajustes", chave: undefined }, evento: `proposal_update_${r.status}` };
+  if (semModelo(r.body)) {
+    return {
+      reply: `Atualizei o rascunho${f.codigo ? ` ${f.codigo}` : ""}. ${textoSemModelo(f.natureza ?? "venda", f.codigo ?? "")}`,
+      fluxo: null,
+      evento: "proposta_ajustada_sem_modelo",
+    };
+  }
   return {
     reply: textoRascunho(f.codigo, pdfDe(r.body), true),
     fluxo: { ...f, etapa: "ajustes", chave: undefined, ajustePendente: false, atualizadoEm: ctx.agora },
