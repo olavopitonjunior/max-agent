@@ -342,6 +342,25 @@ export function afirmaEnvio(texto: string): boolean {
   return AFIRMA_ENVIO.test(t);
 }
 
+/**
+ * O modelo livre ENCENANDO o fluxo: pedindo "responda SIM" ou "responda com um
+ * número" (prod 07/10: inventou a confirmação e o menu de assinatura). Toda
+ * confirmação e todo menu numerado saem de template; no texto livre, é teatro.
+ */
+/** Dirigido à pessoa (início de frase): "Responda SIM", "Digite 1 ou 2". */
+const ENCENA_CONFIRMACAO = /(^|[.!?:\n]\s*)(responda|responde|digite)\b[^.\n]{0,25}\b(sim|1 ou 2)\b/;
+/** Menu numerado montado pelo modelo + "responda com o número". */
+const ENCENA_MENU = /(^|[.!?:\n]\s*)(responda|responde|digite)\b[^.\n]{0,25}\bcom (o|um) numero\b/;
+
+export const TEXTO_SEM_ENCENACAO =
+  'Para eu criar ou enviar algo, sou eu que conduzo pelo sistema. Me diga o que quer fazer — por exemplo, "enviar a proposta para assinatura" ou "criar uma proposta".';
+
+export function encenaConfirmacao(texto: string): boolean {
+  const t = texto.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").replace(/\*/g, "");
+  if (ENCENA_CONFIRMACAO.test(t)) return true;
+  return ENCENA_MENU.test(t) && /^\s*\d[.)]?\s+\S/m.test(t);
+}
+
 /** O texto do modelo AFIRMA ter concluído uma criação? */
 export function afirmaCriacao(texto: string): boolean {
   const t = texto.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
@@ -359,6 +378,7 @@ export function travarCriacaoFalsa(
   texto: string,
   ctx: { houveLeitura: boolean; podeCriar: boolean; podeEnviar?: boolean }
 ): { texto: string; travou: boolean } {
+  if (encenaConfirmacao(texto)) return { texto: TEXTO_SEM_ENCENACAO, travou: true };
   if (ctx.houveLeitura) return { texto, travou: false };
   if (afirmaEnvio(texto)) {
     return { texto: ctx.podeEnviar ? TEXTO_NADA_ENVIADO : TEXTO_NADA_ENVIADO_SEM_ENVIO, travou: true };

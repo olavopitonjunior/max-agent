@@ -82,6 +82,8 @@ import {
   conduzirFluxo,
   fluxoExpirou,
   iniciarFluxo,
+  lerEscolha,
+  lerNatureza,
   pedeEnvio,
   rebaixarFluxo,
   retomarEnvio,
@@ -726,7 +728,17 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
 
   // Sem fluxo (ou vencido) e a pessoa pede o ENVIO: retoma do rascunho dela —
   // nunca deixar o modelo livre "enviar" (prod 07/10).
-  if (!atual && podeEscrever(state.identity) && pedeEnvio(userText)) {
+  // Fluxo de criação que ainda não colheu nada (escolha 1/2, venda ou locação)
+  // não segura um pedido de envio de proposta existente.
+  // ...a não ser que a mensagem também RESPONDA a pergunta aberta (code review:
+  // "proposta, e já manda pra ela" é a escolha, não o envio de um rascunho velho).
+  const naoComecou =
+    !atual ||
+    (atual.kind === "escolha" && !lerEscolha(userText)) ||
+    (atual.kind === "negocio" && atual.etapa === "tipo" && !lerNatureza(userText)) ||
+    (atual.kind === "proposta" && atual.etapa === "natureza" && !lerNatureza(userText)) ||
+    (atual.kind === "proposta" && atual.etapa === "selecao_envio");
+  if (naoComecou && podeEscrever(state.identity) && pedeEnvio(userText)) {
     const passo = await retomarEnvio(
       {
         texto: userText,
@@ -768,7 +780,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     // se a resposta do modelo terminar em pergunta, o "sim" a ela não pode
     // criar nem enviar (achado N1 do code review).
     return {
-      fluxo: rebaixarFluxo(atual),
+      fluxo: passo.fluxo === null ? null : rebaixarFluxo(atual),
       ...(usage.length > 0 ? { usage } : {}),
       toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
     };

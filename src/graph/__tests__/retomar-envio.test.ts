@@ -218,7 +218,8 @@ describe("achados do code review", () => {
 
   it("N4: pedido de envio antes do rascunho explica que ainda não há rascunho", async () => {
     const f: Fluxo = { kind: "proposta", etapa: "coleta", natureza: "venda", dados: {}, atualizadoEm: agora };
-    const p = await F.conduzirFluxo(f, ctx("manda pra assinatura"), dep());
+    const semDados = { acao: vi.fn(), extrairProposta: vi.fn().mockResolvedValue({}), extrairCampos: vi.fn() };
+    const p = await F.conduzirFluxo(f, ctx("manda pra assinatura"), semDados);
     expect(p.reply).toContain("Ainda não há rascunho para enviar");
   });
 
