@@ -15,7 +15,7 @@
  *    de uma vez → coleta por texto ou áudio, em uma ou várias mensagens →
  *    resumo "está correto?" → `proposal.create` → link do PDF → ajustes
  *    (resumo de novo + "sim" → `proposal.update`) → tipo de assinatura (os
- *    liberados na org) → confirmação dos assinantes com o custo →
+ *    liberados na org) → confirmação dos assinantes →
  *    `proposal.send`.
  *
  * ── Princípios (os mesmos do resto do grafo) ──────────────────────────────
@@ -140,6 +140,8 @@ export type Fluxo =
       chave?: Chave;
       /** Dado mudou depois do rascunho e o servidor ainda não foi atualizado. */
       ajustePendente?: boolean;
+      /** CPF do proponente recusado no envio de um rascunho retomado. */
+      pendenciaCpf?: boolean;
       atualizadoEm: number;
     };
 
@@ -285,7 +287,10 @@ export function resumoDaProposta(f: { natureza?: "venda" | "locacao"; dados: Dad
   return `${corpoDaProposta(f)}\n\nEstá correto? Responda *SIM* para gerar o rascunho, ou me diga o que mudar.`;
 }
 
-function resumoDoAjuste(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta }): string {
+function resumoDoAjuste(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; codigo?: string }): string {
+  if (!f.natureza && f.dados.proponente?.cpf) {
+    return `Vou corrigir apenas o CPF do proponente na proposta${f.codigo ? ` ${f.codigo}` : ""} para ${f.dados.proponente.cpf}.\n\nAtualizo o rascunho assim? Responda *SIM*.`;
+  }
   return `${corpoDaProposta(f)}\n\nAtualizo o rascunho assim? Responda *SIM*, ou me diga o que mais mudar.`;
 }
 
@@ -297,6 +302,16 @@ const telefoneUtil = (s?: string) => {
   return d.length === 10 || d.length === 11 || ((d.length === 12 || d.length === 13) && d.startsWith("55"));
 };
 const emailUtil = (s?: string) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test((s ?? "").trim());
+const cpfValido = (raw: string): boolean => {
+  const cpf = raw.replace(/\D/g, "");
+  if (cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
+  for (let n = 9; n < 11; n++) {
+    let soma = 0;
+    for (let i = 0; i < n; i++) soma += Number(cpf[i]) * (n + 1 - i);
+    if (Number(cpf[n]) !== ((soma * 10) % 11) % 10) return false;
+  }
+  return true;
+};
 
 /**
  * O que AINDA falta para o servidor aceitar — as mesmas regras do
@@ -308,6 +323,7 @@ export function faltandoNaProposta(d: DadosDaProposta): string[] {
   const p = d.proponente ?? {};
   if (!p.nome) falta.push("nome completo do comprador");
   else if (!nomeCompleto(p.nome)) falta.push(`sobrenome de ${p.nome}`);
+  if (p.cpf && !cpfValido(p.cpf)) falta.push("CPF válido de quem faz a proposta");
   if (!d.imovel?.endereco) falta.push("endereço do imóvel");
   if (!(typeof d.valor === "number" && d.valor > 0)) falta.push("valor");
   const canal = d.canal ?? canalPadrao(d);
@@ -651,7 +667,7 @@ function selecaoDeRascunhos(
  * A pessoa pediu para enviar e não há fluxo ativo (venceu, ou o rascunho veio
  * de outra conversa): acha o RASCUNHO dela no servidor e retoma o fluxo na
  * escolha do tipo de assinatura — o envio continua exigindo a confirmação dos
- * assinantes e do custo. Nunca envia direto daqui.
+ * assinantes. Nunca envia direto daqui.
  */
 export async function retomarEnvio(
   ctx: ContextoDoTurno,
@@ -1058,6 +1074,14 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     };
   }
 
+  if (f.etapa === "ajustes" && f.pendenciaCpf && !f.ajustePendente && resposta !== "nenhum") {
+    return {
+      reply: "Ainda preciso de um CPF válido do proponente. Me mande o CPF correto para ajustar o rascunho.",
+      fluxo: { ...f, atualizadoEm: agora },
+      evento: "cpf_pendente",
+    };
+  }
+
   // Ajuste ainda não aplicado no servidor: o OK volta ao resumo do ajuste —
   // seguir para a assinatura enviaria o rascunho VELHO.
   if (f.etapa === "ajustes" && f.ajustePendente && resposta !== "nenhum") {
@@ -1076,7 +1100,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     return { reply: textoMetodos(f.metodos ?? []), fluxo: { ...f, atualizadoEm: agora }, evento: "metodo_repetido" };
   }
   if (f.etapa === "envio" && resposta !== "sim" && pedeEnvio(ctx.texto)) {
-    // Pedido de envio NÃO é o "sim": mostra de novo quem assina e o custo.
+    // Pedido de envio NÃO é o "sim": mostra de novo quem assina.
     return { reply: textoEnvio(f), fluxo: { ...f, atualizadoEm: agora }, evento: "envio_repetido" };
   }
 
@@ -1100,10 +1124,34 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     return { liberar: true, fluxo: f, evento: "envio_liberado" };
   }
 
-  // Fluxo RETOMADO (`retomarEnvio`): o Max não tem os dados nem a natureza do
-  // rascunho — extrair e mandar `proposal.update` sobrescreveria uma locação
-  // com o schema de venda. Ajuste desse rascunho é pela tela.
+  // Fluxo retomado: só o CPF pendente pode ser corrigido sem conhecer a
+  // natureza ou o restante do documento. O servidor aplica um PATCH pontual.
   if (f.propostaId && !f.natureza) {
+    if (f.pendenciaCpf) {
+      const texto = ctx.texto.trim();
+      const digitos = texto.replace(/\D/g, "");
+      const frase = normalizar(texto.replace(/[\d.\-]+/g, " "));
+      const identificaProponente =
+        frase === "" || /^(?:o )?cpf(?: correto| do proponente| do comprador| da compradora| do inquilino| da inquilina)?(?: e)?$/.test(frase);
+      if (identificaProponente && digitos) {
+        if (!cpfValido(digitos)) {
+          return { reply: "Esse CPF não passou na validação. Confira os 11 dígitos e me mande o CPF correto.", fluxo: f, evento: "cpf_invalido" };
+        }
+        const g: FluxoProposta = {
+          ...f, etapa: "revisao_ajuste", dados: { proponente: { cpf: digitos } },
+          ajustePendente: true, chave: undefined, atualizadoEm: agora,
+        };
+        return { reply: resumoDoAjuste(g), fluxo: g, evento: "proposta_revisao_ajuste" };
+      }
+      if (frase.includes("cpf")) {
+        return { reply: "Preciso do CPF do proponente desta proposta. Me mande apenas esse CPF.", fluxo: f, evento: "cpf_de_outra_pessoa" };
+      }
+      if (pedeEnvio(ctx.texto)) {
+        return f.ajustePendente
+          ? { reply: resumoDoAjuste(f), fluxo: { ...f, etapa: "revisao_ajuste", atualizadoEm: agora }, evento: "proposta_revisao_ajuste" }
+          : { reply: "Ainda preciso de um CPF válido do proponente. Me mande o CPF correto para ajustar o rascunho.", fluxo: f, evento: "cpf_pendente" };
+      }
+    }
     if (pedeEnvio(ctx.texto)) return oferecerMetodos(f, ctx, deps);
     const pareceAjuste = /\d|\b(valor|comprador|inquilino|vendedor|endereco|imovel|cpf|telefone|email|sinal|pagamento|comissao|matricula)\b/.test(
       normalizar(ctx.texto)
@@ -1242,7 +1290,9 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
   const chave = chaveDe(f, "proposal.update", ctx);
   const r = await deps.acao(
     "proposal.update",
-    { proposta_id: f.propostaId, ...argsDaProposta(f, { atualizacao: true }) },
+    f.pendenciaCpf
+      ? { proposta_id: f.propostaId, proponente: { cpf: f.dados.proponente?.cpf } }
+      : { proposta_id: f.propostaId, ...argsDaProposta(f, { atualizacao: true }) },
     chave.valor
   );
   if (!r || (r.status === 409 && r.body.error === "em_andamento")) {
@@ -1287,7 +1337,7 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
   }
   return {
     reply: textoRascunho(f.codigo, pdfDe(r.body), true),
-    fluxo: { ...f, etapa: "ajustes", chave: undefined, ajustePendente: false, atualizadoEm: ctx.agora },
+    fluxo: { ...f, etapa: "ajustes", chave: undefined, ajustePendente: false, pendenciaCpf: false, atualizadoEm: ctx.agora },
     evento: "proposta_ajustada",
   };
 }
@@ -1320,12 +1370,10 @@ function textoEnvio(f: FluxoProposta): string {
   const lista = (f.assinantes ?? [])
     .map((a, i) => `${i + 1}. ${a.nome} — ${papelDe(a.papel, f.natureza)}`)
     .join("\n");
-  const n = f.assinantes?.length ?? 0;
   const como = f.metodo ? ` por *${f.metodo.rotulo}*` : "";
   return (
     `Vou enviar a proposta${f.codigo ? ` ${f.codigo}` : ""} para assinatura${como}:\n` +
-    `${lista}\n\n${n === 1 ? "1 assinatura será cobrada" : `${n} assinaturas serão cobradas`}. ` +
-    "Confirma? Responda *SIM* para enviar."
+    `${lista}\n\nConfirma? Responda *SIM* para enviar.`
   );
 }
 
@@ -1444,6 +1492,23 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
           `Complete pela tela; o rascunho${f.codigo ? ` ${f.codigo}` : ""} continua salvo.`,
         fluxo: null,
         evento: "envio_pendencia_outro_papel",
+      };
+    }
+    const somenteCpfDoProponente =
+      !f.natureza && faltando.length === 1 && faltando[0]?.campo === "cpf" &&
+      ["proponente", "comprador", "locatario", "inquilino"].includes(normalizar(faltando[0]?.signatario?.papel ?? ""));
+    if (somenteCpfDoProponente) {
+      if (!ctx.policy.includes("proposal.create")) {
+        return {
+          reply: "Para enviar, preciso de um CPF válido do proponente. Não tenho permissão para editar esse rascunho por aqui; corrija na tela de propostas e me peça o envio novamente.",
+          fluxo: null,
+          evento: "envio_pendencia_cpf_sem_edicao",
+        };
+      }
+      return {
+        reply: "Para enviar, preciso de um CPF válido do proponente. Me mande o CPF correto e eu ajusto o rascunho por aqui.",
+        fluxo: { ...f, etapa: "ajustes", pendenciaCpf: true, chave: undefined, atualizadoEm: ctx.agora },
+        evento: "envio_pendencia_cpf",
       };
     }
     const itens = faltando

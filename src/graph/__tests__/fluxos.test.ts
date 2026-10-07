@@ -277,7 +277,7 @@ describe("fluxo de PROPOSTA", () => {
     expect(n.proponente?.email).toBe("l@x.com");
   });
 
-  it("OK depois do rascunho → tipos de assinatura liberados → assinantes + custo → SIM envia com o método", async () => {
+  it("OK depois do rascunho → tipos de assinatura liberados → assinantes → SIM envia com o método", async () => {
     const d = deps({
       acao: vi.fn().mockImplementation(async (verb: string) =>
         verb === "proposal.options"
@@ -306,7 +306,8 @@ describe("fluxo de PROPOSTA", () => {
     p = await F.conduzirFluxo(p.fluxo!, ctx("2"), d);
     expect(p.reply).toContain("WhatsApp (token)");
     expect(p.reply).toContain("Letícia Gonçalves Nogueira — comprador");
-    expect(p.reply).toContain("2 assinaturas serão cobradas");
+    expect(p.reply).not.toMatch(/cobrad[ao]s?/);
+    expect(p.reply).toContain("Responda *SIM* para enviar");
     p = await F.conduzirFluxo(p.fluxo!, ctx("sim", { messageId: "msg-envio" }), d);
     expect(d.acao).toHaveBeenLastCalledWith("proposal.send", { proposta_id: "p1", metodo: "whatsapp" }, "msg-envio");
     expect(p.reply).toContain("enviada para assinatura");
@@ -335,6 +336,72 @@ describe("fluxo de PROPOSTA", () => {
     const p = await F.conduzirFluxo(f, ctx("sim"), d);
     expect(p.reply).toContain("CPF (vendedor)");
     expect(p.fluxo).toMatchObject({ etapa: "ajustes" });
+  });
+
+  it("rascunho retomado: CPF inválido é explicado e pode ser corrigido pelo Max após confirmação", async () => {
+    const acao = vi.fn().mockImplementation(async (verb: string) =>
+      verb === "proposal.send"
+        ? { status: 422, body: { error: "pendencias", faltando: [{ signatario: { posicao: 1, papel: "proponente" }, campo: "cpf", motivo: "CPF inválido" }] } }
+        : { status: 200, body: { pdf: { link: "https://imobpro.ia.br/pdf/1" } } }
+    );
+    const d = deps({ acao });
+    const f: Fluxo = {
+      kind: "proposta", etapa: "envio", dados: {}, propostaId: "p1", codigo: "P-12",
+      metodo: { valor: "whatsapp", rotulo: "WhatsApp" }, assinantes: [{ nome: "Letícia", papel: "proponente" }], atualizadoEm: agora,
+    };
+    let p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).toContain("CPF válido do proponente");
+    expect(p.reply).toContain("Me mande o CPF correto");
+    expect(p.reply).not.toContain("tela de propostas");
+    expect(p.fluxo).toMatchObject({ etapa: "ajustes", pendenciaCpf: true });
+
+    p = await F.conduzirFluxo(p.fluxo!, ctx("288.268.569-03"), d);
+    expect(p.reply).toContain("não passou na validação");
+    expect(acao).toHaveBeenCalledTimes(1);
+
+    p = await F.conduzirFluxo(p.fluxo!, ctx("ok"), d);
+    expect(p.reply).toContain("Me mande o CPF correto");
+    expect(p.fluxo).toMatchObject({ etapa: "ajustes", pendenciaCpf: true });
+    expect(acao).toHaveBeenCalledTimes(1);
+
+    p = await F.conduzirFluxo(p.fluxo!, ctx("envie a proposta novamente"), d);
+    expect(p.reply).toContain("Me mande o CPF correto");
+    expect(acao).toHaveBeenCalledTimes(1);
+
+    p = await F.conduzirFluxo(p.fluxo!, ctx("CPF do vendedor é 529.982.247-25"), d);
+    expect(p.reply).toContain("CPF do proponente");
+    expect(p.fluxo).toMatchObject({ etapa: "ajustes", pendenciaCpf: true });
+    expect(acao).toHaveBeenCalledTimes(1);
+
+    p = await F.conduzirFluxo(p.fluxo!, ctx("O CPF correto é 529.982.247-25"), d);
+    expect(p.reply).toContain("corrigir apenas o CPF");
+    expect(p.reply).toContain("P-12");
+    expect(p.reply).toContain("Responda *SIM*");
+    expect(acao).toHaveBeenCalledTimes(1);
+
+    p = await F.conduzirFluxo(p.fluxo!, ctx("não"), d);
+    expect(p.reply).toContain("O que você quer mudar?");
+    p = await F.conduzirFluxo(p.fluxo!, ctx("O CPF correto é 111.444.777-35"), d);
+    expect(p.reply).toContain("11144477735");
+    expect(p.reply).not.toContain("52998224725");
+    expect(acao).toHaveBeenCalledTimes(1);
+
+    p = await F.conduzirFluxo(p.fluxo!, ctx("sim", { messageId: "confirmar-cpf" }), d);
+    expect(acao).toHaveBeenLastCalledWith("proposal.update", { proposta_id: "p1", proponente: { cpf: "11144477735" } }, "confirmar-cpf");
+    expect(p.reply).toContain("Atualizei o rascunho");
+  });
+
+  it("CPF pendente em rascunho retomado: sem permissão para editar, não promete correção pelo Max", async () => {
+    const acao = vi.fn().mockResolvedValue({
+      status: 422,
+      body: { error: "pendencias", faltando: [{ signatario: { posicao: 1, papel: "proponente" }, campo: "cpf" }] },
+    });
+    const f: Fluxo = { kind: "proposta", etapa: "envio", dados: {}, propostaId: "p1", codigo: "P-12", atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("sim", { policy: ["proposal.send"] }), deps({ acao }));
+    expect(p.reply).toContain("CPF válido");
+    expect(p.reply).toContain("tela de propostas");
+    expect(p.reply).not.toContain("ajusto por aqui");
+    expect(p.fluxo).toBeNull();
   });
 
   it("NÃO no envio não envia e diz que o rascunho continua", async () => {
@@ -481,6 +548,9 @@ describe("saídas e travas", () => {
     ]);
     expect(F.faltandoNaProposta({ ...DADOS_OK, vendedor: { nome: "Carlos Souza" } })).toEqual([
       "telefone ou e-mail do vendedor",
+    ]);
+    expect(F.faltandoNaProposta({ ...DADOS_OK, proponente: { ...DADOS_OK.proponente, cpf: "288.268.569-03" } })).toEqual([
+      "CPF válido de quem faz a proposta",
     ]);
   });
 
