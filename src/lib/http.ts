@@ -24,6 +24,11 @@ export const META_TIMEOUT_MS = 10_000;
  * minutos; 20s cortava exatamente as mídias que MAX_MEDIA_BYTES aceita
  * (achado do code review), então ela usa a classe do LLM. */
 export const IMOBPRO_TIMEOUT_MS = 8_000;
+/** Documento Google + ClickSign + notificação: medido em 25s em produção.
+ * O cron de 60s pode iniciar um turno até os 20s; 30s deixa margem para
+ * checkpoint/resposta. Estouro continua incerto, com a mesma chave, sem retry.
+ */
+export const IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS = 30_000;
 export const IMOBPRO_TRANSCRIBE_TIMEOUT_MS = 45_000;
 
 /**
