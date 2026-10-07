@@ -644,7 +644,8 @@ function rotuloDoRascunho(x: { codigo?: string; titulo?: string }): string {
 function selecaoDeRascunhos(
   rascunhos: { id: string; codigo?: string; titulo?: string }[],
   cabeca: string,
-  agora: number
+  agora: number,
+  pedido?: string
 ): Extract<PassoDoFluxo, { reply: string }> {
   const lista = rascunhos
     .slice(0, 5)
@@ -656,6 +657,7 @@ function selecaoDeRascunhos(
       kind: "proposta",
       etapa: "selecao_envio",
       dados: {},
+      pedido,
       candidatos: rascunhos.slice(0, 5).map((x) => ({ id: x.id, codigo: x.codigo, titulo: x.titulo })),
       atualizadoEm: agora,
     },
@@ -684,6 +686,10 @@ export async function retomarEnvio(
       evento: "envio_sem_politica",
     };
   }
+  // Uma operação incerta tem identidade própria: não abrir seleção nem correção.
+  if (anterior?.kind === "proposta" && anterior.propostaId && anterior.chave?.verbo === "proposal.send") {
+    return await oferecerMetodos(anterior, ctx, deps) as Extract<PassoDoFluxo, { reply: string }>;
+  }
   const r = await deps.acao("proposal.list", {});
   if (!r || r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: "falha_proposal_list" };
   const items = (Array.isArray(r.body.items) ? r.body.items : []) as {
@@ -693,16 +699,19 @@ export async function retomarEnvio(
     estado?: unknown;
   }[];
   const todos = items.filter(
-    (i) => typeof i.id === "string" && typeof i.estado === "string" && normalizar(i.estado).startsWith("rascunho")
+    (i) => typeof i.id === "string" && typeof i.estado === "string" &&
+      ["rascunho", "falha no envio", "falha_envio"].includes(normalizar(i.estado))
   ) as { id: string; codigo?: string; titulo?: string }[];
-  const filtro = filtrarPorCitacao(ctx.texto, todos);
+  // Dados de correção não são nomes/códigos de propostas.
+  const filtro = filtrarPorCitacao(ctx.texto.replace(/\bcpf(?:\s+(?:dela|dele|correto|do proponente|do comprador|da compradora|do inquilino|da inquilina))?(?:\s+[eé])?\s*[:=-]?\s*\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/gi, ""), todos);
   if (filtro.citou && filtro.itens.length === 0 && todos.length > 0) {
     // Citou alguém que não tem rascunho: NUNCA cai no rascunho de outra pessoa
     // (code review: "envie a da Maria" com só a da Letícia enviaria a errada).
     return selecaoDeRascunhos(
       todos,
       `Não achei rascunho de "${filtro.citou.join(" ")}". Os seus rascunhos mais recentes:`,
-      ctx.agora
+      ctx.agora,
+      ctx.texto
     );
   }
   const rascunhos = filtro.citou ? filtro.itens : todos;
@@ -716,22 +725,54 @@ export async function retomarEnvio(
     };
   }
   if (rascunhos.length > 1) {
-    return selecaoDeRascunhos(rascunhos, "Você tem mais de uma proposta em rascunho (as mais recentes). Qual devo enviar?", ctx.agora);
+    return selecaoDeRascunhos(rascunhos, "Você tem mais de uma proposta em rascunho (as mais recentes). Qual devo enviar?", ctx.agora, ctx.texto);
   }
   const alvo = rascunhos[0]!;
   const chave =
     anterior?.kind === "proposta" && anterior.propostaId === alvo.id && anterior.chave?.verbo === "proposal.send"
       ? anterior.chave
       : undefined;
-  const passo = (await oferecerMetodos(
-    { kind: "proposta", etapa: "ajustes", dados: {}, propostaId: alvo.id, codigo: alvo.codigo, chave, atualizadoEm: ctx.agora },
-    ctx,
-    deps
-  )) as Extract<PassoDoFluxo, { reply: string }>;
-  // Diz QUAL rascunho foi retomado — a pessoa confere antes de qualquer "sim".
+  const retomado: FluxoProposta = {
+    kind: "proposta", etapa: "ajustes", dados: {}, propostaId: alvo.id, codigo: alvo.codigo, chave, atualizadoEm: ctx.agora,
+    // Expirar a confirmação não precisa apagar a escolha, que será revalidada.
+    metodo: anterior?.kind === "proposta" && anterior.propostaId === alvo.id ? anterior.metodo : undefined,
+  };
+  const ajuste = prepararCpfDaRetomada(retomado, ctx.texto, ctx);
+  if (ajuste) return ajuste;
+  const passo = (await oferecerMetodos(retomado, ctx, deps)) as Extract<PassoDoFluxo, { reply: string }>;
   return alvo.codigo && passo.fluxo
     ? { ...passo, reply: `Retomando a proposta ${rotuloDoRascunho(alvo)}.\n${passo.reply}` }
     : passo;
+}
+
+function prepararCpfDaRetomada(retomado: FluxoProposta, texto: string, ctx: ContextoDoTurno): Extract<PassoDoFluxo, { reply: string }> | null {
+  // Nunca mudar dados enquanto o resultado de uma escrita é desconhecido.
+  if (retomado.chave) return null;
+  // O pedido pode trazer a correção junto: nunca exigir que a pessoa redigite.
+  // Apenas CPF explicitamente atribuído ao proponente; vendedor/outros ficam fora.
+  const normalizado = normalizar(texto);
+  if (/\b(vendedor[a]?|proprietari[oa]|conjuge|testemunha)\b/.test(normalizado)) return null;
+  const cpfInformado = normalizado.match(
+    /\bcpf\s+(?:dela|dele|do proponente|do comprador|da compradora|do inquilino|da inquilina)(?:\s+e)?\s*[:=-]?\s*(\d{3}\.?\d{3}\.?\d{3}-?\d{2})(?!\d)/
+  );
+  if (cpfInformado && (normalizado.match(/\bcpf\b/g) ?? []).length === 1) {
+    if (!ctx.policy.includes("proposal.create")) {
+      return { reply: TEXTO_SEM_PERMISSAO, fluxo: retomado, evento: "envio_pendencia_cpf_sem_edicao" };
+    }
+    const cpf = cpfInformado[1].replace(/\D/g, "");
+    if (!cpfValido(cpf)) {
+      return {
+        reply: "Esse CPF não passou na validação. Confira os 11 dígitos e me mande o CPF correto do proponente.",
+        fluxo: { ...retomado, pendenciaCpf: true }, evento: "cpf_invalido",
+      };
+    }
+    const ajuste: FluxoProposta = {
+      ...retomado, etapa: "revisao_ajuste", dados: { proponente: { cpf } },
+      pendenciaCpf: true, ajustePendente: true, chave: undefined,
+    };
+    return { reply: resumoDoAjuste(ajuste), fluxo: ajuste, evento: "proposta_revisao_ajuste" };
+  }
+  return null;
 }
 
 // ─── Entrada ──────────────────────────────────────────────────────────────
@@ -1048,11 +1089,8 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     // Sem escolha legível: ENCERRA — pendurada, a lista capturaria um número
     // dito depois para outra coisa (mesmo padrão da escolha 1/2).
     if (!escolhido) return { liberar: true, fluxo: null, evento: "selecao_encerrada" };
-    return oferecerMetodos(
-      { ...f, etapa: "ajustes", propostaId: escolhido.id, codigo: escolhido.codigo, candidatos: undefined, atualizadoEm: agora },
-      ctx,
-      deps
-    );
+    const retomado: FluxoProposta = { ...f, etapa: "ajustes", propostaId: escolhido.id, codigo: escolhido.codigo, candidatos: undefined, pedido: undefined, atualizadoEm: agora };
+    return prepararCpfDaRetomada(retomado, f.pedido ?? "", ctx) ?? oferecerMetodos(retomado, ctx, deps);
   }
 
   if (f.etapa === "natureza" || (!f.natureza && !f.propostaId)) {
@@ -1410,7 +1448,12 @@ async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: Dep
   if (assinantes.length === 0) {
     return { reply: "Não encontrei assinantes nesta proposta, então não dá para enviar. Confira no sistema.", fluxo: null, evento: "sem_assinantes" };
   }
-  const g = { ...f, metodos, assinantes, chave: manterChaveDeEnvio(f), atualizadoEm: ctx.agora };
+  const metodo = metodos.find((m) => m.valor === f.metodo?.valor);
+  const g = { ...f, metodos, metodo, assinantes, chave: manterChaveDeEnvio(f), atualizadoEm: ctx.agora };
+  if (metodo) {
+    const h = { ...g, etapa: "envio" as const };
+    return { reply: textoEnvio(h), fluxo: h, evento: "proposta_envio" };
+  }
   if (metodos.length === 1) {
     // Só um tipo liberado: não há escolha a fazer, e mandar `metodo` trocaria
     // a autenticação por canal que a imobiliária configurou. Vai o padrão.
@@ -1524,6 +1567,22 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
   }
   if (r.status === 409 && r.body.error === "ja_enviada") {
     return { reply: "Essa proposta já foi enviada.", fluxo: null, evento: "ja_enviada" };
+  }
+  if (r.body.error === "documento_indisponivel") {
+    const motivos: Record<string, string> = {
+      google_doc_unavailable: "Não consegui gerar ou acessar o documento no Google Docs. Um administrador precisa verificar o acesso ao modelo da imobiliária.",
+      google_docs: "O modelo da imobiliária está sem um documento Google Docs utilizável. Um administrador precisa revisar o modelo.",
+      no_template: "Não há modelo ativo para gerar esta proposta. Um administrador precisa ativar o modelo da imobiliária.",
+      edited_with_hidden: "O documento editado tem campos ocultos incompatíveis com o envio. É preciso revisar essa configuração na proposta.",
+    };
+    const motivo = typeof r.body.motivo === "string" ? motivos[r.body.motivo] : undefined;
+    return {
+      reply: `${motivo ?? "Não consegui preparar o documento para assinatura. A equipe responsável precisa verificar a geração do documento."} ` +
+        `A proposta${f.codigo ? ` ${f.codigo}` : ""} está salva, mas o envio falhou. Depois da correção, me peça para enviar esta mesma proposta novamente.`,
+      // Recusa definitiva: chave nova na próxima confirmação; não apagar a escolha.
+      fluxo: { ...f, etapa: "ajustes", chave: undefined, atualizadoEm: ctx.agora },
+      evento: "envio_bloqueado_documento_indisponivel",
+    };
   }
   // Bloqueios do servidor com código FIXO (`CODIGO_DO_BLOQUEIO`): cada um diz o
   // fato e o caminho. Prod 07/10: FINCasa sem conta ClickSign → 409 que caía no

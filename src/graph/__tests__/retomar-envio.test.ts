@@ -298,7 +298,6 @@ describe("re-review", () => {
 describe("bloqueios do envio (prod 07/10: FINCasa sem ClickSign)", () => {
   it.each([
     [409, "clicksign_nao_configurada", "não tem a ClickSign conectada"],
-    [422, "documento_indisponivel", "não está pronto para envio"],
     [400, "sem_signatarios", "não tem assinantes"],
     [400, "signatarios_em_conflito", "mesmo CPF ou contato"],
     [400, "roteamento_indisponivel", "Ajuste na tela de propostas"],
