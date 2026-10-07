@@ -293,3 +293,49 @@ describe("re-review", () => {
     expect(p.fluxo).toMatchObject({ propostaId: "b" });
   });
 });
+
+describe("bloqueios do envio (prod 07/10: FINCasa sem ClickSign)", () => {
+  it.each([
+    [409, "clicksign_nao_configurada", "não tem a ClickSign conectada"],
+    [422, "documento_indisponivel", "não está pronto para envio"],
+    [400, "sem_signatarios", "não tem assinantes"],
+    [400, "signatarios_em_conflito", "mesmo CPF ou contato"],
+    [400, "roteamento_indisponivel", "Ajuste na tela de propostas"],
+  ])("%s %s → texto honesto, sem 'não consegui falar'", async (status, error, trecho) => {
+    const d = dep(vi.fn().mockResolvedValue({ status, body: { error } }));
+    const f: Fluxo = {
+      kind: "proposta", etapa: "envio", natureza: "venda", dados: {}, propostaId: "p1", codigo: "PROP-2026-0001",
+      metodo: { valor: "whatsapp", rotulo: "WhatsApp" }, assinantes: [], atualizadoEm: agora,
+    };
+    const p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).toContain(trecho);
+    expect(p.reply).toContain("PROP-2026-0001 continua salvo");
+    expect(p.reply).not.toContain("Não consegui falar");
+    expect(p.fluxo).toBeNull();
+  });
+});
+
+describe("ClickSign não conectada: avisa cedo", () => {
+  it("preflight assinatura:false → avisa no início e segue a coleta", async () => {
+    const acao = vi.fn().mockResolvedValue({ status: 200, body: { modelo: true, assinatura: false } });
+    const p = await F.conduzirFluxo({ kind: "proposta", etapa: "natureza", dados: {}, atualizadoEm: agora }, ctx("venda"), dep(acao));
+    expect(p.reply).toContain("ainda não tem a ClickSign conectada");
+    expect(p.reply).toContain("Comprador");
+    expect(p.fluxo).toMatchObject({ etapa: "coleta" });
+  });
+
+  it("preflight sem o campo (servidor antigo) não avisa nada", async () => {
+    const acao = vi.fn().mockResolvedValue({ status: 200, body: { modelo: true } });
+    const p = await F.conduzirFluxo({ kind: "proposta", etapa: "natureza", dados: {}, atualizadoEm: agora }, ctx("venda"), dep(acao));
+    expect(p.reply).not.toContain("ClickSign");
+  });
+
+  it("options com assinaturaConfigurada:false para antes dos tipos de assinatura", async () => {
+    const acao = vi.fn().mockResolvedValue({ status: 200, body: { ...OP.body, assinaturaConfigurada: false } });
+    const f: Fluxo = { kind: "proposta", etapa: "ajustes", natureza: "venda", dados: {}, propostaId: "p1", codigo: "PROP-2026-0001", atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("ok"), dep(acao));
+    expect(p.reply).toContain("não tem a ClickSign conectada");
+    expect(p.reply).not.toContain("Como os assinantes");
+    expect(p.fluxo).toBeNull();
+  });
+});

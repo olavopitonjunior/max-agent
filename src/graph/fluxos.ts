@@ -694,8 +694,11 @@ async function iniciarProposta(
   const tipos =
     natureza === "locacao" ? ["locacao_residencial_v1", "locacao_comercial_v1"] : ["compra_venda_v1"];
   let semNenhum = true;
+  let semAssinatura = false;
   for (const schemaType of tipos) {
     const pre = await deps.acao("proposal.preflight", { schemaType });
+    // `assinatura` (ClickSign conectada) é da org, não do tipo: basta uma resposta.
+    if (pre?.status === 200 && pre.body.assinatura === false) semAssinatura = true;
     if (!(pre?.status === 200 && pre.body.modelo === false)) {
       semNenhum = false;
       break;
@@ -712,12 +715,15 @@ async function iniciarProposta(
     if (extraido) dados = mesclarDados({}, sanearDados(extraido));
   }
   const f: Fluxo = { kind: "proposta", etapa: "coleta", natureza, dados, atualizadoEm: agora };
+  // Sem ClickSign: segue (rascunho e PDF funcionam), mas avisa JÁ — antes de
+  // a pessoa preencher tudo e descobrir no "sim" do envio (prod 07/10).
+  const aviso = semAssinatura ? `${TEXTO_AVISO_SEM_ASSINATURA}\n\n` : "";
   const temAlgo = !igual(dados, mesclarDados({}, sanearDados({})));
-  if (!temAlgo) return { reply: textoCamposDaProposta(natureza), fluxo: f, evento: "proposta_campos" };
+  if (!temAlgo) return { reply: `${aviso}${textoCamposDaProposta(natureza)}`, fluxo: f, evento: "proposta_campos" };
   const falta = faltandoNaProposta(dados);
-  if (falta.length === 0) return { reply: resumoDaProposta(f), fluxo: { ...f, etapa: "revisao" }, evento: "proposta_revisao" };
+  if (falta.length === 0) return { reply: `${aviso}${resumoDaProposta(f)}`, fluxo: { ...f, etapa: "revisao" }, evento: "proposta_revisao" };
   return {
-    reply: `${textoCamposDaProposta(natureza)}\n\nDo seu pedido já anotei o que deu; ainda falta: ${falta.join("; ")}.`,
+    reply: `${aviso}${textoCamposDaProposta(natureza)}\n\nDo seu pedido já anotei o que deu; ainda falta: ${falta.join("; ")}.`,
     fluxo: f,
     evento: "proposta_campos",
   };
@@ -1236,6 +1242,13 @@ async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: Dep
   if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
   if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
   if (r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: `proposal_options_${r.status}` };
+  if (r.body.assinaturaConfigurada === false) {
+    return {
+      reply: `${TEXTO_DO_BLOQUEIO.clicksign_nao_configurada} O rascunho${f.codigo ? ` ${f.codigo}` : ""} continua salvo, sem envio.`,
+      fluxo: null,
+      evento: "envio_sem_clicksign",
+    };
+  }
   const metodos = (Array.isArray(r.body.metodos) ? (r.body.metodos as MetodoDeAssinatura[]) : []).filter(
     (m) => m && typeof m.valor === "string" && typeof m.rotulo === "string"
   );
@@ -1257,6 +1270,28 @@ async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: Dep
   }
   return { reply: textoMetodos(metodos), fluxo: { ...g, etapa: "metodo" }, evento: "proposta_metodo" };
 }
+
+export const TEXTO_AVISO_SEM_ASSINATURA =
+  "Aviso: sua imobiliária ainda não tem a ClickSign conectada. Consigo montar o rascunho, " +
+  "mas o envio para assinatura só funciona depois que um administrador conectar a conta nas " +
+  "configurações de assinatura do sistema.";
+
+/** Bloqueios do `proposal.send` (contractmaker `CODIGO_DO_BLOQUEIO`) → fato + caminho. */
+const TEXTO_DO_BLOQUEIO: Record<string, string> = {
+  clicksign_nao_configurada:
+    "Sua imobiliária ainda não tem a ClickSign conectada, então não dá para enviar para assinatura. " +
+    "Um administrador conecta a conta nas configurações de assinatura do sistema.",
+  documento_indisponivel:
+    "O documento desta proposta não está pronto para envio. Confira o rascunho no sistema.",
+  signatarios_em_conflito:
+    "Há assinantes com o mesmo CPF ou contato nesta proposta. Corrija na tela de propostas.",
+  // Todo bloqueio de roteamento é de CONFIGURAÇÃO (quem assina, canal), não
+  // falha passageira — "tente de novo" faria a pessoa repetir o mesmo envio.
+  roteamento_indisponivel:
+    "Do jeito que os assinantes estão configurados, o envio não fecha (quem assina ou o canal de algum deles). " +
+    "Ajuste na tela de propostas.",
+  sem_signatarios: "Esta proposta não tem assinantes. Complete na tela de propostas.",
+};
 
 const CAMPO_FALTANDO: Record<string, string> = {
   nome: "nome completo",
@@ -1323,6 +1358,17 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
   }
   if (r.status === 409 && r.body.error === "ja_enviada") {
     return { reply: "Essa proposta já foi enviada.", fluxo: null, evento: "ja_enviada" };
+  }
+  // Bloqueios do servidor com código FIXO (`CODIGO_DO_BLOQUEIO`): cada um diz o
+  // fato e o caminho. Prod 07/10: FINCasa sem conta ClickSign → 409 que caía no
+  // genérico "não consegui falar com o sistema".
+  const bloqueio = typeof r.body.error === "string" ? TEXTO_DO_BLOQUEIO[r.body.error] : undefined;
+  if (bloqueio) {
+    return {
+      reply: `${bloqueio} O rascunho${f.codigo ? ` ${f.codigo}` : ""} continua salvo, sem envio.`,
+      fluxo: null,
+      evento: `envio_bloqueado_${r.body.error}`,
+    };
   }
   return { reply: TEXTO_SEM_RESPOSTA, fluxo: { ...f, chave: undefined }, evento: `proposal_send_${r.status}` };
 }
