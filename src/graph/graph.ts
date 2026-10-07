@@ -82,7 +82,9 @@ import {
   conduzirFluxo,
   fluxoExpirou,
   iniciarFluxo,
+  pedeEnvio,
   rebaixarFluxo,
+  retomarEnvio,
   SYSTEM_DA_EXTRACAO,
   TOOL_EXTRAIR_PROPOSTA,
   toolExtrairCampos,
@@ -716,13 +718,39 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
  * passo seguinte; sem fluxo (ou vencido), passa adiante sem tocar em nada.
  */
 async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
-  const atual = state.fluxo;
-  if (!atual) return {};
   const agora = Date.now();
-  if (fluxoExpirou(atual, agora)) return { fluxo: null };
-
   const userText = state.inbound.text?.trim() || "";
   const usage: LlmUsage[] = [];
+  const vencido = state.fluxo && fluxoExpirou(state.fluxo, agora);
+  const atual = vencido ? null : state.fluxo;
+
+  // Sem fluxo (ou vencido) e a pessoa pede o ENVIO: retoma do rascunho dela —
+  // nunca deixar o modelo livre "enviar" (prod 07/10).
+  if (!atual && podeEscrever(state.identity) && pedeEnvio(userText)) {
+    const passo = await retomarEnvio(
+      {
+        texto: userText,
+        messageId: state.inbound.messageId,
+        policy: state.policy,
+        politicaIndisponivel: state.politicaIndisponivel,
+        agora,
+      },
+      depsDoFluxo(state, usage),
+      state.fluxo
+    );
+    return {
+      fluxo: passo.fluxo,
+      messages: [
+        { role: "user", content: userText },
+        { role: "assistant", content: passo.reply },
+      ],
+      reply: passo.reply,
+      ...(usage.length > 0 ? { usage } : {}),
+      toolLog: [{ name: "fluxo", args: { kind: "envio" }, outcome: passo.evento }],
+    };
+  }
+  if (!atual) return vencido ? { fluxo: null } : {};
+
   const passo = await conduzirFluxo(
     atual,
     {
@@ -1350,9 +1378,10 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   const trava = travarCriacaoFalsa(texto, {
     houveLeitura: state.toolResults.some((r) => r.items !== null),
     podeCriar: modoDeCriacao(state.identity, state.policy) === "disponivel",
+    podeEnviar: podeEscrever(state.identity) && state.policy.includes("proposal.send"),
   });
   if (trava.travou) {
-    console.warn(`[compose] afirmação de criação sem escrita em ${state.identity.orgId}`);
+    console.warn(`[compose] afirmação de criação/envio sem escrita em ${state.identity.orgId}`);
   }
 
   // G6: o teto vale DEPOIS do sanitizador — cortar antes contaria linha que

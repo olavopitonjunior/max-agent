@@ -133,6 +133,21 @@ describe("fluxo no grafo", () => {
     expect(s.fluxo).toMatchObject({ propostaId: "p1" });
   });
 
+  it("prod 07/10: 'Pode enviar para assinatura' com o fluxo VENCIDO retoma pelo servidor, sem o modelo livre", async () => {
+    acao.mockImplementation(async (p: { verb: string }) =>
+      p.verb === "proposal.list"
+        ? { status: 200, body: { items: [{ id: "p1", codigo: "PROP-2026-0001", estado: "Rascunho" }] } }
+        : { status: 200, body: { metodos: [{ valor: "email", rotulo: "E-mail" }, { valor: "whatsapp", rotulo: "WhatsApp" }], signatarios: [{ nome: "Letícia Gonçalves", papel: "proponente" }] } }
+    );
+    const s = await run("Pode enviar para assinatura", {
+      fluxo: { kind: "proposta", etapa: "coleta", natureza: "venda", dados: {}, atualizadoEm: Date.now() - 31 * 60 * 1000 },
+    });
+    expect(llm).not.toHaveBeenCalled();
+    expect(s.reply).toContain("Como os assinantes vão se identificar");
+    expect(s.fluxo).toMatchObject({ propostaId: "p1", etapa: "metodo" });
+    expect(acao.mock.calls.map((c) => c[0].verb)).not.toContain("proposal.send");
+  });
+
   it("fluxo vencido é descartado e o turn segue normal", async () => {
     llm.mockResolvedValue({ text: "Oi! Como posso ajudar?", toolCalls: [], usage: uso });
     const s = await run("oi", { fluxo: { kind: "escolha", atualizadoEm: Date.now() - 31 * 60 * 1000 } });
