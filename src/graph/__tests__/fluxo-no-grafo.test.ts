@@ -81,12 +81,23 @@ describe("fluxo no grafo", () => {
     expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.status", "proposal.complete", "proposal.convert"]);
     expect(llm).not.toHaveBeenCalled();
   });
-  it("classificador errado não prepara confirmação de criação para proposta referenciada", async () => {
+  it("classificador errado vira continuidade da proposta referenciada, não criação", async () => {
     llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
     const s = await run("Aproveite a proposta da Letícia e gere um link");
-    expect(s.fluxo).toBeNull();
-    expect(s.reply).toContain("Não abri um formulário novo");
+    expect(s.fluxo).toMatchObject({ kind: "continuidade", etapa: "selecao", converter: true });
+    expect(s.reply).toContain("PROP-AAAA-NNNN");
     expect(acao).not.toHaveBeenCalled();
+  });
+  it("depois do redirecionamento, só o código converte (sem laço de recusa)", async () => {
+    llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
+    acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.status") return { status: 200, body: { proposta: { id: "p1", codigo: "PROP-2026-0001", status: "completa" } } };
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
+    const s = await run("Aproveite a proposta da Letícia e gere um link");
+    const r = await run("PROP-2026-0001", { fluxo: s.fluxo }, "selecao");
+    expect(r.fluxo).toMatchObject({ kind: "continuidade", etapa: "confirmacao", converter: true, alvo: { id: "p1" } });
+    expect(r.reply).toContain("converter a proposta PROP-2026-0001 em negócio");
   });
   it("continuidade vencida conserva o alvo e expira só a confirmação", async () => {
     const s = await run("sim", { fluxo: { kind: "continuidade", etapa: "confirmacao", converter: true,

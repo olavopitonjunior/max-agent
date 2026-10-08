@@ -799,11 +799,13 @@ export async function iniciarFluxo(
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
   // Defesa independente do roteador: nem uma chamada errada de propor_criacao
   // pode preparar um SIM que autorize um negócio desvinculado da proposta.
-  if (params.pedido && (pedeContinuidade(params.pedido) || referenciaPropostaExistente(params.pedido))) {
+  // O grafo troca esta resposta pela continuidade (graph.ts); o texto fica como
+  // última defesa para quem chamar iniciarFluxo direto.
+  if (params.pedido && (pedeContinuidade(params.pedido) || referenciaPropostaExistente(params.pedido, params.tipo))) {
     return {
       fluxo: null,
       evento: "criacao_referencia_existente",
-      reply: "Seu pedido faz referência a uma proposta existente. Não abri um formulário novo. Você quer convertê-la em negócio? Informe o código PROP-AAAA-NNNN junto do pedido de conversão para eu continuar a proposta correta.",
+      reply: "Seu pedido faz referência a uma proposta existente, então não abri um formulário novo. Para continuar, responda: converter PROP-AAAA-NNNN.",
     };
   }
   const podeProposta = params.policy.includes("proposal.create");

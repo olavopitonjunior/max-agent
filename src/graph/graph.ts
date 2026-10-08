@@ -1187,7 +1187,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
         };
       }
       const extra: LlmUsage[] = [];
-      const passo = await iniciarFluxo(
+      let passo = await iniciarFluxo(
         {
           tipo: args.tipo,
           natureza: args.natureza ?? (args.tipo === "proposta" ? undefined : args.tipo),
@@ -1197,6 +1197,12 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
         },
         depsDoFluxo(state, extra)
       );
+      // Pedido de criação que cita proposta existente: o modelo quis um formulário
+      // a partir dela, então é conversão. Continua a proposta em vez de recusar.
+      if (passo.evento === "criacao_referencia_existente" && podeEscrever(state.identity)) {
+        passo = await iniciarContinuidade({ texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+          politicaIndisponivel: state.politicaIndisponivel, agora: Date.now() }, depsDoFluxo(state, extra), { converter: true });
+      }
 
       return {
         ...daOferta,
