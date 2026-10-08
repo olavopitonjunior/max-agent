@@ -37,7 +37,7 @@
 
 import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
-import { conduzirContinuidade, type FluxoContinuidade } from "./continuidade";
+import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -797,6 +797,15 @@ export async function iniciarFluxo(
   },
   deps: DepsDoFluxo
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
+  // Defesa independente do roteador: nem uma chamada errada de propor_criacao
+  // pode preparar um SIM que autorize um negócio desvinculado da proposta.
+  if (params.pedido && (pedeContinuidade(params.pedido) || referenciaPropostaExistente(params.pedido))) {
+    return {
+      fluxo: null,
+      evento: "criacao_referencia_existente",
+      reply: "Seu pedido faz referência a uma proposta existente. Não abri um formulário novo. Você quer convertê-la em negócio? Informe o código PROP-AAAA-NNNN junto do pedido de conversão para eu continuar a proposta correta.",
+    };
+  }
   const podeProposta = params.policy.includes("proposal.create");
   const podeNegocio = params.policy.includes("form.create");
   if (params.tipo !== "proposta" && podeNegocio) {

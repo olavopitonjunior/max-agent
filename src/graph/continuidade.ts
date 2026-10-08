@@ -17,11 +17,31 @@ export interface FluxoContinuidade {
 type Resposta = Extract<PassoDoFluxo, { reply: string }>;
 const obj = (v: unknown): Record<string, unknown> => v && typeof v === "object" ? v as Record<string, unknown> : {};
 const citaPessoa = (texto: string): boolean => /\bproposta\s+(?:assinada\s+)?(?:da|do|de)\s+(?!venda\b|locacao\b)\p{L}+/iu.test(texto);
+const conversao = /\b(converter|converta|conversao|transformar|transforme|tranforme)\b/;
+/** "Virar negócio" só é conversão quando o sujeito é uma proposta que já existe. */
+const virar = /\b(virar|vire)\b/;
+const indefinida = /\b(?:uma|um|nova|novo|outra)\s+proposta\b|\bproposta\s+nova\b/;
+
+/** "Faz/cria/monta uma proposta do João" é criação: o nome é do cliente novo. */
+const criaProposta = /\b(?:cri[ae]r?|fa[zc]a?|fazer|mont[ae]r?|ger[ae]r?|abr[ae]|abrir|prepar[ae]r?|elabor[ae]r?)\s+(?:(?:uma|um|a|o|nova|novo|outra|mais)\s+){0,2}proposta\b|\bnova\s+proposta\b|\bproposta\s+nova\b/;
+
+/** Guarda conservadora da criação: referência existente exige esclarecer o alvo,
+ * independentemente do verbo que o modelo tenha interpretado. Código, demonstrativo
+ * e estado sempre referem; "proposta da X" só refere sem verbo de criação. */
+export function referenciaPropostaExistente(texto: string): boolean {
+  const t = normalizar(texto);
+  return /\bprop-\d{4}-\d+\b/.test(t) ||
+    /\b(?:essa|esta|aquela|dessa|desta|daquela|mesma)\s+proposta\b/.test(t) ||
+    /\bproposta\s+(?:assinada|existente|aprovada|concluida)\b/.test(t) ||
+    (citaPessoa(t) && !criaProposta.test(t));
+}
 
 /** Pedidos de continuidade nunca podem cair na criação de formulário avulso. */
 export function pedeContinuidade(texto: string): boolean {
-  const t = normalizar(texto);
-  if (/^(como|quando|onde|qual|quais|quanto|por que|o que)\b/.test(t) || /\bnao\s+(concluir|conclua|converter|converta)\b/.test(t)) return false;
+  const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "");
+  if (/^(como|quando|onde|qual|quais|quanto|por que|o que)\b/.test(t) || /\bnao\s+(?:(?:quero|pode|deve)\s+)?(?:a\s+)?(concluir|conclua|converter|converta|conversao|transformar|transforme|tranforme|virar|vire)\b/.test(t)) return false;
+  if (conversao.test(t) && /\b(proposta|prop-\d{4})\b/.test(t)) return true;
+  if (virar.test(t) && !indefinida.test(t) && (/\bprop-\d{4}/.test(t) || citaPessoa(t) || /\b(?:essa|esta|dessa|desta|mesma)\s+proposta\b/.test(t))) return true;
   return (/\b(concluir|conclua|converter|converta)\b/.test(t) && (/\b(proposta|prop-\d{4}|negocio|formulario)\b/.test(t) || /^(pode )?(concluir|conclua|converter|converta)[.!]?$/.test(t))) ||
     /\b(formulario|negocio)\b.*\b(dess[ae]|dest[ae]|da proposta|proposta assinada)\b/.test(t) ||
     /\b(continuar|continue|seguir|seguir com|dar continuidade)\b.*\bproposta\b/.test(t);
@@ -52,7 +72,7 @@ function alvoDe(v: unknown): Alvo | null {
 export async function iniciarContinuidade(ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<Resposta> {
   const f: FluxoContinuidade = {
     kind: "continuidade", etapa: "selecao", atualizadoEm: ctx.agora,
-    converter: /\b(converter|converta|negocio|formulario)\b/.test(normalizar(ctx.texto)),
+    converter: conversao.test(normalizar(ctx.texto)) || /\b(negocio|formulario)\b/.test(normalizar(ctx.texto)),
   };
   if (!ctx.policy.includes("proposal.list") || ctx.politicaIndisponivel) {
     return resposta(null, "Não consegui validar sua permissão para continuar essa proposta. Não criei outro formulário.", "continuidade_sem_politica");

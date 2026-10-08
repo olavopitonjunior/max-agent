@@ -37,6 +37,34 @@ const DADOS_OK: import("../fluxos").DadosDaProposta = {
 };
 
 describe("entrada", () => {
+  it.each([
+    "Crie uma nova proposta da Letícia",
+    "Faz uma proposta do João",
+    "Cria uma proposta da Letícia",
+    "Monta a proposta do Carlos pro apto 52",
+    "Crie uma proposta de compra do Pedro",
+    "Max, crie proposta da Ana",
+  ])("não bloqueia criação de proposta para uma pessoa: %s", async (pedido) => {
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps());
+    expect(p.fluxo?.kind).toBe("escolha");
+  });
+  it.each([
+    "Max, tranforme a proposta da Letícia em negócio e gere o link do formulário",
+    "Aproveite a proposta da Letícia e gere um link",
+    "Gere um formulário a partir de PROP-2026-0001",
+    "Gere um formulário com os dados dessa proposta",
+  ])("barra criação avulsa mesmo com classificação errada: %s", async (pedido) => {
+    const d = deps();
+    const p = await F.iniciarFluxo({ tipo: "venda", pedido, policy: [...TUDO], agora }, d);
+    expect(p.fluxo).toBeNull();
+    expect(p.evento).toBe("criacao_referencia_existente");
+    expect(d.acao).not.toHaveBeenCalled();
+  });
+  it("continua permitindo um formulário novo sem referência existente", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 200, body: { campos: [] } }) });
+    const p = await F.iniciarFluxo({ tipo: "venda", pedido: "Crie um formulário novo de venda", policy: [...TUDO], agora }, d);
+    expect(p.fluxo?.kind).toBe("negocio");
+  });
   it("pedido de proposta pergunta proposta × negócio", async () => {
     const p = await F.iniciarFluxo({ tipo: "proposta", policy: [...TUDO], agora }, deps());
     expect(p.reply).toBe(F.TEXTO_ESCOLHA);

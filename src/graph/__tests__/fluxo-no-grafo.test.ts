@@ -63,6 +63,31 @@ beforeEach(() => {
 });
 
 describe("fluxo no grafo", () => {
+  it("frase real seleciona proposta e converte o mesmo ID, sem criar formulário avulso", async () => {
+    llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
+    acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.status") return { status: 200, body: { proposta: { id: "p1", codigo: "PROP-2026-0001", status: "assinada_proponente" } } };
+      if (verb === "proposal.complete") return { status: 200, body: { status: "completa" } };
+      if (verb === "proposal.convert") return { status: 201, body: { negocio: { id: "d1", link: "/deals/d1" } } };
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
+    const inicial = await run("Max, tranforme a proposta da Letícia em negócio e gere o link do formulário");
+    expect(inicial.fluxo).toMatchObject({ kind: "continuidade", etapa: "selecao", converter: true });
+    expect(acao).not.toHaveBeenCalled();
+    const selecionado = await run("PROP-2026-0001", { fluxo: inicial.fluxo }, "selecao");
+    expect(selecionado.fluxo).toMatchObject({ etapa: "confirmacao", alvo: { id: "p1" } });
+    const fim = await run("SIM", { fluxo: selecionado.fluxo }, "confirmacao");
+    expect(fim.reply).toContain("/deals/d1");
+    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.status", "proposal.complete", "proposal.convert"]);
+    expect(llm).not.toHaveBeenCalled();
+  });
+  it("classificador errado não prepara confirmação de criação para proposta referenciada", async () => {
+    llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
+    const s = await run("Aproveite a proposta da Letícia e gere um link");
+    expect(s.fluxo).toBeNull();
+    expect(s.reply).toContain("Não abri um formulário novo");
+    expect(acao).not.toHaveBeenCalled();
+  });
   it("continuidade vencida conserva o alvo e expira só a confirmação", async () => {
     const s = await run("sim", { fluxo: { kind: "continuidade", etapa: "confirmacao", converter: true,
       alvo: { id: "p1", codigo: "PROP-2026-0001", status: "completa" }, atualizadoEm: Date.now() - 60 * 60 * 1000 } });

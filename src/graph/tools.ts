@@ -78,7 +78,9 @@ export const FORM_TOOL: LlmTool = {
     "Cria um formulário ou uma proposta e devolve o link. Chame sempre que a " +
     "pessoa pedir para CRIAR, ABRIR, GERAR ou MANDAR um formulário, uma ficha, " +
     "um cadastro, uma proposta ou o link de preenchimento — mesmo que ela não " +
-    "dê detalhes. A criação não acontece agora: a pessoa ainda confirma depois.",
+    "dê detalhes. Não use para converter, transformar ou continuar uma proposta " +
+    "existente, nem para gerar um formulário a partir dela: isso exige preservar " +
+    "o vínculo com a proposta. A criação não acontece agora: a pessoa ainda confirma depois.",
   parameters: {
     type: "object",
     properties: {
