@@ -62,6 +62,24 @@ beforeEach(() => {
   vi.mocked(searchKnowledge).mockResolvedValue([]);
 });
 
+describe("cronometrar (O0)", () => {
+  it("cada nó que rodou deixa { no, ms } em timings, na ordem do grafo", async () => {
+    llm.mockResolvedValue({ text: "Olá! Posso ajudar com propostas e negócios.", toolCalls: [], usage: uso });
+    const s = await run("oi");
+    const nos = (s.timings as { no: string; ms: number }[]).map((t) => t.no);
+    expect(nos.slice(0, 4)).toEqual(["gate", "continuar", "conduzir", "confirm"]);
+    expect(nos).toContain("answer");
+    expect(nos).toContain("compose");
+    for (const t of s.timings as { no: string; ms: number }[]) expect(t.ms).toBeGreaterThanOrEqual(0);
+  });
+  it("turn barrado no gate mede só o que rodou", async () => {
+    vi.mocked(fetchProfile).mockResolvedValue({ enabled: false, model: "x", instructions: null, maxPolicy: POLITICA } as never);
+    const s = await run("oi");
+    expect((s.timings as { no: string }[]).map((t) => t.no)).toEqual(["gate", "compose"]);
+    expect(llm).not.toHaveBeenCalled();
+  });
+});
+
 describe("fluxo no grafo", () => {
   it("frase real seleciona proposta e converte o mesmo ID, sem criar formulário avulso", async () => {
     llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });

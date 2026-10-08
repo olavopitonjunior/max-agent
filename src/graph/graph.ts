@@ -375,6 +375,17 @@ export const MaxState = Annotation.Root({
   }),
 
   /**
+   * Quanto cada nó levou neste turn, na ordem em que rodaram (`cronometrar`).
+   * Vai para `conversation_turn.timings_json`: é o que diz ONDE o p95 mora
+   * antes de qualquer mudança no grafo. Mesmo reducer de reset dos de cima
+   * (`[]` = zerar), e zerado no `RESET_DO_TURN`.
+   */
+  timings: Annotation<TimingDeNo[]>({
+    reducer: (prev, next) => (next.length === 0 ? [] : [...prev, ...next]),
+    default: () => [],
+  }),
+
+  /**
    * G2 — número → id da última lista mostrada. ATRAVESSA turns de propósito:
    * "e a 2?" chega na mensagem seguinte. O prazo é o `REFERENCIA_TTL_MS`,
    * conferido por `resolverReferencia` na hora do uso — mapa vencido continua
@@ -462,7 +473,7 @@ export async function seedNotification(
   phone: string,
   texto: string
 ): Promise<void> {
-  const app = buildGraph().compile({ checkpointer: await getCheckpointer() });
+  const app = await getApp();
   await app.updateState(
     { configurable: { thread_id: threadIdFor(orgId, phone) } },
     { messages: [{ role: "assistant", content: texto }] }
@@ -482,11 +493,20 @@ export async function seedNotification(
  */
 async function gate(state: MaxStateType): Promise<MaxUpdate> {
   let perfilFalhou = false;
-  const profile = await fetchProfile(state.identity.orgId).catch((err) => {
-    console.warn("[graph] perfil indisponível, seguindo:", err?.message ?? err);
-    perfilFalhou = true;
-    return null;
-  });
+  // Perfil e chave de papel são duas idas ao ImobPro que não dependem uma da
+  // outra: em paralelo, o gate custa a mais lenta, não a soma. A chave é lida
+  // mesmo quando o kill switch ou a deny-list vão cortar o turn — é uma
+  // leitura, e o halt é a exceção, não o caso que se otimiza.
+  const [profile, chave] = await Promise.all([
+    fetchProfile(state.identity.orgId).catch((err) => {
+      console.warn("[graph] perfil indisponível, seguindo:", err?.message ?? err);
+      perfilFalhou = true;
+      return null;
+    }),
+    state.identity.kind === "user"
+      ? chaveDePolitica(state.identity.orgId, state.inbound.fromPhone)
+      : Promise.resolve<string | null>(null),
+  ]);
 
   /**
    * Todo `halt` DESCARTA a pendência, e isso não é higiene: é consentimento.
@@ -591,11 +611,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
    * cair no MENOR privilégio: guardar um valor anterior para usar quando a rota
    * cai reintroduziria exatamente o congelamento, e com pior sincronismo.
    */
-  const chave =
-    state.identity.kind === "user"
-      ? await chaveDePolitica(state.identity.orgId, state.inbound.fromPhone)
-      : null;
-
+  // (`chave` foi lida no topo do gate, em paralelo com o perfil.)
   const policy = resolverPolitica({
     politica: profile?.maxPolicy,
     sujeito: state.identity,
@@ -1530,17 +1546,42 @@ function afterCompose(state: MaxStateType): "compact" | typeof END {
   return state.halt ? END : "compact";
 }
 
+/** Um nó do grafo, com o tempo que levou anexado ao estado (`timings`). */
+export interface TimingDeNo {
+  no: string;
+  ms: number;
+}
+
+/**
+ * Envolve um nó para medir o que ELE levou — sem contar o checkpoint, que o
+ * LangGraph grava entre nós. Soma com `latency_ms` do turn, não substitui: a
+ * diferença entre os dois é justamente o custo do checkpointer e da fila.
+ *
+ * A medição vai junto da atualização que o nó devolve, então um nó que falha
+ * não registra tempo — o turn inteiro já conta como erro.
+ */
+function cronometrar(
+  no: string,
+  fn: (state: MaxStateType) => Promise<MaxUpdate> | MaxUpdate
+): (state: MaxStateType) => Promise<MaxUpdate> {
+  return async (state) => {
+    const iniciadoEm = Date.now();
+    const update = await fn(state);
+    return { ...update, timings: [{ no, ms: Date.now() - iniciadoEm }] };
+  };
+}
+
 export function buildGraph() {
   return new StateGraph(MaxState)
-    .addNode("gate", gate)
-    .addNode("continuar", continuar)
-    .addNode("conduzir", conduzir)
-    .addNode("confirm", confirm)
-    .addNode("retrieve", retrieve)
-    .addNode("answer", answer)
-    .addNode("tools", tools)
-    .addNode("compose", compose)
-    .addNode("compact", compact)
+    .addNode("gate", cronometrar("gate", gate))
+    .addNode("continuar", cronometrar("continuar", continuar))
+    .addNode("conduzir", cronometrar("conduzir", conduzir))
+    .addNode("confirm", cronometrar("confirm", confirm))
+    .addNode("retrieve", cronometrar("retrieve", retrieve))
+    .addNode("answer", cronometrar("answer", answer))
+    .addNode("tools", cronometrar("tools", tools))
+    .addNode("compose", cronometrar("compose", compose))
+    .addNode("compact", cronometrar("compact", compact))
     .addEdge(START, "gate")
     .addConditionalEdges("gate", afterGate, {
       continuar: "continuar",
@@ -1590,6 +1631,37 @@ export async function getCheckpointer(): Promise<PostgresSaver> {
     }
   }
   return checkpointer;
+}
+
+type AppCompilado = ReturnType<ReturnType<typeof buildGraph>["compile"]>;
+let appCompilado: Promise<AppCompilado> | null = null;
+
+/**
+ * O grafo compilado, UMA vez por instância.
+ *
+ * Até aqui cada chamada (`runTurn`, `seedNotification`, `descartarPendencias`)
+ * montava e compilava o grafo de novo — trabalho puro de CPU repetido em todo
+ * turn, e três lugares para esquecer o checkpointer. A compilação é
+ * determinística e sem estado; o que varia por chamada é o `thread_id`, que
+ * vai no `config`.
+ *
+ * Falha na compilação (ou no `setup()` do checkpointer) NÃO fica cacheada: a
+ * próxima chamada tenta de novo.
+ */
+export function getApp(): Promise<AppCompilado> {
+  if (!appCompilado) {
+    appCompilado = (async () =>
+      buildGraph().compile({ checkpointer: await getCheckpointer() }))().catch((err) => {
+      appCompilado = null;
+      throw err;
+    });
+  }
+  return appCompilado;
+}
+
+/** Só para testes: o módulo é cacheado entre arquivos pelo vitest. */
+export function __resetAppParaTestes(): void {
+  appCompilado = null;
 }
 
 /**
@@ -1666,6 +1738,7 @@ export const RESET_DO_TURN = {
     // A oferta é do turn: herdada, deixaria o despachante aceitar chamada de
     // uma tool que este turn nem mostrou ao modelo.
     toolsOferecidas: [],
+    timings: [],
     politicaIndisponivel: false,
 };
 
@@ -1877,10 +1950,9 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
 
   // Carregado ANTES do grafo, junto com o resto do que o prompt precisa. É
   // uma query indexada pela PK — mais barata que a busca semântica que o mesmo
-  // turn já faz.
-  const facts = await loadFacts(orgId, phone);
+  // turn já faz. Em paralelo com o grafo (que só compila na primeira vez).
+  const [facts, app] = await Promise.all([loadFacts(orgId, phone), getApp()]);
 
-  const app = buildGraph().compile({ checkpointer: await getCheckpointer() });
   const result = await comRastro(() => app.invoke(
     {
       inbound: { ...inbound, text: turnText },
@@ -1911,6 +1983,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   const reply = result.reply ?? null;
   const usage = result.usage ?? [];
   const tools = result.toolLog ?? [];
+  const timings = result.timings ?? [];
   const latencyMs = Date.now() - iniciadoEm;
 
   /**
@@ -1956,6 +2029,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         replyText: reply,
         tools,
         usage,
+        timings,
         latencyMs,
         error: desfecho,
       });
@@ -2010,7 +2084,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
  */
 async function descartarPendencias(orgId: string, phone: string): Promise<void> {
   try {
-    const app = buildGraph().compile({ checkpointer: await getCheckpointer() });
+    const app = await getApp();
     const config = { configurable: { thread_id: threadIdFor(orgId, phone) } };
     const atual = await app.getState(config);
     const v = atual.values as Partial<MaxStateType> | undefined;
