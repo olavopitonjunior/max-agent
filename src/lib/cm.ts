@@ -165,9 +165,12 @@ export async function transcribeMedia(
       },
       IMOBPRO_TRANSCRIBE_TIMEOUT_MS
     );
-    // 409 é o idioma da casa para "já tenho este" (ver /notify): desfecho
-    // duplicado aceito é sucesso — carimbar evita reportar para sempre.
-    if (res.status === 409) return "ok";
+    // Nenhum status que não seja 2xx vira texto. A linha anterior devolvia
+    // "ok" em 409 — colada do `/notify`, onde 409 é "já tenho este" — e "ok"
+    // é uma CONFIRMAÇÃO no `lerConfirmacao`: um áudio que o ImobPro recusasse
+    // com 409 teria executado a escrita pendente da pessoa. O transcribe nunca
+    // devolveu 409, mas a transcrição de uma mídia não pode, por construção,
+    // produzir uma palavra que o grafo trate como "sim".
     if (!res.ok) {
       console.warn(
         `[cm] transcrição recusada (${res.status}): ${(await res.text()).slice(0, 200)}`
