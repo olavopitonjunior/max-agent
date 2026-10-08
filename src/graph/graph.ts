@@ -1,4 +1,5 @@
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
+import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
@@ -724,7 +725,17 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const userText = state.inbound.text?.trim() || "";
   const usage: LlmUsage[] = [];
   const vencido = state.fluxo && fluxoExpirou(state.fluxo, agora);
-  const atual = vencido ? null : state.fluxo;
+  // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
+  const atual = vencido ? (state.fluxo?.kind === "continuidade" ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
+
+  // Continuidade tem precedência sobre o classificador "criar formulário".
+  if (atual?.kind !== "continuidade" && podeEscrever(state.identity) && pedeContinuidade(userText)) {
+    const passo = await iniciarContinuidade({ texto: userText, messageId: state.inbound.messageId,
+      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
+    return { fluxo: passo.fluxo, reply: passo.reply,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "continuidade" }, outcome: passo.evento }] };
+  }
 
   // Sem fluxo (ou vencido) e a pessoa pede o ENVIO: retoma do rascunho dela —
   // nunca deixar o modelo livre "enviar" (prod 07/10).
