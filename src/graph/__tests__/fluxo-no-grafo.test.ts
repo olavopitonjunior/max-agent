@@ -63,6 +63,42 @@ beforeEach(() => {
 });
 
 describe("fluxo no grafo", () => {
+  it("frase real seleciona proposta e converte o mesmo ID, sem criar formulário avulso", async () => {
+    llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
+    acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.status") return { status: 200, body: { proposta: { id: "p1", codigo: "PROP-2026-0001", status: "assinada_proponente" } } };
+      if (verb === "proposal.complete") return { status: 200, body: { status: "completa" } };
+      if (verb === "proposal.convert") return { status: 201, body: { negocio: { id: "d1", link: "/deals/d1" } } };
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
+    const inicial = await run("Max, tranforme a proposta da Letícia em negócio e gere o link do formulário");
+    expect(inicial.fluxo).toMatchObject({ kind: "continuidade", etapa: "selecao", converter: true });
+    expect(acao).not.toHaveBeenCalled();
+    const selecionado = await run("PROP-2026-0001", { fluxo: inicial.fluxo }, "selecao");
+    expect(selecionado.fluxo).toMatchObject({ etapa: "confirmacao", alvo: { id: "p1" } });
+    const fim = await run("SIM", { fluxo: selecionado.fluxo }, "confirmacao");
+    expect(fim.reply).toContain("/deals/d1");
+    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.status", "proposal.complete", "proposal.convert"]);
+    expect(llm).not.toHaveBeenCalled();
+  });
+  it("classificador errado vira continuidade da proposta referenciada, não criação", async () => {
+    llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
+    const s = await run("Aproveite a proposta da Letícia e gere um link");
+    expect(s.fluxo).toMatchObject({ kind: "continuidade", etapa: "selecao", converter: true });
+    expect(s.reply).toContain("PROP-AAAA-NNNN");
+    expect(acao).not.toHaveBeenCalled();
+  });
+  it("depois do redirecionamento, só o código converte (sem laço de recusa)", async () => {
+    llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
+    acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.status") return { status: 200, body: { proposta: { id: "p1", codigo: "PROP-2026-0001", status: "completa" } } };
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
+    const s = await run("Aproveite a proposta da Letícia e gere um link");
+    const r = await run("PROP-2026-0001", { fluxo: s.fluxo }, "selecao");
+    expect(r.fluxo).toMatchObject({ kind: "continuidade", etapa: "confirmacao", converter: true, alvo: { id: "p1" } });
+    expect(r.reply).toContain("converter a proposta PROP-2026-0001 em negócio");
+  });
   it("continuidade vencida conserva o alvo e expira só a confirmação", async () => {
     const s = await run("sim", { fluxo: { kind: "continuidade", etapa: "confirmacao", converter: true,
       alvo: { id: "p1", codigo: "PROP-2026-0001", status: "completa" }, atualizadoEm: Date.now() - 60 * 60 * 1000 } });

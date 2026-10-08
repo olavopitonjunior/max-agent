@@ -10,6 +10,22 @@ const fluxo = (): FluxoContinuidade => ({ kind: "continuidade", etapa: "confirma
 beforeEach(() => acao.mockReset());
 
 describe("continuidade assinada", () => {
+  it.each([
+    "Max, tranforme a proposta da Letícia em negócio e gere o link do formulário",
+    "Max, transforme a proposta da Letícia em negócio e gere o link do formulário",
+    "Quero a conversão da proposta da Letícia em negócio",
+    "Transformar PROP-2026-0001 em negócio",
+    "Faça a proposta da Letícia virar negócio",
+  ])("reconhece conversão sem depender do verbo converter: %s", (texto) => {
+    expect(pedeContinuidade(texto)).toBe(true);
+  });
+  it.each(["Max, não transforme a proposta em negócio", "Como transformar a proposta em negócio?"])("não executa pergunta ou negação: %s", (texto) => {
+    expect(pedeContinuidade(texto)).toBe(false);
+  });
+  it("conversão sem mencionar negócio mantém a intenção ao selecionar", async () => {
+    const r = await iniciarContinuidade({ ...ctx, texto: "Quero a conversão da proposta da Letícia" }, deps);
+    expect(r.fluxo).toMatchObject({ kind: "continuidade", converter: true, etapa: "selecao" });
+  });
   it.each(["Concluir. Pode criar o formulário desse negócio.", "Converter PROP-2026-0001", "Pode criar o formulário dessa proposta assinada"])("intercepta %s", (texto) => expect(pedeContinuidade(texto)).toBe(true));
   it.each(["Como converter uma proposta?", "não conclua a proposta", "quero criar um formulário novo", "concluir o cadastro", "converter dólar em reais"])("não captura %s", (texto) => expect(pedeContinuidade(texto)).toBe(false));
   it("nega sem política antes de ler", async () => {
