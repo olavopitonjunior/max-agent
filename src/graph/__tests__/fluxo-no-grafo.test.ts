@@ -63,6 +63,31 @@ beforeEach(() => {
 });
 
 describe("fluxo no grafo", () => {
+  it("continuidade vencida conserva o alvo e expira só a confirmação", async () => {
+    const s = await run("sim", { fluxo: { kind: "continuidade", etapa: "confirmacao", converter: true,
+      alvo: { id: "p1", codigo: "PROP-2026-0001", status: "completa" }, atualizadoEm: Date.now() - 60 * 60 * 1000 } });
+    expect(s.reply).toContain("PROP-2026-0001");
+    expect(s.fluxo).toMatchObject({ kind: "continuidade", etapa: "confirmacao", alvo: { id: "p1" } });
+    expect(acao).not.toHaveBeenCalled();
+    expect(llm).not.toHaveBeenCalled();
+  });
+  it("concluir e criar formulário desse negócio retoma a proposta assinada, nunca form.create", async () => {
+    llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
+    acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.list") return { status: 200, body: { items: [{ id: "p1", codigo: "PROP-2026-0001", status: "assinada_proponente" }], total: 1 } };
+      if (verb === "proposal.complete") return { status: 200, body: { ok: true, status: "completa" } };
+      if (verb === "proposal.convert") return { status: 201, body: { negocio: { id: "d1", link: "/deals/d1" } } };
+      return { status: 200, body: { campos: [] } };
+    });
+    const inicial = await run("Concluir. Pode criar o formulário desse negócio.");
+    expect(inicial.reply).toContain("PROP-2026-0001");
+    expect(inicial.reply).toContain("sem enviar ao proprietário");
+    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.list"]);
+    const confirmado = await run("Sim", { fluxo: inicial.fluxo }, "confirmacao");
+    expect(confirmado.reply).toContain("/deals/d1");
+    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.list", "proposal.complete", "proposal.convert"]);
+    expect(llm).not.toHaveBeenCalled();
+  });
   it("turn com fluxo ativo: só a extração chama modelo, resposta é template, trilha sem dado pessoal", async () => {
     llm.mockResolvedValue({
       text: "",

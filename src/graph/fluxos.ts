@@ -37,6 +37,7 @@
 
 import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
+import { conduzirContinuidade, type FluxoContinuidade } from "./continuidade";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -106,6 +107,7 @@ interface Chave {
 }
 
 export type Fluxo =
+  | FluxoContinuidade
   | {
       kind: "escolha";
       natureza?: "venda" | "locacao";
@@ -528,6 +530,7 @@ function manterChaveDeEnvio(f: { chave?: Chave }): Chave | undefined {
  */
 export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (!f) return null;
+  if (f.kind === "continuidade") return { ...f, etapa: ["concluida", "selecao"].includes(f.etapa) ? f.etapa : "resumo" };
   if (f.kind === "negocio" && f.etapa === "revisao") return { ...f, etapa: "campos", forcar: undefined };
   if (f.kind === "proposta") {
     if (f.etapa === "revisao") return { ...f, etapa: "coleta" };
@@ -891,6 +894,7 @@ export async function conduzirFluxo(
   ctx: ContextoDoTurno,
   deps: DepsDoFluxo
 ): Promise<PassoDoFluxo> {
+  if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };
   }
