@@ -31,8 +31,10 @@ const MIDIA = { kind: "audio" as const, mimeType: "audio/ogg", data: Buffer.from
 
 describe("transcribeMedia × status HTTP", () => {
   it.each([409, 402, 403, 413, 415, 500, 502])("%s devolve null, nunca texto", async (status) => {
-    mockFetch({ ok: false, status, body: '{"error":"x"}' });
+    const fn = mockFetch({ ok: false, status, body: '{"error":"x"}' });
     expect(await transcribeMedia("org1", MIDIA)).toBeNull();
+    // O null tem que vir do STATUS, não de um atalho antes da rede.
+    expect(fn).toHaveBeenCalledTimes(1);
   });
 
   it("200 devolve o texto transcrito", async () => {

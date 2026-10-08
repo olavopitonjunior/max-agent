@@ -19,8 +19,8 @@ ALTER TABLE conversation_turn
   ADD COLUMN IF NOT EXISTS signals_json jsonb,
   ADD COLUMN IF NOT EXISTS degradado    boolean NOT NULL DEFAULT false;
 
--- Teto de custo por pessoa e dia: "quanto esta pessoa gastou hoje" varre a
--- thread dela por data. O índice por org já existe (org_id, created_at); este
--- restringe pelo telefone.
-CREATE INDEX IF NOT EXISTS conversation_turn_pessoa_dia_idx
-  ON conversation_turn (org_id, phone, created_at DESC);
+-- O índice (org_id, phone, created_at) do teto por pessoa/dia NÃO entra aqui:
+-- o runner roda cada migração dentro de BEGIN, então não dá para usar
+-- CONCURRENTLY, e a construção travaria `registrarTurn` numa tabela que só
+-- cresce. Ele vai na migração do PR que lê o teto (O4), medido o tamanho da
+-- tabela antes.

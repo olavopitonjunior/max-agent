@@ -503,8 +503,10 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       perfilFalhou = true;
       return null;
     }),
+    // `.catch` porque `orgById` fica fora do try de `chaveDePolitica`: uma
+    // rejeição aqui derrubaria o gate inteiro, inclusive o kill switch.
     state.identity.kind === "user"
-      ? chaveDePolitica(state.identity.orgId, state.inbound.fromPhone)
+      ? chaveDePolitica(state.identity.orgId, state.inbound.fromPhone).catch(() => null)
       : Promise.resolve<string | null>(null),
   ]);
 
@@ -540,12 +542,13 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
    *
    * Um agente desligado que respondesse "não falo da minha configuração"
    * mentiria sobre o próprio estado: quem está desligado está indisponível, e é
-   * isso que a pessoa precisa ouvir. A ordem inversa economizaria uma chamada
-   * HTTP e trocaria a resposta certa pela barata.
+   * isso que a pessoa precisa ouvir. (Perfil e chave de papel já foram lidos em
+   * paralelo no topo; a ordem aqui é só de qual resposta vence.)
    *
-   * Daqui pra frente é que vale o "custo zero": o corte acontece antes do RAG e
-   * antes do modelo. Sondar o Max não gasta token nem embedding, e a resposta é
-   * a mesma em toda tentativa — determinismo é metade do valor de uma recusa.
+   * Daqui pra frente é que vale o "custo zero" de MODELO: o corte acontece
+   * antes do RAG e antes do modelo. Sondar o Max não gasta token nem embedding,
+   * e a resposta é a mesma em toda tentativa — determinismo é metade do valor
+   * de uma recusa.
    *
    * Não entra no histórico (o `halt` corta antes do `compact` e nenhum nó
    * acrescenta `messages`): a pergunta bloqueada não vira contexto do turno
@@ -1622,13 +1625,17 @@ export async function getCheckpointer(): Promise<PostgresSaver> {
     // um client em transação por escrita — na pool compartilhada ele
     // estrangulava as queries da fila; via `fromConnString` era uma pool sem
     // teto furando a contabilidade do Neon.
-    checkpointer = new PostgresSaver(checkpointerPool());
+    const saver = new PostgresSaver(checkpointerPool());
     // `setup()` é DDL idempotente, mas rodar a cada cold start é uma rodada de
     // CREATE IF NOT EXISTS por instância. Depois do primeiro deploy com as
     // tabelas criadas, desligue com MAX_CHECKPOINTER_SETUP=0.
     if (process.env.MAX_CHECKPOINTER_SETUP !== "0") {
-      await checkpointer.setup();
+      await saver.setup();
     }
+    // Só vira singleton DEPOIS do setup: um saver cujo DDL falhou não pode
+    // ficar cacheado, senão a instância inteira fica presa a ele até o próximo
+    // cold start (é o que o `getApp` promete ao não cachear falha).
+    checkpointer = saver;
   }
   return checkpointer;
 }
@@ -1657,11 +1664,6 @@ export function getApp(): Promise<AppCompilado> {
     });
   }
   return appCompilado;
-}
-
-/** Só para testes: o módulo é cacheado entre arquivos pelo vitest. */
-export function __resetAppParaTestes(): void {
-  appCompilado = null;
 }
 
 /**
