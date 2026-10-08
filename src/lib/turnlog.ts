@@ -41,6 +41,8 @@ export interface TurnLog {
   replyText?: string | null;
   tools?: ToolLogEntry[];
   usage?: LlmUsage[];
+  /** Tempo por nó do grafo (migration 020). Vazio ou ausente = NULL. */
+  timings?: { no: string; ms: number }[];
   latencyMs?: number;
   error?: string | null;
 }
@@ -50,8 +52,8 @@ export async function registrarTurn(log: TurnLog): Promise<void> {
     await query(
       `INSERT INTO conversation_turn
          (org_id, phone, message_id, kind, inbound_text, transcript,
-          reply_text, tools_json, usage_json, latency_ms, error)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11)`,
+          reply_text, tools_json, usage_json, latency_ms, error, timings_json)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12::jsonb)`,
       [
         log.orgId,
         // Mesma chave do `thread_id` e da memória: investigar um turn e a
@@ -66,6 +68,7 @@ export async function registrarTurn(log: TurnLog): Promise<void> {
         JSON.stringify(log.usage ?? []),
         log.latencyMs ?? null,
         log.error ?? null,
+        log.timings?.length ? JSON.stringify(log.timings) : null,
       ]
     );
   } catch (err) {

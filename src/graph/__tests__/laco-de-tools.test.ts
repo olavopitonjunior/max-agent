@@ -277,7 +277,7 @@ describe("RESET_DO_TURN é o contrato, e precisa cobrir o laço", () => {
     expect(Object.keys(RESET_DO_TURN)).toEqual(
       expect.arrayContaining([
         "reply", "halt", "propostaDescartada", "draft",
-        "bloqueios", "usage", "toolLog",
+        "bloqueios", "usage", "toolLog", "timings",
       ])
     );
   });
