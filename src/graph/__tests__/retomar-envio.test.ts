@@ -186,13 +186,46 @@ describe("achados do code review", () => {
     expect(d.acao).not.toHaveBeenCalled();
   });
 
-  it("B2: fluxo RETOMADO não extrai nem sobrescreve — ajuste é pela tela", async () => {
-    const d = dep();
+  it("B2 (09/10): fluxo RETOMADO ajusta só o que foi dito — resumo parcial, e o PATCH leva só esse campo", async () => {
+    const d = dep(vi.fn().mockResolvedValue({ status: 200, body: { proposta: { id: "p1" } } }));
+    d.extrairProposta.mockResolvedValue({ valor: 900000 });
     const f: Fluxo = { kind: "proposta", etapa: "ajustes", dados: {}, propostaId: "p1", codigo: "P-1", atualizadoEm: agora };
     const p = await F.conduzirFluxo(f, ctx("o valor é 900 mil"), d);
-    expect(p.reply).toContain("use a tela de propostas");
-    expect(d.extrairProposta).not.toHaveBeenCalled();
+    expect(p.reply).toContain("Vou ajustar na proposta P-1:");
+    expect(p.reply).toContain("Valor: R$");
+    expect(p.reply).toContain("O resto da proposta não muda");
+    expect(p.reply).not.toContain("Comprador:");
     expect(d.acao).not.toHaveBeenCalled();
+    const q = await F.conduzirFluxo(p.fluxo!, ctx("sim"), d);
+    expect(d.acao).toHaveBeenCalledTimes(1);
+    // Nada de schemaType/título/canal deduzidos: o servidor conhece o resto.
+    expect(d.acao.mock.calls[0]!.slice(0, 2)).toEqual(["proposal.update", { proposta_id: "p1", valor: 900000 }]);
+    expect(q.reply).toContain("Atualizei o rascunho P-1");
+  });
+
+  it("B2 (09/10): fluxo RETOMADO com campo que o Max não toca (fiador) indica a tela, sem escrever", async () => {
+    const d = dep();
+    d.extrairProposta.mockResolvedValue({});
+    const f: Fluxo = { kind: "proposta", etapa: "ajustes", dados: {}, propostaId: "p1", codigo: "P-1", atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("tira o fiador"), d);
+    expect(p.reply).toContain("Fiador não dá para ajustar pelo WhatsApp");
+    expect(p.reply).toContain("tela da proposta P-1");
+    expect(d.acao).not.toHaveBeenCalled();
+  });
+
+  it("review 09/10 #8: 'envia a da Letícia Souza' não pega o rascunho da Letícia Andrade", () => {
+    const itens = [{ id: "a", codigo: "PROP-1", titulo: "Casa", nomes: ["Letícia Andrade"] }];
+    expect(F.filtrarPorCitacao("envia a proposta da Letícia Souza", itens).itens).toEqual([]);
+    expect(F.filtrarPorCitacao("envia a proposta da Letícia Andrade", itens).itens).toHaveLength(1);
+  });
+
+  it("B2 (09/10): nome que só repete a referência da busca não vira PATCH do proponente", async () => {
+    const d = dep(vi.fn().mockResolvedValue({ status: 200, body: {} }));
+    d.extrairProposta.mockResolvedValue({ proponente: { nome: "Letícia Andrade" }, valor: 480000 });
+    const f: Fluxo = { kind: "proposta", etapa: "ajustes", dados: {}, propostaId: "p2", codigo: "P-2", referencia: "leticia andrade", atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("muda o valor da proposta da Letícia Andrade para 480 mil"), d);
+    expect(p.fluxo).toMatchObject({ dados: { valor: 480000 } });
+    expect((p.fluxo as { dados: { proponente?: unknown } }).dados.proponente).toBeUndefined();
   });
 
   it("B2: pendência no envio de fluxo retomado manda completar na tela", async () => {
