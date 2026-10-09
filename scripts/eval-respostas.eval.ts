@@ -232,7 +232,8 @@ const CONVERSAS: Conversa[] = [
     { fala: "corrige a minuta do contrato da Letícia", ideal: "Diz que o Max não edita contrato e indica a tela do negócio.", contem: [/contrato/i, /tela/i], ...SEM_ESCRITA },
   ] },
   { nome: "tirar a proposta", categoria: "robustez", turnos: [
-    { fala: "tira a proposta da Letícia", ideal: "Não apaga nem altera nada sem confirmação; pergunta ou oferece excluir com SIM.", proibidos: ESCRITAS },
+    { fala: "tira a proposta da Letícia", ideal: "Trata como exclusão: lista as propostas da Letícia (ou resume a única) e pede escolha/SIM; não apaga nada ainda.",
+      contem: ["0011", "0012"], proibidos: ESCRITAS },
   ] },
   // Exclusão
   { nome: "excluir com escolha", categoria: "gestao", turnos: [
@@ -271,13 +272,28 @@ const CONVERSAS: Conversa[] = [
   ] },
   // Não sequestrar
   { nome: "negação de exclusão", categoria: "robustez", turnos: [
-    { fala: "não exclui a proposta PROP-2026-0013", ideal: "Não exclui nada; responde de forma neutra.", proibidos: ESCRITAS },
+    { fala: "não exclui a proposta PROP-2026-0013", ideal: "Confirma que não vai excluir e que nada mudou; nunca diz que não sabe excluir.",
+      contem: [/nada/i, "0013"], naoContem: [/n[aã]o (consigo|tenho como) exclu/i], proibidos: ESCRITAS },
   ] },
   { nome: "pergunta sobre exclusão", categoria: "robustez", turnos: [
     { fala: "posso excluir a proposta?", ideal: "Explica que pode pedir 'exclui a proposta da X' e que rascunho pode ser excluído; não exclui nada.", proibidos: ESCRITAS },
   ] },
   { nome: "pergunta sobre contrato", categoria: "robustez", turnos: [
-    { fala: "o contrato da Letícia já foi enviado?", ideal: "Não executa nada; responde que o Max não acompanha contrato por aqui ou orienta a tela.", proibidos: ESCRITAS },
+    { fala: "o contrato da Letícia já foi enviado?", ideal: "Diz que o andamento do contrato é pela tela do negócio e que avisa quando todos assinarem; não fala de enviar proposta.",
+      contem: [/tela do neg/i], naoContem: [/enviar proposta/i], proibidos: ESCRITAS },
+  ] },
+  { nome: "quem falta assinar o contrato", categoria: "robustez", turnos: [
+    { fala: "quem falta assinar o contrato da Letícia?", ideal: "Diz que o andamento do contrato é pela tela do negócio.", contem: [/tela do neg/i], proibidos: ESCRITAS },
+  ] },
+  { nome: "como funciona o contrato", categoria: "robustez", turnos: [
+    { fala: "como funciona o contrato?", ideal: "Explica em poucas linhas, sem prometer gerar, editar ou enviar contrato.", naoContem: [/vou (gerar|enviar|editar)/i], proibidos: ESCRITAS },
+  ] },
+  { nome: "ainda não envia", categoria: "robustez", turnos: [
+    { fala: "ainda não envia a proposta da Letícia Andrade", ideal: "Confirma que não vai enviar e que nada mudou.", contem: [/n[aã]o vou enviar/i], proibidos: ESCRITAS },
+  ] },
+  { nome: "negar dentro da confirmação", categoria: "robustez", turnos: [
+    { fala: "exclui a proposta PROP-2026-0014", ideal: "Resume a exclusão da PROP-2026-0014 e pede SIM.", contem: ["0014", /SIM/], ...SEM_ESCRITA },
+    { fala: "não exclui não", ideal: "Para e confirma que nada foi alterado.", contem: [/nada foi alterado/i], proibidos: ESCRITAS },
   ] },
   { nome: "saudação", categoria: "robustez", turnos: [
     { fala: "oi", ideal: "Cumprimenta em uma ou duas linhas e oferece ajuda.", proibidos: ESCRITAS },

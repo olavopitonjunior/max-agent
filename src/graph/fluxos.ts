@@ -379,6 +379,45 @@ function campoSoNaTela(texto: string): string | null {
   return SO_NA_TELA.find(([re]) => re.test(t))?.[1] ?? null;
 }
 
+/**
+ * Telefone, CPF e e-mail só entram como a pessoa ESCREVEU. Eval 09/10: o
+ * extrator devolveu "119888-7777" para "11 98888-7777" — um dígito a menos,
+ * e ainda assim um telefone "válido" de 10 dígitos. Valor que não está na
+ * mensagem: se ela traz um único candidato daquele tipo, vale o escrito;
+ * senão o campo sai (melhor perguntar de novo que gravar errado).
+ */
+const so = (x: string) => x.replace(/\D/g, "");
+const semDdi = (d: string) => (d.length >= 12 && d.startsWith("55") ? d.slice(2) : d);
+function conferirCampo(
+  valor: string | undefined,
+  candidatos: string[],
+  igual: (a: string, b: string) => boolean
+): string | undefined {
+  if (!valor) return valor;
+  if (candidatos.some((c) => igual(c, valor))) return valor;
+  return candidatos.length === 1 ? candidatos[0] : undefined;
+}
+export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaProposta {
+  const telefones = (texto.match(/(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}(?!\d)/g) ?? []).map((t) => t.trim());
+  const cpfs = (texto.match(/(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/g) ?? []);
+  const emails = (texto.match(/[^\s@:;,<>()]+@[^\s@:;,<>()]+\.[a-z]{2,}/gi) ?? []).map((e) => e.replace(/[.]+$/, ""));
+  const out: DadosDaProposta = { ...d };
+  for (const k of ["proponente", "vendedor"] as const) {
+    const pessoa = out[k];
+    if (!pessoa) continue;
+    const q: Pessoa = { ...pessoa };
+    // Telefone: pelos dígitos (com ou sem 55), nunca por um CPF que caiba no padrão.
+    const tels = telefones.filter((t) => !cpfs.some((c) => so(c) === so(t)));
+    q.telefone = conferirCampo(q.telefone, tels, (a, b) => semDdi(so(a)) === semDdi(so(b)));
+    q.cpf = conferirCampo(q.cpf, cpfs, (a, b) => so(a) === so(b));
+    q.email = conferirCampo(q.email, emails, (a, b) => a.toLowerCase() === b.toLowerCase());
+    for (const c of ["telefone", "cpf", "email"] as const) if (q[c] === undefined) delete q[c];
+    if (Object.keys(q).length) out[k] = q;
+    else delete out[k];
+  }
+  return out;
+}
+
 /** Nome extraído que é só o termo que achou a proposta ("…da Letícia Andrade"). */
 function eReferencia(nome: string | undefined, referencia: string | undefined): boolean {
   if (!nome || !referencia) return false;
@@ -1355,7 +1394,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   const extraido = await deps.extrairProposta(ctx.texto, f.natureza ?? "venda");
   if (extraido === null) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: "falha_extracao" };
   const parcial = !!f.propostaId && !f.natureza;
-  const novos = semReferencia(sanearDados(extraido), f.referencia);
+  const novos = conferirDitado(semReferencia(sanearDados(extraido), f.referencia), ctx.texto);
   // No ajuste parcial, o canal só muda quando a pessoa fala dele: o extrator
   // devolvia "WhatsApp" para "remove o fiador da proposta da X" (eval 09/10),
   // e o PATCH trocaria o canal sem ninguém pedir.

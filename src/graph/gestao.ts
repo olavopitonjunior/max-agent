@@ -2,6 +2,7 @@ import { conduzirFluxo, type ContextoDoTurno, type DepsDoFluxo, type Fluxo, type
 import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type PropostaListada } from "./localizar";
 import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
+import { negaAcao } from "./capacidades";
 import { imobproBase } from "@/lib/http";
 
 /**
@@ -47,7 +48,7 @@ export const CAMPOS_AJUSTAVEIS = "comprador ou inquilino, imóvel, valor, vended
  * proposta" (envio) e "a proposta foi excluída?" (status).
  */
 const ALVO = String.raw`(?:a\s+|essa\s+|esta\s+|aquela\s+|minha\s+|uma\s+)?(?:proposta\b|prop-\d)`;
-const EXCLUIR = new RegExp(String.raw`^(?:(?:pode|quero|preciso|por favor|favor)\s+)?(?:exclu(?:a|ir|i)|apag(?:a|ar|ue)|delet(?:a|ar|e)|remov(?:a|e|er))\s+` + ALVO);
+const EXCLUIR = new RegExp(String.raw`^(?:(?:pode|quero|preciso|por favor|favor)\s+)?(?:exclu(?:a|ir|i)|apag(?:a|ar|ue)|delet(?:a|ar|e)|remov(?:a|e|er)|tir(?:a|ar|e))\s+` + ALVO);
 const DUPLICAR = new RegExp(String.raw`^(?:(?:pode|quero|preciso|por favor|favor)\s+)?(?:duplic(?:a|ar|ue)|clon(?:a|ar|e)|fa(?:z|ca|zer)\s+uma\s+copia\s+d[ae])\s+` + ALVO);
 const NEGACAO = /\b(nao|nunca|jamais)\b/;
 
@@ -62,7 +63,7 @@ const VERBO_EDICAO = String.raw`(?:mud|alter|troc|corrig|corrij|ajust|edit|atual
 const PEDIDO = String.raw`^(?:(?:pode|consegue|quero|preciso|por favor|favor|pfv|pf)[\s,]+)*(?:que\s+(?:voce\s+|vc\s+)?)?`;
 const EDITAR = new RegExp(String.raw`${PEDIDO}${VERBO_EDICAO}\b[^.?!]{0,80}?\b(?:proposta\b|prop-\d)`);
 const EDITAR_NA = new RegExp(String.raw`^(?:n|d)?a\s+(?:proposta\b|prop-\d)[^.?!]{0,60}?[,:;]?\s*${VERBO_EDICAO}\b`);
-/** "Tira/remove a proposta" é exclusão dita de outro jeito — não é edição. */
+/** "Tira/remove a proposta" é exclusão (resumo + SIM, eval 09/10) — nunca edição. */
 const TIRAR_A_PROPOSTA = new RegExp(String.raw`${PEDIDO}(?:remov|tir)\w*\s+` + ALVO);
 const PERGUNTA_DE_PROCESSO = /^(como|quando|onde|por que|porque|o que|qual|quais|quanto|posso|da pra|da para|e possivel)\b/;
 
@@ -155,6 +156,8 @@ function resumo(f: FluxoGestao): Resposta {
     : `Duplicar a proposta ${rotulo}? Crio um rascunho novo com os mesmos dados; a original não muda.`;
   return resposta({ ...f, etapa: "confirmacao" }, `${texto}\n\nResponda SIM para confirmar ou NÃO para parar.`);
 }
+/** O que `negaAcao` devolve para a ação DESTE fluxo — só ela vale como NÃO ("não manda pro dono, só exclui" não cancela). */
+const ACAO_NEGAVEL: Record<Operacao, string> = { excluir: "excluir", duplicar: "duplicar", editar: "alterar" };
 const acaoNome = (op: Operacao) => (op === "excluir" ? "excluir" : op === "duplicar" ? "duplicar" : "ajustar");
 
 export async function iniciarGestao(
@@ -222,7 +225,8 @@ function textoDaRecusa(f: FluxoGestao, status: number, body: Record<string, unkn
 
 export async function conduzirGestao(f: FluxoGestao, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const confirmacao = lerConfirmacao(ctx.texto);
-  if (confirmacao === "nao" || /^(cancelar|pare|parar|desistir)[.!]?$/i.test(ctx.texto.trim())) {
+  // "Não exclui não", "não converte ainda": negar a ação é o NÃO ao resumo (eval 09/10).
+  if (confirmacao === "nao" || negaAcao(ctx.texto) === ACAO_NEGAVEL[f.operacao] || /^(cancelar|pare|parar|desistir)[.!]?$/i.test(ctx.texto.trim())) {
     // Com escrita incerta, a chave fica: um novo pedido sobre a mesma proposta
     // confere o MESMO pedido antes de repetir (review 09/10, W4).
     return f.chave

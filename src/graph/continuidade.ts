@@ -1,5 +1,6 @@
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "./fluxos";
 import { lerConfirmacao, normalizar } from "./tools";
+import { negaAcao } from "./capacidades";
 import { imobproBase } from "@/lib/http";
 import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type PropostaListada } from "./localizar";
 
@@ -126,7 +127,8 @@ export async function iniciarContinuidade(ctx: ContextoDoTurno, deps: DepsDoFlux
 }
 
 export async function conduzirContinuidade(f: FluxoContinuidade, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
-  if (lerConfirmacao(ctx.texto) === "nao" || /^(cancelar|pare|parar|desistir)[.!]?$/i.test(ctx.texto.trim())) {
+  // "Não exclui não", "não converte ainda": negar a ação é o NÃO ao resumo (eval 09/10).
+  if (lerConfirmacao(ctx.texto) === "nao" || negaAcao(ctx.texto) === "converter" || /^(cancelar|pare|parar|desistir)[.!]?$/i.test(ctx.texto.trim())) {
     return resposta(null, "Parei a continuidade por aqui. A proposta e qualquer operação já registrada continuam preservadas.");
   }
   if (!permitido(f, ctx)) return resposta({ ...f, etapa: f.alvo ? "resumo" : "selecao" }, "Não consegui validar sua permissão para continuar agora. Não criei outro formulário.");
