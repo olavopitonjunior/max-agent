@@ -129,6 +129,7 @@ describe("excluir", () => {
     ["ja_convertida", "já virou negócio"],
     ["ja_enviada", "só cancelada"],
     ["assinatura_ativa", "ClickSign"],
+    ["estado_mudou", "mudou de situação"],
   ])("409 %s vira frase fixa, sem afirmar exclusão", async (codigo, trecho) => {
     acao.mockResolvedValueOnce({ status: 409, body: { error: codigo } });
     const r = await conduzirGestao(confirmando("excluir"), ctx("sim"), deps);
