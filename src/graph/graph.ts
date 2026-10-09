@@ -1,7 +1,10 @@
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
-import { pedeAcaoForaDoMax, pedeCapacidades, textoDeCapacidades, textoForaDoMax } from "./capacidades";
+import {
+  negaAcao, pedeAcaoForaDoMax, pedeCapacidades, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
+  textoDoAndamentoDoContrato, textoForaDoMax,
+} from "./capacidades";
 import { pedeConsulta, responderConsulta } from "./consulta";
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
@@ -767,16 +770,28 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     ["ajustes", "revisao_ajuste", "metodo"].includes(atual.etapa);
   const livre = !coletando || rascunhoAberto;
   const gestao = podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
-  const continuidade = podeEscrever(state.identity) && pedeContinuidade(userText);
+  // "Não converte a proposta da X" é o contrário do pedido: a negação vem antes.
+  const negada = !atual ? negaAcao(userText) : null;
+  const continuidade = podeEscrever(state.identity) && !negada && pedeContinuidade(userText);
   const foraDoMax = coletando || gestao || continuidade ? null : pedeAcaoForaDoMax(userText);
-  if (!coletando && !gestao && !continuidade && (foraDoMax || pedeCapacidades(userText))) {
+  // "O contrato já foi enviado?" e "não exclui a proposta X": respostas do
+  // sistema (eval 09/10 — o modelo confundia o contrato com o envio da
+  // proposta e dizia "não consigo excluir"). A negação só sem fluxo aberto:
+  // dentro de um, o "não" é a resposta ao resumo e o fluxo a trata.
+  const contratoPergunta = coletando || gestao || continuidade ? false : perguntaDoContrato(userText);
+  if (!coletando && !gestao && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
     const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
     const linkDoNegocio = resultado?.match(/Negócio: (\S+)/)?.[1] ?? null;
     const reply = foraDoMax
       ? textoForaDoMax(foraDoMax, linkDoNegocio)
-      : textoDeCapacidades(state.policy, podeEscrever(state.identity));
+      : contratoPergunta
+        ? textoDoAndamentoDoContrato(linkDoNegocio)
+        : negada
+          ? textoDaNegacao(negada, userText)
+          : textoDeCapacidades(state.policy, podeEscrever(state.identity));
+    const outcome = foraDoMax ? `fora_do_max_${foraDoMax}` : contratoPergunta ? "andamento_do_contrato" : negada ? `negou_${negada}` : "capacidades";
     return { reply, pendingAction: null, messages: [{ role: "user", content: userText }, { role: "assistant", content: reply }],
-      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: foraDoMax ? `fora_do_max_${foraDoMax}` : "capacidades" }] };
+      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome }] };
   }
 
   // Excluir/duplicar proposta: fluxo próprio, determinístico (decisão 09/10).

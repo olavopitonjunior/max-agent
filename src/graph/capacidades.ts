@@ -91,3 +91,60 @@ export function textoForaDoMax(tipo: "contrato" | "cobranca", linkDoNegocio?: st
   return `Contrato eu não gero, não edito nem envio para assinatura. Se você tiver permissão, faça ${tela}\n` +
     "Quando o contrato for assinado por todos, eu te aviso por aqui (se o aviso estiver ligado na sua imobiliária).";
 }
+
+/**
+ * Pergunta pelo ANDAMENTO do contrato ("o contrato da Letícia já foi
+ * enviado?", "quem falta assinar o contrato?"). O Max não lê o contrato por
+ * aqui — eval de 09/10: o modelo respondia "ainda não enviei nada; me diga
+ * 'enviar proposta para assinatura'", confundindo com o envio da proposta.
+ * Pergunta de PROCESSO ("como funciona o contrato?") segue para o atendimento.
+ */
+const STATUS_DO_CONTRATO =
+  /\b(?:ja (?:foi|esta|ta|saiu|assinou|assinaram)|foi (?:enviad|assinad|gerad|aprovad|pra assinatura)\w*|status|situacao|andamento|como (?:esta|anda|ta|vai)|saiu|esta pronto|ta pronto|falta(?:m)? assinar|quem (?:falta|ja assinou)|assinaram|ja assinad\w*)/;
+
+export function perguntaDoContrato(texto: string): boolean {
+  const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "");
+  if (!/\bcontratos?\b/.test(t) || /\bpropostas?\b/.test(t)) return false;
+  const pergunta = /\?\s*$/.test(texto) || PERGUNTA.test(t) || /^(?:e\s+)?(?:o\s+)?contrato\b/.test(t);
+  return pergunta && STATUS_DO_CONTRATO.test(t);
+}
+
+export function textoDoAndamentoDoContrato(linkDoNegocio?: string | null): string {
+  const tela = linkDoNegocio ? `na tela do negócio: ${linkDoNegocio}` : "na tela do negócio, no sistema.";
+  return `O andamento do contrato (envio e assinaturas) eu ainda não consulto por aqui: veja ${tela}\n` +
+    "Quando o contrato for assinado por todos, eu te aviso por aqui (se o aviso estiver ligado na sua imobiliária).";
+}
+
+/**
+ * "Não exclui a proposta X", "ainda não envia", "não precisa duplicar": a
+ * pessoa está dizendo o que NÃO fazer. Eval de 09/10: o modelo respondia "eu
+ * não consigo excluir proposta" — falso, e alarmante. Resposta do sistema:
+ * nada foi feito. Pergunta ("não exclui a proposta?") segue para o atendimento.
+ */
+const NEGA_ACAO = new RegExp(
+  String.raw`^(?:(?:ok|tudo bem|calma|espera|pera|opa)[,!.\s]+)?(?:ainda\s+)?(?:nao|nunca)\s+` +
+  String.raw`(?:(?:precisa(?:\s+mais)?|e\s+pra|eh\s+pra|quero\s+que\s+(?:voce\s+|vc\s+)?|vai|pode|deve|mais)\s+)?` +
+  String.raw`(exclu|apag|delet|remov|duplic|clon|envi|mand|dispar|convert|transform|cancel|edit|mud|alter|troc|corrig|ger|cri)\w*`
+);
+const ACAO_NEGADA: Record<string, string> = {
+  exclu: "excluir", apag: "excluir", delet: "excluir", remov: "excluir", duplic: "duplicar", clon: "duplicar",
+  envi: "enviar", mand: "enviar", dispar: "enviar", convert: "converter", transform: "converter", cancel: "cancelar",
+  edit: "alterar", mud: "alterar", alter: "alterar", troc: "alterar", corrig: "alterar", ger: "criar", cri: "criar",
+};
+const OBJETO_DO_MAX = /\b(propostas?|prop-\d|rascunho|negocio|formulario|contrato|ela|essa|esta|isso|ainda|agora|nada)\b/;
+
+/** A ação que a pessoa disse para NÃO fazer ("excluir", "enviar"…), ou null. */
+export function negaAcao(texto: string): string | null {
+  if (/\?\s*$/.test(texto)) return null;
+  const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "").trim();
+  const m = NEGA_ACAO.exec(t);
+  if (!m) return null;
+  if (!OBJETO_DO_MAX.test(t) && t.split(/\s+/).length > 4) return null;
+  return ACAO_NEGADA[m[1]!] ?? null;
+}
+
+export function textoDaNegacao(acao: string, texto: string): string {
+  const codigo = texto.match(/\bPROP-\d{4}-\d+\b/i)?.[0].toUpperCase();
+  if (/\bcontrato\b/.test(normalizar(texto))) return "Certo, nada foi alterado. Contrato, de todo modo, é pela tela do negócio.";
+  return `Certo, não vou ${acao} nada. ${codigo ? `A proposta ${codigo} continua como está.` : "Nada foi alterado."}`;
+}
