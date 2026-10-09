@@ -39,6 +39,7 @@ import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
+import { termoDeBusca } from "./localizar";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -146,6 +147,14 @@ export type Fluxo =
       ajustePendente?: boolean;
       /** CPF do proponente recusado no envio de um rascunho retomado. */
       pendenciaCpf?: boolean;
+      /**
+       * Edição pedida pelo nome ("muda o valor da proposta da Letícia…"): o
+       * termo que ACHOU a proposta. Um nome extraído que é só esse termo é a
+       * referência, não um nome novo — nunca vira PATCH do proponente.
+       */
+      referencia?: string;
+      /** Título e cliente da proposta editada pelo nome — vão no resumo do ajuste (review 09/10). */
+      rotulo?: string;
       atualizadoEm: number;
     };
 
@@ -291,11 +300,104 @@ export function resumoDaProposta(f: { natureza?: "venda" | "locacao"; dados: Dad
   return `${corpoDaProposta(f)}\n\nEstá correto? Responda *SIM* para gerar o rascunho, ou me diga o que mudar.`;
 }
 
-function resumoDoAjuste(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; codigo?: string }): string {
-  if (!f.natureza && f.dados.proponente?.cpf) {
-    return `Vou corrigir apenas o CPF do proponente na proposta${f.codigo ? ` ${f.codigo}` : ""} para ${f.dados.proponente.cpf}.\n\nAtualizo o rascunho assim? Responda *SIM*.`;
+/**
+ * Só o que MUDA, para a proposta retomada pelo nome/código (sem a natureza nem
+ * os dados completos no fluxo): o servidor aplica um PATCH desses campos.
+ */
+function linhasDoAjuste(d: DadosDaProposta): string[] {
+  const linhas: string[] = [];
+  const p = d.proponente ?? {};
+  if (p.nome) linhas.push(`Nome do proponente: ${p.nome}`);
+  if (p.cpf) linhas.push(`CPF do proponente: ${p.cpf}`);
+  if (p.email) linhas.push(`E-mail do proponente: ${p.email}`);
+  if (p.telefone) linhas.push(`Telefone do proponente: ${p.telefone}`);
+  const im = d.imovel ?? {};
+  const endereco = [im.endereco, im.numero, im.bairro, im.cidade, im.uf].filter(Boolean).join(", ");
+  if (endereco) linhas.push(`Imóvel: ${endereco}`);
+  if (im.matricula) linhas.push(`Matrícula: ${im.matricula}`);
+  if (d.valor) linhas.push(`Valor: ${real(d.valor)}`);
+  if (d.vendedor && Object.values(d.vendedor).some(Boolean)) linhas.push(`Vendedor/proprietário: ${linhaPessoa(d.vendedor)}`);
+  if (d.pagamento?.sinal) linhas.push(`Sinal: ${real(d.pagamento.sinal)}`);
+  if (d.pagamento?.forma) linhas.push(`Forma de pagamento: ${d.pagamento.forma}`);
+  if (d.comissao?.percentual) linhas.push(`Comissão: ${d.comissao.percentual}%`);
+  else if (d.comissao?.valor) linhas.push(`Comissão: ${real(d.comissao.valor)}`);
+  if (d.canal) linhas.push(`Assinatura chega por: ${d.canal === "email" ? "e-mail" : "WhatsApp"}`);
+  return linhas;
+}
+
+function resumoDoAjuste(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; codigo?: string; rotulo?: string }): string {
+  const so = Object.keys(f.dados);
+  if (!f.natureza && so.length === 1 && so[0] === "proponente" && Object.keys(f.dados.proponente ?? {}).join() === "cpf") {
+    return `Vou corrigir apenas o CPF do proponente na proposta${f.codigo ? ` ${f.codigo}` : ""} para ${f.dados.proponente!.cpf}.\n\nAtualizo o rascunho assim? Responda *SIM*.`;
+  }
+  if (!f.natureza) {
+    return `Vou ajustar na proposta${f.codigo ? ` ${f.codigo}` : ""}${f.rotulo ? ` — ${f.rotulo}` : ""}:\n${linhasDoAjuste(f.dados).map((l) => `- ${l}`).join("\n")}\n\n` +
+      "O resto da proposta não muda. Atualizo assim? Responda *SIM*, ou me diga o que mais mudar.";
   }
   return `${corpoDaProposta(f)}\n\nAtualizo o rascunho assim? Responda *SIM*, ou me diga o que mais mudar.`;
+}
+
+/**
+ * Ajuste PARCIAL (proposta retomada): o que foi dito tem de ser válido; o que
+ * não foi dito já está no servidor e não é "falta".
+ */
+function invalidosNoAjuste(d: DadosDaProposta): string[] {
+  const falta: string[] = [];
+  const p = d.proponente ?? {};
+  if (p.nome && !nomeCompleto(p.nome)) falta.push(`sobrenome de ${p.nome}`);
+  if (p.cpf && !cpfValido(p.cpf)) falta.push("CPF válido de quem faz a proposta");
+  if (p.email && !emailUtil(p.email)) falta.push("e-mail válido do proponente");
+  if (p.telefone && !telefoneUtil(p.telefone)) falta.push("telefone com DDD do proponente");
+  if (d.valor !== undefined && !(d.valor > 0)) falta.push("valor");
+  const v = d.vendedor ?? {};
+  if (v.nome && !nomeCompleto(v.nome)) falta.push(`sobrenome de ${v.nome}`);
+  if (v.cpf && !cpfValido(v.cpf)) falta.push("CPF válido do vendedor/proprietário");
+  if (v.email && !emailUtil(v.email)) falta.push("e-mail válido do vendedor/proprietário");
+  if (v.telefone && !telefoneUtil(v.telefone)) falta.push("telefone com DDD do vendedor/proprietário");
+  return falta;
+}
+
+/**
+ * Campos que existem na proposta mas o PATCH do Max não toca — o servidor
+ * só aceita proponente, imóvel, valor, vendedor, pagamento, comissão e canal.
+ */
+const SO_NA_TELA: [RegExp, string][] = [
+  [/\bfiador\w*/, "Fiador"],
+  [/\bgarant\w*/, "Garantia"],
+  [/\btestemunh\w*/, "Testemunha"],
+  [/\bclausul\w*/, "Cláusula"],
+  [/\bparcel\w*/, "Parcelamento"],
+  [/\bfinanciament\w*/, "Financiamento"],
+  [/\bconjuge\b/, "Cônjuge"],
+  [/\bestado civil\b/, "Estado civil"],
+  [/\bprofiss\w*/, "Profissão"],
+  [/\b(segundo|outro|mais um) (comprador|proponente|inquilino|locatario|vendedor)\b/, "Mais uma parte"],
+  [/\bprazo\b|\bvigencia\b|\breajuste\b|\bmulta\b/, "Prazo e condições"],
+];
+function campoSoNaTela(texto: string): string | null {
+  const t = normalizar(texto);
+  return SO_NA_TELA.find(([re]) => re.test(t))?.[1] ?? null;
+}
+
+/** Nome extraído que é só o termo que achou a proposta ("…da Letícia Andrade"). */
+function eReferencia(nome: string | undefined, referencia: string | undefined): boolean {
+  if (!nome || !referencia) return false;
+  const ref = new Set(normalizar(referencia).split(/[^a-z0-9]+/).filter(Boolean));
+  const partes = normalizar(nome).split(/[^a-z0-9]+/).filter(Boolean);
+  return partes.length > 0 && partes.every((w) => ref.has(w));
+}
+function semReferencia(d: DadosDaProposta, referencia: string | undefined): DadosDaProposta {
+  if (!referencia) return d;
+  const out: DadosDaProposta = { ...d };
+  for (const k of ["proponente", "vendedor"] as const) {
+    const pessoa = out[k];
+    if (pessoa && eReferencia(pessoa.nome, referencia)) {
+      const { nome: _nome, ...resto } = pessoa;
+      if (Object.keys(resto).length) out[k] = resto;
+      else delete out[k];
+    }
+  }
+  return out;
 }
 
 // ─── Validação (espelho do `buildProposalPayload`) ──────────────────────────
@@ -469,6 +571,19 @@ export function argsDaProposta(
   };
 }
 
+/** O PATCH de uma proposta retomada: só os campos que a pessoa disse. */
+export function argsDoAjuste(d: DadosDaProposta): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+  if (d.proponente && Object.values(d.proponente).some(Boolean)) args.proponente = d.proponente;
+  if (d.imovel && Object.values(d.imovel).some(Boolean)) args.imovel = d.imovel;
+  if (typeof d.valor === "number") args.valor = d.valor;
+  if (d.vendedor && Object.values(d.vendedor).some(Boolean)) args.vendedor = d.vendedor;
+  if (d.pagamento?.sinal || d.pagamento?.forma) args.pagamento = d.pagamento;
+  if (d.comissao?.percentual || d.comissao?.valor) args.comissao = d.comissao;
+  if (d.canal) args.canal = d.canal;
+  return args;
+}
+
 // ─── Leitura de respostas curtas ────────────────────────────────────────────
 
 const CANCELA_ANCORADO = /^(para(r)?|sair|chega)$/;
@@ -630,15 +745,20 @@ export function citacaoDoRascunho(texto: string): string[] | null {
 }
 
 /** Rascunhos que batem com a citação. `citou` diz se havia o que procurar. */
-export function filtrarPorCitacao<T extends { titulo?: string; codigo?: string }>(
+export function filtrarPorCitacao<T extends { titulo?: string; codigo?: string; nomes?: string[] }>(
   texto: string,
   itens: T[]
 ): { itens: T[]; citou: string[] | null } {
   const citou = citacaoDoRascunho(texto);
   if (!citou) return { itens, citou: null };
   const achados = itens.filter((i) => {
-    const alvo = normalizar(`${i.titulo ?? ""} ${i.codigo ?? ""}`);
-    return citou.some((w) => (/\d/.test(w) ? alvo.includes(w) : new RegExp(`(^|[^a-z0-9])${w}($|[^a-z0-9])`).test(alvo)));
+    const alvo = normalizar(`${i.titulo ?? ""} ${i.codigo ?? ""} ${(i.nomes ?? []).join(" ")}`);
+    // Código/número: basta um. Nomes: TODOS — "a da Letícia Souza" não pega a
+    // da Letícia Andrade (review 09/10).
+    const numeros = citou.filter((w) => /\d/.test(w));
+    const nomes = citou.filter((w) => !/\d/.test(w));
+    if (numeros.some((w) => alvo.includes(w))) return true;
+    return nomes.length > 0 && nomes.every((w) => new RegExp(`(^|[^a-z0-9])${w}($|[^a-z0-9])`).test(alvo));
   });
   return { itens: achados, citou };
 }
@@ -696,20 +816,30 @@ export async function retomarEnvio(
   if (anterior?.kind === "proposta" && anterior.propostaId && anterior.chave?.verbo === "proposal.send") {
     return await oferecerMetodos(anterior, ctx, deps) as Extract<PassoDoFluxo, { reply: string }>;
   }
-  const r = await deps.acao("proposal.list", {});
-  if (!r || r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: "falha_proposal_list" };
-  const items = (Array.isArray(r.body.items) ? r.body.items : []) as {
-    id?: unknown;
-    codigo?: unknown;
-    titulo?: unknown;
-    estado?: unknown;
-  }[];
-  const todos = items.filter(
-    (i) => typeof i.id === "string" && typeof i.estado === "string" &&
-      ["rascunho", "falha no envio", "falha_envio"].includes(normalizar(i.estado))
-  ) as { id: string; codigo?: string; titulo?: string }[];
   // Dados de correção não são nomes/códigos de propostas.
-  const filtro = filtrarPorCitacao(ctx.texto.replace(/\bcpf(?:\s+(?:dela|dele|correto|do proponente|do comprador|da compradora|do inquilino|da inquilina))?(?:\s+[eé])?\s*[:=-]?\s*\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/gi, ""), todos);
+  const semCpf = ctx.texto.replace(/\bcpf(?:\s+(?:dela|dele|correto|do proponente|do comprador|da compradora|do inquilino|da inquilina))?(?:\s+[eé])?\s*[:=-]?\s*\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/gi, "");
+  const rascunhosDe = (body: Record<string, unknown>) =>
+    ((Array.isArray(body.items) ? body.items : []) as { id?: unknown; codigo?: unknown; titulo?: unknown; estado?: unknown; signatarios?: unknown }[])
+      .filter((i) => typeof i.id === "string" && typeof i.estado === "string" &&
+        ["rascunho", "falha no envio", "falha_envio"].includes(normalizar(i.estado)))
+      .map((i) => ({
+        id: i.id as string,
+        codigo: typeof i.codigo === "string" ? i.codigo : undefined,
+        titulo: typeof i.titulo === "string" ? i.titulo : undefined,
+        // Quem assina: "envie a da Letícia" acha a proposta pelo nome da cliente (teste 09/10).
+        nomes: (Array.isArray(i.signatarios) ? i.signatarios : [])
+          .map((x) => (x && typeof x === "object" ? (x as { nome?: unknown }).nome : undefined))
+          .filter((n): n is string => typeof n === "string"),
+      }));
+  // Citou alguém: busca em TODAS as propostas dela, não só nas recentes.
+  const termo = termoDeBusca(semCpf);
+  const buscada = termo ? await deps.acao("proposal.list", { busca: termo }) : null;
+  const buscados = buscada?.status === 200 ? rascunhosDe(buscada.body) : [];
+  const achados = buscados.filter((x) => filtrarPorCitacao(semCpf, [x]).itens.length > 0);
+  const r = achados.length ? buscada : await deps.acao("proposal.list", {});
+  if (!r || r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: "falha_proposal_list" };
+  const todos = achados.length ? achados : rascunhosDe(r.body);
+  const filtro = filtrarPorCitacao(semCpf, todos);
   if (filtro.citou && filtro.itens.length === 0 && todos.length > 0) {
     // Citou alguém que não tem rascunho: NUNCA cai no rascunho de outra pessoa
     // (code review: "envie a da Maria" com só a da Letícia enviaria a errada).
@@ -1209,27 +1339,41 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
           : { reply: "Ainda preciso de um CPF válido do proponente. Me mande o CPF correto para ajustar o rascunho.", fluxo: f, evento: "cpf_pendente" };
       }
     }
-    if (pedeEnvio(ctx.texto)) return oferecerMetodos(f, ctx, deps);
-    const pareceAjuste = /\d|\b(valor|comprador|inquilino|vendedor|endereco|imovel|cpf|telefone|email|sinal|pagamento|comissao|matricula)\b/.test(
+    const pareceAjuste = /\d|@|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|imovel|rua|bairro|cidade|numero|cpf|telefone|celular|e-?mail|nome|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal)\b/.test(
       normalizar(ctx.texto)
-    );
+    ) || !!campoSoNaTela(ctx.texto);
+    // Com dado novo, o ajuste vem ANTES do envio: "corrige o e-mail e manda
+    // pra assinatura" não pode mandar a versão velha (review 09/10). Sem dado,
+    // a extração não acha nada e o pedido de envio segue lá embaixo.
+    if (!pareceAjuste && pedeEnvio(ctx.texto)) return oferecerMetodos(f, ctx, deps);
     if (!pareceAjuste) return { liberar: true, fluxo: f, evento: "ajuste_retomado_liberado" };
-    return {
-      reply:
-        `Para ajustar o rascunho${f.codigo ? ` ${f.codigo}` : ""}, use a tela de propostas no sistema; ` +
-        "depois me diga \"enviar proposta para assinatura\".",
-      fluxo: null,
-      evento: "ajuste_retomado_pela_tela",
-    };
+    // Segue para a extração: o ajuste PARCIAL (só os campos ditos) é aplicado
+    // pelo PATCH do servidor, que conhece a natureza e o resto da proposta.
   }
 
   // Coleta, correção no resumo, ou ajuste depois do rascunho: extrai e mescla.
   const extraido = await deps.extrairProposta(ctx.texto, f.natureza ?? "venda");
   if (extraido === null) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: "falha_extracao" };
-  const dados = mesclarDados(f.dados, sanearDados(extraido));
+  const parcial = !!f.propostaId && !f.natureza;
+  const novos = semReferencia(sanearDados(extraido), f.referencia);
+  // No ajuste parcial, o canal só muda quando a pessoa fala dele: o extrator
+  // devolvia "WhatsApp" para "remove o fiador da proposta da X" (eval 09/10),
+  // e o PATCH trocaria o canal sem ninguém pedir.
+  if (parcial && novos.canal && !/\b(whats\w*|zap|e-?mail|canal|sms)\b/.test(normalizar(ctx.texto))) delete novos.canal;
+  const dados = mesclarDados(f.dados, novos);
   // Nada novo nesta mensagem: não é do fluxo (pergunta, conversa) — libera, e
   // nunca diz "Anotado" sem ter anotado (achado B5). Nenhuma escrita (B1).
   if (igual(dados, f.dados)) {
+    // Pediu para mudar o que o Max não toca (fiador, cláusula…): o caminho, sem o modelo.
+    const soNaTela = f.propostaId ? campoSoNaTela(ctx.texto) : null;
+    if (soNaTela) {
+      return {
+        reply: `${soNaTela} não dá para ajustar pelo WhatsApp: use a tela da proposta${f.codigo ? ` ${f.codigo}` : ""} no sistema. ` +
+          "Por aqui eu ajusto comprador ou inquilino, imóvel, valor, vendedor ou proprietário, pagamento, comissão e o canal da assinatura.",
+        fluxo: { ...f, atualizadoEm: agora },
+        evento: "ajuste_so_na_tela",
+      };
+    }
     // Mensagem sem dado novo: aí sim um pedido de envio vale (com dado novo, o
     // ajuste vem antes — "corrige o e-mail dela e manda" não perde a correção).
     if (pedeEnvio(ctx.texto)) {
@@ -1252,7 +1396,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   // Dado mudou: o "sim" anterior (e a chave dele) não vale para o resumo novo.
   const g: FluxoProposta = { ...f, dados, chave: undefined, atualizadoEm: agora };
-  const falta = faltandoNaProposta(dados);
+  const falta = parcial ? invalidosNoAjuste(dados) : faltandoNaProposta(dados);
   const depoisDoRascunho = !!f.propostaId && (f.etapa === "ajustes" || f.etapa === "revisao_ajuste");
   if (falta.length > 0) {
     return {
@@ -1262,8 +1406,9 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     };
   }
   if (depoisDoRascunho) {
+    const soNaTela = parcial ? campoSoNaTela(ctx.texto) : null;
     return {
-      reply: resumoDoAjuste(g),
+      reply: (soNaTela ? `${soNaTela} não dá para ajustar pelo WhatsApp (só pela tela da proposta); o resto, sim.\n` : "") + resumoDoAjuste(g),
       fluxo: { ...g, etapa: "revisao_ajuste", ajustePendente: true },
       evento: "proposta_revisao_ajuste",
     };
@@ -1347,9 +1492,13 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
   const chave = chaveDe(f, "proposal.update", ctx);
   const r = await deps.acao(
     "proposal.update",
-    f.pendenciaCpf
-      ? { proposta_id: f.propostaId, proponente: { cpf: f.dados.proponente?.cpf } }
-      : { proposta_id: f.propostaId, ...argsDaProposta(f, { atualizacao: true }) },
+    // Retomada (sem a natureza): só os campos ditos — o CPF pendente incluído;
+    // o resumo mostrou exatamente isso (review 09/10).
+    !f.natureza
+      ? { proposta_id: f.propostaId, ...argsDoAjuste(f.dados) }
+      : f.pendenciaCpf
+        ? { proposta_id: f.propostaId, proponente: { cpf: f.dados.proponente?.cpf } }
+        : { proposta_id: f.propostaId, ...argsDaProposta(f, { atualizacao: true }) },
     chave.valor
   );
   if (!r || (r.status === 409 && r.body.error === "em_andamento")) {
@@ -1394,7 +1543,12 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
   }
   return {
     reply: textoRascunho(f.codigo, pdfDe(r.body), true),
-    fluxo: { ...f, etapa: "ajustes", chave: undefined, ajustePendente: false, pendenciaCpf: false, atualizadoEm: ctx.agora },
+    fluxo: {
+      ...f, etapa: "ajustes", chave: undefined, ajustePendente: false, atualizadoEm: ctx.agora,
+      // Parcial: o que foi aplicado já está no servidor; o próximo ajuste não o
+      // reenvia (nem desfaz uma edição feita na tela no meio-tempo).
+      ...(f.natureza ? { pendenciaCpf: false } : { dados: {}, pendenciaCpf: !!f.pendenciaCpf && !f.dados.proponente?.cpf }),
+    },
     evento: "proposta_ajustada",
   };
 }

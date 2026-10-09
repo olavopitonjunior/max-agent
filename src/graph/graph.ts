@@ -2,6 +2,7 @@ import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
 import { pedeAcaoForaDoMax, pedeCapacidades, textoDeCapacidades, textoForaDoMax } from "./capacidades";
+import { pedeConsulta, responderConsulta } from "./consulta";
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
@@ -758,7 +759,14 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
   const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha";
   // Continuidade e gestão vêm antes: "converte a proposta… pra gerar o contrato" é conversão.
-  const gestao = podeEscrever(state.identity) && !coletando && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
+  // Rascunho aberto para ajuste (sem escrita pendente) não prende o turno: pedido
+  // sobre OUTRA proposta ("muda o valor da proposta do João…"), consulta ou
+  // exclusão vão para o caminho próprio, que acha a proposta citada de novo
+  // (review 09/10: o ajuste aberto capturava a edição de outra proposta).
+  const rascunhoAberto = atual?.kind === "proposta" && !!atual.propostaId && !atual.chave &&
+    ["ajustes", "revisao_ajuste", "metodo"].includes(atual.etapa);
+  const livre = !coletando || rascunhoAberto;
+  const gestao = podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
   const continuidade = podeEscrever(state.identity) && pedeContinuidade(userText);
   const foraDoMax = coletando || gestao || continuidade ? null : pedeAcaoForaDoMax(userText);
   if (!coletando && !gestao && !continuidade && (foraDoMax || pedeCapacidades(userText))) {
@@ -787,6 +795,22 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     return { fluxo: passo.fluxo, reply: passo.reply,
       messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
       toolLog: [{ name: "fluxo", args: { kind: "continuidade" }, outcome: passo.evento }] };
+  }
+
+  // Consultar propostas (listar, procurar, ver o status): resposta do sistema
+  // com a busca em todas as propostas da pessoa — nunca o modelo filtrando as
+  // recentes de cabeça (teste 09/10). Envio vem antes: "envia a da X" é envio.
+  // O fluxo aberto fica, rebaixado: um "sim" depois da lista não executa nada.
+  const emSelecao = (atual?.kind === "continuidade" || atual?.kind === "gestao") && atual.etapa === "selecao";
+  if (livre && !emSelecao && podeEscrever(state.identity) && state.policy.includes("proposal.list") &&
+      !pedeEnvio(userText) && pedeConsulta(userText)) {
+    const r = await responderConsulta(depsDoFluxo(state, usage), userText);
+    return {
+      ...(atual ? { fluxo: rebaixarFluxo(atual) } : vencido ? { fluxo: null } : {}),
+      reply: r.reply,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: r.reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "consulta" }, outcome: r.evento }],
+    };
   }
 
   // Sem fluxo (ou vencido) e a pessoa pede o ENVIO: retoma do rascunho dela —

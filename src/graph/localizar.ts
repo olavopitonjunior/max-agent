@@ -24,6 +24,8 @@ export interface PropostaListada {
   status: string;
   estado?: string;
   nomes: string[];
+  /** Quem assina e em que pé está ("assinou", "pendente") — para o detalhe da consulta. */
+  assinaturas?: { nome: string; status: string }[];
 }
 
 /** Palavras que aparecem perto do nome sem ser nome (verbos, objetos do pedido). */
@@ -98,9 +100,11 @@ const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object"
 function paraListada(v: unknown): PropostaListada | null {
   const p = obj(v);
   if (typeof p.id !== "string" || typeof p.status !== "string") return null;
-  const nomes = Array.isArray(p.signatarios)
-    ? p.signatarios.map((s) => obj(s).nome).filter((n): n is string => typeof n === "string")
-    : [];
+  const assinaturas = (Array.isArray(p.signatarios) ? p.signatarios : [])
+    .map((s) => ({ nome: obj(s).nome, status: obj(s).status }))
+    .filter((s): s is { nome: string; status: string } => typeof s.nome === "string" && typeof s.status === "string");
+  const nomes = (Array.isArray(p.signatarios) ? p.signatarios : [])
+    .map((s) => obj(s).nome).filter((n): n is string => typeof n === "string");
   return {
     id: p.id,
     codigo: typeof p.codigo === "string" ? p.codigo : p.id,
@@ -108,6 +112,7 @@ function paraListada(v: unknown): PropostaListada | null {
     status: p.status,
     estado: typeof p.estado === "string" ? p.estado : undefined,
     nomes,
+    ...(assinaturas.length ? { assinaturas } : {}),
   };
 }
 

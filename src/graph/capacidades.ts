@@ -53,8 +53,18 @@ export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: 
  * contrato" (conversão, que o Max faz), "faz uma proposta, contrato de 30
  * meses" e "o contrato já foi enviado?".
  */
-const ACAO_NO_CONTRATO =
-  /\b(?:ger[ae]r?|emit[ae]r?|emiti|edit[ae]r?|alter[ae]r?|corrij[ae]|corrigir|aprov[ae]r?|envi[ae]r?|mand[ae]r?|dispar[ae]r?|faz(?:er)?|fa[cç]a|cri[ae]r?|assin[ae]r?)\s+(?:o\s+|um\s+|esse\s+|este\s+|meu\s+)?contrato\b|\bcontrato\s+(?:pra|para)\s+(?:assinatura|assinar)\b/;
+const VERBO_NO_CONTRATO = String.raw`(?:ger[ae]r?|emit[ae]r?|emiti|edit[ae]r?|alter[ae]r?|corrij[ae]|corrig(?:e|ir)|aprov[ae]r?|envi[ae]r?|mand[ae]r?|dispar[ae]r?|faz(?:er)?|fa[cç]a|cri[ae]r?|assin[ae]r?|mud[ae]r?|troc[ae]r?|ajust[ae]r?|revis[ae]r?)`;
+/**
+ * Também a PARTE do contrato ("edita a cláusula do contrato", "muda o prazo do
+ * contrato da X") e a minuta — teste 09/10: caía no modelo, que recusava mas
+ * perguntava "venda ou locação?" à toa.
+ */
+const ACAO_NO_CONTRATO = new RegExp(
+  String.raw`\b${VERBO_NO_CONTRATO}\s+(?:o\s+|um\s+|esse\s+|este\s+|meu\s+)?contrato\b` +
+  String.raw`|\b${VERBO_NO_CONTRATO}\s+(?:a\s+|as\s+|o\s+|os\s+|essa\s+|esta\s+)?(?:clausulas?|texto|prazo|redacao|vigencia|reajuste|multa|valor|data|paragrafo|item)\s+(?:do|no|desse|deste|da)\s+contrato\b` +
+  String.raw`|\b${VERBO_NO_CONTRATO}\s+(?:a\s+|essa\s+|esta\s+)?minuta\b` +
+  String.raw`|\bcontrato\s+(?:pra|para)\s+(?:assinatura|assinar)\b`
+);
 const COBRANCA = /\bcobrancas?\b|\b(?:ger[ae]r?|emit[ae]r?|mand[ae]r?|envi[ae]r?|cri[ae]r?)\s+(?:o\s+|um\s+|a\s+|uma\s+)?(?:boleto|cobranca)\b/;
 const PERGUNTA = /^(como|quando|onde|por que|porque|o que|qual|quais|quanto)\b/;
 const NEGACAO = /\b(nao|nunca|jamais)\b/;
@@ -76,8 +86,8 @@ export function pedeAcaoForaDoMax(texto: string): "contrato" | "cobranca" | null
 
 /** `linkDoNegocio`: o negócio de que a conversa acabou de tratar, quando há. */
 export function textoForaDoMax(tipo: "contrato" | "cobranca", linkDoNegocio?: string | null): string {
-  const tela = linkDoNegocio ? `Abra o negócio: ${linkDoNegocio}` : "Abra o negócio pela tela de Negócios do sistema.";
-  if (tipo === "cobranca") return `Cobrança não é feita pelo Max. Se você tiver permissão, siga pelo sistema. ${tela}`;
-  return "Contrato eu não gero, não edito nem envio para assinatura. Se você tiver permissão de contrato, siga pela tela do negócio. " +
-    `${tela}\nQuando o contrato for assinado por todos, eu te aviso por aqui (se o aviso estiver ligado na sua imobiliária).`;
+  const tela = linkDoNegocio ? `pela tela do negócio: ${linkDoNegocio}` : "pela tela do negócio, no sistema.";
+  if (tipo === "cobranca") return `Cobrança não é feita pelo Max. Se você tiver permissão, faça ${tela}`;
+  return `Contrato eu não gero, não edito nem envio para assinatura. Se você tiver permissão, faça ${tela}\n` +
+    "Quando o contrato for assinado por todos, eu te aviso por aqui (se o aviso estiver ligado na sua imobiliária).";
 }
