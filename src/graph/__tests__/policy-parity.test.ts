@@ -286,6 +286,7 @@ const CATALOGO_DO_IMOBPRO = [
   "proposal.detail",
   "proposal.create",
   "proposal.send",
+  "proposal.delete",
   "form.create",
   "notify.manual",
   "audio.reply",
@@ -299,7 +300,7 @@ describe("paridade do catálogo de capabilities", () => {
   /** O padrão do ImobPro (`POLITICA_PADRAO`) passa inteiro por este lado. */
   it("o padrão emitido pelo ImobPro resolve sem perder nenhuma capability", () => {
     const padrao = JSON.parse(
-      '{"byRole":{"*":["deal.list","deal.pending","proposal.list","form.create","proposal.create","proposal.send"]},' +
+      '{"byRole":{"*":["deal.list","deal.pending","proposal.list","form.create","proposal.create","proposal.send","proposal.delete"]},' +
         '"byRecipient":{},"brokerDefault":["deal.list","deal.pending"]}'
     ) as MaxPolicy;
     expect(resolverPolitica({ politica: padrao, sujeito: gerente, role: "sales" })).toEqual([
@@ -309,6 +310,7 @@ describe("paridade do catálogo de capabilities", () => {
       "form.create",
       "proposal.create",
       "proposal.send",
+      "proposal.delete",
     ]);
   });
 });

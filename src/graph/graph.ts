@@ -1,5 +1,7 @@
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
+import { iniciarGestao, pedeGestao } from "./gestao";
+import { pedeAcaoForaDoMax, pedeCapacidades, textoDeCapacidades, textoForaDoMax } from "./capacidades";
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
@@ -745,10 +747,41 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const usage: LlmUsage[] = [];
   const vencido = state.fluxo && fluxoExpirou(state.fluxo, agora);
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
-  const atual = vencido ? (state.fluxo?.kind === "continuidade" ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
+  // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
+  // resumo velhos não podem capturar um "2" dias depois (review 09/10).
+  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave);
+  const atual = vencido ? (sobrevive ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
+  const escritaEmAberto = !!(atual && "chave" in atual && atual.chave);
+
+  // O que o Max faz, e o que não faz (contrato, cobrança): resposta do
+  // sistema, nunca do modelo (prod 09/10). O fluxo em curso fica como está.
+  // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
+  const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha";
+  // Continuidade e gestão vêm antes: "converte a proposta… pra gerar o contrato" é conversão.
+  const gestao = podeEscrever(state.identity) && !coletando && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
+  const continuidade = podeEscrever(state.identity) && pedeContinuidade(userText);
+  const foraDoMax = coletando || gestao || continuidade ? null : pedeAcaoForaDoMax(userText);
+  if (!coletando && !gestao && !continuidade && (foraDoMax || pedeCapacidades(userText))) {
+    const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
+    const linkDoNegocio = resultado?.match(/Negócio: (\S+)/)?.[1] ?? null;
+    const reply = foraDoMax
+      ? textoForaDoMax(foraDoMax, linkDoNegocio)
+      : textoDeCapacidades(state.policy, podeEscrever(state.identity));
+    return { reply, pendingAction: null, messages: [{ role: "user", content: userText }, { role: "assistant", content: reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: foraDoMax ? `fora_do_max_${foraDoMax}` : "capacidades" }] };
+  }
+
+  // Excluir/duplicar proposta: fluxo próprio, determinístico (decisão 09/10).
+  if (gestao && !escritaEmAberto) {
+    const passo = await iniciarGestao(gestao, { texto: userText, messageId: state.inbound.messageId,
+      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
+    return { fluxo: passo.fluxo, reply: passo.reply,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "gestao", operacao: gestao }, outcome: passo.evento }] };
+  }
 
   // Continuidade tem precedência sobre o classificador "criar formulário".
-  if (atual?.kind !== "continuidade" && podeEscrever(state.identity) && pedeContinuidade(userText)) {
+  if (atual?.kind !== "continuidade" && continuidade && !(escritaEmAberto && atual?.kind === "gestao")) {
     const passo = await iniciarContinuidade({ texto: userText, messageId: state.inbound.messageId,
       policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
     return { fluxo: passo.fluxo, reply: passo.reply,
@@ -767,7 +800,8 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     (atual.kind === "escolha" && !lerEscolha(userText)) ||
     (atual.kind === "negocio" && atual.etapa === "tipo" && !lerNatureza(userText)) ||
     (atual.kind === "proposta" && atual.etapa === "natureza" && !lerNatureza(userText)) ||
-    (atual.kind === "proposta" && atual.etapa === "selecao_envio");
+    (atual.kind === "proposta" && atual.etapa === "selecao_envio") ||
+    (atual.kind === "gestao" && !atual.chave);
   if (naoComecou && podeEscrever(state.identity) && pedeEnvio(userText)) {
     const passo = await retomarEnvio(
       {

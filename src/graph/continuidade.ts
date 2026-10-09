@@ -1,14 +1,17 @@
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "./fluxos";
 import { lerConfirmacao, normalizar } from "./tools";
 import { imobproBase } from "@/lib/http";
+import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type PropostaListada } from "./localizar";
 
-interface Alvo { id: string; codigo: string; status: string }
+interface Alvo { id: string; codigo: string; status: string; titulo?: string }
 export interface FluxoContinuidade {
   kind: "continuidade";
   etapa: "selecao" | "resumo" | "confirmacao" | "execucao" | "concluida";
   converter: boolean;
   alvo?: Alvo;
   candidatos?: Alvo[];
+  /** O que a pessoa digitou para achar a proposta — repetido no resumo. */
+  termo?: string;
   chave?: { verbo: string; valor: string };
   completou?: boolean;
   resultado?: string;
@@ -70,20 +73,23 @@ function permitido(f: FluxoContinuidade, ctx: ContextoDoTurno): boolean {
     (!f.alvo || f.alvo.status === "completa" || f.alvo.status === "convertida" || ctx.policy.includes("proposal.send"));
 }
 function resumo(f: FluxoContinuidade): Resposta {
+  // Código + título e o termo que a pessoa usou: o SIM é dado sabendo QUAL (review 09/10).
+  const rotulo = f.alvo ? rotuloDaProposta({ codigo: f.alvo.codigo, titulo: f.alvo.titulo }) + (f.termo && !/^prop-/.test(f.termo) ? `, achada por "${f.termo}"` : "") : "";
   const acao = f.alvo?.status === "assinada_proponente" && !f.completou
-    ? `concluir a proposta ${f.alvo.codigo} sem enviar ao proprietário${f.converter ? " e convertê-la em negócio" : ""}`
-    : `converter a proposta ${f.alvo?.codigo} em negócio`;
+    ? `concluir a proposta ${rotulo} sem enviar ao proprietário${f.converter ? " e convertê-la em negócio" : ""}`
+    : `converter a proposta ${rotulo} em negócio`;
   return resposta({ ...f, etapa: "confirmacao" },
     `Posso ${acao}?${f.converter ? " Vou aproveitar os dados já preenchidos e o PDF assinado, sem criar formulário avulso." : ""}\n\nResponda SIM para confirmar ou NÃO para parar.`);
 }
-function alvoDe(v: unknown): Alvo | null {
-  const p = obj(v);
-  return typeof p.id === "string" && typeof p.status === "string" &&
-    ["assinada_proponente", "completa", "convertida"].includes(p.status)
-    ? { id: p.id, codigo: typeof p.codigo === "string" ? p.codigo : p.id, status: p.status } : null;
+const CONTINUAVEIS = ["assinada_proponente", "completa", "convertida"];
+function alvoDe(p: PropostaListada): Alvo | null {
+  return CONTINUAVEIS.includes(p.status) ? { id: p.id, codigo: p.codigo, status: p.status, titulo: p.titulo } : null;
+}
+function listaDeAlvos(alvos: Alvo[]): string {
+  return alvos.map((p, i) => `${i + 1}. ${rotuloDaProposta(p)}`).join("\n");
 }
 
-export async function iniciarContinuidade(ctx: ContextoDoTurno, deps: DepsDoFluxo, opts: { converter?: boolean } = {}): Promise<Resposta> {
+export async function iniciarContinuidade(ctx: ContextoDoTurno, deps: DepsDoFluxo, opts: { converter?: boolean; termo?: string | null } = {}): Promise<Resposta> {
   const f: FluxoContinuidade = {
     kind: "continuidade", etapa: "selecao", atualizadoEm: ctx.agora,
     converter: !!opts.converter || conversao.test(normalizar(ctx.texto)) || /\b(negocio|formulario)\b/.test(normalizar(ctx.texto)),
@@ -91,20 +97,27 @@ export async function iniciarContinuidade(ctx: ContextoDoTurno, deps: DepsDoFlux
   if (!ctx.policy.includes("proposal.list") || ctx.politicaIndisponivel) {
     return resposta(null, "Não consegui validar sua permissão para continuar essa proposta. Não criei outro formulário.", "continuidade_sem_politica");
   }
-  const codigo = ctx.texto.match(/\bPROP-\d{4}-\d+\b/i)?.[0].toUpperCase();
-  // Referência por pessoa não é um identificador inequívoco. Pedir código em
-  // vez de escolher outra proposta porque só uma apareceu na primeira página.
-  if (!codigo && citaPessoa(ctx.texto)) {
-    return resposta(f, "Qual é o código dessa proposta (PROP-AAAA-NNNN)? Vou continuar a proposta indicada, sem abrir um formulário avulso.");
-  }
-  const r = await deps.acao(codigo ? "proposal.status" : "proposal.list", codigo ? { codigo } : {});
-  if (!r || r.status !== 200) return resposta(f, "Não consegui consultar essa proposta agora. Nenhum formulário novo foi criado. Tente novamente informando o código da proposta.");
-  const items: unknown[] = codigo ? [r.body.proposta] : Array.isArray(r.body.items) ? r.body.items : [];
-  const candidatos = items.map(alvoDe).filter((p): p is Alvo => !!p);
-  // Lista paginada não prova unicidade: pedir escolha/código, nunca assumir a mais recente.
-  if (candidatos.length !== 1 || (!codigo && Number(r.body.total) > items.length)) {
-    if (!candidatos.length) return resposta(f, "Não identifiquei uma proposta assinada para continuar. Qual é o código PROP-AAAA-NNNN? Não vou criar um formulário avulso.");
-    return resposta({ ...f, candidatos }, `Qual proposta devo continuar?\n${candidatos.map((p, i) => `${i + 1}. ${p.codigo}`).join("\n")}\n\nResponda com o número ou com o código da proposta.`);
+  // Localiza por código, nome de quem está na proposta, título/endereço — em
+  // TODAS as propostas da pessoa (prod 09/10: "a da Letícia" pedia o código).
+  const r = await buscarPropostas(deps, ctx.texto, opts.termo);
+  if (r?.termo) f.termo = r.termo;
+  if (!r) return resposta(f, "Não consegui consultar suas propostas agora. Nenhum formulário novo foi criado. Tente de novo em instantes.");
+  const candidatos = r.itens.map(alvoDe).filter((p): p is Alvo => !!p);
+  // Lista paginada não prova unicidade: pedir escolha, nunca assumir a mais recente.
+  if (candidatos.length !== 1 || r.total > r.itens.length) {
+    if (!candidatos.length) {
+      const unica = r.termo && r.itens.length === 1 ? r.itens[0]! : null;
+      if (unica) {
+        return resposta(null, `Achei a proposta ${rotuloDaProposta(unica)}, mas ela ainda não foi assinada pelo proponente. Só continuo proposta assinada; nenhum formulário foi criado.`, "continuidade_nao_assinada");
+      }
+      return resposta(f, r.termo
+        ? `Não achei proposta assinada sua com "${r.termo}". Me diga o nome de outra pessoa da proposta, o endereço ou o código. Não criei formulário avulso.`
+        : "Não achei proposta assinada sua para continuar. Me diga o nome do cliente, o endereço ou o código da proposta. Não criei formulário avulso.");
+    }
+    const lista = candidatos.slice(0, 5);
+    const cabeca = r.termo ? `Achei ${candidatos.length > 1 ? "mais de uma proposta" : "esta proposta"} com "${r.termo}":` : "Qual proposta devo continuar?";
+    const resto = r.total > lista.length ? `\n(${r.total} no total; se não estiver aqui, me diga o nome ou o código.)` : "";
+    return resposta({ ...f, candidatos: lista }, `${cabeca}\n${listaDeAlvos(lista)}${resto}\n\nResponda com o número.`);
   }
   f.alvo = candidatos[0];
   if (!permitido(f, ctx)) return resposta(null, "Sua permissão atual não permite concluir/converter essa proposta pelo Max. Nenhum formulário novo foi criado.");
@@ -118,19 +131,28 @@ export async function conduzirContinuidade(f: FluxoContinuidade, ctx: ContextoDo
   }
   if (!permitido(f, ctx)) return resposta({ ...f, etapa: f.alvo ? "resumo" : "selecao" }, "Não consegui validar sua permissão para continuar agora. Não criei outro formulário.");
   if (!f.chave && f.alvo && pedeContinuidade(ctx.texto)) {
-    const texto = /\bPROP-\d{4}-\d+\b/i.test(ctx.texto) || citaPessoa(ctx.texto) ? ctx.texto : `${ctx.texto} ${f.alvo.codigo}`;
+    const texto = termoDeBusca(ctx.texto) ? ctx.texto : `${ctx.texto} ${f.alvo.codigo}`;
     return iniciarContinuidade({ ...ctx, texto }, deps);
   }
   if (lerConfirmacao(ctx.texto) === "nenhum" && f.etapa !== "selecao" && !pedeContinuidade(ctx.texto)) {
     return { liberar: true, fluxo: f, evento: "continuidade_outro_assunto" };
   }
   if (f.etapa === "selecao") {
-    const codigo = ctx.texto.match(/\bPROP-\d{4}-\d+\b/i)?.[0];
-    if (codigo) return iniciarContinuidade({ ...ctx, texto: `${f.converter ? "converter" : "concluir"} ${codigo}` }, deps);
+    const codigo = codigoCitado(ctx.texto);
+    if (codigo) return iniciarContinuidade({ ...ctx, texto: `${f.converter ? "converter" : "concluir"} ${codigo}` }, deps, { converter: f.converter });
     const n = /^\d+$/.test(ctx.texto.trim()) ? Number(ctx.texto.trim()) : 0;
     const alvo = f.candidatos?.[n - 1];
     if (alvo && !permitido({ ...f, alvo }, ctx)) return resposta(f, "Sua permissão atual não permite continuar essa proposta. Escolha outra ou responda NÃO para parar.");
-    return alvo ? resumo({ ...f, alvo, atualizadoEm: ctx.agora }) : resposta(f, "Informe o número da lista ou o código da proposta. Não abri outro formulário.");
+    if (alvo) return resumo({ ...f, alvo, atualizadoEm: ctx.agora });
+    if (n) return resposta(f, "Esse número não está na lista. Responda com um número da lista, o nome do cliente ou o código da proposta.");
+    // "Procure a da Letícia", "liste as minhas propostas": nova busca, nunca
+    // "informe o número" sem lista na tela (prod 09/10).
+    // Resposta curta = o nome/endereço pedido; frase longa só com forma explícita
+    // de busca. Outro assunto encerra a seleção (não fica pendurada, review 09/10).
+    const curto = termoDaResposta(ctx.texto);
+    if (curto) return iniciarContinuidade(ctx, deps, { converter: f.converter, termo: curto });
+    if (pedeLista(ctx.texto) || (pedeBusca(ctx.texto) && termoDeBusca(ctx.texto))) return iniciarContinuidade(ctx, deps, { converter: f.converter });
+    return { liberar: true, fluxo: null, evento: "continuidade_outro_assunto" };
   }
   if (f.etapa === "concluida") return resposta(f, f.resultado ?? "Essa operação já foi concluída.");
   if (f.etapa === "resumo") return resumo({ ...f, atualizadoEm: ctx.agora });
@@ -163,7 +185,10 @@ export async function conduzirContinuidade(f: FluxoContinuidade, ctx: ContextoDo
   const negocio = obj(r.body.negocio);
   if ((r.status === 201 || (r.status === 409 && r.body.error === "already_converted")) && typeof negocio.link === "string") {
     const link = new URL(negocio.link, imobproBase()).toString();
-    const resultado = `Proposta ${f.alvo.codigo} convertida em negócio, com os dados e o PDF assinado preservados.\n${link}`;
+    const form = obj(r.body.formulario);
+    const linkDoForm = typeof form.link === "string" ? new URL(form.link, imobproBase()).toString() : null;
+    const resultado = `Proposta ${f.alvo.codigo} convertida em negócio, com os dados e o PDF assinado preservados.\nNegócio: ${link}` +
+      (linkDoForm ? `\nFormulário: ${linkDoForm}` : "");
     return resposta({ ...proximo, etapa: "concluida", chave: undefined, resultado }, resultado, "proposta_convertida");
   }
   return resposta({ ...proximo, etapa: "resumo", chave: undefined }, r.body.error === "gerente_obrigatorio"

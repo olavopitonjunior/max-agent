@@ -49,9 +49,11 @@ describe("continuidade assinada", () => {
     expect((await iniciarContinuidade({ ...ctx, texto: "Converter a proposta da Maria" }, deps)).fluxo).not.toMatchObject({ etapa: "confirmacao" });
   });
   it("novo nome não herda o código da proposta anterior", async () => {
+    acao.mockResolvedValue({ status: 200, body: { items: [{ ...p, titulo: "Letícia" }], total: 1 } });
     const r = await conduzirContinuidade({ ...fluxo(), etapa: "concluida", resultado: "ok" }, { ...ctx, texto: "Converter a proposta da Maria" }, deps);
     expect(r.fluxo).toMatchObject({ etapa: "selecao" });
-    expect(acao).not.toHaveBeenCalled();
+    expect(r.fluxo).not.toHaveProperty("alvo");
+    expect(acao).toHaveBeenCalledWith("proposal.list", { busca: "maria" });
   });
   it("selecionar completa não exige permissão de envio", async () => {
     const r = await conduzirContinuidade({ ...fluxo(), etapa: "selecao", alvo: undefined, candidatos: [{ ...p, status: "completa" }] }, { ...ctx, texto: "1", policy: ["proposal.list", "proposal.create"] }, deps);

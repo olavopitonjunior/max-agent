@@ -81,34 +81,46 @@ describe("cronometrar (O0)", () => {
 });
 
 describe("fluxo no grafo", () => {
-  it("frase real seleciona proposta e converte o mesmo ID, sem criar formulário avulso", async () => {
+  it("frase real acha a proposta pelo nome e converte o mesmo ID, sem pedir código (prod 09/10)", async () => {
     llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
+    const leticia = { id: "p1", codigo: "PROP-2026-0001", status: "assinada_proponente", signatarios: [{ nome: "Letícia Souza", status: "assinou" }] };
     acao.mockImplementation(async ({ verb }: { verb: string }) => {
-      if (verb === "proposal.status") return { status: 200, body: { proposta: { id: "p1", codigo: "PROP-2026-0001", status: "assinada_proponente" } } };
+      if (verb === "proposal.list") return { status: 200, body: { items: [leticia], total: 1, busca: "leticia" } };
       if (verb === "proposal.complete") return { status: 200, body: { status: "completa" } };
-      if (verb === "proposal.convert") return { status: 201, body: { negocio: { id: "d1", link: "/deals/d1" } } };
+      if (verb === "proposal.convert") return { status: 201, body: { negocio: { id: "d1", link: "/deals/d1" }, formulario: { id: "f1", link: "/forms/f1" } } };
       throw new Error(`Ação inesperada: ${verb}`);
     });
     const inicial = await run("Max, tranforme a proposta da Letícia em negócio e gere o link do formulário");
-    expect(inicial.fluxo).toMatchObject({ kind: "continuidade", etapa: "selecao", converter: true });
-    expect(acao).not.toHaveBeenCalled();
-    const selecionado = await run("PROP-2026-0001", { fluxo: inicial.fluxo }, "selecao");
-    expect(selecionado.fluxo).toMatchObject({ etapa: "confirmacao", alvo: { id: "p1" } });
-    const fim = await run("SIM", { fluxo: selecionado.fluxo }, "confirmacao");
+    expect(inicial.fluxo).toMatchObject({ kind: "continuidade", etapa: "confirmacao", converter: true, alvo: { id: "p1" } });
+    expect(acao.mock.calls[0]![0]).toMatchObject({ verb: "proposal.list", args: { busca: "leticia" } });
+    const fim = await run("SIM", { fluxo: inicial.fluxo }, "confirmacao");
     expect(fim.reply).toContain("/deals/d1");
-    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.status", "proposal.complete", "proposal.convert"]);
+    expect(fim.reply).toContain("Formulário:");
+    expect(fim.reply).toContain("/forms/f1");
+    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.list", "proposal.complete", "proposal.convert"]);
     expect(llm).not.toHaveBeenCalled();
   });
   it("classificador errado vira continuidade da proposta referenciada, não criação", async () => {
     llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
+    acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.list") return { status: 200, body: { busca: "leticia", total: 2, items: [
+        { id: "p1", codigo: "PROP-2026-0001", titulo: "Apto Letícia", status: "completa" },
+        { id: "p2", codigo: "PROP-2026-0002", titulo: "Casa Letícia", status: "completa" },
+      ] } };
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
     const s = await run("Aproveite a proposta da Letícia e gere um link");
     expect(s.fluxo).toMatchObject({ kind: "continuidade", etapa: "selecao", converter: true });
-    expect(s.reply).toContain("PROP-AAAA-NNNN");
-    expect(acao).not.toHaveBeenCalled();
+    expect(s.reply).toContain("1. PROP-2026-0001");
+    expect(s.reply).toContain("2. PROP-2026-0002");
   });
-  it("depois do redirecionamento, só o código converte (sem laço de recusa)", async () => {
+  it("na seleção, número ou código convertem a escolhida (sem laço de recusa)", async () => {
     llm.mockResolvedValue({ text: "", toolCalls: [{ name: "propor_criacao", args: { tipo: "venda" } }], usage: uso });
     acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.list") return { status: 200, body: { busca: "leticia", total: 2, items: [
+        { id: "p1", codigo: "PROP-2026-0001", titulo: "Apto Letícia", status: "completa" },
+        { id: "p2", codigo: "PROP-2026-0002", titulo: "Casa Letícia", status: "completa" },
+      ] } };
       if (verb === "proposal.status") return { status: 200, body: { proposta: { id: "p1", codigo: "PROP-2026-0001", status: "completa" } } };
       throw new Error(`Ação inesperada: ${verb}`);
     });
@@ -116,6 +128,23 @@ describe("fluxo no grafo", () => {
     const r = await run("PROP-2026-0001", { fluxo: s.fluxo }, "selecao");
     expect(r.fluxo).toMatchObject({ kind: "continuidade", etapa: "confirmacao", converter: true, alvo: { id: "p1" } });
     expect(r.reply).toContain("converter a proposta PROP-2026-0001 em negócio");
+    const n = await run("2", { fluxo: s.fluxo }, "selecao");
+    expect(n.fluxo).toMatchObject({ etapa: "confirmacao", alvo: { id: "p2" } });
+  });
+  it("na seleção, 'procure a da X' e 'liste as minhas propostas' buscam de novo, nunca 'informe o número' (prod 09/10)", async () => {
+    acao.mockImplementation(async ({ verb, args }: { verb: string; args: Record<string, unknown> }) => {
+      if (verb === "proposal.list") return { status: 200, body: args.busca
+        ? { busca: args.busca, total: 1, items: [{ id: "p9", codigo: "PROP-2026-0009", titulo: "Letícia", status: "completa" }] }
+        : { total: 1, items: [{ id: "p9", codigo: "PROP-2026-0009", titulo: "Letícia", status: "completa" }] } };
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
+    const selecao = { kind: "continuidade", etapa: "selecao", converter: true, atualizadoEm: Date.now() };
+    const procura = await run("Procure nas minhas propostas a da letícia.", { fluxo: selecao }, "selecao");
+    expect(procura.reply).not.toContain("Informe o número");
+    expect(procura.fluxo).toMatchObject({ etapa: "confirmacao", alvo: { id: "p9" } });
+    const lista = await run("Liste as minhas propostas", { fluxo: selecao }, "selecao");
+    expect(lista.reply).not.toContain("Informe o número");
+    expect(lista.reply).toContain("PROP-2026-0009");
   });
   it("continuidade vencida conserva o alvo e expira só a confirmação", async () => {
     const s = await run("sim", { fluxo: { kind: "continuidade", etapa: "confirmacao", converter: true,
@@ -292,5 +321,63 @@ describe("fluxo no grafo", () => {
     expect(acao).toHaveBeenCalledWith(expect.objectContaining({ verb: "proposal.create", idempotencyKey: "t5" }));
     expect(s.reply).toContain("https://imobpro.ia.br/api/public/proposal-pdf/abc");
     expect(s.fluxo?.kind).toBe("proposta");
+  });
+});
+
+describe("escopo do Max no grafo (09/10)", () => {
+  const POLITICA_COM_EXCLUSAO = { ...POLITICA, byRole: { "*": [...POLITICA.byRole["*"], "proposal.delete"] } };
+  it("'o que vc pode fazer' responde pela política, sem o modelo e sem cobrança", async () => {
+    vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: POLITICA_COM_EXCLUSAO } as never);
+    const s = await run("O que vc pode fazer agora?");
+    expect(llm).not.toHaveBeenCalled();
+    expect(s.reply).toContain("excluir");
+    expect(s.reply).not.toMatch(/cobrança de comiss|certid/i);
+  });
+  it("pedido de contrato não vai para o modelo; leva o link do negócio que acabou de ser criado", async () => {
+    const s = await run("agora manda o contrato pra assinatura", { fluxo: { kind: "continuidade", etapa: "concluida", converter: true,
+      alvo: { id: "p1", codigo: "PROP-2026-0001", status: "convertida" },
+      resultado: "Proposta PROP-2026-0001 convertida em negócio.\nNegócio: https://imobpro.ia.br/deals/d1", atualizadoEm: Date.now() } });
+    expect(llm).not.toHaveBeenCalled();
+    expect(s.reply).toContain("não gero, não edito nem envio");
+    expect(s.reply).toContain("https://imobpro.ia.br/deals/d1");
+  });
+  it("'boleto' no meio da coleta da proposta é dado, não pedido de cobrança", async () => {
+    llm.mockResolvedValue({ text: "", toolCalls: [{ name: "extrair_proposta", args: {} }], usage: uso });
+    const fluxo = { kind: "proposta", etapa: "coleta", natureza: "venda", dados: {}, atualizadoEm: Date.now() };
+    const s = await run("forma de pagamento: boleto", { fluxo });
+    expect(s.reply ?? "").not.toContain("Cobrança não é feita pelo Max");
+  });
+  it("exclusão pelo nome no grafo: resumo, SIM, verbo com a chave do SIM", async () => {
+    vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: POLITICA_COM_EXCLUSAO } as never);
+    acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.list") return { status: 200, body: { busca: "leticia", total: 1,
+        items: [{ id: "p1", codigo: "PROP-2026-0001", titulo: "Apto Letícia", status: "rascunho", estado: "Rascunho" }] } };
+      if (verb === "proposal.delete") return { status: 200, body: { ok: true } };
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
+    const r = await run("Max, exclui a proposta da Letícia");
+    expect(r.fluxo).toMatchObject({ kind: "gestao", etapa: "confirmacao" });
+    const fim = await run("SIM", { fluxo: r.fluxo }, "m-sim");
+    expect(fim.reply).toBe("Proposta PROP-2026-0001 excluída.");
+    expect(acao).toHaveBeenLastCalledWith(expect.objectContaining({ verb: "proposal.delete", idempotencyKey: "m-sim" }));
+    expect(llm).not.toHaveBeenCalled();
+  });
+  it("'converte a proposta… pra gerar o contrato' é conversão, não recusa de contrato (review 09/10)", async () => {
+    acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.list") return { status: 200, body: { busca: "leticia", total: 1,
+        items: [{ id: "p1", codigo: "PROP-2026-0001", titulo: "Apto Letícia", status: "completa" }] } };
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
+    const s = await run("converte a proposta da Letícia em negócio pra gerar o contrato");
+    expect(s.fluxo).toMatchObject({ kind: "continuidade", etapa: "confirmacao" });
+    expect(s.reply).not.toContain("não gero");
+  });
+  it("'remove o fiador da proposta' no meio da coleta não abre exclusão nem apaga a coleta (review 09/10)", async () => {
+    vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: POLITICA_COM_EXCLUSAO } as never);
+    llm.mockResolvedValue({ text: "", toolCalls: [{ name: "extrair_proposta", args: {} }], usage: uso });
+    const fluxo = { kind: "proposta", etapa: "coleta", natureza: "venda", dados: {}, atualizadoEm: Date.now() };
+    const s = await run("exclui a proposta da Letícia", { fluxo });
+    expect(s.fluxo?.kind).toBe("proposta");
+    expect(acao).not.toHaveBeenCalledWith(expect.objectContaining({ verb: "proposal.list" }));
   });
 });
