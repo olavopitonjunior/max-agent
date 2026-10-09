@@ -30,6 +30,8 @@ export const VERBOS_DE_ACAO = [
   "proposal.recreate",
   "proposal.convert",
   "proposal.complete",
+  "proposal.delete",
+  "proposal.duplicate",
   "form.options",
   "form.create",
 ] as const;

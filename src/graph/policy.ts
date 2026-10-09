@@ -97,6 +97,13 @@ export const CAPABILITIES = [
    * paridade compara literal a literal.
    */
   "proposal.send",
+  /**
+   * Excluir proposta pelo Max (decisão do Olavo, 09/10/2026). Capability
+   * própria, e não a de enviar: exclusão é definitiva, e a imobiliária pode
+   * querer o Max enviando sem excluir. O ImobPro ainda cobra `PROPOSAL_DELETE`
+   * do papel. Mesma posição da lista do ImobPro (teste de paridade).
+   */
+  "proposal.delete",
   "form.create",
   "notify.manual",
   "audio.reply",
