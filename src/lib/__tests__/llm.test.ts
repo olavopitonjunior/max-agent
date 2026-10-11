@@ -224,4 +224,35 @@ describe("complete (OpenRouter)", () => {
     ).rejects.toThrow(/OPENROUTER_API_KEY/);
     expect(f).not.toHaveBeenCalled();
   });
+
+  /**
+   * ZDR (M1, PII). Dois campos, não um (achado em review): `data_collection:
+   * "deny"` só impede treino; `zdr: true` é quem de fato pede retenção zero.
+   * Default LIGADO (os dois); a válvula de escape é `MAX_LLM_ZDR=false`,
+   * para o dia em que o nano não tiver endpoint com essa política (404).
+   */
+  describe("ZDR (provider.data_collection + zdr)", () => {
+    it("manda `data_collection: deny` E `zdr: true` por padrão, sem precisar de env", async () => {
+      const f = mockFetch(OK);
+      await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      const body = JSON.parse(f.mock.calls[0][1].body);
+      expect(body.provider).toEqual({ data_collection: "deny", zdr: true });
+    });
+
+    it("MAX_LLM_ZDR=false omite os dois campos — a válvula de escape do 404", async () => {
+      vi.stubEnv("MAX_LLM_ZDR", "false");
+      const f = mockFetch(OK);
+      await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      const body = JSON.parse(f.mock.calls[0][1].body);
+      expect(body.provider).toBeUndefined();
+    });
+
+    it("qualquer outro valor de MAX_LLM_ZDR mantém o default ligado", async () => {
+      vi.stubEnv("MAX_LLM_ZDR", "0");
+      const f = mockFetch(OK);
+      await complete({ system: "s", messages: [{ role: "user", content: "oi" }] });
+      const body = JSON.parse(f.mock.calls[0][1].body);
+      expect(body.provider).toEqual({ data_collection: "deny", zdr: true });
+    });
+  });
 });

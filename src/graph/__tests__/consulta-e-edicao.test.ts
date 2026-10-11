@@ -234,6 +234,43 @@ describe("consulta e edição no grafo", () => {
     expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.list"]);
   });
 
+  /**
+   * D3 (review) — fronteira do LLM dentro do grafo: `depsDoFluxo.extrair`
+   * (fluxos.ts, via `TOOL_EXTRAIR_PROPOSTA`) tem que tokenizar o texto ANTES
+   * de mandar pro `complete`, e destokenizar os `args` que voltam ANTES de
+   * `conferirDitado` comparar com o texto cru.
+   *
+   * DOIS telefones no texto de propósito: com um só, `conferirDitado` tem um
+   * fallback ("só há 1 candidato, deve ser esse") que disfarçaria a falta de
+   * destokenização — o token batia errado, mas o fallback acertava por
+   * acidente. Com dois candidatos o fallback não escolhe sozinho, e só o
+   * valor REAL (destokenizado) casa com o candidato certo. Removendo
+   * `destokenizarArgs` de `graph.ts`, este teste quebra: o campo some do
+   * resumo (nenhum candidato bate o token cru).
+   */
+  it("M1 (PII) — texto pro modelo vem tokenizado; args voltam com o telefone real (destokenizado)", async () => {
+    servidor([P.andrade]);
+    const TEL_ANTIGO = "11 97777-6666";
+    const TEL_NOVO = "11 98888-7777";
+    llm.mockImplementation(async (params: { messages: Array<{ content: string }> }) => {
+      const enviado = JSON.stringify(params.messages);
+      // O que vai pro modelo NUNCA leva telefone cru — só os tokens.
+      expect(enviado).not.toContain("977776666");
+      expect(enviado).not.toContain("988887777");
+      expect(enviado).toContain("⟨TEL_1⟩");
+      expect(enviado).toContain("⟨TEL_2⟩");
+      // O modelo "ecoa" o token do telefone NOVO (2º da mensagem).
+      return { text: "", toolCalls: [{ name: "preencher_proposta", args: { proponente: { telefone: "⟨TEL_2⟩" } } }], usage: uso };
+    });
+
+    const s = await run(`corrige o telefone da proposta da Letícia Andrade de ${TEL_ANTIGO} para ${TEL_NOVO}`);
+
+    // Destokenizado de volta: o resumo mostra o telefone NOVO real, nunca o token.
+    expect(s.reply).toContain(`Telefone do proponente: ${TEL_NOVO}`);
+    expect(s.reply).not.toContain("⟨TEL");
+    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.list"]);
+  });
+
   it("review 09/10 #3: com um rascunho aberto para ajuste, a edição de OUTRA proposta busca a citada", async () => {
     servidor([P.andrade, P.carlos]);
     const aberto = { kind: "proposta", etapa: "ajustes", dados: {}, propostaId: "p2", codigo: "PROP-2026-0012", atualizadoEm: Date.now() };

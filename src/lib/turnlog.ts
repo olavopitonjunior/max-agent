@@ -1,6 +1,23 @@
 import { query } from "./db";
 import { conversationKey } from "./phone";
+import { redigir, redigirProfundo, CAMPOS_DA_AUDITORIA } from "./pii";
 import type { LlmUsage } from "./llm";
+
+/**
+ * M1 (PII): só CPF/CNPJ/e-mail saem de `conversation_turn` — NÃO telefone,
+ * CEP nem valor. Decisão de produto (11/10, ajuste de escopo): o painel
+ * "conversas na íntegra" (#49) precisa continuar legível.
+ *
+ * Telefone em claro não é só legibilidade: `/admin/forget` acha e apaga a
+ * conversa REPASSADA ao time por `reply_text LIKE '%+<telefone>%'`
+ * (`forget/route.ts`, bloco `conversation_turn_repasse`/`inbound_queue_repasse`)
+ * — a coluna `phone` resolve a conversa da PESSOA, mas o repasse mora na
+ * linha do TIME, e só esse `LIKE` no texto o alcança. Redigir o telefone
+ * aqui quebraria esse apagamento sem avisar ninguém.
+ *
+ * Renda e demais dados de crédito (M2) são redigidos pelo fluxo `credito`,
+ * não por regex aqui.
+ */
 
 /**
  * Auditoria de conversa — uma linha por turn.
@@ -61,10 +78,10 @@ export async function registrarTurn(log: TurnLog): Promise<void> {
         conversationKey(log.phone),
         log.messageId ?? null,
         log.kind ?? "text",
-        log.inboundText ?? null,
-        log.transcript ?? null,
-        log.replyText ?? null,
-        JSON.stringify(log.tools ?? []),
+        log.inboundText ? redigir(log.inboundText, CAMPOS_DA_AUDITORIA) : null,
+        log.transcript ? redigir(log.transcript, CAMPOS_DA_AUDITORIA) : null,
+        log.replyText ? redigir(log.replyText, CAMPOS_DA_AUDITORIA) : null,
+        JSON.stringify(redigirProfundo(log.tools ?? [], CAMPOS_DA_AUDITORIA)),
         JSON.stringify(log.usage ?? []),
         log.latencyMs ?? null,
         log.error ?? null,

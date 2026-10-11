@@ -87,6 +87,14 @@ function limpar(key: unknown, value: unknown): [string, string] | null {
   // Sequência longa de dígitos é documento, telefone ou valor — nada disso é
   // "fato operacional" e todos têm dono melhor no ImobPro.
   if (/\d[\d.\-/\s]{8,}/.test(v)) return null;
+  /**
+   * M1 (PII, achado em review): `extractFacts` recebe o turno passado por
+   * `redigir` (token FIXO, `⟨CPF⟩`) — então um fato que ainda carrega `⟨`
+   * não é fato, é o PRÓPRIO TOKEN que o modelo copiou pro JSON de extração.
+   * Gravar isso não vaza valor (o token é opaco), mas não serve de fato
+   * nenhum e colidiria em claro com o `⟨CPF⟩` de qualquer outra pessoa.
+   */
+  if (k.includes("⟨") || v.includes("⟨")) return null;
 
   /**
    * AUSÊNCIA de fato não é fato.

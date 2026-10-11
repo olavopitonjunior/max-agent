@@ -129,6 +129,35 @@ d("inbound_queue (Postgres real)", () => {
   });
 
   /**
+   * M1 (PII). `reply_text` é redigido (CPF/CNPJ/e-mail — mesma decisão do
+   * `turnlog.ts`), mas o que SAI pro WhatsApp não pode virar `⟨CPF⟩`: a
+   * pessoa pediu confirmação do próprio CPF, e receber o token de volta
+   * seria pior que o vazamento que isto corrige.
+   */
+  it("reply_text gravado sem CPF; o que vai pro WhatsApp continua com o CPF real", async () => {
+    const CPF = "111.444.777-35"; // DV válido
+    const CPF_SEM_MASCARA = "11144477735"; // mesmo CPF, sem pontuação
+    // As DUAS formas no texto — checar só a sem-máscara contra um texto que
+    // só tinha a com-máscara seria tautológico (achado em review).
+    turn.mockResolvedValueOnce({
+      reply: `Seu CPF ${CPF} (${CPF_SEM_MASCARA}) está confirmado.`,
+    });
+
+    const r = await enqueueInbound(msg());
+    if (r.status !== "queued") throw new Error("esperava queued");
+
+    await processInboundNow(r.id);
+
+    const row = await statusDe(r.id);
+    expect(row.reply_text).not.toContain(CPF);
+    expect(row.reply_text).not.toContain(CPF_SEM_MASCARA);
+    expect(row.reply_text).toContain("⟨CPF⟩");
+    expect(sent).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.stringContaining(CPF) })
+    );
+  });
+
+  /**
    * O invariante que justifica a coluna `reply_text`.
    *
    * Se o grafo respondeu e só o ENVIO caiu, a retentativa não pode re-invocar o

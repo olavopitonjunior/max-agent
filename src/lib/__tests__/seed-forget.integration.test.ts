@@ -214,6 +214,51 @@ d("fase 4B", () => {
   });
 
   /**
+   * M1 (PII). O esquecimento acha a conversa pela coluna `phone` — nunca
+   * varrendo o TEXTO por CPF. Prova as duas pontas: o CONTROLE (telefone
+   * real) apaga; o CPF (mesmo sendo, por acaso, um número de 11 dígitos que
+   * `normalizeBrPhone` aceitaria como celular) não apaga a linha de ALGUÉM
+   * que tem outro telefone — não é por aí que a LGPD alcança essa linha.
+   */
+  it("forget acha pelo TELEFONE; um CPF no corpo não é caminho de apagamento", async () => {
+    vi.stubEnv("MAX_NOTIFY_SECRET", "s-forget");
+    const { POST } = await import("@/app/api/admin/forget/route");
+    const { registrarTurn } = await import("../turnlog");
+    const CPF = "111.444.777-35"; // DV válido, citado dentro do texto
+    const CPF_DIGITOS = CPF.replace(/\D/g, "");
+    const OUTRO_TELEFONE = "5511900000098"; // não é nenhuma variante de PHONE nem do CPF
+
+    const apagar = async (phone: string) => {
+      const rawBody = JSON.stringify({ phone });
+      const ts = String(Date.now());
+      return POST(
+        new NextRequest("http://max.test/api/admin/forget", {
+          method: "POST",
+          body: rawBody,
+          headers: { "x-max-timestamp": ts, "x-max-signature": sign(ts, rawBody, "s-forget") },
+        })
+      );
+    };
+
+    // Linha de OUTRA pessoa, cujo texto cita o CPF — mas o telefone dela não
+    // é nem o CPF nem a variante de PHONE.
+    await registrarTurn({ orgId: ORG, phone: OUTRO_TELEFONE, inboundText: `Meu CPF é ${CPF}.` });
+
+    // Pedir o esquecimento DO CPF (como se alguém tentasse apagar "por ele")
+    // não encontra nem apaga a linha de quem o citou.
+    const porCpf = await apagar(CPF_DIGITOS);
+    expect((await porCpf.json()).deleted.conversation_turn).toBe(0);
+    const aindaLa = await query(`SELECT id FROM conversation_turn WHERE phone = $1`, [OUTRO_TELEFONE]);
+    expect(aindaLa).toHaveLength(1);
+
+    // CONTROLE: pedir pelo TELEFONE de verdade apaga.
+    const porTelefone = await apagar(OUTRO_TELEFONE);
+    expect((await porTelefone.json()).deleted.conversation_turn).toBe(1);
+    const sumiu = await query(`SELECT id FROM conversation_turn WHERE phone = $1`, [OUTRO_TELEFONE]);
+    expect(sumiu).toHaveLength(0);
+  });
+
+  /**
    * A dúvida repassada mora no telefone do TIME, mas o corpo leva o telefone
    * e o texto de quem perguntou. Apagar só `WHERE phone = <pessoa>` deixaria
    * a dúvida inteira para trás — o esquecimento a alcança por `params.de`.
