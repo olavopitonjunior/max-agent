@@ -5,6 +5,7 @@ import { falhaDaMensagemMeta, inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
 import { abrirJanela } from "./janela24h";
 import { log } from "./log";
+import { redigir, CAMPOS_DA_AUDITORIA } from "./pii";
 import { runTurn } from "@/graph/graph";
 
 /**
@@ -324,9 +325,14 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
       afterReply = turn.afterReply;
       // Grava mesmo quando é null: "o grafo decidiu não responder" é resultado,
       // e sem persistir isso a retentativa rodaria o modelo de novo à toa.
+      //
+      // M1 (PII): só a cópia GRAVADA é redigida (CPF/CNPJ/e-mail — mesma
+      // decisão do `turnlog.ts`). `reply`, em memória, segue intacto: é ele
+      // que vai pro `sendText` daqui a pouco, e a pessoa precisa receber o
+      // próprio CPF de volta quando pedir confirmação.
       await query(`UPDATE inbound_queue SET reply_text = $2 WHERE id = $1`, [
         row.id,
-        reply,
+        reply ? redigir(reply, CAMPOS_DA_AUDITORIA) : reply,
       ]);
     } else if (row.last_send_started_at != null) {
       /**

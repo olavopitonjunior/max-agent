@@ -140,4 +140,71 @@ d("conversation_turn (Postgres real)", () => {
       delete process.env.CONVERSATION_TTL_DAYS;
     });
   });
+
+  /**
+   * M1 (PII). Decisão de produto (ajuste de escopo 11/10): só CPF/CNPJ/
+   * e-mail saem daqui — telefone e valor continuam em claro (painel #49,
+   * `/admin/forget` acha pelo telefone). O controle é o que prova que o
+   * teste pegaria o vazamento se a redação fosse removida: grava a MESMA
+   * linha sem passar por `registrarTurn` (direto no INSERT) e confirma que
+   * a query ACHA o CPF — só assim "não achou" significa alguma coisa.
+   */
+  describe("M1 — redação de CPF/CNPJ/e-mail", () => {
+    const CPF = "111.444.777-35"; // DV válido
+    const CPF_SEM_MASCARA = "11144477735"; // mesmo CPF, sem pontuação
+    const EMAIL = "corretor@imobiliaria.com.br";
+    const TEL = "11987650007";
+
+    /**
+     * Achado em review: checar `not.toContain(CPF.replace(/\D/g, ""))` contra
+     * um texto que só tinha o CPF COM máscara é tautológico (essa string sem
+     * pontuação nunca esteve lá). Aqui o texto leva as DUAS formas, e a
+     * asserção cobre as duas — além de exigir o token fixo `⟨CPF⟩` no lugar.
+     */
+    it("registrarTurn redige CPF/CNPJ/e-mail (nas duas formas); telefone e valor ficam em claro", async () => {
+      await registrarTurn({
+        orgId: ORG,
+        phone: TEL,
+        inboundText:
+          `Meu CPF é ${CPF} (${CPF_SEM_MASCARA}), me chama em ${EMAIL} ou no ${TEL}. ` +
+          `Aluguel R$ 1.500,00.`,
+        replyText: `Anotado, CPF ${CPF} confirmado. Combinamos R$ 1.500,00.`,
+        tools: [{ name: "propor_criacao", args: { cpf: CPF, telefone: TEL }, outcome: "proposta" }],
+      });
+
+      const [t] = await linhas();
+      const inbound = String(t.inbound_text);
+      const reply = String(t.reply_text);
+      const tools = JSON.stringify(t.tools_json);
+
+      expect(inbound).not.toContain(CPF);
+      expect(inbound).not.toContain(CPF_SEM_MASCARA);
+      expect(inbound).not.toContain(EMAIL);
+      expect(inbound).toContain("⟨CPF⟩");
+      expect(reply).not.toContain(CPF);
+      expect(reply).toContain("⟨CPF⟩");
+      expect(tools).not.toContain(CPF);
+      expect(tools).toContain("⟨CPF⟩");
+
+      // Telefone (decisão de produto) e valor seguem legíveis.
+      expect(inbound).toContain(TEL);
+      expect(inbound).toContain("R$ 1.500,00");
+    });
+
+    /**
+     * CONTROLE: a mesma linha, gravada SEM passar pela redação (INSERT
+     * direto). Se este teste não achasse o CPF, o teste de cima estaria só
+     * medindo uma query fraca, não a redação de verdade.
+     */
+    it("controle: sem redação, a mesma query ACHA o CPF", async () => {
+      await query(
+        `INSERT INTO conversation_turn (org_id, phone, inbound_text)
+         VALUES ($1, $2, $3)`,
+        [ORG, TEL, `Meu CPF é ${CPF}.`]
+      );
+
+      const [t] = await linhas();
+      expect(String(t.inbound_text)).toContain(CPF);
+    });
+  });
 });

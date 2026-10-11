@@ -32,6 +32,29 @@ const BASE_URL = "https://openrouter.ai/api/v1";
  */
 export const DEFAULT_MODEL = process.env.MAX_MODEL ?? "openai/gpt-5.4-nano";
 
+/**
+ * ZDR (Zero Data Retention) do OpenRouter — DOIS campos, que fazem coisas
+ * diferentes (achado em review: `data_collection` sozinho não é ZDR):
+ *
+ *  - `data_collection: "deny"` só impede o provedor de usar o payload pra
+ *    TREINAR modelo. Não promete retenção zero.
+ *  - `zdr: true` é o que de fato só roteia a chamada por endpoint que
+ *    CONTRATUALMENTE não retém o payload depois de respondido.
+ *
+ * Default LIGADO (os dois) — é política, não opt-in. Uma flag só, porque não
+ * existe caso de querer um sem o outro: quem liga ZDR quer as duas garantias.
+ *
+ * **Risco conhecido, não resolvido aqui**: se `gpt-5.4-nano` não tiver
+ * endpoint com essa política, o OpenRouter devolve 404 em vez de rotear sem
+ * ZDR — e aí TODO turn passa a falhar. A eval (`eval-adversarial`/
+ * `eval-respostas`) é quem confirma se o nano tem endpoint ZDR; o resultado
+ * vai anotado no PR. Até confirmar, `MAX_LLM_ZDR=false` é a válvula de
+ * escape sem precisar reverter o deploy.
+ */
+function zdrLigado(): boolean {
+  return process.env.MAX_LLM_ZDR !== "false";
+}
+
 export interface LlmUsage {
   model: string;
   promptTokens: number;
@@ -295,6 +318,7 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
         max_tokens: p.maxTokens ?? DEFAULT_MAX_TOKENS,
         temperature: p.temperature ?? 0.3,
         messages: [{ role: "system", content: p.system }, ...p.messages],
+        ...(zdrLigado() ? { provider: { data_collection: "deny", zdr: true } } : {}),
         ...(p.tools?.length
           ? {
               tools: p.tools.map((t) => ({

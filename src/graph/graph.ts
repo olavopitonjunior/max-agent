@@ -66,6 +66,7 @@ import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
 import { checkpointerPool } from "@/lib/db";
 import { conversationKey, phoneTag } from "@/lib/phone";
 import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
+import { tokenizar, destokenizarResposta, destokenizarArgs, redigir, redigirProfundo, type MapaPii } from "@/lib/pii";
 import {
   assuntoBloqueado,
   buildSystemPrompt,
@@ -434,6 +435,28 @@ export const MaxState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => false,
   }),
+
+  /**
+   * M1 (PII) — token → valor real do que foi tokenizado pra ir ao modelo
+   * neste TURN (só em `answer`; `compact`/`extractFacts` usam `redigir`, sem
+   * mapa — ver o cabeçalho de `pii.ts` sobre por que os dois NUNCA podem
+   * compartilhar numeração).
+   *
+   * **Isto é campo do `MaxState`, logo GRAVADO pelo `PostgresSaver` a cada
+   * super-step** — não é uma variável que fica só em memória entre o começo
+   * e o fim do turno. "Nunca persiste" seria mentira; o que é verdade (e o
+   * que importa) é que ele tem vida curta: o `RESET_DO_TURN` apaga a chave
+   * no PRÓXIMO turno, antes de qualquer leitura, e nenhum código deste
+   * projeto lê `piiMap` fora da janela do turno que o escreveu. Igual
+   * `toolResults`/`toolLog`: sem o reset, o mapa do turno passado
+   * continuaria "válido" e destokenizaria, pro corretor de HOJE, um valor de
+   * uma conversa de ONTEM. Mescla (não substitui): dentro do turno, `answer`
+   * pode tokenizar em mais de uma volta do laço de tools.
+   */
+  piiMap: Annotation<MapaPii>({
+    reducer: (prev, next) => (Object.keys(next).length === 0 ? {} : { ...prev, ...next }),
+    default: () => ({}),
+  }),
 });
 
 export type MaxStateType = typeof MaxState.State;
@@ -708,10 +731,16 @@ async function continuar(state: MaxStateType): Promise<MaxUpdate> {
 function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
   const orgId = state.identity.orgId;
   const extrair = async (texto: string, tool: { name: string; description: string; parameters: Record<string, unknown> }) => {
+    // M1 (PII) — tokeniza SÓ pra esta chamada: `conferirDitado` (fluxos.ts)
+    // compara o que volta com o texto CRU que a pessoa escreveu, então os
+    // `args` precisam estar com o valor real de novo antes de saírem daqui.
+    // Mapa local, não o do turno: destokeniza no mesmo instante em que
+    // tokenizou, não sobra token pendurado pra precisar persistir.
+    const { texto: textoTok, mapa } = tokenizar(texto, state.piiMap);
     try {
       const r = await complete({
         system: SYSTEM_DA_EXTRACAO,
-        messages: [{ role: "user", content: comoMensagemDoUsuario(texto) }],
+        messages: [{ role: "user", content: comoMensagemDoUsuario(textoTok) }],
         model: state.model,
         tools: [tool],
         toolChoice: tool.name,
@@ -719,7 +748,8 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
       });
       usage.push(r.usage);
       void reportUsage(orgId, r.usage);
-      return r.toolCalls.find((c) => c.name === tool.name)?.args ?? {};
+      const args = r.toolCalls.find((c) => c.name === tool.name)?.args ?? {};
+      return destokenizarArgs(args, mapa);
     } catch (err) {
       console.error("[fluxo] extração falhou:", err instanceof Error ? err.message : String(err));
       return null;
@@ -1176,6 +1206,22 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   const defs = oferta.entradas.map((e) => e.def);
   const tools = defs.length > 0 ? defs : undefined;
 
+  /**
+   * M1 (PII) — tokeniza ANTES de ir pro modelo. `history`/`userText` crus
+   * continuam servindo o resto da função (checkpoint, `ferramentasDoTurno`,
+   * etc. — ver o cabeçalho do campo `piiMap`); só o que vai pro `complete`
+   * passa pelo token. Reaproveita `state.piiMap`: se um valor já apareceu
+   * numa volta anterior do laço de tools, ganha o MESMO token de novo.
+   */
+  let mapaTurno = state.piiMap;
+  const historiaTokenizada = history.map((m) => {
+    const r = tokenizar(m.content, mapaTurno);
+    mapaTurno = r.mapa;
+    return { ...m, content: r.texto };
+  });
+  const userTextTok = tokenizar(userText, mapaTurno);
+  mapaTurno = userTextTok.mapa;
+
   let result;
   try {
     result = await complete({
@@ -1184,13 +1230,30 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       // histórico também, porque uma injeção de três turns atrás continua no
       // prompt. Sem etiqueta em volta: medido, ela derrubava a escolha de
       // tool (ver `comoMensagemDoUsuario`). O histórico guarda o texto cru.
-      messages: [...history, { role: "user" as const, content: userText }].map(
+      messages: [...historiaTokenizada, { role: "user" as const, content: userTextTok.texto }].map(
         (m): ChatMessage =>
           m.role === "user" ? { ...m, content: comoMensagemDoUsuario(m.content) } : m
       ),
       model: state.model,
       tools,
     });
+    /**
+     * Ecoou `⟨TEL_1⟩` num argumento ou no texto livre: destokeniza assim que
+     * sai do modelo, antes de qualquer decisão sobre o que fazer com ele.
+     *
+     * Duas funções, DUAS políticas (review) — não é a mesma operação:
+     *  - `destokenizarResposta` (texto livre): token que sobra sem casar o
+     *    mapa (de outro turno, ou mutilado) vira `[dado]`. Nunca pro
+     *    corretor um valor de HOJE que não é dele, nem o token cru.
+     *  - `destokenizarArgs` (args de tool): fica como está. Não existe
+     *    `[dado]` que o ImobPro aceite como CPF — o token sem mapa faz o
+     *    servidor RECUSAR o campo, que é o comportamento certo.
+     */
+    result = {
+      ...result,
+      text: destokenizarResposta(result.text, mapaTurno),
+      toolCalls: result.toolCalls.map((c) => ({ ...c, args: destokenizarArgs(c.args, mapaTurno) })),
+    };
   } catch (err) {
     // O turn que falhou também custou: sem registrar a tentativa, um agente que
     // só erra aparece no painel como um agente que não gasta nada.
@@ -1209,6 +1272,10 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       // significados. Hoje seria inofensivo (nada contribui `usage` antes do
       // `answer`), e é exatamente por isso que precisa ser corrigido agora.
       ...(usage ? { usage: [usage] } : {}),
+      // O que foi tokenizado pra ESTA tentativa (mesmo falha) não pode se
+      // perder: a volta seguinte do laço reaproveita `state.piiMap`, e sem
+      // propagar aqui ela tokenizaria de novo com numeração reiniciada.
+      piiMap: mapaTurno,
       reply:
         "Tive um problema pra responder agora. Tenta de novo em instantes, " +
         "ou fala com seu corretor se for urgente.",
@@ -1276,6 +1343,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
           reply: texto,
           usage: usageDoTurn,
           toolLog: [...trilha, { name: chamada.name, args: { tipo: args.tipo }, outcome: "fluxo_em_andamento" }],
+          piiMap: mapaTurno,
         };
       }
       const extra: LlmUsage[] = [];
@@ -1310,6 +1378,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
           ...trilha,
           { name: chamada.name, args: { tipo: args.tipo }, outcome: passo.evento },
         ],
+        piiMap: mapaTurno,
       };
     }
 
@@ -1320,7 +1389,9 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
      * repete o pedido.
      */
     if (auth.motivo === "tipo_invalido") {
-      console.warn(`[answer] tipo inválido na chamada: ${JSON.stringify(chamada.args)}`);
+      // M1 (PII) — `chamada.args` já veio destokenizado (ver acima); redige
+      // de novo antes do log, porque daqui ele vai pro painel da Vercel.
+      console.warn(`[answer] tipo inválido na chamada: ${JSON.stringify(redigirProfundo(chamada.args))}`);
     }
     trilha.push({ name: chamada.name, args: chamada.args, outcome: auth.motivo });
 
@@ -1339,6 +1410,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
         reply: texto,
         usage: usageDoTurn,
         toolLog: trilha,
+        piiMap: mapaTurno,
       };
     }
   }
@@ -1359,6 +1431,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       messages: [{ role: "user", content: userText }],
       pendingToolCalls: deLeitura,
       usage: usageDoTurn,
+      piiMap: mapaTurno,
       ...(trilha.length > 0 ? { toolLog: trilha } : {}),
     };
   }
@@ -1376,6 +1449,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     messages: [{ role: "user", content: userText }],
     draft: result.text,
     usage: usageDoTurn,
+    piiMap: mapaTurno,
     // Mesma proteção do `usage` acima: `trilha` é `[]` quando não houve
     // chamada, e `[]` é o sinal de reset do reducer. Hoje seria inofensivo
     // porque `confirm` e `answer` nunca rodam no mesmo turn — mas isso é
@@ -1538,6 +1612,22 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
     .join("\n")
     .slice(0, 8000);
 
+  /**
+   * M1 (PII, corrigido em review) — `redigir`, NÃO `tokenizar`.
+   *
+   * `tokenizar` numera (`⟨CPF_1⟩`) a partir do mapa do TURNO atual
+   * (`state.piiMap`), mas o resumo sobrevive a vários turnos — cada um com
+   * seu próprio mapa, numerado do 1 de novo. Se o `compact` usasse
+   * `tokenizar`, o resumo gravaria `⟨CPF_1⟩`, e um turno FUTURO que também
+   * tokenizasse um CPF (de OUTRA pessoa, ou nenhum) como `⟨CPF_1⟩` faria
+   * `destokenizar` casar a chave errada se o modelo ecoasse o token do
+   * resumo de volta — injetando o CPF de hoje onde o resumo falava de
+   * ontem. `redigir` usa token FIXO (`⟨CPF⟩`, sem número, sem mapa): nunca
+   * casa com nenhum `piiMap`, de nenhum turno. O resumo FICA redigido —
+   * `summary` nunca guarda o valor real.
+   */
+  const transcriptRed = redigir(transcript);
+
   try {
     const result = await complete({
       system:
@@ -1548,7 +1638,7 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
       messages: [
         {
           role: "user",
-          content: `${state.summary ? `Resumo anterior:\n${state.summary}\n\n` : ""}${transcript}`,
+          content: `${state.summary ? `Resumo anterior:\n${state.summary}\n\n` : ""}${transcriptRed}`,
         },
       ],
       // Mesmo modelo do turn: o nano já é o barato da casa, e trocar de
@@ -1560,6 +1650,7 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
 
     void reportUsage(state.identity.orgId, result.usage);
     return {
+      // Redigido de propósito — nunca destokenizado. Ver o comentário acima.
       summary: result.text,
       messages: { replace: keep },
       usage: [result.usage],
@@ -1815,6 +1906,8 @@ export const RESET_DO_TURN = {
     toolsOferecidas: [],
     timings: [],
     politicaIndisponivel: false,
+    // M1 (PII) — mapa de tokenização é DO TURN. Ver o comentário no Annotation.
+    piiMap: {},
 };
 
 export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
@@ -2126,11 +2219,20 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
        */
       if (!(reply && turnText) || result.halt) return;
       await (async () => {
+            // M1 (PII, corrigido em review) — `redigir`, não `tokenizar`: mesmo
+            // motivo do `compact` (ver o cabeçalho ali). `extractFacts` grava
+            // em `memory_facts`, que atravessa toda conversa futura — um token
+            // NUMERADO (`⟨CPF_1⟩`) colidiria com o mapa de um turno seguinte,
+            // de qualquer pessoa. `redigir` usa token fixo, que não casa com
+            // mapa nenhum; `limpar` (memory.ts) descarta por garantia qualquer
+            // fato que ainda carregue `⟨`.
+            const textoRed = redigir(turnText);
+            const replyRed = redigir(reply);
             const novos = await extractFacts({
               orgId,
               phone,
-              userText: turnText,
-              replyText: reply,
+              userText: textoRed,
+              replyText: replyRed,
               known: facts,
             });
             const gravados = await saveFacts(orgId, phone, novos);
