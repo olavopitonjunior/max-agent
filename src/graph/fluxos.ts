@@ -39,6 +39,7 @@ import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
+import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { termoDeBusca } from "./localizar";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
@@ -111,6 +112,7 @@ interface Chave {
 export type Fluxo =
   | FluxoContinuidade
   | FluxoGestao
+  | FluxoCredito
   | {
       kind: "escolha";
       natureza?: "venda" | "locacao";
@@ -173,6 +175,8 @@ export interface DepsDoFluxo {
   /** Extração por ferramenta obrigatória. `null` = o modelo falhou. */
   extrairProposta(texto: string, natureza: "venda" | "locacao"): Promise<DadosDaProposta | null>;
   extrairCampos(texto: string, campos: CampoDoPopup[]): Promise<Record<string, string> | null>;
+  /** Crédito (M2): extrator de UM campo da ficha. Opcional: sem ele, só o código interpreta. */
+  extrairCredito?(texto: string, campo: CampoCredito): Promise<Record<string, unknown> | null>;
 }
 
 export interface ContextoDoTurno {
@@ -183,6 +187,10 @@ export interface ContextoDoTurno {
   /** A política não pôde ser conferida neste turn (falha transitória). */
   politicaIndisponivel?: boolean;
   agora: number;
+  /** Nome da imobiliária — textos do crédito ("…pela {org}"). */
+  orgName?: string;
+  /** Thread do checkpoint — AAD do cofre da ficha de crédito. */
+  thread?: string;
 }
 
 /**
@@ -688,6 +696,8 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (!f) return null;
   if (f.kind === "continuidade") return { ...f, etapa: ["concluida", "selecao"].includes(f.etapa) ? f.etapa : "resumo" };
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
+  // Crédito: a revisão (o SIM que envia, no M3) volta para a coleta; o servidor diz o que falta.
+  if (f.kind === "credito") return f.etapa === "revisao" ? { ...f, etapa: "coleta", campoAtual: undefined } : f;
   if (f.kind === "negocio" && f.etapa === "revisao") return { ...f, etapa: "campos", forcar: undefined };
   if (f.kind === "proposta") {
     if (f.etapa === "revisao") return { ...f, etapa: "coleta" };
@@ -1063,7 +1073,7 @@ async function iniciarProposta(
 // ─── O turno dentro de um fluxo ───────────────────────────────────────────
 
 export function fluxoExpirou(f: Fluxo, agora: number): boolean {
-  const longo = f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave;
+  const longo = (f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave) || f.kind === "credito";
   const ttl = longo ? FLUXO_TTL_POS_RASCUNHO_MS : FLUXO_TTL_MS;
   return agora - f.atualizadoEm > ttl;
 }
@@ -1079,6 +1089,7 @@ export async function conduzirFluxo(
 ): Promise<PassoDoFluxo> {
   if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (fluxo.kind === "gestao") return conduzirGestao(fluxo, ctx, deps);
+  if (fluxo.kind === "credito") return conduzirCredito(fluxo, ctx, deps);
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };
   }

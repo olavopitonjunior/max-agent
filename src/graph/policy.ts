@@ -107,6 +107,14 @@ export const CAPABILITIES = [
   "form.create",
   "notify.manual",
   "audio.reply",
+  /**
+   * Crédito Upestate (M2, 11/10/2026). `credit.read`: `credit.preflight` e
+   * `credit.status`; `credit.request`: `lead.upsert` e (M3) `credit.request`.
+   * FORA do `POLITICA_PADRAO` do ImobPro: a org liga em `/admin/max`. Mesma
+   * posição da lista de lá (teste de paridade).
+   */
+  "credit.read",
+  "credit.request",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

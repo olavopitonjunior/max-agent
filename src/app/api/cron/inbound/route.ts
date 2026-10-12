@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth";
-import { sweepInbound } from "@/lib/inbound";
+import { podarTextoDaFila, sweepInbound } from "@/lib/inbound";
 import { pruneOldFacts } from "@/lib/memory";
 import { pruneOldTurns } from "@/lib/turnlog";
 import { podarPedidosDeDuvida } from "@/lib/aceite";
@@ -59,6 +59,16 @@ export async function GET(req: NextRequest) {
       if (anonimizados > 0) {
         console.log(`[cron/inbound] ${anonimizados} turn(s) anonimizados por idade`);
       }
+
+      // A fila guarda a fala e a resposta: depois de 30 dias, só o fato do turno.
+      const filaPodada = await podarTextoDaFila().catch((err) => {
+        console.warn(
+          "[cron/inbound] poda da fila falhou:",
+          err instanceof Error ? err.message : String(err)
+        );
+        return 0;
+      });
+      if (filaPodada > 0) console.log(`[cron/inbound] ${filaPodada} linha(s) da fila sem texto por idade`);
 
       // Pedido de dúvida que ninguém usou guarda telefone e nome à toa.
       const pedidos = await podarPedidosDeDuvida().catch((err) => {

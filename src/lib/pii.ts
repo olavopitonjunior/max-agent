@@ -89,10 +89,10 @@ function cnpjValido(raw: string): boolean {
 // real: uma sequência de 11/14 dígitos que não seja CPF/CNPJ não é tocada e
 // segue disponível para TEL/CEP tentarem.
 
-/** 3 grupos de 3 + 2, com ou sem pontuação. Nunca cai sobre CRECI (não tem esse formato). */
-const RE_CPF = /(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/g;
+/** 3 grupos de 3 + 2, com ou sem pontuação/espaço ("111 444 777 35", "111.444.777.35"). O DV filtra o resto. */
+export const RE_CPF = /(?<!\d)\d{3}[.\s]?\d{3}[.\s]?\d{3}[-.\s]?\d{2}(?!\d)/g;
 /** 2+3+3+4+2, com ou sem pontuação/barra. */
-const RE_CNPJ = /(?<!\d)\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}(?!\d)/g;
+export const RE_CNPJ = /(?<!\d)\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-.\s]?\d{2}(?!\d)/g;
 const RE_EMAIL = /[^\s@:;,<>()]+@[^\s@:;,<>()]+\.[a-z]{2,}/gi;
 /**
  * DDD(2) + nono dígito opcional + 4 + 4, com/sem +55, com/sem máscara.
@@ -321,6 +321,34 @@ export function redigirProfundo<T>(valor: T, campos: Categoria[] = TODAS_CATEGOR
     return Object.fromEntries(
       Object.entries(valor).map(([k, v]) => [k, redigirProfundo(v, campos)])
     ) as T;
+  }
+  return valor;
+}
+
+/**
+ * Redação de TURNO DE CRÉDITO (M2): além das categorias de `redigir`, todo
+ * número com 3+ dígitos ("8500", "8.000,00", "777") e todo valor com "mil"/"k"
+ * ("8 mil", "oito mil e quinhentos", "12k") vira `⟨VALOR⟩`. Mais largo de
+ * propósito: na ficha, número solto é renda, aluguel ou documento.
+ */
+const NUMERAL = String.raw`(?:zero|um|uma|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|treze|catorze|quatorze|quinze|dezesseis|dezessete|dezoito|dezenove|vinte|trinta|quarenta|cinquenta|sessenta|setenta|oitenta|noventa|cem|cento|duzent[oa]s|trezent[oa]s|quatrocent[oa]s|quinhent[oa]s|seiscent[oa]s|setecent[oa]s|oitocent[oa]s|novecent[oa]s|mil|milh[aã]o|milh[oõ]es)`;
+/** Valor por extenso ("novecentos reais", "dois mil trezentos e cinquenta", "1 milhão"). */
+const POR_EXTENSO = new RegExp(
+  String.raw`(?<![\p{L}])${NUMERAL}(?:\s+(?:e\s+|de\s+)?${NUMERAL})*(?![\p{L}])(?:\s+(?:de\s+)?reais)?`, "giu");
+
+export function redigirCredito(texto: string): string {
+  return redigir(texto)
+    .replace(/(?:R\$\s*)?\d[\d.,]*\s*(?:mil|k|milh[aã]o|milh[oõ]es)(?![\p{L}])(?:\s*(?:de\s+)?reais)?/giu, "⟨VALOR⟩")
+    .replace(POR_EXTENSO, (m) => (/(cem|cento|centos|mil|milh|reais)/i.test(m) ? "⟨VALOR⟩" : m))
+    .replace(/(?:R\$\s*)?\d(?:[\d.,\s]*\d)?/g, (m) => (m.replace(/\D/g, "").length >= 3 ? "⟨VALOR⟩" : m));
+}
+
+/** `redigirCredito` recursivo, para objetos do state. */
+export function redigirCreditoProfundo<T>(valor: T): T {
+  if (typeof valor === "string") return redigirCredito(valor) as T;
+  if (Array.isArray(valor)) return valor.map((v) => redigirCreditoProfundo(v)) as T;
+  if (valor && typeof valor === "object") {
+    return Object.fromEntries(Object.entries(valor).map(([k, v]) => [k, redigirCreditoProfundo(v)])) as T;
   }
   return valor;
 }

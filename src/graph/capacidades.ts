@@ -27,7 +27,7 @@ export function pedeCapacidades(texto: string): boolean {
   return PEDE_CAPACIDADES.test(t.trim());
 }
 
-export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: boolean): string {
+export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: boolean, credito = false): string {
   const tem = (c: Capability) => policy.includes(c);
   const linhas: string[] = [];
   const proposta: string[] = [];
@@ -42,6 +42,8 @@ export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: 
   if (podeEscrever && tem("form.create")) negocio.push("criar o formulário");
   if (tem("deal.list") || tem("deal.pending")) negocio.push("consultar negócios e pendências");
   if (negocio.length) linhas.push(`- Negócios: ${negocio.join(", ")}.`);
+  // Crédito só com a flag `MAX_CREDITO` E a política da org.
+  if (credito && podeEscrever && tem("credit.request")) linhas.push("- Análise de crédito (Upestate): preencher a ficha do pretendente e ver o status.");
   if (!linhas.length) return "Por aqui eu tiro dúvidas sobre o processo da imobiliária. Para o resto, fale com a imobiliária.";
   linhas.push("Contrato e cobrança são pela tela do negócio no sistema.");
   return `Pelo WhatsApp eu consigo:\n${linhas.join("\n")}`;

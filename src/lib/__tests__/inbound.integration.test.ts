@@ -36,7 +36,7 @@ vi.mock("../connection", () => ({
   }),
 }));
 
-const { enqueueInbound, sweepInbound, processInboundNow } = await import(
+const { enqueueInbound, sweepInbound, processInboundNow, podarTextoDaFila, TEXTO_REENVIO_SENSIVEL } = await import(
   "../inbound"
 );
 const { query, db } = await import("../db");
@@ -171,6 +171,69 @@ d("inbound_queue (Postgres real)", () => {
    * reenviar, e a máquina de estado é informada por `envio`, porque o
    * `/status` de um minuto atrás estava defasado.
    */
+  /** M2: turno da ficha de crédito não deixa a fala nem valores na fila. */
+  it("turno de crédito: text NULL e reply_text sem valores; turno comum inalterado", async () => {
+    turn.mockResolvedValue({ reply: "Anotei: renda R$ 8.000,00.\nValor do aluguel?", sensivel: true, afterReply: async () => undefined });
+    const a = await enqueueInbound(msg({ text: "8 mil" }));
+    if (a.status !== "queued") throw new Error("esperava queued");
+    await processInboundNow(a.id);
+    const [ra] = await query<{ text: string | null; reply_text: string | null }>(`SELECT text, reply_text FROM inbound_queue WHERE id = $1`, [a.id]);
+    expect(ra!.text).toBeNull();
+    expect(ra!.reply_text).not.toContain("8.000,00");
+    expect(ra!.reply_text).toContain("⟨VALOR⟩");
+    // O que vai ao WhatsApp é o real.
+    expect(JSON.stringify(sent.mock.calls[0])).toContain("8.000,00");
+
+    turn.mockResolvedValue({ reply: "Renda de R$ 8.000,00 é boa.", afterReply: async () => undefined });
+    const b = await enqueueInbound(msg({ text: "8 mil" }));
+    if (b.status !== "queued") throw new Error("esperava queued");
+    await processInboundNow(b.id);
+    const [rb] = await query<{ text: string | null; reply_text: string | null }>(`SELECT text, reply_text FROM inbound_queue WHERE id = $1`, [b.id]);
+    expect(rb!.text).toBe("8 mil");
+    expect(rb!.reply_text).toContain("8.000,00");
+  });
+
+  it("reenvio: linha sensível manda a frase fixa; linha comum, o reply_text original", async () => {
+    turn.mockResolvedValue({ reply: "Anotei: renda R$ 8.000,00.", sensivel: true, afterReply: async () => undefined });
+    const a = await enqueueInbound(msg({ text: "8 mil" }));
+    if (a.status !== "queued") throw new Error("esperava queued");
+    sent.mockRejectedValueOnce(new Error("z-api fora do ar"));
+    await processInboundNow(a.id);
+    const [meio] = await query<{ status: string; sensivel: boolean }>(`SELECT status, sensivel FROM inbound_queue WHERE id = $1`, [a.id]);
+    expect(meio).toMatchObject({ status: "pending", sensivel: true });
+    await sweepInbound();
+    expect(turn).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveBeenCalledTimes(2);
+    expect(sent.mock.calls[1]![0]).toMatchObject({ body: TEXTO_REENVIO_SENSIVEL });
+
+    vi.clearAllMocks();
+    sent.mockResolvedValue({ messageId: "REPLY-MID" });
+    turn.mockResolvedValue({ reply: "resposta comum", afterReply: async () => undefined });
+    const b = await enqueueInbound(msg({ text: "oi" }));
+    if (b.status !== "queued") throw new Error("esperava queued");
+    sent.mockRejectedValueOnce(new Error("z-api fora do ar"));
+    await processInboundNow(b.id);
+    await sweepInbound();
+    expect(sent.mock.calls[1]![0]).toMatchObject({ body: "resposta comum" });
+  });
+
+  it("poda: texto de linha liquidada há mais de 30 dias vira NULL; recente e pendente ficam", async () => {
+    const velha = await enqueueInbound(msg({ text: "velha" }));
+    const pendente = await enqueueInbound(msg({ text: "pendente velha" }));
+    const nova = await enqueueInbound(msg({ text: "nova" }));
+    if (velha.status !== "queued" || pendente.status !== "queued" || nova.status !== "queued") throw new Error("esperava queued");
+    await query(`UPDATE inbound_queue SET status = 'done', reply_text = 'r', created_at = now() - interval '31 days' WHERE id = $1`, [velha.id]);
+    await query(`UPDATE inbound_queue SET created_at = now() - interval '31 days' WHERE id = $1`, [pendente.id]);
+    await query(`UPDATE inbound_queue SET status = 'done', reply_text = 'r' WHERE id = $1`, [nova.id]);
+    expect(await podarTextoDaFila()).toBeGreaterThanOrEqual(1);
+    const linhas = await query<{ id: string; text: string | null; reply_text: string | null; status: string }>(
+      `SELECT id, text, reply_text, status FROM inbound_queue WHERE id = ANY($1)`, [[velha.id, pendente.id, nova.id]]);
+    const por = Object.fromEntries(linhas.map((l) => [l.id, l]));
+    expect(por[velha.id]).toMatchObject({ text: null, reply_text: null, status: "done" });
+    expect(por[pendente.id]!.text).toBe("pendente velha");
+    expect(por[nova.id]).toMatchObject({ text: "nova", reply_text: "r" });
+  });
+
   it("envio recusado pelo canal devolve a tentativa e informa a máquina de estado", async () => {
     const r = await enqueueInbound(msg());
     if (r.status !== "queued") throw new Error("esperava queued");

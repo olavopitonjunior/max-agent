@@ -5,7 +5,7 @@ import { falhaDaMensagemMeta, inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
 import { abrirJanela } from "./janela24h";
 import { log } from "./log";
-import { redigir, CAMPOS_DA_AUDITORIA } from "./pii";
+import { redigir, CAMPOS_DA_AUDITORIA, redigirCredito } from "./pii";
 import { runTurn } from "@/graph/graph";
 
 /**
@@ -46,6 +46,8 @@ export interface InboundRow extends Record<string, unknown> {
   button_payload: string | null;
   attempts: number;
   reply_text: string | null;
+  /** Turno da ficha de crédito: `reply_text` está redigido (migration 021). */
+  sensivel?: boolean;
   /** O envio COMEÇOU numa tentativa (ver migration 007). */
   last_send_started_at: string | Date | null;
 }
@@ -101,7 +103,7 @@ export async function enqueueInbound(
 
 const CLAIM_COLUMNS = `id, message_id, from_phone, group_id, kind, text,
   media_url, mime_type, sender_name, reply_to_message_id, timestamp_ms,
-  button_payload, attempts, reply_text, last_send_started_at`;
+  button_payload, attempts, reply_text, sensivel, last_send_started_at`;
 
 /**
  * Dá pra responder agora?
@@ -307,6 +309,9 @@ export type SettleStatus = "done" | "failed" | "retry";
  * reenvia — não re-invoca o grafo, que já gravou o turn no checkpoint e faria a
  * fala da pessoa aparecer duas vezes na thread.
  */
+export const TEXTO_REENVIO_SENSIVEL =
+  "Tive um problema para enviar sua resposta. Mande *RESUMO* para ver a ficha de novo.";
+
 export async function runQueued(row: InboundRow): Promise<SettleStatus> {
   try {
     let reply = row.reply_text;
@@ -330,10 +335,19 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
       // decisão do `turnlog.ts`). `reply`, em memória, segue intacto: é ele
       // que vai pro `sendText` daqui a pouco, e a pessoa precisa receber o
       // próprio CPF de volta quando pedir confirmação.
-      await query(`UPDATE inbound_queue SET reply_text = $2 WHERE id = $1`, [
-        row.id,
-        reply ? redigir(reply, CAMPOS_DA_AUDITORIA) : reply,
-      ]);
+      // Turno da ficha de crédito: a fala (CPF, renda) sai da fila — o texto
+      // foi gravado no INSERT, antes de se saber — e a resposta vai sem valores.
+      if (turn.sensivel) {
+        await query(`UPDATE inbound_queue SET text = NULL, sensivel = true, reply_text = $2 WHERE id = $1`, [
+          row.id,
+          reply ? redigirCredito(reply) : reply,
+        ]);
+      } else {
+        await query(`UPDATE inbound_queue SET reply_text = $2 WHERE id = $1`, [
+          row.id,
+          reply ? redigir(reply, CAMPOS_DA_AUDITORIA) : reply,
+        ]);
+      }
     } else if (row.last_send_started_at != null) {
       /**
        * Resposta pronta E envio já iniciado: a tentativa anterior morreu ENTRE
@@ -352,6 +366,10 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
       );
       return "done";
     }
+
+    // Retentativa de turno de crédito: o `reply_text` gravado está redigido
+    // ("⟨VALOR⟩") e não pode ir à pessoa. Vai a frase fixa.
+    if (afterReply === undefined && row.sensivel && reply) reply = TEXTO_REENVIO_SENSIVEL;
 
     let replyMessageId: string | null = null;
     if (reply) {
@@ -669,4 +687,22 @@ export async function sweepInbound(limit = 20): Promise<InboundTotals> {
     if (r === "done") await drenarTelefone(row.from_phone, deadline);
   }
   return totals;
+}
+
+/**
+ * Retenção da fila (M2): `text` e `reply_text` de linhas liquidadas há mais de
+ * 30 dias viram NULL — a linha (status, tentativas, entrega) fica. Sem DELETE,
+ * mesmo padrão do `pruneOldTurns`. Chamado pelo cron `/api/cron/inbound`.
+ */
+export async function podarTextoDaFila(dias = 30): Promise<number> {
+  const rows = await query<{ id: string }>(
+    `UPDATE inbound_queue
+        SET text = NULL, reply_text = NULL
+      WHERE created_at < now() - ($1 || ' days')::interval
+        AND status NOT IN ('pending', 'processing')
+        AND (text IS NOT NULL OR reply_text IS NOT NULL)
+      RETURNING id`,
+    [String(dias)]
+  );
+  return rows.length;
 }
