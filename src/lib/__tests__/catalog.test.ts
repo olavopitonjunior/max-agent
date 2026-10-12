@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   CATALOGO,
+  KINDS_COM_ACEITE,
+  textoDoAvisoDeCredito,
+  templatesDoKind,
   botoesEmOrdem,
   parametroObrigatorioFaltando,
   parametrosDoCorpo,
@@ -8,7 +11,7 @@ import {
   templateUsavel,
   todosOsTemplates,
 } from "../templates/catalog";
-import { botoesDaLinha } from "../outbox";
+import { botoesDaLinha, renderMessage } from "../outbox";
 
 /**
  * As regras que a Meta aplica na análise de template, travadas aqui para que
@@ -59,6 +62,7 @@ describe("a régua do Olavo (01/10/2026)", () => {
       [
         "contract_signed",
         "contract_signed_parte",
+        "credit_result",
         "form_completed",
         "form_completed_parte",
         "form_reminder",
@@ -128,6 +132,31 @@ describe("a régua do Olavo (01/10/2026)", () => {
       expect(def.paramsObrigatorios).toEqual(["proposta"]);
       expect(templateUsavel(def, { recipient_name: "Ana", org_name: "Imob", title: "Proposta", params: {} })).toBe(false);
     }
+  });
+});
+
+describe("aviso de crédito (credit_result, M3)", () => {
+  const params = { lead: "Letícia Andrade", decisao: "Aprovado" };
+  const linha = { title: "Análise de crédito", body: "corpo do emissor", link_url: "https://x.test/locacao/pessoas/clientes/lc1", org_name: "FINCasa", recipient_name: "Olavo Ramos" };
+
+  it("fora da janela: o template JÁ APROVADO da mensagem da imobiliária, sem template novo", () => {
+    expect(templatesDoKind("credit_result").map((t) => t.name)).toEqual(templatesDoKind("manual_message").map((t) => t.name));
+    expect(KINDS_COM_ACEITE).toContain("credit_result");
+    // Nenhum nome novo para submeter à Meta.
+    const nomes = todosOsTemplates().map((t) => t.name);
+    expect(nomes.filter((n) => /credit|credito/.test(n))).toEqual([]);
+  });
+
+  it("dentro da janela: texto livre fixo, com o link", () => {
+    expect(renderMessage({ ...linha, kind: "credit_result", params })).toBe(
+      "A análise de crédito de Letícia Andrade saiu: Aprovado. https://x.test/locacao/pessoas/clientes/lc1");
+    expect(textoDoAvisoDeCredito({ proposta: "PROP-2026-0013", decisao: "Reprovado." }, null)).toBe("A análise de crédito da proposta PROP-2026-0013 saiu: Reprovado.");
+  });
+
+  it("sem os params: o formato genérico de sempre (controle)", () => {
+    expect(textoDoAvisoDeCredito({ decisao: "Aprovado" })).toBeNull();
+    expect(renderMessage({ ...linha, kind: "credit_result", params: null })).toContain("*Análise de crédito*");
+    expect(renderMessage({ ...linha, kind: "stage_change", params })).toContain("corpo do emissor");
   });
 });
 

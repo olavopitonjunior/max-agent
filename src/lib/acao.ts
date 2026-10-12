@@ -91,7 +91,9 @@ export async function executarAcao(params: {
       timeoutDoVerbo(params.verb)
     );
     const body = (await res.json().catch(() => ({}))) as unknown;
-    if (res.status >= 500) {
+    // 503 `notConfigured` do crédito (M3) é resposta de NEGÓCIO ("indisponível"), não falha de rede.
+    const naoConfigurado = res.status === 503 && !!body && typeof body === "object" && (body as Record<string, unknown>).notConfigured === true;
+    if (res.status >= 500 && !naoConfigurado) {
       console.warn(`[acao] ${params.verb} ${res.status} na org ${params.orgId}`);
       return null;
     }

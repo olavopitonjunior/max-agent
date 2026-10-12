@@ -333,6 +333,11 @@ export const CATALOGO: Record<string, TemplateDef> = {
   ),
 };
 
+// Crédito Upestate (M3): o aviso `credit_result` não ganha template novo na
+// Meta — fora da janela sai pelo da mensagem da imobiliária (já aprovado) e o
+// texto (`textoDoAvisoDeCredito`) é entregue no OK, como a mensagem manual.
+CATALOGO.credit_result = MENSAGEM;
+
 // Sem vendedor cadastrado, a assinatura do proponente NÃO significa que
 // todos assinaram. O mesmo fato usa o template parcial, nunca completed.
 CATALOGO.proposal_awaiting_decision = CATALOGO.proposal_signed_proponente;
@@ -346,7 +351,23 @@ export const KINDS_COM_ACEITE: readonly string[] = [
   "manual_message",
   "manual_message_parte",
   "support_handoff",
+  "credit_result",
 ];
+
+/**
+ * O texto do aviso `credit_result` (M3): "A análise de crédito de {lead}
+ * saiu: {decisao}. {link}". Dentro da janela é o texto livre; fora, é o que o
+ * OK entrega. Só nome/código e rótulo — o emissor nunca manda CPF, renda ou
+ * score (`upestate-runner.ts`). `null` sem os params: fica o corpo do emissor.
+ */
+export function textoDoAvisoDeCredito(params: Record<string, string> | null | undefined, link?: string | null): string | null {
+  const decisao = params?.decisao?.trim();
+  const lead = params?.lead?.trim();
+  const proposta = params?.proposta?.trim();
+  if (!decisao || (!lead && !proposta)) return null;
+  const alvo = lead ? `de ${lead}` : `da proposta ${proposta}`;
+  return `A análise de crédito ${alvo} saiu: ${decisao.replace(/[.\s]+$/, "")}.${link ? ` ${link}` : ""}`;
+}
 
 /**
  * Versão 2 — texto estritamente TRANSACIONAL (decisão do Olavo, 03/10/2026).
@@ -415,6 +436,7 @@ const MENSAGEM_V2 = t(
 );
 V2.manual_message = MENSAGEM_V2;
 V2.manual_message_parte = MENSAGEM_V2;
+V2.credit_result = MENSAGEM_V2;
 
 /**
  * Versão 3 — texto de STATUS da transação (decisão do Olavo, 03/10/2026).
@@ -459,6 +481,7 @@ const MENSAGEM_V3 = t(
 );
 V3.manual_message = MENSAGEM_V3;
 V3.manual_message_parte = MENSAGEM_V3;
+V3.credit_result = MENSAGEM_V3;
 
 /**
  * `proposal_completed` v2 (decisão do Olavo, 06/10/2026): a Meta aprovou o v1

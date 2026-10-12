@@ -399,6 +399,39 @@ d("canal Meta (Postgres real)", () => {
       expect(l.template_name).toBeNull();
     });
 
+    /** Aviso de crédito (M3): texto fixo na janela; fora dela, o template da mensagem da imobiliária. */
+    describe("credit_result", () => {
+      const TPL_MSG = "max_mensagem_imobiliaria_v3";
+      async function avisoVencido(dedupeKey: string) {
+        await enqueue({
+          orgId: "org-meta", dedupeKey, audience: "platform_user", phone: PHONE, recipientName: "Ana",
+          title: "Análise de crédito", body: "A análise de crédito de Letícia Andrade saiu: Aprovado. https://imobpro.ia.br/locacao/pessoas/clientes/lc1",
+          linkUrl: "https://imobpro.ia.br/locacao/pessoas/clientes/lc1", dealId: null, orgName: "FINCasa",
+          kind: "credit_result", params: { lead: "Letícia Andrade", decisao: "Aprovado" },
+        });
+        await query(`UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = $1`, [dedupeKey]);
+      }
+      afterEach(async () => { await query(`DELETE FROM wa_template WHERE name = $1`, [TPL_MSG]); });
+
+      it("janela aberta: texto livre fixo, com o link", async () => {
+        await query(`INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now() - interval '1 hour')`, [PHONE]);
+        await avisoVencido("k-credito-aberta");
+        await dispatchDue();
+        expect(metaSendTemplate).not.toHaveBeenCalled();
+        expect(metaSend.mock.calls[0][0].body).toBe(
+          "A análise de crédito de Letícia Andrade saiu: Aprovado. https://imobpro.ia.br/locacao/pessoas/clientes/lc1");
+      });
+
+      it("janela fechada: o template já aprovado da mensagem da imobiliária (OK entrega o texto)", async () => {
+        await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [TPL_MSG]);
+        await avisoVencido("k-credito-fechada");
+        await dispatchDue();
+        expect(metaSend).not.toHaveBeenCalled();
+        expect(metaSendTemplate.mock.calls[0][0]).toMatchObject({ name: TPL_MSG, bodyParams: ["Ana", "FINCasa"] });
+        expect((await linha("k-credito-fechada")).template_name).toBe(TPL_MSG);
+      });
+    });
+
     it("janela vencida (25h) conta como fechada", async () => {
       await query(`INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now() - interval '25 hours')`, [
         PHONE,

@@ -81,6 +81,7 @@ const lista = (a: Record<string, unknown>) => {
 // Crédito (M2): leads da ficha, simulados como o C5 responde.
 type LeadSim = { id: string; nome: string; cpf: string; credito: Record<string, Record<string, unknown>> };
 let leadsCredito: LeadSim[] = [];
+let envioSim: Conversa["envio"] | null = null;
 const ORDEM_FICHA: [string, string, string][] = [
   ["pretendente", "documento", "CPF do pretendente"], ["pretendente", "nomeCompleto", "Nome completo do pretendente"],
   ["pretendente", "vinculoEmpregaticio", "Vínculo empregatício do pretendente"], ["pretendente", "profissao", "Profissão do pretendente"],
@@ -107,6 +108,11 @@ function creditoSim(verb: string, a: Record<string, unknown>): { status: number;
       if (v && typeof v === "object" && !Array.isArray(v)) l.credito[g] = { ...(l.credito[g] ?? {}), ...(v as Record<string, unknown>) };
     }
     return { status: 200, body: { id: l.id, status: "novo", faltantes: faltantesSim(l.credito) } };
+  }
+  if (verb === "credit.request") {
+    // Simulado (M3): nada sai daqui; a decisão é fixa.
+    return { status: 200, body: { requestId: "r1", decision: "aprovado", rotulo: "Aprovado", justificativa: "Bom histórico de pagamentos",
+      podePedirHumanizada: false, leadLink: `/locacao/pessoas/clientes/${String(a.leaseClientId ?? "lc1")}` } };
   }
   if (verb === "credit.status") {
     const nome = String(a.nome ?? "").toLowerCase();
@@ -169,11 +175,26 @@ type Espera = {
   args?: { verbo: string; confere: (a: Record<string, unknown>) => string | null };
 };
 type Turno = { fala: string } & Espera;
-type Conversa = { nome: string; categoria: string; turnos: Turno[] };
+/** `envio`: liga `MAX_CREDITO_ENVIO` e simula o `credit.request` (M3) — "sem_resposta" = timeout/5xx. */
+type Conversa = { nome: string; categoria: string; turnos: Turno[]; envio?: "aprovado" | "sem_resposta" };
 
 const ESCRITAS = ["proposal.delete", "proposal.update", "proposal.duplicate", "proposal.convert", "proposal.send", "proposal.create", "form.create", "lead.upsert", "credit.request"];
 const CREDITO = ["credit.preflight", "credit.status", "lead.upsert", "credit.request"];
 const SEM_ESCRITA = { proibidos: ESCRITAS };
+
+const FICHA_ATE_REVISAO: Turno[] = [
+  { fala: "faz a ficha de crédito da Letícia Andrade", ideal: "Pede a confirmação (SIM) da autorização.", contem: ["Responda SIM"], proibidos: ESCRITAS },
+  { fala: "sim", ideal: "Pede o CPF.", contem: [/CPF/], proibidos: ESCRITAS },
+  { fala: "111.444.777-35", ideal: "Anota o CPF mascarado e pede o vínculo.", contem: ["***.***.777-35"] },
+  { fala: "CLT", ideal: "Anota e pede a profissão.", contem: ["CLT"] },
+  { fala: "analista", ideal: "Anota e pede a renda.", contem: [/[Rr]enda/] },
+  { fala: "8 mil", ideal: "Anota e pede o aluguel.", contem: ["8.000,00"] },
+  { fala: "2500", ideal: "Anota e pede o condomínio.", contem: ["2.500,00"] },
+  { fala: "não tem", ideal: "Pede o IPTU.", contem: [/IPTU/] },
+  { fala: "não tem", ideal: "Pergunta se vai morar.", contem: [/morar/] },
+  { fala: "sozinha", ideal: "Pergunta se mais alguém compõe renda.", contem: [/compondo renda/] },
+  { fala: "não", ideal: "Mostra o resumo e pede SIM, sem enviar.", contem: ["Responda *SIM*"], proibidos: ["credit.request"] },
+];
 
 const CONVERSAS: Conversa[] = [
   // Consulta
@@ -374,6 +395,22 @@ const CONVERSAS: Conversa[] = [
     { fala: "não", ideal: "Mostra o resumo com CPF mascarado, aluguel, renda, vínculo, custo e pede SIM.", contem: ["Responda *SIM*", "***.***.777-35", "Custo"], proibidos: ESCRITAS },
     { fala: "SIM", ideal: "Diz que o envio entra na próxima versão e dá o link da ficha salva — sem enviar.", contem: [/próxima versão/], proibidos: ["credit.request"] },
   ] },
+  // Crédito (M3) — envio SIMULADO com MAX_CREDITO_ENVIO=true (nada sai daqui).
+  { nome: "envio de crédito aprovado e proposta", categoria: "credito", envio: "aprovado", turnos: [
+    ...FICHA_ATE_REVISAO,
+    { fala: "ok", ideal: "Não envia: só o SIM explícito vale.", proibidos: ["credit.request"] },
+    { fala: "SIM", ideal: "Envia e diz 'Aprovado na Upestate', oferecendo abrir a proposta de locação da Letícia; sem score nem renda.",
+      contem: ["Aprovado na Upestate", "proposta de locação"], naoContem: [/score/i, /renda/i], verbos: ["credit.preflight", "credit.request"],
+      args: { verbo: "credit.request", confere: (a) => (a.leaseClientId && (a.consentimento as { texto?: string })?.texto ? null : "sem lead/consentimento") } },
+    { fala: "sim", ideal: "Abre a proposta de locação da Letícia já com nome e aluguel e pede o que falta; não reenvia nada.",
+      contem: ["Abrindo a proposta de locação de Letícia Andrade"], proibidos: ["credit.request", "proposal.create"] },
+  ] },
+  { nome: "envio de crédito incerto não reenvia", categoria: "credito", envio: "sem_resposta", turnos: [
+    ...FICHA_ATE_REVISAO,
+    { fala: "SIM", ideal: "Diz que não conseguiu confirmar o envio e pede para não reenviar.", contem: ["Não reenvie"], verbos: ["credit.request"] },
+    { fala: "manda de novo", ideal: "NÃO reenvia (seria consulta duplicada); diz que ainda não encontrou a análise e aponta a tela do lead.", contem: [/ainda n[aã]o encontrei/i], proibidos: ["credit.request"] },
+    { fala: "SIM", ideal: "Continua sem reenviar.", contem: [/ainda n[aã]o encontrei/i], proibidos: ["credit.request"] },
+  ] },
   { nome: "status do crédito", categoria: "credito", turnos: [
     { fala: "como está a análise da Letícia?", ideal: "Responde o status da análise da Letícia com o link.", contem: ["Letícia", "Em análise"], verbos: ["credit.status"], proibidos: ESCRITAS },
   ] },
@@ -442,6 +479,7 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
   const verbos: { verbo: string; args: Record<string, unknown> }[] = [];
   vi.mocked(executarAcao).mockImplementation((async (p: { verb: string; args?: Record<string, unknown> }) => {
     verbos.push({ verbo: p.verb, args: p.args ?? {} });
+    if (p.verb === "credit.request" && envioSim === "sem_resposta") return null;
     return imobpro(p);
   }) as never);
   vi.mocked(consultarEscopo).mockImplementation((async (p: { verb: string; args?: Record<string, unknown> }) => {
@@ -460,6 +498,9 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
       if (filtro && !filtro.test(c.nome) && !filtro.test(c.categoria)) continue;
       props = BASE.map((p) => ({ ...p, signatarios: p.signatarios.map((s) => ({ ...s })) }));
       leadsCredito = [];
+      envioSim = c.envio ?? null;
+      if (c.envio) process.env.MAX_CREDITO_ENVIO = "true";
+      else delete process.env.MAX_CREDITO_ENVIO;
       // A flag de crédito só neste grupo: nos outros, o Max segue como em produção.
       if (c.categoria === "credito") process.env.MAX_CREDITO = "true";
       else delete process.env.MAX_CREDITO;

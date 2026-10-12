@@ -57,3 +57,20 @@ describe("orçamento do envio de proposta", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("credit.request: 503 de negócio × 5xx de falha (M3)", () => {
+  const responde = (status: number, body: Record<string, unknown>) =>
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status })));
+
+  it("503 notConfigured chega ao fluxo (texto 'indisponível')", async () => {
+    responde(503, { error: "Upestate não está configurada nesta instância.", notConfigured: true });
+    expect(await request("credit.request")).toEqual({ status: 503, body: { error: "Upestate não está configurada nesta instância.", notConfigured: true } });
+  });
+
+  it("503 sem a marca e 500 seguem como sem resposta (envio incerto, nunca reenvia)", async () => {
+    responde(503, { error: "gateway" });
+    expect(await request("credit.request")).toBeNull();
+    responde(500, { notConfigured: true });
+    expect(await request("credit.request")).toBeNull();
+  });
+});

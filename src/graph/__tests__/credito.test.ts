@@ -59,6 +59,13 @@ let chamadas: { verb: string; args: Record<string, unknown>; key?: string }[] = 
 let preflight: Record<string, unknown> = {};
 let faltantesForcados: string[] | null = null;
 let statusResposta: { status: number; body: Record<string, unknown> } | null = null;
+/** M3: resposta do `credit.request`; "sem_resposta" = timeout/5xx (o cliente devolve null). */
+let requestResposta: { status: number; body: Record<string, unknown> } | "sem_resposta" | null = null;
+/** M3: `credit.status{leaseClientId}` forçado; null = o que o fake guardou em `analises`. */
+let statusPorLead: { status: number; body: Record<string, unknown> } | null = null;
+let analises: Record<string, unknown>[] = [];
+const APROVADO = { status: 200, body: { requestId: "r1", decision: "aprovado", rotulo: "Aprovado", justificativa: "Bom histórico de pagamentos.",
+  podePedirHumanizada: false, leadLink: "/locacao/pessoas/clientes/lc1" } };
 
 function cpfOk(raw: string): boolean {
   const c = raw.replace(/\D/g, "");
@@ -128,8 +135,27 @@ async function imobpro(p: { verb: string; args: Record<string, unknown>; idempot
       if (a.campos) lead.credito = mesclar(lead.credito, a.campos as Record<string, unknown>);
       return { status: novo ? 201 : 200, body: { id: lead.id, status: "novo", faltantes: faltantes(lead.credito) } };
     }
-    case "credit.status":
-      return statusResposta ?? { status: 404, body: { error: "nao_encontrada" } };
+    case "credit.status": {
+      if (typeof a.leaseClientId !== "string") return statusResposta ?? { status: 404, body: { error: "nao_encontrada" } };
+      if (statusPorLead) return statusPorLead;
+      const lead = leads.find((l) => l.id === a.leaseClientId);
+      if (!lead) return { status: 404, body: { error: "nao_encontrada" } };
+      const ultima = [...analises].reverse().find((x) => x.leaseClientId === lead.id) ?? null;
+      return { status: 200, body: { lead: { id: lead.id, nome: lead.nome }, ultima, link: `/locacao/pessoas/clientes/${lead.id}` } };
+    }
+    case "credit.request": {
+      if (!p.idempotencyKey || typeof a.leaseClientId !== "string") return { status: 400, body: { error: "Bad Request" } };
+      if (requestResposta === "sem_resposta") return null;
+      const r = requestResposta ?? APROVADO;
+      // O servidor guarda a análise (200/202): o `credit.status` passa a vê-la.
+      if (r.status === 200 || r.status === 202) {
+        analises.push({ leaseClientId: a.leaseClientId, createdAt: new Date().toISOString(), status: r.status === 202 ? "processing" : "completed",
+          decision: r.body.decision ?? "pendente", rotulo: r.body.rotulo ?? "Em análise", justificativa: r.body.justificativa ?? null, reenvioArriscado: false });
+      }
+      return r;
+    }
+    case "proposal.preflight":
+      return { status: 200, body: { modelo: true, assinatura: true } };
     case "proposal.status":
       return { status: 200, body: { proposta: { id: "prop1", codigo: "PROP-2026-0013", titulo: "Apto", status: "assinada" } } };
     default:
@@ -148,6 +174,9 @@ beforeEach(() => {
   preflight = {};
   faltantesForcados = null;
   statusResposta = null;
+  requestResposta = null;
+  statusPorLead = null;
+  analises = [];
   extracao = null;
   vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: COM_CREDITO } as never);
   vi.mocked(searchKnowledge).mockResolvedValue([]);
@@ -159,7 +188,7 @@ beforeEach(() => {
   });
   acao.mockImplementation(imobpro as never);
 });
-afterEach(() => { delete process.env.MAX_CREDITO; });
+afterEach(() => { delete process.env.MAX_CREDITO; delete process.env.MAX_CREDITO_ENVIO; });
 
 function conversa(identity: Candidate = usuario) {
   const app = buildGraph().compile({ checkpointer: new MemorySaver() });
@@ -666,6 +695,371 @@ describe("revisão: só o SIM estrito avança", () => {
   });
 });
 
+// ─── M3: envio, resultado e desdobramentos ──────────────────────────────────
+
+/** Ficha completa até o resumo (m11). O SIM seguinte é a m12. */
+async function ateRevisao() {
+  const turno = conversa();
+  for (const fala of ["faz a ficha de crédito da Letícia Andrade", "sim", CPF, "CLT", "analista", "8 mil", "2500", "não tem", "não tem", "1"]) {
+    await turno(fala);
+  }
+  const s = await turno("não");
+  expect(s.fluxo).toMatchObject({ etapa: "revisao", leaseClientId: "lc1" });
+  return turno;
+}
+const pedidos = () => chamadas.filter((c) => c.verb === "credit.request");
+const LINK_LC1 = /https?:\/\/\S+\/locacao\/pessoas\/clientes\/lc1$/;
+const ROTULO_DE: Record<string, string> = { aprovado: "Aprovado", revisao: "Pré-aprovado", reprovado: "Reprovado", pendencia: "Pendência", erro: "Erro" };
+
+describe("M3: sub-flag MAX_CREDITO_ENVIO", () => {
+  it("desligada: o SIM da revisão é o do M2 — nada enviado", async () => {
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^Envio entra na próxima versão/);
+    expect(pedidos()).toEqual([]);
+  });
+
+  it("controle: ligada, o MESMO roteiro envia (o oráculo acima sabe falhar)", async () => {
+    process.env.MAX_CREDITO_ENVIO = "true";
+    const turno = await ateRevisao();
+    await turno("SIM");
+    expect(pedidos()).toHaveLength(1);
+  });
+
+  it("MAX_CREDITO_ENVIO sem MAX_CREDITO não liga nada", () => {
+    process.env.MAX_CREDITO_ENVIO = "true";
+    delete process.env.MAX_CREDITO;
+    expect(credito.envioLigado()).toBe(false);
+  });
+});
+
+describe("M3: envio", () => {
+  beforeEach(() => { process.env.MAX_CREDITO_ENVIO = "true"; });
+
+  it("feliz (200 aprovado): preflight, request com a chave do SIM, resultado e a proposta aberta com nome e aluguel", async () => {
+    const turno = await ateRevisao();
+    const antes = chamadas.length;
+    let s = await turno("SIM");
+    expect(chamadas.slice(antes).map((c) => c.verb)).toEqual(["credit.preflight", "credit.status", "credit.request"]);
+    const req = pedidos()[0]!;
+    expect(req.key).toBe("m12");
+    expect(req.args).toEqual({ leaseClientId: "lc1", consentimento: { texto: TEXTO_ATESTACAO, messageId: "m2" } });
+    expect(s.reply).toBe("Aprovado na Upestate. Quer que eu abra a proposta de locação de Letícia Andrade?");
+    expect(s.fluxo).toMatchObject({ kind: "credito", etapa: "resultado", decisao: "aprovado" });
+    expect(semCpf(s.fluxo)).toBe(true);
+
+    s = await turno("sim");
+    expect(pedidos()).toHaveLength(1);
+    expect(s.reply).toMatch(/^Abrindo a proposta de locação de Letícia Andrade\.\n\n/);
+    expect(s.fluxo).toMatchObject({ kind: "proposta", natureza: "locacao", etapa: "coleta",
+      dados: { proponente: { nome: "Letícia Andrade" }, valor: 2500, finalidade: "residencial" } });
+    // O CPF não vai para a proposta (o checkpoint seguiria com ele).
+    expect(semCpf(s.fluxo)).toBe(true);
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("aprovado e NÃO: encerra com o link do lead", async () => {
+    const turno = await ateRevisao();
+    await turno("SIM");
+    const s = await turno("não");
+    expect(s.reply).toMatch(/^Certo\. A análise fica na tela do lead: /);
+    expect(s.reply).toMatch(LINK_LC1);
+    expect(s.fluxo).toBeNull();
+  });
+
+  it("202: 'Enviei… te aviso aqui' e o fluxo acaba (o aviso vem pelo credit_result)", async () => {
+    requestResposta = { status: 202, body: { requestId: "r1", pending: true, leadLink: "/locacao/pessoas/clientes/lc1" } };
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toBe(credito.TEXTO_ENVIO_PENDENTE);
+    expect(s.fluxo).toBeNull();
+  });
+
+  it.each([
+    [402, { error: "Teto mensal da análise de crédito atingido" }, "O limite mensal de análises da imobiliária foi atingido. Fale com o administrador."],
+    [409, { error: "em_andamento", inProgress: true }, "Este CPF já tem uma análise em andamento na Upestate."],
+    [503, { error: "Upestate não está configurada nesta instância.", notConfigured: true }, "Análise de crédito indisponível agora."],
+  ])("%i: texto fixo e o fluxo acaba", async (status, body, texto) => {
+    requestResposta = { status, body };
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toBe(texto);
+    expect(s.fluxo).toBeNull();
+  });
+
+  it("422 cpf_divergente: texto fixo com o link", async () => {
+    requestResposta = { status: 422, body: { error: "cpf_divergente" } };
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^O CPF da ficha não bate com o do cadastro\. Confira na tela: /);
+    expect(s.reply).toMatch(LINK_LC1);
+  });
+
+  it("422 faltantes: volta ao campo que falta", async () => {
+    requestResposta = { status: 422, body: { error: "Dados incompletos para a análise de crédito", missing: ["Profissão do pretendente"] } };
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toBe("Ainda falta: profissão do pretendente.\nProfissão de Letícia Andrade?");
+    expect(s.fluxo).toMatchObject({ etapa: "coleta", campoAtual: "profissao" });
+    expect((s.fluxo as { chave?: unknown }).chave).toBeUndefined();
+  });
+
+  it("preflight com faltantes antes do envio: volta à coleta e NÃO envia", async () => {
+    const turno = await ateRevisao();
+    faltantesForcados = ["Renda mensal do pretendente"];
+    const s = await turno("SIM");
+    expect(s.reply).toBe("Ainda falta: renda mensal do pretendente.\nRenda mensal de Letícia Andrade?");
+    expect(pedidos()).toEqual([]);
+  });
+
+  it("412: refaz a atestação; o SIM volta ao resumo e o novo envio leva o novo consentimento", async () => {
+    requestResposta = { status: 412, body: { requiresConsent: true } };
+    const turno = await ateRevisao();
+    let s = await turno("SIM");
+    expect(s.reply).toMatch(/^A autorização não ficou registrada\. Vou precisar de CPF, renda e vínculo de Letícia Andrade\./);
+    expect(s.fluxo).toMatchObject({ etapa: "atestacao" });
+    expect((s.fluxo as { consentimento?: unknown }).consentimento).toBeUndefined();
+    s = await turno("sim");
+    expect(s.reply).toMatch(/^Obrigado\. Vou consultar Letícia Andrade .* Responda \*SIM\* para enviar\.$/);
+    requestResposta = null;
+    s = await turno("SIM");
+    expect(pedidos()).toHaveLength(2);
+    expect(pedidos()[1]!).toMatchObject({ key: "m14", args: { consentimento: { texto: TEXTO_ATESTACAO, messageId: "m13" } } });
+    expect(s.fluxo).toMatchObject({ etapa: "resultado" });
+  });
+
+  it("D1: análise recente (< 24 h) do lead: NÃO envia; diz qual e encerra", async () => {
+    const turno = await ateRevisao();
+    const ha2h = new Date(Date.now() - 2 * 3600_000);
+    analises.push({ leaseClientId: "lc1", createdAt: ha2h.toISOString(), status: "completed", decision: "reprovado", rotulo: "Reprovado" });
+    const s = await turno("SIM");
+    const dm = ha2h.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });
+    expect(s.reply).toMatch(new RegExp(`^Já existe uma análise de Letícia Andrade de ${dm.replace("/", "\\/")}: Reprovado\\. Veja na tela: `));
+    expect(s.reply).toMatch(LINK_LC1);
+    expect(pedidos()).toEqual([]);
+    expect(s.fluxo).toBeNull();
+  });
+
+  it.each([
+    ["em voo (processing), de 3 dias", { status: "processing", rotulo: "Em análise" }],
+    ["reenvio arriscado, de 3 dias", { status: "failed", rotulo: "Falhou", reenvioArriscado: true }],
+  ])("D1: %s: NÃO envia", async (_nome, extra) => {
+    const turno = await ateRevisao();
+    analises.push({ leaseClientId: "lc1", createdAt: new Date(Date.now() - 3 * 24 * 3600_000).toISOString(), ...extra });
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^Já existe uma análise de Letícia Andrade de \d{2}\/\d{2}: /);
+    expect(pedidos()).toEqual([]);
+  });
+
+  it("D1: análise antiga (> 24 h, concluída): envia (controle)", async () => {
+    const turno = await ateRevisao();
+    analises.push({ leaseClientId: "lc1", createdAt: new Date(Date.now() - 25 * 3600_000).toISOString(), status: "completed", decision: "reprovado", rotulo: "Reprovado" });
+    await turno("SIM");
+    expect(pedidos()).toHaveLength(1);
+  });
+
+  it("D1: status sem resposta: nada é enviado e a revisão fica", async () => {
+    const turno = await ateRevisao();
+    statusPorLead = { status: 500, body: {} };
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/Nada foi enviado\.$/);
+    expect(pedidos()).toEqual([]);
+    expect(s.fluxo).toMatchObject({ etapa: "revisao" });
+  });
+
+  it("D1: cancelar em 'enviando' + nova ficha do mesmo CPF: não envia de novo (a anterior é recente)", async () => {
+    requestResposta = { status: 202, body: { requestId: "r1", pending: true } };
+    // 1º envio sai (202): o servidor guarda a análise em voo.
+    const turno = await ateRevisao();
+    await turno("SIM");
+    expect(pedidos()).toHaveLength(1);
+    // Nova ficha, mesmo CPF: o SIM é barrado pela análise recente.
+    for (const fala of ["faz a ficha de crédito da Letícia Andrade", "sim", CPF, "não"]) await turno(fala);
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^Já existe uma análise de Letícia Andrade de \d{2}\/\d{2}: Em análise\./);
+    expect(pedidos()).toHaveLength(1);
+  });
+
+  it("D1: envio incerto, CANCELAR e nova ficha: se a anterior chegou ao servidor, não envia de novo", async () => {
+    requestResposta = "sem_resposta";
+    const turno = await ateRevisao();
+    await turno("SIM");
+    expect((await turno("cancelar")).reply).toMatch(/^Parei\. Se o envio chegou à Upestate/);
+    // O servidor reconciliou: a análise existe.
+    analises.push({ leaseClientId: "lc1", createdAt: new Date().toISOString(), status: "processing", rotulo: "Em análise" });
+    requestResposta = null;
+    for (const fala of ["faz a ficha de crédito da Letícia Andrade", "sim", CPF, "não"]) await turno(fala);
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^Já existe uma análise/);
+    expect(pedidos()).toHaveLength(1);
+  });
+
+  it("'ok' e 👍 na revisão não enviam (só o SIM estrito)", async () => {
+    const turno = await ateRevisao();
+    await turno("ok");
+    await turno("👍");
+    expect(pedidos()).toEqual([]);
+  });
+});
+
+describe("M3: envio incerto (timeout/5xx) e idempotência", () => {
+  beforeEach(() => { process.env.MAX_CREDITO_ENVIO = "true"; });
+
+  it("sem resposta: texto fixo, a chave fica; 2º SIM e 'manda de novo' NÃO disparam outro envio", async () => {
+    requestResposta = "sem_resposta";
+    const turno = await ateRevisao();
+    let s = await turno("SIM");
+    expect(s.reply).toMatch(/^Não consegui confirmar o envio agora\. Não reenvie: veja o status na tela do lead \(https?:\/\/\S+\/lc1\) ou me pergunte daqui a pouco\.$/);
+    expect(s.fluxo).toMatchObject({ etapa: "enviando", chave: { verbo: "credit.request", valor: "m12" } });
+    expect(typeof (s.fluxo as { chave: { em?: number } }).chave.em).toBe("number");
+
+    requestResposta = null; // o servidor voltaria a responder: mesmo assim, nada de reenvio
+    s = await turno("SIM");
+    expect(pedidos()).toHaveLength(1);
+    expect(ultimo("credit.status")!.args).toEqual({ leaseClientId: "lc1" });
+    expect(s.reply).toMatch(/^Ainda não encontrei sua análise\. Veja na tela do lead: \S+\/lc1, ou me pergunte daqui a pouco\.$/);
+    expect(s.fluxo).toMatchObject({ etapa: "enviando", chave: { valor: "m12" } });
+
+    s = await turno("manda de novo");
+    expect(pedidos()).toHaveLength(1);
+    expect(s.reply).toMatch(/^Ainda não encontrei/);
+    s = await turno("reenvia a análise de crédito da Letícia");
+    expect(pedidos()).toHaveLength(1);
+    expect(s.reply).toMatch(/^Ainda não encontrei/);
+
+    // A análise deste envio aparece (criada depois do SIM): responde e encerra.
+    analises.push({ leaseClientId: "lc1", createdAt: new Date().toISOString(), status: "processing", rotulo: "Em análise" });
+    s = await turno("e aí, chegou?");
+    expect(pedidos()).toHaveLength(1);
+    expect(s.reply).toMatch(/^Não reenviei\. A análise de Letícia Andrade está como "Em análise": /);
+    expect(s.fluxo).toBeNull();
+  });
+
+  it("D2: análise ANTIGA do lead ('Aprovado' de antes do SIM) não conta como a deste envio", async () => {
+    requestResposta = "sem_resposta";
+    const turno = await ateRevisao();
+    await turno("SIM");
+    analises.push({ leaseClientId: "lc1", createdAt: new Date(Date.now() - 3 * 24 * 3600_000).toISOString(), status: "completed", decision: "aprovado", rotulo: "Aprovado" });
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^Ainda não encontrei sua análise/);
+    expect(s.reply).not.toContain("Aprovado");
+    expect(s.fluxo).toMatchObject({ etapa: "enviando" });
+    expect(pedidos()).toHaveLength(1);
+  });
+
+  it("controle (mutante): o mesmo SIM sem a chave guardada DISPARA — o oráculo acima sabe falhar", async () => {
+    requestResposta = "sem_resposta";
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    const comChave = s.fluxo as import("../credito").FluxoCredito;
+    const deps = {
+      acao: (verb: string, args: Record<string, unknown>, key?: string) => imobpro({ verb, args, idempotencyKey: key }),
+      extrairProposta: async () => null, extrairCampos: async () => null,
+    };
+    const ctx = { texto: "SIM", messageId: "m13", policy: ["credit.read", "credit.request"] as never, agora: Date.now(), orgName: "FINCasa", thread: "t" };
+    await credito.conduzirCredito(comChave, ctx, deps as never);
+    expect(pedidos()).toHaveLength(1);
+    // Mutante: sem a chave (e de volta à revisão), o SIM envia outra vez.
+    const { chave: _chave, ...semChave } = comChave;
+    await credito.conduzirCredito({ ...semChave, etapa: "revisao" }, ctx, deps as never);
+    expect(pedidos()).toHaveLength(2);
+    expect(pedidos()[1]!.key).toBe("m13");
+  });
+
+  it("outro assunto com envio incerto: o modelo responde e a chave fica", async () => {
+    requestResposta = "sem_resposta";
+    const turno = await ateRevisao();
+    await turno("SIM");
+    const s = await turno("qual o horário da imobiliária?");
+    expect(s.reply).toBe("O horário é das 9h às 18h.");
+    expect(s.fluxo).toMatchObject({ etapa: "enviando", chave: { valor: "m12" } });
+    expect(pedidos()).toHaveLength(1);
+  });
+});
+
+describe("M3: resultado sem score, restrição nem renda", () => {
+  beforeEach(() => { process.env.MAX_CREDITO_ENVIO = "true"; });
+
+  it("reprovado: só o rótulo e o link", async () => {
+    requestResposta = { status: 200, body: { decision: "reprovado", rotulo: "Reprovado",
+      justificativa: "Restrição no CPF 111.444.777-35, score 320 e renda de R$ 8.000 insuficiente", leadLink: "/locacao/pessoas/clientes/lc1" } };
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^Reprovado\. Para revisão humana, use a tela do lead: /);
+    expect(s.reply).toMatch(LINK_LC1);
+    expect(s.reply).not.toMatch(/score|restri|renda|8\.000|777/i);
+    expect(s.fluxo).toBeNull();
+  });
+
+  it("revisão (pré-aprovado): '{rótulo}. Para revisão humana…' — sem a justificativa", async () => {
+    requestResposta = { status: 200, body: { decision: "revisao", rotulo: "Pré-aprovado", justificativa: "Requer análise da mesa.", leadLink: "/locacao/pessoas/clientes/lc1" } };
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^Pré-aprovado\. Para revisão humana, use a tela do lead: /);
+    expect(s.reply).not.toContain("mesa");
+  });
+
+  /** B1: a justificativa (texto livre do provedor) nunca chega à resposta nem ao state, em nenhuma decisão. */
+  const FRASES = [
+    "Nome sujo", "Endividamento elevado", "Histórico de atrasos", "Pendências cadastrais", "Possui apontamentos",
+    "Cheque sem fundo (CCF)", "Ação judicial de despejo", "Possui processos judiciais", "Falência decretada",
+    "Recuperação judicial", "Rendimentos insuficientes", "Capacidade de pagamento insuficiente",
+    "Consta no cadastro de devedores", "Antecedentes criminais",
+  ];
+  it.each(["aprovado", "revisao", "reprovado", "pendencia", "erro"])("B1 (%s): nenhuma das 14 frases no request nem no status", async (decision) => {
+    const turno = await ateRevisao();
+    for (const [i, frase] of FRASES.entries()) {
+      requestResposta = { status: 200, body: { decision, rotulo: ROTULO_DE[decision], justificativa: frase, leadLink: "/locacao/pessoas/clientes/lc1" } };
+      analises = [];
+      // Volta à revisão a cada frase (ficha completa: o servidor não pede nada).
+      if (i > 0) await turno("faz a ficha de crédito da Letícia Andrade"), await turno("sim"), await turno(CPF), await turno("não");
+      const s = await turno("SIM");
+      // O envio aconteceu de verdade nesta volta (senão o teste passaria em vão).
+      expect(pedidos(), `${decision}: ${frase}`).toHaveLength(i + 1);
+      const st = await turno("como está a análise da Letícia?");
+      for (const x of [s, st]) {
+        const tudo = JSON.stringify({ reply: x.reply, replyNoState: x.replyNoState, fluxo: x.fluxo, messages: x.messages });
+        expect(tudo, `${decision}: ${frase}`).not.toContain(frase);
+      }
+      // A frase não some só porque o status falhou: o status disse o rótulo.
+      statusResposta = { status: 200, body: { lead: { id: "lc1", nome: "Letícia Andrade" }, ultima: { rotulo: ROTULO_DE[decision], justificativa: frase }, link: "/locacao/pessoas/clientes/lc1" } };
+      const st2 = await turno("como está a análise da Letícia?");
+      expect(st2.reply).toContain(ROTULO_DE[decision]);
+      expect(st2.reply).not.toContain(frase);
+      statusResposta = null;
+      await turno("cancelar");
+    }
+  });
+
+  it("aprovado sem proposal.create na política: não oferece a proposta", async () => {
+    vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null,
+      maxPolicy: { byRole: { "*": ["proposal.list", "credit.read", "credit.request"] }, byRecipient: {}, brokerDefault: [] } } as never);
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^Aprovado na Upestate\. Veja na tela do lead: /);
+    expect(s.reply).not.toMatch(/proposta/);
+    expect(s.fluxo).toBeNull();
+  });
+
+  it.each([
+    ["pendencia", /^A Upestate pediu complemento da ficha \(Pendência\)\. Veja na tela do lead: /],
+    ["erro", /^A análise não pôde ser concluída \(Erro\)\. Veja na tela do lead: /],
+  ])("%s: texto fixo + link", async (decision, re) => {
+    requestResposta = { status: 200, body: { decision, rotulo: null, leadLink: "/locacao/pessoas/clientes/lc1" } };
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(re);
+    expect(s.reply).toMatch(LINK_LC1);
+  });
+
+  it("'aprova mesmo assim' no meio do fluxo: o Max não aprova", async () => {
+    const turno = await ateRevisao();
+    const s = await turno("aprova mesmo assim");
+    expect(s.reply).toContain(TEXTO_APROVAR);
+    expect(pedidos()).toEqual([]);
+  });
+});
+
 describe("cofre: subchave própria e AAD = thread", () => {
   it("o cofre de uma thread não abre em outra", () => {
     const c = cifrarCofre('{"cpf":"11144477735"}', "org1:a");
@@ -674,6 +1068,81 @@ describe("cofre: subchave própria e AAD = thread", () => {
     expect(() => decifrarCofre(c, "org1:b")).toThrow();
   });
 });
+
+/**
+ * M3: os turnos de ENVIO e RESULTADO (envio incerto, 2º SIM, aprovado, proposta
+ * aberta) pelo `runTurn` de verdade — todos sensíveis, e nenhum CPF/renda nos
+ * 5 lugares. Controle positivo: o sobrenome está lá.
+ */
+function itDbEnvio() {
+  const hasDb = Boolean(process.env.DATABASE_URL);
+  (hasDb ? it : it.skip)("envio e resultado: CPF e renda fora do banco; turnos sensíveis", async () => {
+    const ORG = "org-credito-envio-pii";
+    const FONE = "5511900000779";
+    process.env.MAX_CREDITO_ENVIO = "true";
+    vi.mocked(resolveIdentity).mockResolvedValue({ kind: "identified", candidate: { ...usuario, orgId: ORG } } as never);
+    const { query } = await import("@/lib/db");
+    const limpar = async () => {
+      await query(`DELETE FROM checkpoint_writes WHERE thread_id LIKE $1`, [`${ORG}:%`]);
+      await query(`DELETE FROM checkpoint_blobs WHERE thread_id LIKE $1`, [`${ORG}:%`]);
+      await query(`DELETE FROM checkpoints WHERE thread_id LIKE $1`, [`${ORG}:%`]);
+      await query(`DELETE FROM conversation_turn WHERE org_id = $1`, [ORG]);
+      await query(`DELETE FROM memory_facts WHERE org_id = $1`, [ORG]);
+    };
+    await limpar();
+    try {
+      const sensiveis: (boolean | undefined)[] = [];
+      let n = 0;
+      const falar = async (text: string) => {
+        const r = await runTurn({ messageId: `env-${++n}-${Math.random()}`, fromPhone: FONE, groupId: null, kind: "text", text,
+          mediaUrl: null, mimeType: null, timestampMs: null, senderName: "Olavo", replyToMessageId: null } as Parameters<typeof runTurn>[0]);
+        await r.afterReply();
+        sensiveis.push(r.sensivel);
+        return r.reply ?? "";
+      };
+      for (const fala of ["faz a ficha de crédito da Letícia Andrade", "sim", `cpf ${CPF}`, "CLT", "analista", "renda 8 mil", "2500", "não tem", "não tem", "1", "não"]) {
+        await falar(fala);
+      }
+      sensiveis.length = 0;
+      // Envio incerto e o 2º SIM (consulta, sem reenvio).
+      requestResposta = "sem_resposta";
+      expect(await falar("SIM")).toMatch(/^Não consegui confirmar o envio agora\. Não reenvie/);
+      requestResposta = { status: 200, body: { ...APROVADO.body, justificativa: "Renda de R$ 8.000,00 compatível; CPF 111.444.777-35 sem restrição" } };
+      expect(await falar("SIM")).toMatch(/^Ainda não encontrei/);
+      expect(pedidos()).toHaveLength(1);
+      // Cancela o incerto e refaz até o resultado aprovado (nova ficha do mesmo CPF).
+      await falar("cancelar");
+      for (const fala of ["faz a ficha de crédito da Letícia Andrade", "sim", `cpf ${CPF}`]) await falar(fala);
+      faltantesForcados = [];
+      await falar("não");
+      faltantesForcados = null;
+      const aprovado = await falar("SIM");
+      expect(aprovado).toBe("Aprovado na Upestate. Quer que eu abra a proposta de locação de Letícia Andrade?");
+      expect(await falar("sim")).toMatch(/^Abrindo a proposta de locação de Letícia Andrade/);
+      for (const s of sensiveis) expect(s).toBe(true);
+
+      const conta = async (padrao: string) => {
+        const [linha] = await query<{ n: string }>(
+          `SELECT (
+             (SELECT count(*) FROM checkpoints WHERE thread_id LIKE $2 AND (checkpoint::text LIKE $1 OR metadata::text LIKE $1)) +
+             (SELECT count(*) FROM checkpoint_blobs WHERE thread_id LIKE $2 AND encode(blob, 'escape') LIKE $1) +
+             (SELECT count(*) FROM checkpoint_writes WHERE thread_id LIKE $2 AND encode(blob, 'escape') LIKE $1) +
+             (SELECT count(*) FROM conversation_turn t WHERE org_id = $3 AND row_to_json(t)::text LIKE $1) +
+             (SELECT count(*) FROM memory_facts m WHERE org_id = $3 AND row_to_json(m)::text LIKE $1)
+           )::text AS n`,
+          [padrao, `${ORG}:%`, ORG]
+        );
+        return Number(linha!.n);
+      };
+      expect(await conta("%Andrade%")).toBeGreaterThan(0);
+      for (const p of [CPF_D, CPF, "8 mil", "8.000,00", "8.000", "restrição"]) {
+        expect(await conta(`%${p}%`), p).toBe(0);
+      }
+    } finally {
+      await limpar();
+    }
+  }, 30_000);
+}
 
 /** Caminho de erro do `runTurn` (`comRastro`): com a flag ligada, o texto vai redigido. */
 function itDbErro() {
@@ -712,6 +1181,7 @@ function itDbErro() {
  */
 describe("auditoria de PII no banco", () => {
   itDbErro();
+  itDbEnvio();
 
   const hasDb = Boolean(process.env.DATABASE_URL);
   const itDb = hasDb ? it : it.skip;

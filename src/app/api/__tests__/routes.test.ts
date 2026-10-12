@@ -197,6 +197,20 @@ describe("POST /api/notify", () => {
     );
   });
 
+  it("credit_result (M3): o corpo vira o texto fixo do aviso, com o link", async () => {
+    const base = JSON.parse(CORPO_DO_CM);
+    await postar(JSON.stringify({ ...base, kind: "credit_result", linkUrl: "https://fincasa.imobpro.ia.br/locacao/pessoas/clientes/lc1",
+      body: "A análise de crédito de Letícia Andrade foi atualizada: Aprovado.", params: { lead: "Letícia Andrade", decisao: "Aprovado" } }));
+    expect(enfileiraOut).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "credit_result",
+      body: "A análise de crédito de Letícia Andrade saiu: Aprovado. https://fincasa.imobpro.ia.br/locacao/pessoas/clientes/lc1",
+    }));
+    // Sem os params, o corpo do emissor fica.
+    enfileiraOut.mockClear();
+    await postar(JSON.stringify({ ...base, kind: "credit_result", body: "corpo do emissor", params: undefined }));
+    expect(enfileiraOut).toHaveBeenCalledWith(expect.objectContaining({ body: "corpo do emissor" }));
+  });
+
   it("emissor antigo (sem kind/params) segue 202, com os dois nulos", async () => {
     const res = await postar(NOTIFY_BODY);
     expect(res.status).toBe(202);

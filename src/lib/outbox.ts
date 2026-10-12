@@ -16,6 +16,7 @@ import {
   KINDS_COM_ACEITE,
   botoesEmOrdem,
   templatesDoKind,
+  textoDoAvisoDeCredito,
   templateUsavel,
   parametroObrigatorioFaltando,
   parametrosDoCorpo,
@@ -194,7 +195,14 @@ export function renderMessage(row: {
   link_url: string | null;
   org_name: string;
   recipient_name: string;
+  kind?: string | null;
+  params?: Record<string, string> | null;
 }): string {
+  // Aviso de crédito (M3): texto fixo com o link; sem os params, o formato genérico.
+  if (row.kind === "credit_result") {
+    const aviso = textoDoAvisoDeCredito(row.params, row.link_url);
+    if (aviso) return aviso;
+  }
   const first = row.recipient_name.trim().split(/\s+/)[0] ?? "";
   const hello = first ? `Oi, ${first}! ` : "";
   const parts = [`${hello}*${row.title}*`, row.body];

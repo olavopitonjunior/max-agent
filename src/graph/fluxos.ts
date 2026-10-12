@@ -1014,11 +1014,13 @@ export async function iniciarFluxo(
   return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
 }
 
-async function iniciarProposta(
+/** `prefill`: dados que já vêm do sistema (crédito aprovado → proposta, M3). */
+export async function iniciarProposta(
   natureza: "venda" | "locacao" | undefined,
   pedido: string | undefined,
   agora: number,
-  deps: DepsDoFluxo
+  deps: DepsDoFluxo,
+  prefill?: DadosDaProposta
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
   if (!natureza) {
     return {
@@ -1055,6 +1057,7 @@ async function iniciarProposta(
     const extraido = await deps.extrairProposta(pedido, natureza);
     if (extraido) dados = mesclarDados({}, sanearDados(extraido));
   }
+  if (prefill) dados = mesclarDados(dados, sanearDados(prefill));
   const f: Fluxo = { kind: "proposta", etapa: "coleta", natureza, dados, atualizadoEm: agora };
   // Sem ClickSign: segue (rascunho e PDF funcionam), mas avisa JÁ — antes de
   // a pessoa preencher tudo e descobrir no "sim" do envio (prod 07/10).
