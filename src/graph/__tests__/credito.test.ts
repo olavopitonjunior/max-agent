@@ -786,7 +786,7 @@ describe("M3: envio", () => {
     expect(s.fluxo).toMatchObject({ kind: "proposta", etapa: "ajustes", propostaId: "p1" });
   });
 
-  it("create recusa o vínculo (404 de posse, produção atual antes da promoção do #1580): oferece abrir sem vínculo", async () => {
+  it("create recusa a POSSE do lead (404): oferece abrir sem vínculo", async () => {
     const turno = await ateRevisao();
     await turno("SIM");
     await turno("sim");

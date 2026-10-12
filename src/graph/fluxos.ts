@@ -147,8 +147,10 @@ export type Fluxo =
       chave?: Chave;
       /** Crédito aprovado (M3): o `proposal.create` confere a posse e preenche nome/CPF/aluguel do lead — nunca CPF/renda aqui. */
       leaseClientId?: string;
-      /** `proposal.create` recusou o vínculo com o lead (403/404 de posse, ou 400 antes da promoção do #1580): oferta de abrir sem ele. */
+      /** `proposal.create` recusou a POSSE do lead (404): oferta de abrir sem ele. 403 (RBAC/política, `POLITICA_NAO_CONCEDE`/`can`) e 400 (corpo inválido/idempotência) NÃO são posse — seguem o tratamento normal (sem permissão / recusa como sem lead), nunca esta oferta. */
       ofertaSemVinculo?: boolean;
+      /** O lead ligado está sem nome/aluguel (422 ou 400 do `proposal.create` com `leaseClientId`): `faltandoNaProposta` para de relaxar esses campos até serem informados, mesmo com o vínculo mantido. */
+      leadIncompleto?: boolean;
       /** Dado mudou depois do rascunho e o servidor ainda não foi atualizado. */
       ajustePendente?: boolean;
       /** CPF do proponente recusado no envio de um rascunho retomado. */
@@ -1331,7 +1333,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
       return { reply: "Certo, não abri a proposta. A análise fica na tela do lead.", fluxo: null, evento: "proposta_lead_recusada" };
     }
     if (resposta !== "sim") return { liberar: true, fluxo: f, evento: "proposta_lead_oferta_liberada" };
-    const g: FluxoProposta = { ...f, leaseClientId: undefined, ofertaSemVinculo: undefined, chave: undefined, atualizadoEm: agora };
+    const g: FluxoProposta = { ...f, leaseClientId: undefined, ofertaSemVinculo: undefined, leadIncompleto: undefined, chave: undefined, atualizadoEm: agora };
     const falta = faltandoNaProposta(g.dados);
     if (falta.length === 0) return { reply: resumoDaProposta(g), fluxo: { ...g, etapa: "revisao" }, evento: "proposta_sem_vinculo_revisao" };
     return {
@@ -1370,10 +1372,21 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // Depois do rascunho: "ok/sim/não" = nada a ajustar → assinatura.
   if (f.etapa === "ajustes" && resposta !== "nenhum") return oferecerMetodos(f, ctx, deps);
 
-  // "sim" na coleta com tudo preenchido = quer ver o resumo de novo (depois de
-  // uma interrupção ou de uma pergunta no meio). Mostra; não escreve.
-  if (f.etapa === "coleta" && resposta === "sim" && faltandoNaProposta(f.dados, { temLead: !!f.leaseClientId }).length === 0) {
-    return { reply: resumoDaProposta(f), fluxo: { ...f, etapa: "revisao", atualizadoEm: agora }, evento: "proposta_revisao" };
+  // "sim" na coleta: com tudo preenchido, quer ver o resumo de novo (depois de
+  // uma interrupção ou de uma pergunta no meio) — mostra, não escreve. Com algo
+  // faltando (ex.: lead incompleto depois de um 422), lembra o que falta em vez
+  // de liberar: sem isso, um "sim" repetido voltaria a liberar/resumir e o
+  // `criarRascunho` seguinte repetiria o mesmo 422 em loop.
+  if (f.etapa === "coleta" && resposta === "sim") {
+    const falta = faltandoNaProposta(f.dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
+    if (falta.length === 0) {
+      return { reply: resumoDaProposta(f), fluxo: { ...f, etapa: "revisao", atualizadoEm: agora }, evento: "proposta_revisao" };
+    }
+    return {
+      reply: `Ainda falta: ${falta.join("; ")}.`,
+      fluxo: { ...f, atualizadoEm: agora },
+      evento: "proposta_coleta_sim_incompleta",
+    };
   }
 
   if (f.etapa === "metodo" && !lerMetodo(ctx.texto, f.metodos ?? []) && pedeEnvio(ctx.texto)) {
@@ -1475,7 +1488,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
           ? { reply: resumoDoAjuste(f), fluxo: { ...f, etapa: "revisao_ajuste", atualizadoEm: agora }, evento: "proposta_revisao_ajuste" }
           : oferecerMetodos(f, ctx, deps);
       }
-      const falta = faltandoNaProposta(f.dados, { temLead: !!f.leaseClientId });
+      const falta = faltandoNaProposta(f.dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
       return {
         reply: falta.length
           ? `Ainda não há rascunho para enviar. Falta: ${falta.join("; ")}.`
@@ -1489,7 +1502,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   // Dado mudou: o "sim" anterior (e a chave dele) não vale para o resumo novo.
   const g: FluxoProposta = { ...f, dados, chave: undefined, atualizadoEm: agora };
-  const falta = parcial ? invalidosNoAjuste(dados) : faltandoNaProposta(dados, { temLead: !!f.leaseClientId });
+  const falta = parcial ? invalidosNoAjuste(dados) : faltandoNaProposta(dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
   const depoisDoRascunho = !!f.propostaId && (f.etapa === "ajustes" || f.etapa === "revisao_ajuste");
   if (falta.length > 0) {
     return {
@@ -1547,22 +1560,30 @@ async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsD
   if (!r || (r.status === 409 && r.body.error === "em_andamento")) {
     return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_proposal_create" };
   }
-  // Vínculo com o lead recusado: posse (403/404) ou campo desconhecido na
-  // produção anterior à promoção do #1580 (400). Nunca afirma que criou —
-  // oferece abrir sem o vínculo, pedindo CPF como antes desta feature.
-  if (f.leaseClientId && (r.status === 403 || r.status === 404 || r.status === 400)) {
+  // Posse do lead recusada: o contractmaker responde SÓ 404 (nunca 403 nem
+  // 400 — a premissa de um 400 de posse "antes da promoção do #1580" era
+  // falsa: o master atual já ignora o campo desconhecido e responde 201).
+  // Nunca afirma que criou — oferece abrir sem o vínculo, pedindo nome/CPF/
+  // valor como antes desta feature.
+  if (f.leaseClientId && r.status === 404) {
     return {
       reply: "Não consegui ligar a proposta ao lead agora. Quer abrir a proposta sem o vínculo? (SIM)",
       fluxo: { ...f, etapa: "revisao", ofertaSemVinculo: true, chave: undefined, atualizadoEm: ctx.agora },
       evento: "proposta_lead_sem_vinculo",
     };
   }
+  // 403 é RBAC/política (`POLITICA_NAO_CONCEDE`/`can`), nunca posse — mesmo
+  // com leaseClientId, cai aqui e nunca na oferta sem vínculo.
   if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
   const recusa = recusaDoServidor(r);
   if (recusa || r.status === 422 || r.status === 400) {
+    // Com leaseClientId, a recusa pode ser porque o lead está sem nome/aluguel
+    // (ex.: "Falta o valor"): `leadIncompleto` faz `faltandoNaProposta` parar
+    // de relaxar esses campos, senão o próximo SIM repete o mesmo erro em
+    // loop (o vínculo com o lead é mantido; só o relaxamento muda).
     return {
       reply: `${recusa ?? "Algum dado não foi aceito pelo sistema."}\nMe mande e eu ajusto.`,
-      fluxo: { ...f, etapa: "coleta", chave: undefined },
+      fluxo: { ...f, etapa: "coleta", chave: undefined, ...(f.leaseClientId ? { leadIncompleto: true } : {}) },
       evento: "proposta_recusada",
     };
   }

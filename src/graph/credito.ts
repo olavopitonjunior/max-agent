@@ -1250,6 +1250,9 @@ async function desdobrarResultado(f: FluxoCredito, ctx: ContextoDoTurno, deps: D
   // dois (e o CPF, que o Max nunca manda) é o `proposal.create` com
   // `leaseClientId` (contractmaker #1580) — por isso a proposta FICA ligada ao
   // lead e a coleta não pede nome, CPF nem aluguel de novo (ver `faltandoNaProposta`).
+  // Posse recusada só vem como 404 (`fluxos.criarRascunho` oferece abrir sem
+  // vínculo); 403 é RBAC/política e 400 é corpo inválido — nenhum dos dois é
+  // tratado como posse.
   const pre = f.leaseClientId ? await deps.acao("credit.preflight", { leaseClientId: f.leaseClientId }) : null;
   const nome = (pre?.status === 200 ? str(obj(pre.body.lead).nome) : null) ?? f.leadNome;
   const aluguel = abrirCofre(f, ctx).aluguel;
