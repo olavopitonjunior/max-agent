@@ -290,6 +290,9 @@ const CATALOGO_DO_IMOBPRO = [
   "form.create",
   "notify.manual",
   "audio.reply",
+  // C5/M2 (11/10/2026): crédito Upestate, fora do padrão.
+  "credit.read",
+  "credit.request",
 ];
 
 describe("paridade do catálogo de capabilities", () => {
@@ -312,5 +315,13 @@ describe("paridade do catálogo de capabilities", () => {
       "proposal.send",
       "proposal.delete",
     ]);
+  });
+
+  /** Crédito não nasce concedido: só vale quando a org liga em `/admin/max`. */
+  it("crédito ligado pela org chega inteiro; ausente do padrão, não aparece", () => {
+    const ligada = JSON.parse('{"byRole":{"*":["proposal.list","credit.read","credit.request"]}}') as MaxPolicy;
+    expect(resolverPolitica({ politica: ligada, sujeito: gerente, role: "sales" })).toEqual(["proposal.list", "credit.read", "credit.request"]);
+    const padrao = JSON.parse('{"byRole":{"*":["proposal.list"]}}') as MaxPolicy;
+    expect(resolverPolitica({ politica: padrao, sujeito: gerente, role: "sales" })).not.toContain("credit.request");
   });
 });

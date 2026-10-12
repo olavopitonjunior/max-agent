@@ -1,6 +1,8 @@
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
-import { fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS, IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS } from "./http";
+import {
+  fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS, IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS, IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS,
+} from "./http";
 import type { ScopeSubject } from "@/graph/scope-contract";
 
 /**
@@ -34,8 +36,21 @@ export const VERBOS_DE_ACAO = [
   "proposal.duplicate",
   "form.options",
   "form.create",
+  // Crédito Upestate (M2): leitura (`credit.read`) e a ficha (`credit.request`).
+  "credit.preflight",
+  "credit.status",
+  "lead.upsert",
+  // M3: envio síncrono da análise (até 20 s no servidor).
+  "credit.request",
 ] as const;
 export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
+
+/** Envio de proposta e de análise de crédito esperam mais; o resto, o teto comum. */
+export function timeoutDoVerbo(verb: VerboDeAcao): number {
+  if (verb === "proposal.send") return IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS;
+  if (verb === "credit.request") return IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS;
+  return IMOBPRO_TIMEOUT_MS;
+}
 
 export interface RespostaDeAcao {
   status: number;
@@ -73,7 +88,7 @@ export async function executarAcao(params: {
           args: params.args,
         }),
       },
-      params.verb === "proposal.send" ? IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS : IMOBPRO_TIMEOUT_MS
+      timeoutDoVerbo(params.verb)
     );
     const body = (await res.json().catch(() => ({}))) as unknown;
     if (res.status >= 500) {

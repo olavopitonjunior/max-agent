@@ -6,6 +6,10 @@ import {
   textoDoAndamentoDoContrato, textoForaDoMax,
 } from "./capacidades";
 import { pedeConsulta, responderConsulta } from "./consulta";
+import {
+  conduzirCredito, continuacaoCredito, creditoLigado, iniciarCredito, pedeCredito, responderStatusCredito,
+  toolExtrairCredito, TEXTO_APROVAR, TEXTO_SCORE,
+} from "./credito";
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
@@ -66,7 +70,7 @@ import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
 import { checkpointerPool } from "@/lib/db";
 import { conversationKey, phoneTag } from "@/lib/phone";
 import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
-import { tokenizar, destokenizarResposta, destokenizarArgs, redigir, redigirProfundo, type MapaPii } from "@/lib/pii";
+import { tokenizar, destokenizarResposta, destokenizarArgs, redigir, redigirProfundo, redigirCredito, type MapaPii } from "@/lib/pii";
 import {
   assuntoBloqueado,
   buildSystemPrompt,
@@ -156,6 +160,59 @@ type MessagesUpdate = ChatMessage[] | { replace: ChatMessage[] };
 
 // Mora no despachante, que é quem o produz. Reexportado: era daqui.
 export type { ResultadoDeTool };
+
+/**
+ * O que o turno tem de CRU e não pode ir ao checkpoint (M2). O LangGraph grava
+ * o state (e o `metadata.writes`) a cada nó; por isso:
+ *  - o `inbound` entra no state SEM texto (`text: null`): os nós leem daqui;
+ *  - em turno de crédito, `reply`/`draft` vão ao state redigidos e o texto real
+ *    fica aqui, onde o `runTurn` o lê para responder.
+ * Vive só durante o `invoke` (limpo no `finally` do `runTurn`). O fallback
+ * `state.inbound.text` existe só para os testes que chamam `buildGraph` direto.
+ */
+interface TurnoCru { texto?: string; reply?: string; draft?: string }
+const TURNO_CRU = new Map<string, TurnoCru>();
+function textoDoTurno(state: { inbound: InboundMessage }): string {
+  return TURNO_CRU.get(state.inbound.messageId)?.texto ?? state.inbound.text ?? "";
+}
+/** A resposta real de um turno de crédito (o state guarda a redigida). Para testes com `buildGraph`. */
+export function respostaDoTurno(messageId: string): string | undefined {
+  return TURNO_CRU.get(messageId)?.reply;
+}
+export function encerrarTurno(messageId: string): void {
+  TURNO_CRU.delete(messageId);
+}
+
+/** Turno que passa pela ficha de crédito (fluxo aberto, aberto agora ou trilha no log). */
+function turnoSensivel(state: MaxStateType, update: MaxUpdate): boolean {
+  const fluxoNovo = update.fluxo as Fluxo | null | undefined;
+  return state.fluxo?.kind === "credito" || fluxoNovo?.kind === "credito" ||
+    turnoDeCredito([...(state.toolLog ?? []), ...((update.toolLog as ToolLogEntry[] | undefined) ?? [])]);
+}
+
+/**
+ * Em turno de crédito, nada do que o nó devolve vai cru ao state: texto de
+ * mensagens, `reply`, `draft` e resto com `redigirCredito` (CPF, valores, "8
+ * mil"); `piiMap` vazio (o mapa tem os valores reais). O real fica em `TURNO_CRU`.
+ */
+function blindarCredito(state: MaxStateType, update: MaxUpdate): MaxUpdate {
+  if (!turnoSensivel(state, update)) return update;
+  const id = state.inbound.messageId;
+  const cru: TurnoCru = TURNO_CRU.get(id) ?? {};
+  const out: MaxUpdate = { ...update };
+  if (typeof update.reply === "string") { cru.reply = update.reply; out.reply = redigirCredito(update.reply); }
+  if (typeof update.draft === "string") { cru.draft = update.draft; out.draft = redigirCredito(update.draft); }
+  const msgs = update.messages as MessagesUpdate | undefined;
+  if (msgs) {
+    const limpar = (l: ChatMessage[]) => l.map((m) => ({ ...m, content: redigirCredito(m.content) }));
+    out.messages = Array.isArray(msgs) ? limpar(msgs) : { replace: limpar(msgs.replace) };
+  }
+  const resto = update.restoDaResposta as { texto: string; criadoEm: number } | null | undefined;
+  if (resto) out.restoDaResposta = { ...resto, texto: redigirCredito(resto.texto) };
+  if ("piiMap" in update) out.piiMap = {};
+  TURNO_CRU.set(id, cru);
+  return out;
+}
 
 export const MaxState = Annotation.Root({
   inbound: Annotation<InboundMessage>,
@@ -583,7 +640,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
    * acrescenta `messages`): a pergunta bloqueada não vira contexto do turno
    * seguinte, o que é exatamente o que se quer de uma tentativa de sondagem.
    */
-  const bloqueado = assuntoBloqueado(state.inbound.text ?? "");
+  const bloqueado = assuntoBloqueado(textoDoTurno(state));
   if (bloqueado) {
     console.warn(
       `[gate] assunto bloqueado (${bloqueado}) em ${state.identity.orgId}`
@@ -605,7 +662,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
    * da deny-list: custo zero, descarta pendência e resto, não entra no
    * histórico nem na memória (`halt`).
    */
-  if (pedeLeituraDeAnexo(state.inbound.text ?? "")) {
+  if (pedeLeituraDeAnexo(textoDoTurno(state))) {
     return {
       halt: "pede_leitura_de_anexo",
       pendingAction: null,
@@ -707,7 +764,7 @@ async function continuar(state: MaxStateType): Promise<MaxUpdate> {
   const vale =
     !state.pendingAction &&
     Date.now() - guardado.criadoEm <= PENDING_TTL_MS &&
-    querVerOResto(state.inbound.text ?? "");
+    querVerOResto(textoDoTurno(state));
   if (!vale) return { restoDaResposta: null };
 
   // O resto passa pelo MESMO teto: um texto de 1500 caracteres sai em três
@@ -717,7 +774,7 @@ async function continuar(state: MaxStateType): Promise<MaxUpdate> {
     reply: texto,
     restoDaResposta: resto ? { texto: resto, criadoEm: Date.now() } : null,
     messages: [
-      { role: "user", content: state.inbound.text?.trim() || "" },
+      { role: "user", content: textoDoTurno(state).trim() },
       { role: "assistant", content: texto },
     ],
   };
@@ -768,6 +825,7 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
     extrairProposta: async (texto) => extrair(texto, TOOL_EXTRAIR_PROPOSTA as never),
     extrairCampos: async (texto, campos) =>
       (await extrair(texto, toolExtrairCampos(campos))) as Record<string, string> | null,
+    extrairCredito: async (texto, campo) => extrair(texto, toolExtrairCredito(campo)),
   };
 }
 
@@ -777,7 +835,7 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
  */
 async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const agora = Date.now();
-  const userText = state.inbound.text?.trim() || "";
+  const userText = textoDoTurno(state).trim();
   const usage: LlmUsage[] = [];
   const vencido = state.fluxo && fluxoExpirou(state.fluxo, agora);
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
@@ -790,7 +848,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // O que o Max faz, e o que não faz (contrato, cobrança): resposta do
   // sistema, nunca do modelo (prod 09/10). O fluxo em curso fica como está.
   // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
-  const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha";
+  const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha" || atual?.kind === "credito";
   // Continuidade e gestão vêm antes: "converte a proposta… pra gerar o contrato" é conversão.
   // Rascunho aberto para ajuste (sem escrita pendente) não prende o turno: pedido
   // sobre OUTRA proposta ("muda o valor da proposta do João…"), consulta ou
@@ -799,6 +857,38 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const rascunhoAberto = atual?.kind === "proposta" && !!atual.propostaId && !atual.chave &&
     ["ajustes", "revisao_ajuste", "metodo"].includes(atual.etapa);
   const livre = !coletando || rascunhoAberto;
+
+  // Crédito (M2): antes da consulta e da criação ("ficha de crédito" não é
+  // formulário). Flag desligada = o Max segue como antes, sem citar crédito.
+  const ctxDoTurno = { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+    politicaIndisponivel: state.politicaIndisponivel, agora, orgName: state.identity.orgName,
+    thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) };
+  const credito = creditoLigado() && livre && !escritaEmAberto ? pedeCredito(userText) : null;
+  if (credito) {
+    const deps = depsDoFluxo(state, usage);
+    const passo = credito === "abrir"
+      ? await iniciarCredito(ctxDoTurno, deps, podeEscrever(state.identity))
+      : credito === "status"
+        ? await responderStatusCredito(ctxDoTurno, deps, podeEscrever(state.identity))
+        : credito === "score"
+          ? { reply: TEXTO_SCORE, fluxo: null, evento: "credito_score" }
+          : { reply: TEXTO_APROVAR, fluxo: null, evento: "credito_aprovar" };
+    // Status/score não mexem no fluxo aberto (fica rebaixado, como na consulta).
+    const fluxo = credito === "abrir" ? passo.fluxo : atual ? rebaixarFluxo(atual) : vencido ? null : undefined;
+    return {
+      ...(fluxo !== undefined ? { fluxo } : {}),
+      reply: passo.reply,
+      // Histórico redigido: o pedido pode trazer CPF/valor, e `messages` vai para o checkpoint.
+      // O `blindarCredito` redige (CPF, valores) antes do checkpoint.
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
+      ...(usage.length > 0 ? { usage } : {}),
+      toolLog: [{ name: "fluxo", args: { kind: "credito", pedido: credito }, outcome: passo.evento }],
+    };
+  }
+  if (atual?.kind === "credito" && !creditoLigado()) {
+    // Flag desligada no meio da ficha: o fluxo some e o turno segue normal.
+    return { fluxo: null, toolLog: [{ name: "fluxo", args: { kind: "credito" }, outcome: "credito_desligado" }] };
+  }
   const gestao = podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
   // "Não converte a proposta da X" é o contrário do pedido: a negação vem antes.
   const negada = !atual ? negaAcao(userText) : null;
@@ -818,7 +908,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
         ? textoDoAndamentoDoContrato(linkDoNegocio)
         : negada
           ? textoDaNegacao(negada, userText)
-          : textoDeCapacidades(state.policy, podeEscrever(state.identity));
+          : textoDeCapacidades(state.policy, podeEscrever(state.identity), creditoLigado());
     const outcome = foraDoMax ? `fora_do_max_${foraDoMax}` : contratoPergunta ? "andamento_do_contrato" : negada ? `negou_${negada}` : "capacidades";
     return { reply, pendingAction: null, messages: [{ role: "user", content: userText }, { role: "assistant", content: reply }],
       toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome }] };
@@ -896,17 +986,18 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   }
   if (!atual) return vencido ? { fluxo: null } : {};
 
-  const passo = await conduzirFluxo(
-    atual,
-    {
-      texto: userText,
-      messageId: state.inbound.messageId,
-      policy: state.policy,
-      politicaIndisponivel: state.politicaIndisponivel,
-      agora,
-    },
-    depsDoFluxo(state, usage)
-  );
+  const passo = atual.kind === "credito"
+    ? await conduzirCredito(atual, ctxDoTurno, depsDoFluxo(state, usage), podeEscrever(state.identity))
+    : await conduzirFluxo(atual, ctxDoTurno, depsDoFluxo(state, usage));
+  if (passo.liberar && atual.kind === "credito") {
+    // Pergunta fora da ficha: o modelo responde e o `compose` acrescenta o
+    // "Continuando a ficha…" (o fluxo volta marcado como pausado).
+    return {
+      fluxo: passo.fluxo,
+      ...(usage.length > 0 ? { usage } : {}),
+      toolLog: [{ name: "fluxo", args: { kind: "credito" }, outcome: passo.evento }],
+    };
+  }
   if (passo.liberar) {
     // A mensagem não era do fluxo (pergunta, conversa): segue para o
     // atendimento normal — sem "Anotado" falso. O fluxo fica, mas REBAIXADO:
@@ -918,10 +1009,12 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
       toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
     };
   }
+  // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
+  const daFicha = atual.kind === "credito";
   return {
     fluxo: passo.fluxo,
     messages: [
-      { role: "user", content: userText },
+      { role: "user", content: daFicha ? "(resposta da ficha de crédito)" : userText },
       { role: "assistant", content: passo.reply },
     ],
     reply: passo.reply,
@@ -948,7 +1041,7 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
   const pending = state.pendingAction;
   if (!pending) return {};
 
-  const userText = state.inbound.text?.trim() || "";
+  const userText = textoDoTurno(state).trim();
 
   if (propostaExpirou(pending, Date.now())) {
     // Sem aviso: para a pessoa, uma proposta de meia hora atrás já saiu da
@@ -1112,7 +1205,7 @@ async function executar(
 }
 
 async function retrieve(state: MaxStateType): Promise<MaxUpdate> {
-  const text = state.inbound.text ?? "";
+  const text = textoDoTurno(state);
   if (!shouldSearch(text)) return { hits: [] };
 
   const hits = await searchKnowledge(state.identity.orgId, text).catch((err) => {
@@ -1133,7 +1226,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    * criei".
    */
   const criacao = modoDeCriacao(state.identity, state.policy);
-  const pedidoBruto = state.inbound.text?.trim() || "";
+  const pedidoBruto = textoDoTurno(state).trim();
 
   // Pedido EXPLÍCITO de criação a quem não pode criar agora: template, sem
   // modelo — é onde o nano mais tende a encenar a ação. Só na volta 0.
@@ -1163,9 +1256,10 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     criacao,
     // Vazio na primeira volta; preenchido quando o `tools` já rodou.
     toolResults: state.toolResults,
+    credito: creditoLigado(),
   });
 
-  const userText = state.inbound.text?.trim() || "(mensagem sem texto)";
+  const userText = textoDoTurno(state).trim() || "(mensagem sem texto)";
   const history = state.messages.slice(-MAX_HISTORY);
 
   /**
@@ -1330,7 +1424,9 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
             ? "um formulário de negócio"
             : state.fluxo.kind === "proposta"
               ? "uma proposta"
-              : "um pedido de criação";
+              : state.fluxo.kind === "credito"
+                ? "uma ficha de crédito"
+                : "um pedido de criação";
         const texto =
           `Você já tem ${emAndamento} em andamento comigo. Continue por aqui, ` +
           "ou diga CANCELAR para começar outro.";
@@ -1558,7 +1654,7 @@ function afterAnswer(state: MaxStateType): "tools" | "compose" {
 async function compose(state: MaxStateType): Promise<MaxUpdate> {
   if (state.draft === null) return {};
 
-  const { texto, bloqueios } = sanitizar(state.draft);
+  const { texto, bloqueios } = sanitizar(TURNO_CRU.get(state.inbound.messageId)?.draft ?? state.draft);
 
   if (bloqueios.length > 0) {
     // Nível de aviso e não de erro: o turno saiu, e o que se quer é o padrão
@@ -1582,17 +1678,26 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   // G6: o teto vale DEPOIS do sanitizador — cortar antes contaria linha que
   // ia cair de qualquer jeito. O resto fica guardado para o "quer ver?".
   const final = limitarTamanho(trava.texto);
+  // Ficha de crédito pausada por uma pergunta: volta ao campo em aberto.
+  const pausada = state.fluxo?.kind === "credito" && state.fluxo.pausado ? state.fluxo : null;
+  const saida = pausada ? `${final.texto}\n\n${continuacaoCredito(pausada)}` : final.texto;
 
   return {
-    reply: final.texto,
+    ...(pausada ? { fluxo: { ...pausada, pausado: false } } : {}),
+    reply: saida,
     restoDaResposta: final.resto ? { texto: final.resto, criadoEm: Date.now() } : null,
     // Consumido: se sobrasse no checkpoint, o turno seguinte que respondesse
     // por template encontraria um `draft` velho e o `compose` publicaria a
     // resposta do turno passado por cima.
     draft: null,
     bloqueios,
-    messages: [{ role: "assistant", content: final.texto }],
+    messages: [{ role: "assistant", content: saida }],
   };
+}
+
+/** O turno passou pela ficha de crédito? Então não vai para resumo nem memória. */
+function turnoDeCredito(toolLog: readonly ToolLogEntry[] | undefined): boolean {
+  return (toolLog ?? []).some((t) => t.name === "fluxo" && t.args.kind === "credito");
 }
 
 /**
@@ -1604,6 +1709,8 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
  */
 async function compact(state: MaxStateType): Promise<MaxUpdate> {
   if (state.messages.length < COMPACT_AT) return {};
+  // Turno da ficha de crédito não vai para o resumo (M1, `pulaMemoria`).
+  if (state.fluxo?.kind === "credito" || turnoDeCredito(state.toolLog)) return {};
 
   const keep = state.messages.slice(-KEEP_AFTER_COMPACT);
   const older = state.messages.slice(0, -KEEP_AFTER_COMPACT);
@@ -1733,7 +1840,7 @@ function cronometrar(
 ): (state: MaxStateType) => Promise<MaxUpdate> {
   return async (state) => {
     const iniciadoEm = Date.now();
-    const update = await fn(state);
+    const update = blindarCredito(state, await fn(state));
     return { ...update, timings: [{ no, ms: Date.now() - iniciadoEm }] };
   };
 }
@@ -1854,6 +1961,11 @@ export interface TurnResult {
    * alguém iria investigar — não deixava rastro nenhum.
    */
   afterReply: () => Promise<void>;
+  /**
+   * Turno da ficha de crédito (`turnoSensivel`): quem grava fora do grafo
+   * (`inbound_queue`) apaga o texto e redige a resposta. Ausente = não.
+   */
+  sensivel?: boolean;
 }
 
 /**
@@ -1966,7 +2078,8 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         phone: inbound.fromPhone,
         messageId: inbound.messageId,
         kind: inbound.kind,
-        inboundText: texto || null,
+        // Falha não sabe se o turno era da ficha: com a flag ligada, na dúvida redige.
+        inboundText: (creditoLigado() || pedeCredito(texto) ? redigirCredito(texto) : texto) || null,
         latencyMs: Date.now() - iniciadoEm,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -2121,9 +2234,12 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   // turn já faz. Em paralelo com o grafo (que só compila na primeira vez).
   const [facts, app] = await Promise.all([loadFacts(orgId, phone), getApp()]);
 
+  TURNO_CRU.set(inbound.messageId, { texto: turnText });
+  let replyCru: string | undefined;
   const result = await comRastro(() => app.invoke(
     {
-      inbound: { ...inbound, text: turnText },
+      // Sem texto: o checkpoint guarda o `inbound`; os nós leem o cru de `TURNO_CRU`.
+      inbound: { ...inbound, text: null },
       identity: identity.candidate,
       fromMedia,
       facts,
@@ -2146,9 +2262,14 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         thread_id: threadIdFor(orgId, phone),
       },
     }
-  ), orgId);
+  ).then((r) => {
+    replyCru = TURNO_CRU.get(inbound.messageId)?.reply;
+    return r;
+  }).finally(() => TURNO_CRU.delete(inbound.messageId)), orgId);
 
-  const reply = result.reply ?? null;
+  // Turno de crédito: o state tem a resposta redigida; a real veio de `TURNO_CRU`.
+  const reply = replyCru ?? result.reply ?? null;
+  const deCredito = turnoSensivel(result, {});
   const usage = result.usage ?? [];
   const tools = result.toolLog ?? [];
   const timings = result.timings ?? [];
@@ -2173,6 +2294,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
 
   return {
     reply,
+    sensivel: deCredito,
     // Só vale extrair de um turn que teve as duas pontas: sem resposta não há
     // conversa da qual aprender, e um turn que falhou no modelo ensinaria o
     // erro.
@@ -2190,11 +2312,12 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         phone,
         messageId: inbound.messageId,
         kind: inbound.kind,
-        inboundText: turnText || null,
+        // Crédito: auditoria também sem valores (renda, aluguel).
+        inboundText: (deCredito ? redigirCredito(turnText) : turnText) || null,
         // Só quando houve mídia: repetir o texto digitado nas duas colunas
         // encheria a tabela sem acrescentar informação.
-        transcript: fromMedia ? turnText : null,
-        replyText: reply,
+        transcript: fromMedia ? (deCredito ? redigirCredito(turnText) : turnText) : null,
+        replyText: deCredito && reply ? redigirCredito(reply) : reply,
         tools,
         usage,
         timings,
@@ -2218,6 +2341,8 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
        * sistema" não é fato durável sobre ninguém.
        */
       if (!(reply && turnText) || result.halt) return;
+      // Turno da ficha de crédito não alimenta a memória (CPF, renda).
+      if (deCredito) return;
       await (async () => {
             // M1 (PII, corrigido em review) — `redigir`, não `tokenizar`: mesmo
             // motivo do `compact` (ver o cabeçalho ali). `extractFacts` grava

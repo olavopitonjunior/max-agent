@@ -20,6 +20,9 @@
 import { it, vi } from "vitest";
 import { writeFileSync } from "node:fs";
 
+// Cofre da ficha de crédito (grupo `credito`): chave descartável, nada é gravado.
+process.env.MAX_ENCRYPTION_KEY ||= Buffer.alloc(32, 7).toString("base64");
+
 type Res = { text: string; toolCalls: { name: string; args: Record<string, unknown> }[]; usage: { promptTokens?: number; completionTokens?: number } };
 const chamadas: { tools: string[]; tokens: number }[] = [];
 vi.mock("@/lib/llm", async (orig) => {
@@ -44,7 +47,7 @@ vi.mock("@/lib/cm", async (orig) => ({
 vi.mock("@/lib/acao", () => ({ executarAcao: vi.fn() }));
 vi.mock("@/lib/scope", async (orig) => ({ ...(await orig<typeof import("@/lib/scope")>()), consultarEscopo: vi.fn() }));
 
-const { buildGraph, RESET_DO_TURN } = await import("../src/graph/graph");
+const { buildGraph, RESET_DO_TURN, respostaDoTurno, encerrarTurno } = await import("../src/graph/graph");
 const { fetchProfile } = await import("../src/lib/cm");
 const { executarAcao } = await import("../src/lib/acao");
 const { consultarEscopo } = await import("../src/lib/scope");
@@ -75,7 +78,48 @@ const lista = (a: Record<string, unknown>) => {
   return { items: items.slice(0, 10), total: items.length, ...(b ? { busca: norm(b) } : {}) };
 };
 
+// Crédito (M2): leads da ficha, simulados como o C5 responde.
+type LeadSim = { id: string; nome: string; cpf: string; credito: Record<string, Record<string, unknown>> };
+let leadsCredito: LeadSim[] = [];
+const ORDEM_FICHA: [string, string, string][] = [
+  ["pretendente", "documento", "CPF do pretendente"], ["pretendente", "nomeCompleto", "Nome completo do pretendente"],
+  ["pretendente", "vinculoEmpregaticio", "Vínculo empregatício do pretendente"], ["pretendente", "profissao", "Profissão do pretendente"],
+  ["pretendente", "rendaMensal", "Renda mensal do pretendente"], ["locacao", "valorAluguel", "Valor do aluguel"],
+  ["locacao", "valorCondominio", "Valor do condomínio"], ["locacao", "valorIptu", "Valor do IPTU"],
+  ["locacao", "vaiMorar", "Se o pretendente vai morar no imóvel"],
+];
+const faltantesSim = (c: LeadSim["credito"]) => ORDEM_FICHA.filter(([g, k]) => c[g]?.[k] === undefined).map(([, , r]) => r);
+function creditoSim(verb: string, a: Record<string, unknown>): { status: number; body: Record<string, unknown> } | null {
+  if (verb === "credit.preflight") {
+    const l = leadsCredito.find((x) => x.id === a.leaseClientId);
+    return { status: 200, body: { configurado: true, orgLigada: true, custoCents: 1500, consentimento: !!l, faltantes: l ? faltantesSim(l.credito) : faltantesSim({}), avisos: [], lead: l ? { id: l.id, nome: l.nome, status: "novo" } : null } };
+  }
+  if (verb === "lead.upsert") {
+    const cpf = String(a.cpf ?? "").replace(/\D/g, "");
+    if (cpf.length !== 11) return { status: 422, body: { error: "documento_invalido" } };
+    let l = leadsCredito.find((x) => x.cpf === cpf);
+    if (!l) {
+      if (typeof a.nome !== "string") return { status: 422, body: { error: "nome_obrigatorio" } };
+      l = { id: `lc${leadsCredito.length + 1}`, nome: a.nome, cpf, credito: {} };
+      leadsCredito.push(l);
+    }
+    for (const [g, v] of Object.entries((a.campos ?? {}) as Record<string, unknown>)) {
+      if (v && typeof v === "object" && !Array.isArray(v)) l.credito[g] = { ...(l.credito[g] ?? {}), ...(v as Record<string, unknown>) };
+    }
+    return { status: 200, body: { id: l.id, status: "novo", faltantes: faltantesSim(l.credito) } };
+  }
+  if (verb === "credit.status") {
+    const nome = String(a.nome ?? "").toLowerCase();
+    if (!nome.startsWith("let")) return { status: 404, body: { error: "nao_encontrada" } };
+    return { status: 200, body: { lead: { id: "lc9", nome: "Letícia Andrade", status: "em_analise" },
+      ultima: { rotulo: "Em análise", createdAt: "2026-10-10T15:00:00.000Z", completedAt: null }, link: "/locacao/pessoas/clientes/lc9" } };
+  }
+  return null;
+}
+
 async function imobpro({ verb, args = {} }: { verb: string; args?: Record<string, unknown> }): Promise<{ status: number; body: Record<string, unknown> }> {
+  const credito = creditoSim(verb, args);
+  if (credito) return credito;
   const p = achar(args);
   switch (verb) {
     case "proposal.list": return { status: 200, body: lista(args) };
@@ -127,7 +171,8 @@ type Espera = {
 type Turno = { fala: string } & Espera;
 type Conversa = { nome: string; categoria: string; turnos: Turno[] };
 
-const ESCRITAS = ["proposal.delete", "proposal.update", "proposal.duplicate", "proposal.convert", "proposal.send", "proposal.create", "form.create"];
+const ESCRITAS = ["proposal.delete", "proposal.update", "proposal.duplicate", "proposal.convert", "proposal.send", "proposal.create", "form.create", "lead.upsert", "credit.request"];
+const CREDITO = ["credit.preflight", "credit.status", "lead.upsert", "credit.request"];
 const SEM_ESCRITA = { proibidos: ESCRITAS };
 
 const CONVERSAS: Conversa[] = [
@@ -308,6 +353,39 @@ const CONVERSAS: Conversa[] = [
   { nome: "link de formulário", categoria: "criacao", turnos: [
     { fala: "me manda o link do formulário de locação", ideal: "Começa o formulário de negócio de locação (resumo/pergunta), sem criar nada ainda.", ...SEM_ESCRITA },
   ] },
+  // Crédito (M2) — rodam com MAX_CREDITO=true (só este grupo).
+  { nome: "ficha de crédito completa", categoria: "credito", turnos: [
+    { fala: "faz a ficha de crédito da Letícia Andrade", ideal: "Pede a confirmação de que a pretendente autorizou a consulta (SIM), sem pedir dado nem gravar nada.",
+      contem: ["Responda SIM"], verbos: ["credit.preflight"], proibidos: ESCRITAS },
+    { fala: "sim", ideal: "Pede o CPF da Letícia.", contem: [/CPF/], proibidos: ESCRITAS },
+    { fala: "111.444.777-35", ideal: "Anota o CPF mascarado e pede o vínculo de trabalho.", contem: ["***.***.777-35"], naoContem: ["111.444.777-35"], verbos: ["lead.upsert"],
+      args: { verbo: "lead.upsert", confere: (a) => (a.cpf === "11144477735" && (a.consentimento as { texto?: string })?.texto ? null : "sem cpf/consentimento") } },
+    { fala: "carteira assinada", ideal: "Anota CLT e pede a profissão.", contem: ["CLT"],
+      args: { verbo: "lead.upsert", confere: (a) => ((a.campos as { pretendente?: { vinculoEmpregaticio?: number } }).pretendente?.vinculoEmpregaticio === 6 ? null : "vínculo ≠ 6") } },
+    { fala: "analista de sistemas", ideal: "Anota e pede a renda mensal.", contem: [/[Rr]enda/] },
+    { fala: "8 mil", ideal: "Anota R$ 8.000,00 e pede o aluguel.", contem: ["8.000,00"],
+      args: { verbo: "lead.upsert", confere: (a) => ((a.campos as { pretendente?: { rendaMensal?: number } }).pretendente?.rendaMensal === 8000 ? null : "renda ≠ 8000") } },
+    { fala: "quanto tempo demora a análise?", ideal: "Responde sem prometer prazo nem resultado e volta à ficha ('Continuando a ficha…').",
+      contem: ["Continuando a ficha"], naoContem: [/aprovad/i], proibidos: ESCRITAS },
+    { fala: "2500", ideal: "Anota o aluguel e pede o condomínio.", contem: ["2.500,00"] },
+    { fala: "não tem", ideal: "Anota sem condomínio e pede o IPTU.", contem: [/sem condom/i] },
+    { fala: "não tem", ideal: "Anota sem IPTU e pergunta se vai morar no imóvel.", contem: [/morar/] },
+    { fala: "sozinha", ideal: "Pergunta se mais alguém compõe renda.", contem: [/compondo renda/] },
+    { fala: "não", ideal: "Mostra o resumo com CPF mascarado, aluguel, renda, vínculo, custo e pede SIM.", contem: ["Responda *SIM*", "***.***.777-35", "Custo"], proibidos: ESCRITAS },
+    { fala: "SIM", ideal: "Diz que o envio entra na próxima versão e dá o link da ficha salva — sem enviar.", contem: [/próxima versão/], proibidos: ["credit.request"] },
+  ] },
+  { nome: "status do crédito", categoria: "credito", turnos: [
+    { fala: "como está a análise da Letícia?", ideal: "Responde o status da análise da Letícia com o link.", contem: ["Letícia", "Em análise"], verbos: ["credit.status"], proibidos: ESCRITAS },
+  ] },
+  { nome: "como funciona o crédito", categoria: "credito", turnos: [
+    { fala: "como funciona a análise de crédito?", ideal: "Explica em poucas linhas, sem prometer aprovação nem score e sem abrir ficha.", naoContem: [/score de \d/i, /aprovad[oa] com certeza/i], proibidos: CREDITO },
+  ] },
+  { nome: "score", categoria: "credito", turnos: [
+    { fala: "qual o score da Letícia?", ideal: "Diz que não existe score por aqui.", contem: [/score/i], naoContem: [/\d{3}\s*pontos/i], proibidos: CREDITO },
+  ] },
+  { nome: "ficha de locação não é crédito", categoria: "credito", turnos: [
+    { fala: "me manda a ficha de locação do João", ideal: "Trata como formulário/proposta de locação, nunca como análise de crédito.", proibidos: CREDITO },
+  ] },
   { nome: "enviar rascunho pelo nome", categoria: "envio", turnos: [
     { fala: "envia a proposta da Letícia Andrade para assinatura", ideal: "Retoma a PROP-2026-0012 e oferece os tipos de assinatura (WhatsApp/e-mail).",
       contem: ["0012", /whatsapp/i], ...SEM_ESCRITA },
@@ -316,7 +394,7 @@ const CONVERSAS: Conversa[] = [
 
 // ─── Execução e métricas ────────────────────────────────────────────────────
 
-const POLITICA = { byRole: { "*": ["deal.list", "deal.pending", "proposal.list", "form.create", "proposal.create", "proposal.send", "proposal.delete"] }, byRecipient: {}, brokerDefault: [] };
+const POLITICA = { byRole: { "*": ["deal.list", "deal.pending", "proposal.list", "form.create", "proposal.create", "proposal.send", "proposal.delete", "credit.read", "credit.request"] }, byRecipient: {}, brokerDefault: [] };
 const usuario = { orgId: "org-eval", orgName: "FINCasa", kind: "user" as const, userId: "u1", userName: "Olavo" };
 
 type Linha = {
@@ -381,6 +459,10 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
     for (const c of CONVERSAS) {
       if (filtro && !filtro.test(c.nome) && !filtro.test(c.categoria)) continue;
       props = BASE.map((p) => ({ ...p, signatarios: p.signatarios.map((s) => ({ ...s })) }));
+      leadsCredito = [];
+      // A flag de crédito só neste grupo: nos outros, o Max segue como em produção.
+      if (c.categoria === "credito") process.env.MAX_CREDITO = "true";
+      else delete process.env.MAX_CREDITO;
       seq = 0;
       const app = buildGraph().compile({ checkpointer: new MemorySaver() });
       const thread = `eval-${rodada}-${c.nome}`;
@@ -389,13 +471,17 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
         chamadas.length = 0;
         verbos.length = 0;
         const t0 = Date.now();
+        const messageId = `m${++msg}`;
         const s = await app.invoke(
-          { inbound: { messageId: `m${++msg}`, fromPhone: "5511987654321", groupId: null, kind: "text" as const, text: t.fala, mediaUrl: null, mimeType: null, timestampMs: null, senderName: "Olavo", replyToMessageId: null },
+          { inbound: { messageId, fromPhone: "5511987654321", groupId: null, kind: "text" as const, text: t.fala, mediaUrl: null, mimeType: null, timestampMs: null, senderName: "Olavo", replyToMessageId: null },
             identity: usuario, ...RESET_DO_TURN },
           { configurable: { thread_id: thread } }
         );
         const ms = Date.now() - t0;
-        const resposta = String(s.reply ?? "");
+        // Turno de crédito: o state guarda a resposta redigida; o que vai ao
+        // corretor é a real, como no `runTurn`.
+        const resposta = String(respostaDoTurno(messageId) ?? s.reply ?? "");
+        encerrarTurno(messageId);
         const nomes = verbos.map((v) => v.verbo);
         const falhasTexto = [
           ...(t.contem ?? []).filter((x) => !testa(resposta, x)).map((x) => `falta ${x}`),

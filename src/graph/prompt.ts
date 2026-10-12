@@ -272,6 +272,14 @@ O que você NÃO faz:
  * descrever uma ferramenta que não está no pedido é a forma mais barata de
  * fazer um modelo pequeno prometer o que não consegue entregar.
  */
+/** Só com a flag `MAX_CREDITO` (M2): sem ela o Max não fala de crédito. */
+const REGRA_CREDITO = `
+
+Análise de crédito:
+- Nunca invente nem antecipe resultado de análise de crédito (aprovado,
+  recusado, chance de aprovar). Score não existe por aqui: não informe nem
+  estime score. A ficha e o status são conduzidos pelo sistema.`;
+
 const SABE_CRIAR_FORM = `
 
 Criar proposta ou formulário de negócio:
@@ -467,6 +475,8 @@ export function buildSystemPrompt(params: {
   criacao?: "disponivel" | "sem_login" | "sem_politica";
   /** Resultado das tools de leitura deste turn, já cercado. */
   toolResults?: { tool: string; items: unknown[] | null; truncated: boolean }[];
+  /** Flag `MAX_CREDITO` ligada: entra a regra de crédito. */
+  credito?: boolean;
 }): string {
   // ─── BLOCO ESTÁVEL ──────────────────────────────────────────────────────
   // Idêntico para toda pessoa da mesma org, turno após turno. É o que o cache
@@ -486,6 +496,7 @@ export function buildSystemPrompt(params: {
       sem_politica: CRIACAO_INDISPONIVEL,
     }[params.criacao ?? (params.podeEscrever ? "disponivel" : "sem_login")],
   ];
+  if (params.credito) parts.push(REGRA_CREDITO);
 
   parts.push(`\n\nVocê atende a ${params.orgName}.`);
 
