@@ -1,5 +1,6 @@
 import type { Capability } from "./policy";
 import { normalizar } from "./tools";
+import { envioLigado } from "./credito";
 
 /**
  * O que o Max faz — dito pelo SISTEMA, a partir da política deste turn, e não
@@ -43,7 +44,11 @@ export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: 
   if (tem("deal.list") || tem("deal.pending")) negocio.push("consultar negócios e pendências");
   if (negocio.length) linhas.push(`- Negócios: ${negocio.join(", ")}.`);
   // Crédito só com a flag `MAX_CREDITO` E a política da org.
-  if (credito && podeEscrever && tem("credit.request")) linhas.push("- Análise de crédito (Upestate): preencher a ficha do pretendente e ver o status.");
+  if (credito && podeEscrever && tem("credit.request")) {
+    // M3: com `MAX_CREDITO_ENVIO`, o envio também é pelo Max (sempre com a confirmação).
+    const envio = envioLigado();
+    linhas.push(`- Análise de crédito (Upestate): preencher a ficha do pretendente${envio ? ", enviar com a sua confirmação" : ""} e ver o status.`);
+  }
   if (!linhas.length) return "Por aqui eu tiro dúvidas sobre o processo da imobiliária. Para o resto, fale com a imobiliária.";
   linhas.push("Contrato e cobrança são pela tela do negócio no sistema.");
   return `Pelo WhatsApp eu consigo:\n${linhas.join("\n")}`;

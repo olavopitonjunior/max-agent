@@ -4,6 +4,7 @@ import { requireHmac } from "@/lib/auth";
 import { enqueue } from "@/lib/outbox";
 import { toE164NoPlus } from "@/lib/phone";
 import { isOrgKnown } from "@/lib/orgs";
+import { textoDoAvisoDeCredito } from "@/lib/templates/catalog";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -101,6 +102,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invalid_phone" }, { status: 422 });
   }
 
+  // Crédito (M3): o corpo vira o texto fixo do aviso — o mesmo dentro da janela e no OK.
+  const body = p.kind === "credit_result" ? textoDoAvisoDeCredito(p.params, p.linkUrl) ?? p.body : p.body;
+
   const result = await enqueue({
     orgId: p.orgId,
     dedupeKey: p.dedupeKey,
@@ -108,7 +112,7 @@ export async function POST(req: NextRequest) {
     phone,
     recipientName: p.recipientName,
     title: p.title,
-    body: p.body,
+    body,
     linkUrl: p.linkUrl,
     dealId: p.dealId,
     orgName: p.orgName,

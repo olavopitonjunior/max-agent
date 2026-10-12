@@ -27,8 +27,8 @@ export const IMOBPRO_TIMEOUT_MS = 8_000;
  */
 export const IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS = 30_000;
 export const IMOBPRO_TRANSCRIBE_TIMEOUT_MS = 45_000;
-/** `credit.request` (M3): o servidor espera a Upestate até 20 s e responde 202 depois; +5 s de rede. */
-export const IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS = 25_000;
+/** `credit.request` (M3): o servidor espera a Upestate até 20 s e responde 202 depois; +10 s de rede. */
+export const IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * Alerta de canal: o receptor manda o E-MAIL antes de responder, e um SMTP em

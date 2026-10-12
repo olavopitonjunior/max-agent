@@ -6,8 +6,9 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 import { RE_CNPJ, RE_CPF } from "@/lib/pii";
 
 /**
- * Fluxo `credito` (M2, plano §7.6): coleta da ficha residencial PF da Upestate
- * pelo WhatsApp, campo a campo, SEM envio (o `credit.request` é o M3).
+ * Fluxo `credito` (M2/M3, plano §7.6): coleta da ficha residencial PF da
+ * Upestate pelo WhatsApp, campo a campo; no M3, o envio (`credit.request`,
+ * sub-flag `MAX_CREDITO_ENVIO`), o resultado e o desdobramento em proposta.
  *
  * Desenho:
  *  - intercepto determinístico (`pedeCredito`) antes da consulta/criação;
@@ -36,7 +37,7 @@ export type CampoCredito =
 
 export interface FluxoCredito {
   kind: "credito";
-  etapa: "atestacao" | "coleta" | "revisao";
+  etapa: "atestacao" | "coleta" | "revisao" | "enviando" | "resultado";
   leaseClientId?: string;
   leadNome?: string;
   campoAtual?: CampoCredito;
@@ -52,6 +53,13 @@ export interface FluxoCredito {
   pausado?: boolean;
   /** Cifrado — ver o cabeçalho. */
   cofre?: string;
+  /**
+   * M3: o envio em curso — `valor` é a `messageId` do SIM (`x-idempotency-key`).
+   * Com chave guardada, nenhum SIM dispara outro `credit.request`.
+   */
+  chave?: { verbo: string; valor: string; em?: number };
+  /** M3: a decisão que voltou no envio (só `aprovado` fica, para o SIM da proposta). */
+  decisao?: string;
   atualizadoEm: number;
 }
 
@@ -62,6 +70,11 @@ type Resposta = Extract<PassoDoFluxo, { reply: string }>;
 /** `MAX_CREDITO` (default desligado). Desligada, o Max segue como antes do M2. */
 export function creditoLigado(): boolean {
   return /^(1|true|on|sim)$/i.test(process.env.MAX_CREDITO ?? "");
+}
+
+/** `MAX_CREDITO_ENVIO` (default desligado, M3): sem ela, o SIM da revisão não envia (comportamento do M2). */
+export function envioLigado(): boolean {
+  return creditoLigado() && /^(1|true|on|sim)$/i.test(process.env.MAX_CREDITO_ENVIO ?? "");
 }
 
 // ─── Textos fixos ────────────────────────────────────────────────────────
@@ -75,6 +88,17 @@ export const TEXTO_SCORE =
   "Não existe score por aqui: a análise de crédito da Upestate não devolve score. " +
   "Posso abrir uma ficha de crédito ou ver o status de uma análise.";
 const TEXTO_TENTATIVAS = "Pode conferir e mandar de novo?";
+
+// M3 — envio e resultado (textos fixos da spec).
+export const TEXTO_ENVIO_PENDENTE = "Enviei. A Upestate ainda está analisando; te aviso aqui assim que sair.";
+export const textoEnvioIncerto = (url: string) =>
+  `Não consegui confirmar o envio agora. Não reenvie: veja o status na tela do lead (${url}) ou me pergunte daqui a pouco.`;
+export const textoAindaNaoEncontrei = (url: string) =>
+  `Ainda não encontrei sua análise. Veja na tela do lead: ${url}, ou me pergunte daqui a pouco.`;
+export const TEXTO_EM_ANDAMENTO = "Este CPF já tem uma análise em andamento na Upestate.";
+export const TEXTO_TETO = "O limite mensal de análises da imobiliária foi atingido. Fale com o administrador.";
+export const TEXTO_INDISPONIVEL = "Análise de crédito indisponível agora.";
+const textoCpfDivergente = (url: string) => `O CPF da ficha não bate com o do cadastro. Confira na tela: ${url}`;
 
 const textoInativa = (org: string) => `Análise de crédito não está ativa na ${org}. Fale com o administrador.`;
 const link = (caminho: string) => new URL(caminho, imobproBase()).toString();
@@ -574,6 +598,8 @@ function pergunta(f: FluxoCredito, campo: CampoCredito): string {
 export function continuacaoCredito(f: FluxoCredito): string {
   const cab = `Continuando a ficha ${deQuem(f)}: `;
   if (f.etapa === "atestacao") return `${cab}confirma que ele(a) autorizou a consulta de crédito na Upestate? Responda SIM.`;
+  if (f.etapa === "enviando") return `Sobre a análise ${deQuem(f)}: ainda estou conferindo o envio; te aviso aqui.`;
+  if (f.etapa === "resultado") return `Sobre a análise ${deQuem(f)}: quer que eu abra a proposta de locação? Responda SIM ou NÃO.`;
   if (f.etapa === "revisao" || !f.campoAtual) return `${cab}mande RESUMO para ver o que já tenho, ou CANCELAR para parar.`;
   return `${cab}${pergunta(f, f.campoAtual)}`;
 }
@@ -625,7 +651,7 @@ const STATUS_SEM_CREDITO =
   /^(?:e\s+)?(?:como (?:esta|anda|ficou|ta|vai)|qual (?:e )?o (?:status|resultado)(?: d[ao])?|e)\s+(?:a\s+)?analise\s+(?:da|do|de)\s+(?!proposta|contrato|document|matricula|certid|imovel|minuta)\w+/;
 const APROVAR = /^(?:(?:pode|ja|entao|so)\s+)?aprov(?:a|e|ar)\b/;
 /** Dentro da ficha, a forma solta também vale: "aprova aí", "aprova ela". */
-const APROVAR_SOLTO = /^(?:(?:pode|ja|entao|so)\s+)?aprov(?:a|e|ar)\s+(?:ai|la|logo|isso|ela|ele|agora|direto)\b/;
+const APROVAR_SOLTO = /^(?:(?:pode|ja|entao|so)\s+)?aprov(?:a|e|ar)\s+(?:ai|la|logo|isso|ela|ele|agora|direto|mesmo)\b/;
 const EXCLUI = /\b(carta de credito|cartao de credito|consorcio|financiamento|credito imobiliario|credito habitacional)\b/;
 const NEGACAO = /\b(nao|nunca|jamais)\b/;
 const STATUS = /\b(como (?:esta|anda|ficou|ta|vai)|status|situacao|andamento|saiu|resultado|deu (?:certo|o que)|ja (?:foi|saiu|voltou|aprovou|tem)|foi aprovad\w*|aprovou|reprovou|recusad\w*|retorno)\b/;
@@ -774,6 +800,10 @@ function pedeCorrecao(texto: string): CampoCredito | null {
 const PERGUNTA_FORA = /\?\s*$|^(como|quando|onde|por que|porque|o que|qual|quais|quanto|quem|me (fala|diz|explica)|tem como)\b/;
 
 function cancelar(f: FluxoCredito): Resposta {
+  if (f.chave) {
+    return resposta(null, `Parei. Se o envio chegou à Upestate, o resultado aparece na tela: ${linkDoLead(f.leaseClientId)}`, "credito_cancelado_envio_incerto");
+  }
+  if (f.etapa === "resultado") return resposta(null, `Certo. A análise fica na tela do lead: ${linkDoLead(f.leaseClientId)}`, "credito_resultado_encerrado");
   return f.leaseClientId
     ? resposta(null, `Parei. A ficha ${deQuem(f)} fica salva como rascunho na tela.`, "credito_cancelado")
     : resposta(null, "Parei. Nada foi salvo.", "credito_cancelado");
@@ -823,12 +853,7 @@ async function revisar(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo,
   const r = await deps.acao("credit.preflight", { leaseClientId: f.leaseClientId });
   if (!r || r.status !== 200) return resposta({ ...f, etapa: "coleta", campoAtual: undefined, atualizadoEm: ctx.agora }, TEXTO_SEM_RESPOSTA, "credito_revisao_sem_resposta");
   const faltantes = lista(r.body.faltantes);
-  if (faltantes.length) {
-    const campo = faltantes.map(campoDoFaltante).find((c): c is CampoCredito => !!c);
-    const aviso = `${prefixo}Ainda falta: ${faltantes.join(", ").toLowerCase()}.\n`;
-    if (campo) return perguntar(f, campo, ctx, aviso);
-    return resposta({ ...f, etapa: "coleta", campoAtual: undefined, atualizadoEm: ctx.agora }, `${aviso}Complete pela tela: ${linkDoLead(f.leaseClientId)}`, "credito_faltante_desconhecido");
-  }
+  if (faltantes.length) return voltarAoFaltante(f, faltantes, ctx, prefixo);
   const c = abrirCofre(f, ctx);
   const lead = r.body.lead && typeof r.body.lead === "object" ? (r.body.lead as Record<string, unknown>) : {};
   const nome = f.leadNome ?? (typeof lead.nome === "string" ? lead.nome : "o pretendente");
@@ -843,6 +868,15 @@ async function revisar(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo,
     `${prefixo}Vou consultar ${nome}${c.cpf ? ` (CPF ${mascararCpf(c.cpf)})` : ""} na Upestate pela ${ctx.orgName ?? "sua imobiliária"}.` +
     (partes.length ? ` ${partes.join(", ")}.` : "") + `${custo} Responda *SIM* para enviar.`;
   return resposta({ ...f, etapa: "revisao", campoAtual: undefined, tentativas: 0, pausado: false, atualizadoEm: ctx.agora }, texto, "credito_revisao");
+}
+
+/** A ficha ainda tem faltantes (servidor): volta à coleta do primeiro. */
+function voltarAoFaltante(f: FluxoCredito, faltantes: string[], ctx: ContextoDoTurno, prefixo = ""): Resposta {
+  const g: FluxoCredito = { ...f, chave: undefined, decisao: undefined };
+  const campo = faltantes.map(campoDoFaltante).find((c): c is CampoCredito => !!c);
+  const aviso = `${prefixo}Ainda falta: ${faltantes.join(", ").toLowerCase()}.\n`;
+  if (campo) return perguntar(g, campo, ctx, aviso);
+  return resposta({ ...g, etapa: "coleta", campoAtual: undefined, atualizadoEm: ctx.agora }, `${aviso}Complete pela tela: ${linkDoLead(f.leaseClientId)}`, "credito_faltante_desconhecido");
 }
 
 /** O patch de `dataJson.credito` deste campo — só ele, nunca a ficha inteira. */
@@ -978,9 +1012,14 @@ export async function conduzirCredito(f: FluxoCredito, ctx: ContextoDoTurno, dep
     return resposta(g, `${r.reply}\n\n${continuacaoCredito(g)}`, `${r.evento}_na_ficha`);
   }
 
+  if (f.etapa === "enviando") return conferirEnvio(f, ctx, deps);
+  if (f.etapa === "resultado") return desdobrarResultado(f, ctx, deps);
+
   if (f.etapa === "atestacao") {
     if (confirmaEstrito(ctx.texto)) {
       const g: FluxoCredito = { ...f, consentimento: { texto: TEXTO_ATESTACAO, messageId: ctx.messageId } };
+      // Atestação refeita depois de um 412 (M3): a ficha já existe, volta ao resumo.
+      if (f.leaseClientId) return revisar(g, ctx, deps, "Obrigado. ");
       return perguntar(g, "cpf", ctx, "Obrigado. ");
     }
     if (confirmacao === "nao") return resposta(null, TEXTO_NAO_AUTORIZOU, "credito_sem_autorizacao");
@@ -998,10 +1037,13 @@ export async function conduzirCredito(f: FluxoCredito, ctx: ContextoDoTurno, dep
   if (correcao) return perguntar({ ...f, solidariosEncerrados: f.etapa === "revisao" ? true : f.solidariosEncerrados }, correcao, ctx);
 
   if (f.etapa === "revisao") {
-    // Mesmo SIM estrito da atestação: o M3 envia (e cobra) aqui.
+    // Mesmo SIM estrito da atestação: o M3 envia aqui (consulta sobre a pessoa — nunca em dobro).
     if (confirmaEstrito(ctx.texto)) {
-      // Envio (`credit.request`) é o M3.
-      return resposta(null, `Envio entra na próxima versão; a ficha está salva: ${linkDoLead(f.leaseClientId)}`, "credito_envio_m3");
+      // Sub-flag desligada: o comportamento do M2 (nada é enviado).
+      if (!envioLigado()) {
+        return resposta(null, `Envio entra na próxima versão; a ficha está salva: ${linkDoLead(f.leaseClientId)}`, "credito_envio_m3");
+      }
+      return enviar(f, ctx, deps);
     }
     if (confirmacao === "nao") return cancelar(f);
     return pausar(f);
@@ -1036,4 +1078,186 @@ function falhou(f: FluxoCredito, campo: CampoCredito, motivo: string, ctx: Conte
   const g: FluxoCredito = { ...f, tentativas: tentativas >= 3 ? 0 : tentativas, atualizadoEm: ctx.agora };
   const texto = tentativas >= 3 ? `${TEXTO_TENTATIVAS}\n${pergunta(f, campo)}` : `${motivo} ${pergunta(f, campo)}`;
   return resposta(g, texto, `credito_invalido_${campo}`);
+}
+
+// ─── Envio e resultado (M3) ──────────────────────────────────────────────
+
+const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
+const urlDoLead = (f: FluxoCredito, body?: Record<string, unknown>) => {
+  const rel = str(body?.leadLink);
+  return rel ? link(rel) : linkDoLead(f.leaseClientId);
+};
+
+// A justificativa da Upestate (texto livre do provedor) NUNCA é lida aqui:
+// o resultado é rótulo + link do lead; o detalhe mora na tela.
+
+const ROTULO_PADRAO: Record<string, string> = { aprovado: "Aprovado", revisao: "Em revisão", reprovado: "Reprovado", pendencia: "Pendência", erro: "Erro" };
+
+const DIA_MS = 24 * 3600_000;
+const EM_VOO = new Set(["pending", "submitting", "processing"]);
+
+function instante(v: unknown): number | null {
+  if (typeof v !== "string" && !(v instanceof Date)) return null;
+  const t = new Date(v).getTime();
+  return Number.isNaN(t) ? null : t;
+}
+const diaMes = (t: number) => new Date(t).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });
+
+/** A última análise do lead impede um envio novo? (recente, em voo ou reenvio arriscado) */
+function analiseQueBarra(ultima: Record<string, unknown>, agora: number): { rotulo: string; em: number | null } | null {
+  if (!Object.keys(ultima).length) return null;
+  const em = instante(ultima.createdAt);
+  const recente = em !== null && agora - em < DIA_MS;
+  const emVoo = EM_VOO.has(String(ultima.status ?? "")) || ultima.decision === "pendente";
+  if (!recente && !emVoo && ultima.reenvioArriscado !== true) return null;
+  return { rotulo: str(ultima.rotulo) ?? "em andamento", em };
+}
+
+/**
+ * Revisão + SIM estrito com `MAX_CREDITO_ENVIO`: preflight → status (análise
+ * recente/em voo barra) → `credit.request` com a `messageId` do SIM como
+ * chave. A análise não tem custo (12/10); o cuidado é não fazer consulta
+ * duplicada sobre a pessoa: sem resposta (timeout/5xx) a chave fica e o Max
+ * NUNCA reenvia sozinho.
+ */
+async function enviar(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  // Já houve um SIM para este resumo: nunca um segundo envio.
+  if (f.chave) return conferirEnvio(f, ctx, deps);
+  if (!f.leaseClientId) return perguntar(f, "cpf", ctx);
+  const naoEnviado = (evento: string) => resposta({ ...f, atualizadoEm: ctx.agora }, `${TEXTO_SEM_RESPOSTA} Nada foi enviado.`, evento);
+
+  const pre = await deps.acao("credit.preflight", { leaseClientId: f.leaseClientId });
+  if (!pre) return naoEnviado("credito_envio_preflight_sem_resposta");
+  if (pre.status === 403) return resposta(null, TEXTO_CREDITO_SEM_POLITICA, "credito_envio_preflight_403");
+  if (pre.status !== 200) return naoEnviado(`credito_envio_preflight_${pre.status}`);
+  if (pre.body.configurado !== true || pre.body.orgLigada !== true) {
+    return resposta(null, textoInativa(ctx.orgName ?? "sua imobiliária"), "credito_inativo");
+  }
+  const faltantes = lista(pre.body.faltantes);
+  if (faltantes.length) return voltarAoFaltante(f, faltantes, ctx);
+
+  // Análise recente (< 24 h), em voo ou com reenvio arriscado: não consulta a pessoa de novo.
+  const st = await deps.acao("credit.status", { leaseClientId: f.leaseClientId });
+  if (!st || (st.status !== 200 && st.status !== 404)) return naoEnviado("credito_envio_status_sem_resposta");
+  const barra = st.status === 200 ? analiseQueBarra(obj(st.body.ultima), ctx.agora) : null;
+  if (barra) {
+    const quando = barra.em !== null ? ` de ${diaMes(barra.em)}` : "";
+    return resposta(null, `Já existe uma análise ${deQuem(f)}${quando}: ${barra.rotulo}. Veja na tela: ${linkDoLead(f.leaseClientId)}`, "credito_envio_ja_existe");
+  }
+
+  const chave = { verbo: "credit.request", valor: ctx.messageId, em: ctx.agora };
+  const emCurso: FluxoCredito = { ...f, etapa: "enviando", chave, pausado: false, atualizadoEm: ctx.agora };
+  const args: Record<string, unknown> = { leaseClientId: f.leaseClientId, ...(f.consentimento ? { consentimento: f.consentimento } : {}) };
+  const r = await deps.acao("credit.request", args, chave.valor);
+  // Timeout/5xx: o servidor pode ter enviado. A chave fica e o Max nunca
+  // reenvia — o status (ou o aviso `credit_result`, se o pedido chegou) diz o desfecho.
+  if (!r) return resposta(emCurso, textoEnvioIncerto(linkDoLead(f.leaseClientId)), "credito_envio_incerto");
+  return traduzirEnvio(f, r, ctx);
+}
+
+function traduzirEnvio(f: FluxoCredito, r: { status: number; body: Record<string, unknown> }, ctx: ContextoDoTurno): Resposta {
+  const url = urlDoLead(f, r.body);
+  const erro = str(r.body.error);
+  switch (r.status) {
+    case 202: return resposta(null, TEXTO_ENVIO_PENDENTE, "credito_envio_202");
+    case 200: return resultado(f, r.body, ctx);
+    case 412: {
+      // Consentimento não registrado no servidor: refaz a atestação (o resumo volta depois do SIM).
+      const g: FluxoCredito = { ...f, etapa: "atestacao", consentimento: undefined, chave: undefined, campoAtual: undefined, tentativas: 0, atualizadoEm: ctx.agora };
+      return resposta(g, `A autorização não ficou registrada. ${textoAtestacao(f.leadNome)}`, "credito_envio_412");
+    }
+    case 422: {
+      if (erro === "cpf_divergente") return resposta(null, textoCpfDivergente(url), "credito_envio_cpf_divergente");
+      if (erro === "cpf_ausente") return resposta(null, `O cadastro deste cliente está sem CPF. Complete na tela: ${url}`, "credito_envio_cpf_ausente");
+      const faltantes = [...lista(r.body.faltantes), ...lista(r.body.missing)];
+      if (faltantes.length) return voltarAoFaltante(f, faltantes, ctx);
+      return resposta(null, `O sistema não aceitou o envio. Confira a ficha na tela: ${url}`, "credito_envio_422");
+    }
+    case 409:
+      if (r.body.reason === "provedor_desligado") return resposta(null, textoInativa(ctx.orgName ?? "sua imobiliária"), "credito_envio_desligado");
+      return resposta(null, TEXTO_EM_ANDAMENTO, "credito_envio_409");
+    case 402: return resposta(null, TEXTO_TETO, "credito_envio_402");
+    case 503: return resposta(null, TEXTO_INDISPONIVEL, "credito_envio_503");
+    case 403: return resposta(null, TEXTO_CREDITO_SEM_POLITICA, "credito_envio_403");
+    case 404: return resposta(null, `Não consegui abrir essa ficha pelo Max. Confira na tela: ${url}`, "credito_envio_404");
+    default: return resposta(null, `O sistema não aceitou o envio. Confira a ficha na tela: ${url}`, `credito_envio_${r.status}`);
+  }
+}
+
+/** 200 do envio: rótulo + link — nunca a justificativa (texto livre do provedor). */
+function resultado(f: FluxoCredito, body: Record<string, unknown>, ctx: ContextoDoTurno): Resposta {
+  const decisao = str(body.decision);
+  const url = urlDoLead(f, body);
+  if (!decisao || decisao === "pendente") return resposta(null, TEXTO_ENVIO_PENDENTE, "credito_resultado_pendente");
+  const rotulo = str(body.rotulo) ?? ROTULO_PADRAO[decisao] ?? decisao;
+  if (decisao === "aprovado") {
+    // A proposta só é oferecida a quem pode criá-la.
+    if (!ctx.policy.includes("proposal.create")) {
+      return resposta(null, `Aprovado na Upestate. Veja na tela do lead: ${url}`, "credito_resultado_aprovado_sem_proposta");
+    }
+    const g: FluxoCredito = { ...f, etapa: "resultado", decisao, chave: undefined, pausado: false, atualizadoEm: ctx.agora };
+    return resposta(g, `Aprovado na Upestate. Quer que eu abra a proposta de locação ${deQuem(f)}?`, "credito_resultado_aprovado");
+  }
+  if (decisao === "revisao" || decisao === "reprovado") {
+    return resposta(null, `${rotulo}. Para revisão humana, use a tela do lead: ${url}`, `credito_resultado_${decisao}`);
+  }
+  if (decisao === "pendencia") {
+    return resposta(null, `A Upestate pediu complemento da ficha (${rotulo}). Veja na tela do lead: ${url}`, "credito_resultado_pendencia");
+  }
+  return resposta(null, `A análise não pôde ser concluída (${rotulo}). Veja na tela do lead: ${url}`, `credito_resultado_${decisao}`);
+}
+
+/** "manda de novo", "reenvia", "sim" de novo… — com envio incerto, nada disso reenvia. */
+const PEDE_REENVIO = /\b(de novo|novamente|reenvi\w*|mand\w*|envi\w*|tent\w*|confer\w*|cheg\w*|saiu|foi)\b/;
+
+/**
+ * Envio sem resposta (chave guardada). SIM ou "manda de novo" só CONSULTAM
+ * (`credit.status`): nunca outro `credit.request`. Se o pedido chegou ao
+ * ImobPro, o aviso `credit_result` chega pelo `/notify`; se não chegou, nada
+ * avisa — por isso o texto manda olhar a tela do lead ou perguntar de novo.
+ */
+async function conferirEnvio(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const t = normalizar(ctx.texto);
+  if (lerConfirmacao(ctx.texto) !== "sim" && !confirmaEstrito(ctx.texto) && !PEDE_REENVIO.test(t)) {
+    // Outro assunto: o modelo responde; a chave fica (nenhum SIM futuro reenvia).
+    return { liberar: true, fluxo: { ...f, pausado: false }, evento: "credito_envio_incerto_liberado" };
+  }
+  const url = linkDoLead(f.leaseClientId);
+  const r = f.leaseClientId ? await deps.acao("credit.status", { leaseClientId: f.leaseClientId }) : null;
+  const ultima = r?.status === 200 ? obj(r.body.ultima) : {};
+  const rotulo = str(ultima.rotulo);
+  // Só vale a análise deste envio: criada depois do SIM (1 min de folga de relógio).
+  const criada = instante(ultima.createdAt);
+  const desteEnvio = criada !== null && criada >= (f.chave?.em ?? 0) - 60_000;
+  if (rotulo && desteEnvio) {
+    return resposta(null, `Não reenviei. A análise ${deQuem(f)} está como "${rotulo}": ${url}`, "credito_envio_conferido");
+  }
+  return resposta({ ...f, atualizadoEm: ctx.agora }, textoAindaNaoEncontrei(url), "credito_envio_sem_reenvio");
+}
+
+/** Resultado aprovado: SIM abre a proposta de locação com nome e aluguel; NÃO encerra. */
+async function desdobrarResultado(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const confirmacao = lerConfirmacao(ctx.texto);
+  const url = linkDoLead(f.leaseClientId);
+  if (confirmacao === "nao") return resposta(null, `Certo. A análise fica na tela do lead: ${url}`, "credito_resultado_encerrado");
+  // Outra conversa: o resultado já foi dito; o fluxo acaba e o modelo responde.
+  if (confirmacao !== "sim") return { liberar: true, fluxo: null, evento: "credito_resultado_liberado" };
+  if (!ctx.policy.includes("proposal.create")) {
+    return resposta(null, `Sua conta não tem permissão para criar proposta pelo Max. A análise fica na tela do lead: ${url}`, "credito_proposta_sem_politica");
+  }
+  // Nome do lead pelo servidor; aluguel do cofre. A proposta NÃO fica ligada ao
+  // lead (`proposal.create` não aceita `leaseClientId`) e o CPF não vai junto
+  // (não pode ir ao checkpoint): a coleta da proposta pede o CPF de novo.
+  const pre = f.leaseClientId ? await deps.acao("credit.preflight", { leaseClientId: f.leaseClientId }) : null;
+  const nome = (pre?.status === 200 ? str(obj(pre.body.lead).nome) : null) ?? f.leadNome;
+  const aluguel = abrirCofre(f, ctx).aluguel;
+  const { iniciarProposta } = await import("./fluxos");
+  const passo = await iniciarProposta("locacao", undefined, ctx.agora, deps, {
+    ...(nome ? { proponente: { nome } } : {}),
+    ...(aluguel ? { valor: aluguel } : {}),
+    finalidade: "residencial",
+  });
+  const cab = nome ? `Abrindo a proposta de locação de ${nome}.\n\n` : "";
+  return { ...passo, reply: `${cab}${passo.reply}`, evento: `credito_proposta_${passo.evento}` };
 }

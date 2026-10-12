@@ -278,7 +278,9 @@ const REGRA_CREDITO = `
 Análise de crédito:
 - Nunca invente nem antecipe resultado de análise de crédito (aprovado,
   recusado, chance de aprovar). Score não existe por aqui: não informe nem
-  estime score. A ficha e o status são conduzidos pelo sistema.`;
+  estime score. A ficha e o status são conduzidos pelo sistema.
+- Nunca diga que enviou, reenviou ou aprovou uma análise: o envio é do
+  sistema, só com o SIM no resumo da ficha, e quem decide é a Upestate.`;
 
 const SABE_CRIAR_FORM = `
 
