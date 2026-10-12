@@ -582,9 +582,39 @@ describe("saídas e travas", () => {
     ]);
   });
 
+  it("faltandoNaProposta({ temLead: true }) pula nome e valor — vêm do proposal.create — mas endereço/telefone seguem exigidos", () => {
+    expect(F.faltandoNaProposta({}, { temLead: true })).toEqual(["endereço do imóvel", "telefone do comprador, com DDD"]);
+    expect(F.faltandoNaProposta({ imovel: { endereco: "Rua X, 1" }, valor: 1000, proponente: { telefone: "11999990000" } }, { temLead: true })).toEqual([]);
+    // Sem o flag, o comportamento de hoje continua intacto.
+    expect(F.faltandoNaProposta({ imovel: { endereco: "Rua X, 1" }, valor: 1000, proponente: { telefone: "11999990000" } })).toEqual([
+      "nome completo do comprador",
+    ]);
+  });
+
   it("locação usa o schema de locação e chama o valor de aluguel", () => {
     expect(F.argsDaProposta({ natureza: "locacao", dados: DADOS_OK }).schemaType).toBe("locacao_residencial_v1");
     expect(F.resumoDaProposta({ natureza: "locacao", dados: DADOS_OK })).toContain("Aluguel");
+  });
+
+  it("leaseClientId: vai no args do create, nunca na atualização, e o resumo mostra 'dados do lead analisado' sem CPF/telefone", () => {
+    const f = { natureza: "locacao" as const, dados: DADOS_OK, leaseClientId: "lc1" };
+    expect(F.argsDaProposta(f).leaseClientId).toBe("lc1");
+    expect(F.argsDaProposta(f, { atualizacao: true }).leaseClientId).toBeUndefined();
+    expect(F.argsDaProposta({ ...f, leaseClientId: undefined }).leaseClientId).toBeUndefined();
+
+    const resumo = F.resumoDaProposta(f);
+    expect(resumo).toContain("Inquilino: Letícia Gonçalves Nogueira (dados do lead analisado)");
+    expect(resumo).not.toContain("11999990000");
+    expect(resumo).not.toContain("12345678909");
+  });
+
+  it("iniciarProposta com leaseClientId: campos iniciais não pedem Inquilino/CPF nem valor do aluguel", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 200, body: { modelo: true, assinatura: true } }) });
+    const p = await F.iniciarProposta("locacao", undefined, agora, d, undefined, "lc1");
+    expect(p.fluxo).toMatchObject({ kind: "proposta", etapa: "coleta", leaseClientId: "lc1" });
+    expect(p.reply).not.toContain("CPF");
+    expect(p.reply).not.toContain("Valor do aluguel");
+    expect(p.reply).toContain("Telefone");
   });
 });
 
@@ -693,6 +723,66 @@ describe("recusa do servidor", () => {
     const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "venda", dados: DADOS_OK, atualizadoEm: agora };
     const p = await F.conduzirFluxo(f, ctx("sim"), d);
     expect(p.reply).not.toContain("dados_invalidos");
+  });
+
+  it("403 SEM leaseClientId segue o caminho de hoje: sem permissão, fluxo encerra", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 403, body: {} }) });
+    const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "venda", dados: DADOS_OK, atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("sim"), d);
+    expect(p.reply).toBe("Sua conta não tem permissão para isso pelo Max. Fale com o administrador da imobiliária.");
+    expect(p.fluxo).toBeNull();
+  });
+});
+
+describe("proposta ligada ao lead do crédito (M3): leaseClientId", () => {
+  it.each([403, 404, 400])(
+    "create recusa o vínculo (%i) COM leaseClientId: oferece abrir sem vínculo, nunca afirma criação",
+    async (status) => {
+      const d = deps({ acao: vi.fn().mockResolvedValue({ status, body: {} }) });
+      const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "locacao", dados: DADOS_OK, leaseClientId: "lc1", atualizadoEm: agora };
+      const p = await F.conduzirFluxo(f, ctx("sim", { messageId: "sim-1" }), d);
+      expect(p.reply).toBe("Não consegui ligar a proposta ao lead agora. Quer abrir a proposta sem o vínculo? (SIM)");
+      expect(p.evento).not.toContain("criada");
+      expect(p.fluxo).toMatchObject({ kind: "proposta", etapa: "revisao", ofertaSemVinculo: true, leaseClientId: "lc1" });
+    }
+  );
+
+  it("NÃO à oferta: encerra sem abrir a proposta (e sem reusar a chave do SIM anterior)", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 404, body: {} }) });
+    const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "locacao", dados: DADOS_OK, leaseClientId: "lc1", atualizadoEm: agora };
+    const p1 = await F.conduzirFluxo(f, ctx("sim", { messageId: "sim-1" }), d);
+    const p2 = await F.conduzirFluxo(p1.fluxo!, ctx("não", { messageId: "nao-1" }), d);
+    expect(p2.fluxo).toBeNull();
+    expect(d.acao).toHaveBeenCalledTimes(1);
+  });
+
+  it("SIM à oferta, com tudo já conhecido: vai direto ao resumo normal (sem o id, sem a frase do lead)", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 404, body: {} }) });
+    const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "locacao", dados: DADOS_OK, leaseClientId: "lc1", atualizadoEm: agora };
+    const p1 = await F.conduzirFluxo(f, ctx("sim", { messageId: "sim-1" }), d);
+    const p2 = await F.conduzirFluxo(p1.fluxo!, ctx("sim", { messageId: "sim-2" }), d);
+    expect(p2.fluxo).toMatchObject({ kind: "proposta", etapa: "revisao", leaseClientId: undefined, ofertaSemVinculo: undefined });
+    expect(p2.reply).not.toContain("dados do lead analisado");
+  });
+
+  it("SIM à oferta, com dado faltando: volta à coleta pedindo nome/telefone/CPF como antes desta feature", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 400, body: {} }) });
+    const semNome: import("../fluxos").DadosDaProposta = { imovel: { endereco: "Rua Senador Godoi, 606" }, proponente: { telefone: "11999990000" } };
+    const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "locacao", dados: semNome, leaseClientId: "lc1", atualizadoEm: agora };
+    const p1 = await F.conduzirFluxo(f, ctx("sim", { messageId: "sim-1" }), d);
+    const p2 = await F.conduzirFluxo(p1.fluxo!, ctx("sim", { messageId: "sim-2" }), d);
+    expect(p2.fluxo).toMatchObject({ kind: "proposta", etapa: "coleta", leaseClientId: undefined });
+    expect(p2.reply).toContain("CPF");
+    expect(p2.reply).toContain("nome completo do comprador");
+  });
+
+  it("create aceita o leaseClientId (201): rascunho normal, sem oferta nenhuma", async () => {
+    const acao = vi.fn().mockResolvedValue({ status: 201, body: { proposal: { id: "p1", codigo: "P-1" } } });
+    const d = deps({ acao });
+    const f: Fluxo = { kind: "proposta", etapa: "revisao", natureza: "locacao", dados: DADOS_OK, leaseClientId: "lc1", atualizadoEm: agora };
+    const p = await F.conduzirFluxo(f, ctx("sim", { messageId: "sim-1" }), d);
+    expect(acao).toHaveBeenCalledWith("proposal.create", expect.objectContaining({ leaseClientId: "lc1" }), "sim-1");
+    expect(p.fluxo).toMatchObject({ etapa: "ajustes", propostaId: "p1", leaseClientId: "lc1" });
   });
 });
 

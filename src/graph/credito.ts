@@ -1246,9 +1246,10 @@ async function desdobrarResultado(f: FluxoCredito, ctx: ContextoDoTurno, deps: D
   if (!ctx.policy.includes("proposal.create")) {
     return resposta(null, `Sua conta não tem permissão para criar proposta pelo Max. A análise fica na tela do lead: ${url}`, "credito_proposta_sem_politica");
   }
-  // Nome do lead pelo servidor; aluguel do cofre. A proposta NÃO fica ligada ao
-  // lead (`proposal.create` não aceita `leaseClientId`) e o CPF não vai junto
-  // (não pode ir ao checkpoint): a coleta da proposta pede o CPF de novo.
+  // Nome pro cabeçalho e aluguel do cofre são só conveniência: quem garante os
+  // dois (e o CPF, que o Max nunca manda) é o `proposal.create` com
+  // `leaseClientId` (contractmaker #1580) — por isso a proposta FICA ligada ao
+  // lead e a coleta não pede nome, CPF nem aluguel de novo (ver `faltandoNaProposta`).
   const pre = f.leaseClientId ? await deps.acao("credit.preflight", { leaseClientId: f.leaseClientId }) : null;
   const nome = (pre?.status === 200 ? str(obj(pre.body.lead).nome) : null) ?? f.leadNome;
   const aluguel = abrirCofre(f, ctx).aluguel;
@@ -1257,7 +1258,7 @@ async function desdobrarResultado(f: FluxoCredito, ctx: ContextoDoTurno, deps: D
     ...(nome ? { proponente: { nome } } : {}),
     ...(aluguel ? { valor: aluguel } : {}),
     finalidade: "residencial",
-  });
+  }, f.leaseClientId);
   const cab = nome ? `Abrindo a proposta de locação de ${nome}.\n\n` : "";
   return { ...passo, reply: `${cab}${passo.reply}`, evento: `credito_proposta_${passo.evento}` };
 }
