@@ -29,11 +29,6 @@ vi.mock("../meta", async (orig) => ({
   sendTemplate: vi.fn().mockResolvedValue({ messageId: "wamid.TPL" }),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
-vi.mock("../zapi", async (orig) => ({
-  ...(await orig<typeof import("../zapi")>()),
-  sendText: vi.fn().mockResolvedValue({ messageId: "ZMID" }),
-  connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
-}));
 
 const { enqueue, dispatchDue, botoesDaLinha, marcaParametroAusente } = await import("../outbox");
 const { interceptar } = await import("../aceite");

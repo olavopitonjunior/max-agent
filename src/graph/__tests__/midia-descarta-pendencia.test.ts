@@ -20,8 +20,8 @@ vi.mock("@/lib/cm", async (orig) => ({
   transcribeMedia: vi.fn().mockResolvedValue(null),
   criarFormularioVenda: vi.fn(),
 }));
-vi.mock("@/lib/zapi", async (orig) => ({
-  ...(await orig<typeof import("@/lib/zapi")>()),
+vi.mock("@/lib/transport", async (orig) => ({
+  ...(await orig<typeof import("@/lib/transport")>()),
   downloadMedia: vi.fn().mockResolvedValue({ data: Buffer.from("x"), contentType: "audio/ogg" }),
 }));
 vi.mock("@/lib/llm", () => ({ complete: vi.fn(), DEFAULT_MODEL: "openai/gpt-5.4-nano" }));
