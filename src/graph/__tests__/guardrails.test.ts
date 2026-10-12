@@ -294,6 +294,32 @@ describe("deny-list de assunto", () => {
     expect(r.reply).toContain("indisponível");
     expect(r.halt).toBe("desligado");
   });
+
+  /**
+   * 403 ORG_SUSPENSA do ImobPro: fato estruturado, frase fixa, sem modelo —
+   * e não "perfil indisponível, seguindo" (que gastaria o modelo para um turn
+   * em que toda tool vai falhar).
+   */
+  it("org suspensa: frase fixa, sem modelo, descarta pendência", async () => {
+    const { OrgSuspensaError, TEXTO_ORG_SUSPENSA } = await import("@/lib/org-suspensa");
+    profile.mockRejectedValue(new OrgSuspensaError("/api/agents/profile"));
+
+    const r = await run("quais meus negócios?");
+
+    expect(r.reply).toBe(TEXTO_ORG_SUSPENSA);
+    expect(r.halt).toBe("org_suspensa");
+    expect(r.pendingAction ?? null).toBeNull();
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("perfil com erro genérico segue como antes (não vira org suspensa)", async () => {
+    profile.mockRejectedValue(new Error("ImobPro /api/agents/profile 403: nope"));
+
+    const r = await run("oi");
+
+    expect(r.halt).not.toBe("org_suspensa");
+    expect(llm).toHaveBeenCalled();
+  });
 });
 
 // ─── 2. Sanitizador ─────────────────────────────────────────────────────────

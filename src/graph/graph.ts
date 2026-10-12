@@ -106,6 +106,7 @@ import {
   type Fluxo,
 } from "./fluxos";
 import { executarAcao, type VerboDeAcao } from "@/lib/acao";
+import { OrgSuspensaError, TEXTO_ORG_SUSPENSA } from "@/lib/org-suspensa";
 import { subjectDe } from "@/lib/scope";
 import { chaveDePolitica } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
@@ -579,12 +580,17 @@ export async function seedNotification(
  */
 async function gate(state: MaxStateType): Promise<MaxUpdate> {
   let perfilFalhou = false;
+  let orgSuspensa = false;
   // Perfil e chave de papel são duas idas ao ImobPro que não dependem uma da
   // outra: em paralelo, o gate custa a mais lenta, não a soma. A chave é lida
   // mesmo quando o kill switch ou a deny-list vão cortar o turn — é uma
   // leitura, e o halt é a exceção, não o caso que se otimiza.
   const [profile, chave] = await Promise.all([
     fetchProfile(state.identity.orgId).catch((err) => {
+      if (err instanceof OrgSuspensaError) {
+        orgSuspensa = true;
+        return null;
+      }
       console.warn("[graph] perfil indisponível, seguindo:", err?.message ?? err);
       perfilFalhou = true;
       return null;
@@ -611,6 +617,23 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
    * agente desligado tem que descartar, nunca guardar escrita para executar
    * quando voltar.
    */
+  /**
+   * Org suspensa no ImobPro (403 ORG_SUSPENSA): fato da org, não falha
+   * transitória. Frase fixa, sem modelo e sem tentar de novo — toda tool deste
+   * turn falharia igual. Antes do kill switch: é o estado mais forte. Descarta
+   * pendência pelo mesmo motivo do `halt` do kill switch (abaixo).
+   */
+  if (orgSuspensa) {
+    console.warn(`[gate] org suspensa no ImobPro: ${state.identity.orgId}`);
+    return {
+      halt: "org_suspensa",
+      pendingAction: null,
+      restoDaResposta: null,
+      fluxo: rebaixarFluxo(state.fluxo),
+      reply: TEXTO_ORG_SUSPENSA,
+    };
+  }
+
   if (profile && !profile.enabled) {
     return {
       halt: "desligado",
@@ -1120,6 +1143,11 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
     if (err instanceof ModuloDesligadoError) {
       console.warn(`[confirm] ${err.message} em ${state.identity.orgId}`);
       return responder(textoModuloDesligado(pending.args), "modulo_desligado");
+    }
+    // Org suspensa entre o gate e o "sim": mesmo fato, mesma frase fixa.
+    if (err instanceof OrgSuspensaError) {
+      console.warn(`[confirm] ${err.message} em ${state.identity.orgId}`);
+      return responder(TEXTO_ORG_SUSPENSA, "org_suspensa");
     }
     console.error(
       "[confirm] criação falhou:",
