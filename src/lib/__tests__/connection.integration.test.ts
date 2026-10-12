@@ -96,6 +96,7 @@ d("observeConnection", () => {
       at: expect.any(String),
       represadas: 0,
       motivo: "assinatura",
+      canal: "meta",
     });
   });
 
@@ -127,13 +128,6 @@ d("observeConnection", () => {
     } finally {
       vi.unstubAllEnvs();
     }
-  });
-
-  it("provedor Z-API (ausente): nenhuma chave `canal` no payload", async () => {
-    await observeConnection({ connected: true, fonte: "cron" });
-    await observeConnection({ connected: false, fonte: "cron", motivo: "credencial" });
-    await observeConnection({ connected: false, fonte: "cron", motivo: "credencial" });
-    expect(alerta.mock.calls[0][0]).not.toHaveProperty("canal");
   });
 
   /**

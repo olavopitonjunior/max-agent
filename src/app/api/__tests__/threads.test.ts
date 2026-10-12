@@ -26,7 +26,7 @@ const SECRET = "s-threads";
 const ORG_A = "org-threads-a";
 const ORG_B = "org-threads-b";
 const ORGS = [ORG_A, ORG_B];
-// Formato de gravação (sem "+"), o mesmo de `conversationKey`/`toZapiPhone`.
+// Formato de gravação (sem "+"), o mesmo de `conversationKey`/`toE164NoPlus`.
 const TEL_AMBAS = "5511987650001";
 const TEL_SO_A = "5511987650002";
 const TEL_SO_B = "5511987650003";

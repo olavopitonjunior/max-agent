@@ -1,14 +1,13 @@
 import { query } from "./db";
 import { contarVencidas } from "./outbox";
 import { reportAlert } from "./cm";
-import { provider } from "./transport";
 import type { MotivoInoperante } from "./transport/erro";
 
 /**
  * Por que a queda foi observada. Vai no e-mail, porque muda o CONSELHO:
  *
  *  · ausente — sessão do WhatsApp caiu: reparear por QR;
- *  · `assinatura` / `credencial` — a Z-API respondeu que não vai enviar
+ *  · `assinatura` / `credencial` — o canal respondeu que não vai enviar
  *    (ver `MotivoInoperante`): cartão ou token, nunca QR;
  *  · `inacessivel` — o cron não CONSEGUE perguntar há N passadas seguidas
  *    (timeout, 5xx, formato desconhecido). Não sabemos se está caída; sabemos
@@ -17,7 +16,8 @@ import type { MotivoInoperante } from "./transport/erro";
 export type MotivoQueda = MotivoInoperante | "inacessivel";
 
 /**
- * Transição de conexão da Z-API → alerta por e-mail (F7).
+ * Transição de conexão do canal de WhatsApp (hoje a Cloud API da Meta;
+ * era a Z-API até a migração de 28/09) → alerta por e-mail (F7).
  *
  * ── O problema ────────────────────────────────────────────────────────────
  *
@@ -36,9 +36,12 @@ export type MotivoQueda = MotivoInoperante | "inacessivel";
  *
  * ── Duas fontes, uma máquina ──────────────────────────────────────────────
  *
- *  · **push** — os callbacks `connected`/`disconnected` da Z-API, apontados
- *    para `/api/zapi-connection/<secret>`. Age na PRIMEIRA discordância: o
- *    callback é o evento, não uma amostra dele. Latência de segundos.
+ *  · **push** — legado da Z-API: os callbacks `connected`/`disconnected`
+ *    dela apontavam para `/api/zapi-connection/<secret>`, removida com o
+ *    resto do cliente. Sem consumidor hoje — a Meta notifica queda pelo
+ *    próprio envio, que já alimenta a fonte `envio` abaixo. Age na PRIMEIRA
+ *    discordância: o callback é o evento, não uma amostra dele. Latência de
+ *    segundos.
  *  · **cron** — o do outbox, a cada minuto. Não é a fonte do alerta; é o
  *    detector de callback PERDIDO, porque entrega pela rede falha e um alerta
  *    que depende só dela some justo no dia em que precisa. Exige DUAS passadas
@@ -84,8 +87,8 @@ const CRON_CONFIRMACOES = 2;
  * Passadas seguidas SEM CONSEGUIR PERGUNTAR antes de tratar como queda.
  *
  * Muito mais que as duas de cima, de propósito: uma leitura definitiva
- * (`connected:false` num 200, ou um 400 de assinatura) é a Z-API AFIRMANDO
- * algo; um timeout ou um 5xx é ela não dizendo nada — e um blip do endpoint
+ * (`connected:false` num 200, ou um erro de inoperância) é o canal AFIRMANDO
+ * algo; um timeout ou um 5xx é ele não dizendo nada — e um blip do endpoint
  * de status não pode virar e-mail de queda. Quinze minutos cego, sim: é
  * tempo bastante para não ser blip, e curto bastante para alguém agir antes
  * de a fila envelhecer.
@@ -101,11 +104,12 @@ const CRON_CONFIRMACOES = 2;
 const CRON_CONFIRMACOES_INACESSIVEL = 15;
 
 /**
- *  · `push` — callback `connected`/`disconnected` da Z-API. É o evento.
+ *  · `push` — legado da Z-API (callback `connected`/`disconnected`); sem
+ *    consumidor hoje, ver o doc de `ObserveResult`/`observeConnection` acima.
  *  · `cron` — amostra de minuto em minuto; exige confirmação.
- *  · `envio` — o `send-text` RECUSOU com 400 de assinatura ou 401/403. Também
- *    é evento, não amostra: a Z-API acabou de dizer que não envia. Age na
- *    primeira discordância, como o push. Existe para o caso em que o
+ *  · `envio` — o envio RECUSOU por inoperância (assinatura ou credencial).
+ *    Também é evento, não amostra: o canal acabou de dizer que não envia.
+ *    Age na primeira discordância, como o push. Existe para o caso em que o
  *    `/status` está defasado (cobrança caiu entre a checagem e o envio) — sem
  *    isto o outbox releria "conectada" a cada minuto e nunca transitaria.
  */
@@ -336,8 +340,8 @@ export async function observeConnection(params: {
        *
        * E, se a instância continua caída por uma causa DIFERENTE da gravada
        * quando a gravada era "inacessível", atualiza o motivo e REARMA o
-       * alerta: é o caso "cego por 15 min" → "a Z-API voltou a responder, e
-       * respondeu 400 de assinatura". A causa acionável chegou DEPOIS do
+       * alerta: é o caso "cego por 15 min" → "o canal voltou a responder, e
+       * respondeu com inoperância de assinatura". A causa acionável chegou DEPOIS do
        * e-mail, e o operador precisa dela — sai um segundo 🔴, sujeito ao
        * debounce de 1h como qualquer queda. Só nesse sentido: de uma causa
        * definitiva para outra não se rearma (é a mesma queda, com o mesmo
@@ -404,19 +408,12 @@ export async function observeConnection(params: {
  */
 /** Texto de log para um estado observado. */
 /**
- * `{ canal: "meta" }` quando o Max fala pela Cloud API; nada na Z-API. Lido na
- * hora do ENVIO do alerta: numa troca de provedor no meio de um incidente, o
- * conselho segue o canal que está valendo agora, que é onde se age.
- *
- * Sem lançar: um `WHATSAPP_PROVIDER` inválido já derruba o despacho por outro
- * caminho, e o alerta é justamente o que tem que sair nessa hora.
+ * O canal do alerta. Desde a remoção da Z-API é sempre a Cloud API da Meta;
+ * o campo segue no payload porque o receptor do ImobPro escolhe o texto do
+ * e-mail por ele (sem `canal`, ele ainda falaria de QR code).
  */
-function canalDoAlerta(): { canal?: "meta" } {
-  try {
-    return provider() === "meta" ? { canal: "meta" } : {};
-  } catch {
-    return {};
-  }
+function canalDoAlerta(): { canal: "meta" } {
+  return { canal: "meta" };
 }
 
 function descrever(connected: boolean, motivo: MotivoQueda | undefined): string {

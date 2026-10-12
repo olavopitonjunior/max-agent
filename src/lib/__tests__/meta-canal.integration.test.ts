@@ -20,12 +20,6 @@ vi.mock("../meta", async (orig) => ({
   sendTemplate: vi.fn().mockResolvedValue({ messageId: "wamid.TPL" }),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
-vi.mock("../zapi", async (orig) => ({
-  ...(await orig<typeof import("../zapi")>()),
-  sendText: vi.fn().mockResolvedValue({ messageId: "ZMID" }),
-  connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
-}));
-
 const {
   enqueue,
   dispatchDue,
@@ -41,12 +35,10 @@ const { janelaAberta } = await import("../janela24h");
 const { applyFalhaDeEnvio, applyStatusCallback } = await import("../delivery");
 const { query } = await import("../db");
 const meta = await import("../meta");
-const zapi = await import("../zapi");
 
 const PHONE = "5511900001111";
 const metaSend = meta.sendText as unknown as ReturnType<typeof vi.fn>;
 const metaSendTemplate = meta.sendTemplate as unknown as ReturnType<typeof vi.fn>;
-const zapiSend = zapi.sendText as unknown as ReturnType<typeof vi.fn>;
 
 /** Template da linha padrão (`kind: form_completed`). */
 const TPL = "max_formulario_concluido";
@@ -96,7 +88,6 @@ d("canal Meta (Postgres real)", () => {
     vi.clearAllMocks();
     metaSend.mockResolvedValue({ messageId: "wamid.MID" });
     metaSendTemplate.mockResolvedValue({ messageId: "wamid.TPL" });
-    zapiSend.mockResolvedValue({ messageId: "ZMID" });
     vi.stubEnv("WHATSAPP_PROVIDER", "meta");
     await query(`DELETE FROM outbox WHERE org_id = 'org-meta'`);
     await query(`DELETE FROM conversation_window WHERE phone = $1`, [PHONE]);
@@ -402,7 +393,6 @@ d("canal Meta (Postgres real)", () => {
       expect(totals.sent).toBe(1);
       expect(metaSend).toHaveBeenCalledTimes(1);
       expect(metaSendTemplate).not.toHaveBeenCalled();
-      expect(zapiSend).not.toHaveBeenCalled();
       const l = await linha("k-aberta");
       expect(l.status).toBe("sent");
       expect(l.provider_message_id).toBe("wamid.MID");
@@ -417,16 +407,6 @@ d("canal Meta (Postgres real)", () => {
       const totals = await dispatchDue();
       expect(totals.held).toBe(1);
       expect(metaSend).not.toHaveBeenCalled();
-    });
-
-    /** A Z-API não tem janela: a regra não pode vazar para o canal antigo. */
-    it("provedor Z-API ignora a janela", async () => {
-      vi.stubEnv("WHATSAPP_PROVIDER", "");
-      await linhaVencida("k-zapi");
-      const totals = await dispatchDue();
-      expect(totals.held).toBe(0);
-      expect(totals.sent).toBe(1);
-      expect(zapiSend).toHaveBeenCalledTimes(1);
     });
   });
 
