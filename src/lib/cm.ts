@@ -6,6 +6,7 @@ import type { MaxPolicy } from "@/graph/policy";
 import type { MotivoQueda } from "./connection";
 import { query } from "./db";
 import { sign } from "./hmac";
+import { OrgSuspensaError, ehOrgSuspensa } from "./org-suspensa";
 import {
   fetchWithTimeout,
   imobproBase,
@@ -33,7 +34,9 @@ async function get<T>(path: string, token: string): Promise<T | null> {
   );
   if (res.status === 404) return null;
   if (!res.ok) {
-    throw new Error(`ImobPro ${path} ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    const corpo = await res.text();
+    if (ehOrgSuspensa(res.status, corpo)) throw new OrgSuspensaError(path);
+    throw new Error(`ImobPro ${path} ${res.status}: ${corpo.slice(0, 300)}`);
   }
   return (await res.json()) as T;
 }
@@ -344,9 +347,9 @@ export async function criarFormularioVenda(
   );
 
   if (!res.ok) {
-    throw new Error(
-      `ImobPro /api/forms ${res.status}: ${(await res.text()).slice(0, 300)}`
-    );
+    const corpo = await res.text();
+    if (ehOrgSuspensa(res.status, corpo)) throw new OrgSuspensaError("/api/forms");
+    throw new Error(`ImobPro /api/forms ${res.status}: ${corpo.slice(0, 300)}`);
   }
 
   const data = (await res.json()) as Partial<FormularioCriado>;
@@ -419,6 +422,7 @@ export async function criarFormularioLocacao(
 
   if (!res.ok) {
     const corpo = await res.text();
+    if (ehOrgSuspensa(res.status, corpo)) throw new OrgSuspensaError("/api/locacao/forms");
     if (ehModuloDesligado(res.status, corpo)) {
       throw new ModuloDesligadoError("/api/locacao/forms");
     }
@@ -501,6 +505,7 @@ export async function criarRascunhoProposta(
 
   if (!res.ok) {
     const corpo = await res.text();
+    if (ehOrgSuspensa(res.status, corpo)) throw new OrgSuspensaError("/api/proposals");
     if (ehModuloDesligado(res.status, corpo)) {
       throw new ModuloDesligadoError("/api/proposals");
     }
