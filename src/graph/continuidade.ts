@@ -156,7 +156,13 @@ export async function conduzirContinuidade(f: FluxoContinuidade, ctx: ContextoDo
     if (pedeLista(ctx.texto) || (pedeBusca(ctx.texto) && termoDeBusca(ctx.texto))) return iniciarContinuidade(ctx, deps, { converter: f.converter });
     return { liberar: true, fluxo: null, evento: "continuidade_outro_assunto" };
   }
-  if (f.etapa === "concluida") return resposta(f, f.resultado ?? "Essa operação já foi concluída.");
+  // Concluída = terminal (guardada só para reaproveitar o link do negócio). Só repete o
+  // resultado se a pessoa PEDIR a continuidade de novo; "sim"/"ok"/qualquer outra coisa
+  // é do assunto mais recente (o modelo pode ter acabado de perguntar algo — prod 13/10).
+  if (f.etapa === "concluida") {
+    if (pedeContinuidade(ctx.texto)) return resposta(f, f.resultado ?? "Essa operação já foi concluída.");
+    return { liberar: true, fluxo: f, evento: "continuidade_concluida_liberada" };
+  }
   if (f.etapa === "resumo") return resumo({ ...f, atualizadoEm: ctx.agora });
   if (lerConfirmacao(ctx.texto) !== "sim") return resumo({ ...f, atualizadoEm: ctx.agora });
   if (!f.alvo) return resposta(null, "Preciso identificar a proposta antes de continuar. Informe o código.");
