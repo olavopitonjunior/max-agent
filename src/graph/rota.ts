@@ -13,11 +13,16 @@ import type { ToolLogEntry } from "@/lib/turnlog";
  *   gate → continuar → conduzir → confirm → retrieve/answer(/tools) → compose
  *
  * Valores:
- *   halt            — kill switch ou deny-list (o `gate` cortou)
+ *   halt            — o `gate` cortou (kill switch, deny-list, org suspensa,
+ *                     anexo que não lê…); o motivo exato está em `error`
  *   continuar       — "quer ver o resto?"
  *   fluxo:<kind>    — fluxo determinístico (consulta, gestao, proposta, credito…)
  *   confirmacao     — o SIM/NÃO de uma escrita pendente
  *   modelo          — o LLM respondeu (com ou sem tools: `tools_json` diz quais)
+ *   gate            — não deveria ocorrer: sem `halt` o `gate` sempre segue.
+ *                     Aparecer no painel é sinal de caminho novo no grafo.
+ *
+ * NULL = turn que lançou exceção (ver `comRastro`) ou linha anterior a isto.
  */
 export function rotaDoTurn(
   timings: { no: string }[],
