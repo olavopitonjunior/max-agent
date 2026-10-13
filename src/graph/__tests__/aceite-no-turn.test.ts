@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 /**
  * O aceite roda ANTES da identidade e do modelo. Sem esta trava, tirar a
@@ -54,6 +54,9 @@ describe("runTurn × aceite", () => {
     vi.clearAllMocks();
     repassa.mockResolvedValue(null);
   });
+  afterEach(() => {
+    identidade.mockResolvedValue({ kind: "unknown", alreadyGreeted: true });
+  });
 
   it("interceptado: responde o que o aceite devolveu sem identidade nem modelo", async () => {
     intercepta.mockResolvedValue({ reply: "*Mensagem da X*\n\noi", orgId: "org1", marca: "aceite_entregue" });
@@ -104,11 +107,17 @@ describe("runTurn × aceite", () => {
     expect(r1.reply).toContain("primeiro acesso");
     expect(r1.reply).not.toContain("Não reconheci");
 
-    avisou.mockResolvedValueOnce(true);
-    const r2 = await runTurn({ ...MSG, messageId: "wamid.T3", text: "oi", buttonPayload: null });
-    expect(r2.reply).toBeNull();
     expect(repassa).not.toHaveBeenCalled();
+
+    // Insistiu depois do aviso: vai para o repasse; sem repasse, silêncio.
+    avisou.mockResolvedValue(true);
+    repassa.mockResolvedValueOnce({ reply: "Passei sua mensagem para a nossa equipe.", marca: "desconhecido_repassado" });
+    const r2 = await runTurn({ ...MSG, messageId: "wamid.T3", text: "meu acesso não funciona", buttonPayload: null });
+    expect(r2.reply).toBe("Passei sua mensagem para a nossa equipe.");
+    const r3 = await runTurn({ ...MSG, messageId: "wamid.T4", text: "oi", buttonPayload: null });
+    expect(r3.reply).toBeNull();
+    expect(repassa).toHaveBeenCalledTimes(2);
     expect(complete).not.toHaveBeenCalled();
-    identidade.mockResolvedValue({ kind: "unknown", alreadyGreeted: true });
+    avisou.mockResolvedValue(false);
   });
 });

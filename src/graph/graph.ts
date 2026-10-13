@@ -2141,7 +2141,14 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     if (identity.primeiroAcesso) {
       const { orgId } = identity.primeiroAcesso;
       const jaAvisou = await avisouPrimeiroAcessoHoje(inbound.fromPhone).catch(() => true);
-      if (jaAvisou) return sair(null, { orgId, error: "primeiro_acesso_silenciado" });
+      if (jaAvisou) {
+        // Insistiu depois do aviso: mesmo repasse (e mesmos tetos) do número
+        // desconhecido — a equipe fica sabendo de convite com telefone errado
+        // ou revogado, em vez de o número cair em silêncio.
+        const repasse = await repassarDesconhecido(inbound).catch(() => null);
+        if (repasse) return sair(repasse.reply, { orgId, error: repasse.marca });
+        return sair(null, { orgId, error: "primeiro_acesso_silenciado" });
+      }
       const org = await orgById(orgId).catch(() => null);
       return sair(
         `Oi! Sou o Max${org ? `, da ${org.orgName}` : ""}. Para eu te atender por aqui, ` +

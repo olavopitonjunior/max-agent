@@ -98,7 +98,10 @@ export type Identity =
  * negativo não é cacheado (a próxima mensagem re-varre, e o primeiro acesso
  * vale na hora) e a resposta diz o que falta.
  */
-const PRIMEIRO_ACESSO_DIAS = 30;
+// 7 dias, não mais: a cada mensagem o convidado re-varre todas as orgs (sem
+// negativo no cache), e boas-vindas velhas — convite revogado, telefone
+// digitado errado — não podem prender o número no aviso por um mês.
+const PRIMEIRO_ACESSO_DIAS = 7;
 
 async function boasVindasEnviada(e164: string): Promise<{ orgId: string } | null> {
   const rows = await query<{ org_id: string }>(
