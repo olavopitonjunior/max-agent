@@ -518,7 +518,18 @@ const BOAS_VINDAS_V1 = templatesDoKind("welcome").at(-1)?.name ?? "max_boas_vind
  * curta é conteúdo e vai para o grafo.
  */
 const UM_CUMPRIMENTO =
-  "(?:oi+|ola|opa|e ai|bom dia|boa tarde|boa noite|tudo bem|tudo bom|ok|okay|blz|beleza|certo|show|obrigad[oa]|muito obrigad[oa]|obg|valeu|vlw|tchau|ate mais)";
+  "(?:" +
+  [
+    "oi+e*", "oie+", "ola+", "opa+", "e ?a[ei]+", "salve", "fala",
+    "bom dia+", "boa tarde+", "boa noite+",
+    "(?:tudo|td) (?:bem|bom|certo|joia|tranquilo)(?: com voce| e voce| e ai)?", "como vai",
+    "ok+", "okay", "blz", "beleza", "certo", "show", "joia",
+    "(?:muito )?obrigad[oa]+", "obg", "valeu+", "vlw", "tchau", "ate mais",
+    "rs+", "k{2,}", "(?:ha){2,}",
+    // Vocativo genérico no fim: "boa tarde, pessoal", "bom dia a todos".
+    "pessoal", "a todos", "gente", "equipe",
+  ].join("|") +
+  ")";
 // "oi, bom dia" / "ok e obrigado": todos os pedaços têm que ser cumprimento.
 const SO_CUMPRIMENTOS = new RegExp(`^${UM_CUMPRIMENTO}(?: (?:e )?${UM_CUMPRIMENTO})*$`);
 
@@ -526,16 +537,17 @@ export function ehCumprimento(texto: string): boolean {
   const t = texto
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    // Emoji, pontuação e o vocativo ("oi, Max!") não mudam a intenção.
-    .replace(/\p{Extended_Pictographic}|[‍️]|[\u{1f3fb}-\u{1f3ff}]/gu, " ")
+    .replace(/[\u0300-\u036f]/g, "")
+    // Emoji, pontuação e o vocativo ("oi, Max!") não mudam a intenção. O "?"
+    // também sai: "oi, tudo bem?" é cumprimento; pergunta de conteúdo não
+    // casa a lista de qualquer jeito.
+    .replace(/\p{Extended_Pictographic}|[\u200d\ufe0f]|[\u{1f3fb}-\u{1f3ff}]/gu, " ")
     .replace(/\bmax\b/g, " ")
-    .replace(/[!.,;:~]+/g, " ")
+    .replace(/[!?.,;:~()\-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (texto.includes("?")) return false;
   // Só emoji ("👍") também é reação, não conteúdo.
-  if (!t) return texto.trim().length > 0 && !/\p{L}/u.test(texto);
+  if (!t) return /\p{Extended_Pictographic}/u.test(texto);
   return SO_CUMPRIMENTOS.test(t);
 }
 
@@ -569,7 +581,7 @@ async function apresentacaoPendente(
   if (r.length === 0) return null;
   const a = r.reduce((x, y) => (new Date(y.sent_at) > new Date(x.sent_at) ? y : x));
   if (!ehCumprimento(texto) || !a.body.trim()) {
-    log.info("aceite.apresentacao_consumida", { orgId: a.org_id, motivo: "pergunta" });
+    log.info("aceite.apresentacao_consumida", { orgId: a.org_id, motivo: "nao_cumprimento" });
     return null;
   }
   return { reply: a.body.trim(), orgId: a.org_id, marca: "apresentacao_entregue" };
