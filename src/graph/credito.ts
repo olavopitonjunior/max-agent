@@ -58,6 +58,11 @@ export interface FluxoCredito {
    * Com chave guardada, nenhum SIM dispara outro `credit.request`.
    */
   chave?: { verbo: string; valor: string; em?: number };
+  /**
+   * Já havia análise recente (< 24 h, concluída) e o corretor viu o aviso:
+   * o próximo SIM faz uma consulta nova. Em voo ou reenvio arriscado nunca.
+   */
+  novaConsulta?: boolean;
   /** M3: a decisão que voltou no envio (só `aprovado` fica, para o SIM da proposta). */
   decisao?: string;
   atualizadoEm: number;
@@ -566,6 +571,7 @@ const fecharCofre = (c: Cofre, ctx: ContextoDoTurno): string => cifrarCofre(JSON
 // ─── Perguntas ───────────────────────────────────────────────────────────
 
 const quem = (f: FluxoCredito) => f.leadNome ?? "o pretendente";
+const quemMaiusculo = (f: FluxoCredito) => (f.leadNome ?? "O pretendente");
 const deQuem = (f: FluxoCredito) => (f.leadNome ? `de ${f.leadNome}` : "do pretendente");
 const OPCOES_VINCULO = "(CLT, autônomo, aposentado, servidor, empresário, estudante, liberal ou renda de aluguel)";
 
@@ -672,7 +678,12 @@ export function pedeCredito(texto: string): "abrir" | "status" | "score" | "apro
   if (!nucleo && !STATUS_SEM_CREDITO.test(t)) return null;
   if (EXCLUI.test(t) || NEGACAO.test(t)) return null;
   if (/\bscore\b/.test(t)) return "score";
-  if (STATUS.test(t) || STATUS_SEM_CREDITO.test(t)) return "status";
+  // "Faz a análise de crédito do Pedro Recusado": com verbo de pedido fora do nome, a palavra
+  // de status dentro do nome não conta. Sem verbo ("crédito do João recusado?") segue status.
+  const citado = nomeCitado(texto);
+  const semNome = citado ? t.replace(normalizar(citado), " ") : t;
+  const statusAlvo = semNome !== t && PEDIDO.test(semNome) ? semNome : t;
+  if (STATUS.test(statusAlvo) || STATUS_SEM_CREDITO.test(t)) return "status";
   if (PROCESSO.test(t)) return null;
   if (PEDIDO.test(t)) return "abrir";
   return /\bcredito\s+(?:do|da|de|dos|das)\s+\w+/.test(t) ? "status" : "abrir";
@@ -681,7 +692,10 @@ export function pedeCredito(texto: string): "abrir" | "status" | "score" | "apro
 const GENERICOS = new Set([
   "locatario", "locataria", "inquilino", "inquilina", "pretendente", "cliente", "proposta", "imovel", "apartamento",
   "apto", "casa", "contrato", "lead", "cara", "moca", "rapaz", "senhor", "senhora", "dele", "dela", "pessoa", "credito",
+  "candidato", "candidata", "interessado", "interessada", "morador", "moradora", "inquilinos", "clientes", "pretendentes",
 ]);
+/** Antes do nome: "de um inquilino", "da minha cliente", "do novo locatário" — não fazem parte do nome. */
+const DETERMINANTES = new Set(["um", "uma", "meu", "minha", "nosso", "nossa", "esse", "essa", "este", "esta", "novo", "nova", "outro", "outra"]);
 const PARADA = new Set([
   "que", "pra", "para", "na", "no", "nos", "nas", "com", "por", "pelo", "pela", "ai", "agora", "hoje", "ou", "ja",
   "saiu", "foi", "esta", "ta", "ficou", "aprovou", "favor", "pf", "pfv", "upestate", "e", "prop", "cpf",
@@ -692,7 +706,9 @@ export function nomeCitado(texto: string): string | null {
   const m = /(?:cr[ée]dito|an[áa]lise|ficha)\s+(?:de\s+cr[ée]dito\s+)?(?:d[oa]s?|de)\s+([\p{L}'-]+(?:\s+[\p{L}'-]+){0,5})/iu.exec(texto);
   if (!m) return null;
   const palavras: string[] = [];
-  for (const p of m[1]!.split(/\s+/)) {
+  const brutas = m[1]!.split(/\s+/);
+  while (brutas.length && DETERMINANTES.has(normalizar(brutas[0]!))) brutas.shift();
+  for (const p of brutas) {
     const n = normalizar(p);
     if (PARADA.has(n)) break;
     palavras.push(p);
@@ -797,6 +813,17 @@ function pedeCorrecao(texto: string): CampoCredito | null {
   if (!/^(corrig\w*|corrij\w*|troc\w*|mud\w*|alter\w*|errei)\b/.test(t)) return null;
   return CORRIGIR.find(([re]) => re.test(t))?.[1] ?? null;
 }
+const CAMPOS_DE_VALOR: [RegExp, CampoCredito][] = [
+  [/^(a |o )?(renda|salario)\b/, "renda"], [/^(o )?aluguel\b/, "aluguel"], [/^(o )?condominio\b/, "condominio"], [/^(o )?iptu\b/, "iptu"],
+];
+/** A resposta começa nomeando OUTRO campo de valor ("renda é 8.500" quando a pergunta é o aluguel)? */
+function campoDeValorNomeado(texto: string, atual: CampoCredito): CampoCredito | null {
+  if (BASE[atual] !== "valor") return null;
+  const t = normalizar(texto);
+  if (!/\d/.test(t)) return null;
+  const achado = CAMPOS_DE_VALOR.find(([re]) => re.test(t))?.[1] ?? null;
+  return achado && achado !== atual ? achado : null;
+}
 const PERGUNTA_FORA = /\?\s*$|^(como|quando|onde|por que|porque|o que|qual|quais|quanto|quem|me (fala|diz|explica)|tem como)\b/;
 
 function cancelar(f: FluxoCredito): Resposta {
@@ -814,7 +841,8 @@ function pausar(f: FluxoCredito): PassoDoFluxo {
 }
 
 function perguntar(f: FluxoCredito, campo: CampoCredito, ctx: ContextoDoTurno, prefixo = ""): Resposta {
-  const g: FluxoCredito = { ...f, etapa: "coleta", campoAtual: campo, tentativas: 0, pausado: false, atualizadoEm: ctx.agora };
+  // Mexer na ficha desfaz o "consultar de novo": o próximo SIM volta a conferir a análise recente.
+  const g: FluxoCredito = { ...f, etapa: "coleta", campoAtual: campo, tentativas: 0, pausado: false, novaConsulta: undefined, atualizadoEm: ctx.agora };
   return resposta(g, `${prefixo}${pergunta(g, campo)}`, `credito_pergunta_${campo}`);
 }
 
@@ -856,7 +884,10 @@ async function revisar(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo,
   if (faltantes.length) return voltarAoFaltante(f, faltantes, ctx, prefixo);
   const c = abrirCofre(f, ctx);
   const lead = r.body.lead && typeof r.body.lead === "object" ? (r.body.lead as Record<string, unknown>) : {};
-  const nome = f.leadNome ?? (typeof lead.nome === "string" ? lead.nome : "o pretendente");
+  const nomeDoLead = typeof lead.nome === "string" && lead.nome.trim() ? lead.nome.trim() : undefined;
+  const nome = f.leadNome ?? nomeDoLead ?? "o pretendente";
+  // Lead achado pelo CPF: o nome veio do servidor e passa a valer nas mensagens seguintes.
+  if (!f.leadNome && nomeDoLead) f = { ...f, leadNome: nomeDoLead };
   const partes = [
     c.aluguel !== undefined ? `Aluguel ${brl(c.aluguel)}` : "",
     c.renda !== undefined ? `renda ${brl(c.renda)}` : "",
@@ -1054,6 +1085,12 @@ export async function conduzirCredito(f: FluxoCredito, ctx: ContextoDoTurno, dep
     if (PERGUNTA_FORA.test(t)) return pausar(f);
     return revisar(f, ctx, deps);
   }
+  const nomeado = campoDeValorNomeado(ctx.texto, f.campoAtual);
+  if (nomeado) {
+    // "renda é 8.500" na pergunta do aluguel: grava na renda e volta ao aluguel (o servidor diz o que falta).
+    const ro = await interpretarCampo(nomeado, ctx.texto, async (texto, c) => (deps.extrairCredito ? deps.extrairCredito(texto, c) : null));
+    if (ro.tipo === "ok") return gravar(f, nomeado, ro.valor, ctx, deps, ro.extras);
+  }
   const campo = f.campoAtual;
   const extrair: ExtratorDeCampo = async (texto, c) => (deps.extrairCredito ? deps.extrairCredito(texto, c) : null);
   const r = await interpretarCampo(campo, ctx.texto, extrair);
@@ -1105,13 +1142,14 @@ function instante(v: unknown): number | null {
 const diaMes = (t: number) => new Date(t).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });
 
 /** A última análise do lead impede um envio novo? (recente, em voo ou reenvio arriscado) */
-function analiseQueBarra(ultima: Record<string, unknown>, agora: number): { rotulo: string; em: number | null } | null {
+function analiseQueBarra(ultima: Record<string, unknown>, agora: number): { rotulo: string; em: number | null; soRecente: boolean } | null {
   if (!Object.keys(ultima).length) return null;
   const em = instante(ultima.createdAt);
   const recente = em !== null && agora - em < DIA_MS;
   const emVoo = EM_VOO.has(String(ultima.status ?? "")) || ultima.decision === "pendente";
-  if (!recente && !emVoo && ultima.reenvioArriscado !== true) return null;
-  return { rotulo: str(ultima.rotulo) ?? "em andamento", em };
+  const arriscado = ultima.reenvioArriscado === true;
+  if (!recente && !emVoo && !arriscado) return null;
+  return { rotulo: str(ultima.rotulo) ?? "em andamento", em, soRecente: !emVoo && !arriscado };
 }
 
 /**
@@ -1134,6 +1172,8 @@ async function enviar(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo):
   if (pre.body.configurado !== true || pre.body.orgLigada !== true) {
     return resposta(null, textoInativa(ctx.orgName ?? "sua imobiliária"), "credito_inativo");
   }
+  const nomeDoLead = str(obj(pre.body.lead).nome);
+  if (!f.leadNome && nomeDoLead) f = { ...f, leadNome: nomeDoLead };
   const faltantes = lista(pre.body.faltantes);
   if (faltantes.length) return voltarAoFaltante(f, faltantes, ctx);
 
@@ -1141,9 +1181,15 @@ async function enviar(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo):
   const st = await deps.acao("credit.status", { leaseClientId: f.leaseClientId });
   if (!st || (st.status !== 200 && st.status !== 404)) return naoEnviado("credito_envio_status_sem_resposta");
   const barra = st.status === 200 ? analiseQueBarra(obj(st.body.ultima), ctx.agora) : null;
-  if (barra) {
+  if (barra && !(barra.soRecente && f.novaConsulta)) {
     const quando = barra.em !== null ? ` de ${diaMes(barra.em)}` : "";
-    return resposta(null, `Já existe uma análise ${deQuem(f)}${quando}: ${barra.rotulo}. Veja na tela: ${linkDoLead(f.leaseClientId)}`, "credito_envio_ja_existe");
+    const base = `Já existe uma análise ${deQuem(f)}${quando}: ${barra.rotulo}. Veja na tela: ${linkDoLead(f.leaseClientId)}`;
+    if (barra.soRecente) {
+      // Concluída e recente: o corretor decide. Só o próximo SIM estrito consulta de novo; NÃO encerra.
+      const g: FluxoCredito = { ...f, etapa: "revisao", novaConsulta: true, pausado: false, atualizadoEm: ctx.agora };
+      return resposta(g, `${base}\n\nQuer fazer uma consulta nova mesmo assim? Responda *SIM*.`, "credito_envio_oferece_nova");
+    }
+    return resposta(null, base, "credito_envio_ja_existe");
   }
 
   const chave = { verbo: "credit.request", valor: ctx.messageId, em: ctx.agora };
@@ -1200,7 +1246,14 @@ function resultado(f: FluxoCredito, body: Record<string, unknown>, ctx: Contexto
     return resposta(g, `Aprovado na Upestate. Quer que eu abra a proposta de locação ${deQuem(f)}?`, "credito_resultado_aprovado");
   }
   if (decisao === "revisao" || decisao === "reprovado") {
-    return resposta(null, `${rotulo}. Para revisão humana, use a tela do lead: ${url}`, `credito_resultado_${decisao}`);
+    const humanizada = body.podePedirHumanizada === true;
+    const cab = decisao === "revisao"
+      ? `${quemMaiusculo(f)} ficou em revisão na análise automática da Upestate${/revis/i.test(rotulo) ? "" : ` (${rotulo})`} — ainda não é aprovação.`
+      : `${quemMaiusculo(f)} foi recusado(a) na análise automática da Upestate (${rotulo}).`;
+    const passo = humanizada
+      ? `Próximo passo: pedir a análise humanizada, com comprovantes de renda, na tela do lead. O motivo também está lá: ${url}`
+      : `O motivo está na tela do lead: ${url}`;
+    return resposta(null, `${cab}\n${passo}`, `credito_resultado_${decisao}`);
   }
   if (decisao === "pendencia") {
     return resposta(null, `A Upestate pediu complemento da ficha (${rotulo}). Veja na tela do lead: ${url}`, "credito_resultado_pendencia");

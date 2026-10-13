@@ -227,6 +227,10 @@ describe("pedeCredito", () => {
     ["crédito da Letícia", "status"],
     ["a análise de crédito do João já saiu?", "status"],
     ["qual o status do crédito da Letícia?", "status"],
+    ["faz a análise de crédito do Pedro Teste Recusado", "abrir"],
+    ["quero uma ficha de crédito da Ana Aprovada", "abrir"],
+    ["o crédito do João Silva recusado?", "status"],
+    ["pode ver se o crédito do João foi recusado", "status"],
     ["qual o score dele?", "score"],
     ["me passa o score da Letícia", "score"],
   ])("%s → %s", (t, esperado) => expect(pedeCredito(t)).toBe(esperado));
@@ -247,6 +251,11 @@ describe("pedeCredito", () => {
     expect(nomeCitado("faz a ficha de crédito da Letícia Andrade")).toBe("Letícia Andrade");
     expect(nomeCitado("como está a análise da letícia?")).toBe("Letícia");
     expect(nomeCitado("analisa o crédito do locatário da proposta X")).toBeNull();
+    expect(nomeCitado("quero fazer uma análise de crédito de um inquilino")).toBeNull();
+    expect(nomeCitado("faz a ficha da minha cliente")).toBeNull();
+    expect(nomeCitado("análise de crédito de uma candidata nova")).toBeNull();
+    expect(nomeCitado("análise de crédito da minha cliente Letícia")).toBeNull();
+    expect(nomeCitado("faz a análise de crédito da Ana Maria")).toBe("Ana Maria");
   });
 });
 
@@ -503,6 +512,24 @@ describe("caminhos da coleta", () => {
     expect(s.fluxo).toBeNull();
   });
 
+  it("resposta que nomeia outro campo ('renda é 9 mil' na pergunta do aluguel) grava a renda e volta ao aluguel", async () => {
+    const turno = await ateRenda();
+    await turno("8 mil");
+    const s = await turno("renda é 9 mil");
+    expect(ultimo("lead.upsert")!.args.campos).toEqual({ v: 1, tipo: "residencial", pretendente: { rendaMensal: 9000 } });
+    expect(s.reply).toMatch(/Valor do aluguel/);
+    const a = await turno("2500");
+    expect(ultimo("lead.upsert")!.args.campos).toMatchObject({ locacao: { valorAluguel: 2500 } });
+    expect(a.reply).not.toMatch(/Valor do aluguel/);
+  });
+
+  it("o mesmo campo nomeado ('aluguel de 2500' na pergunta do aluguel) segue normal", async () => {
+    const turno = await ateRenda();
+    await turno("8 mil");
+    await turno("aluguel de 2500");
+    expect(ultimo("lead.upsert")!.args.campos).toMatchObject({ locacao: { valorAluguel: 2500 } });
+  });
+
   it("revisão com faltantes volta ao campo que falta", async () => {
     const turno = await ateRenda();
     await turno("8 mil");
@@ -708,7 +735,7 @@ async function ateRevisao() {
   return turno;
 }
 const pedidos = () => chamadas.filter((c) => c.verb === "credit.request");
-const LINK_LC1 = /https?:\/\/\S+\/locacao\/pessoas\/clientes\/lc1$/;
+const LINK_LC1 = /https?:\/\/\S+\/locacao\/pessoas\/clientes\/lc1$/m;
 const ROTULO_DE: Record<string, string> = { aprovado: "Aprovado", revisao: "Pré-aprovado", reprovado: "Reprovado", pendencia: "Pendência", erro: "Erro" };
 
 describe("M3: sub-flag MAX_CREDITO_ENVIO", () => {
@@ -878,7 +905,7 @@ describe("M3: envio", () => {
     expect(s.fluxo).toMatchObject({ etapa: "resultado" });
   });
 
-  it("D1: análise recente (< 24 h) do lead: NÃO envia; diz qual e encerra", async () => {
+  it("D1: análise recente (< 24 h) e concluída: NÃO envia; diz qual e oferece consulta nova", async () => {
     const turno = await ateRevisao();
     const ha2h = new Date(Date.now() - 2 * 3600_000);
     analises.push({ leaseClientId: "lc1", createdAt: ha2h.toISOString(), status: "completed", decision: "reprovado", rotulo: "Reprovado" });
@@ -886,8 +913,52 @@ describe("M3: envio", () => {
     const dm = ha2h.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });
     expect(s.reply).toMatch(new RegExp(`^Já existe uma análise de Letícia Andrade de ${dm.replace("/", "\\/")}: Reprovado\\. Veja na tela: `));
     expect(s.reply).toMatch(LINK_LC1);
+    expect(s.reply).toMatch(/Quer fazer uma consulta nova mesmo assim\? Responda \*SIM\*\.$/);
+    expect(pedidos()).toEqual([]);
+    expect(s.fluxo).toMatchObject({ etapa: "revisao", novaConsulta: true });
+  });
+
+  it("D1: lead já existente (achado pelo CPF): a mensagem usa o nome da ficha, não 'do pretendente'", async () => {
+    leads.push({ id: "lc1", nome: "Mariana Lima", cpf: CPF_D, credito: { pretendente: { documento: CPF_D, nomeCompleto: "Mariana Lima" } } as Credito });
+    const turno = conversa();
+    let s = await turno("quero fazer uma análise de crédito");
+    for (const fala of ["sim", CPF, "CLT", "analista", "8 mil", "2500", "não tem", "não tem", "1", "não"]) s = await turno(fala);
+    expect(s.fluxo).toMatchObject({ etapa: "revisao", leaseClientId: "lc1" });
+    analises.push({ leaseClientId: "lc1", createdAt: new Date(Date.now() - 2 * 3600_000).toISOString(), status: "completed", decision: "reprovado", rotulo: "Reprovado" });
+    s = await turno("SIM");
+    expect(s.reply).toMatch(/^Já existe uma análise de Mariana Lima de \d{2}\/\d{2}: Reprovado\./);
+    expect(pedidos()).toEqual([]);
+  });
+
+  it("D1: depois da oferta, o SIM consulta de novo (uma vez, com a chave do SIM)", async () => {
+    const turno = await ateRevisao();
+    analises.push({ leaseClientId: "lc1", createdAt: new Date(Date.now() - 2 * 3600_000).toISOString(), status: "completed", decision: "aprovado", rotulo: "Aprovado" });
+    await turno("SIM");
+    expect(pedidos()).toEqual([]);
+    const s = await turno("SIM");
+    expect(pedidos()).toHaveLength(1);
+    expect(s.reply).toMatch(/^Aprovado na Upestate\./);
+  });
+
+  it("D1: depois da oferta, NÃO encerra sem enviar", async () => {
+    const turno = await ateRevisao();
+    analises.push({ leaseClientId: "lc1", createdAt: new Date(Date.now() - 2 * 3600_000).toISOString(), status: "completed", decision: "aprovado", rotulo: "Aprovado" });
+    await turno("SIM");
+    const s = await turno("não");
     expect(pedidos()).toEqual([]);
     expect(s.fluxo).toBeNull();
+  });
+
+  it("D1: corrigir a ficha depois da oferta desfaz a consulta nova (o SIM seguinte avisa de novo)", async () => {
+    const turno = await ateRevisao();
+    analises.push({ leaseClientId: "lc1", createdAt: new Date(Date.now() - 2 * 3600_000).toISOString(), status: "completed", decision: "aprovado", rotulo: "Aprovado" });
+    await turno("SIM");
+    const c = await turno("corrigir aluguel");
+    expect(c.fluxo).not.toHaveProperty("novaConsulta", true);
+    await turno("2600");
+    const s = await turno("SIM");
+    expect(pedidos()).toEqual([]);
+    expect(s.reply).toMatch(/^Já existe uma análise/);
   });
 
   it.each([
@@ -1035,18 +1106,26 @@ describe("M3: resultado sem score, restrição nem renda", () => {
       justificativa: "Restrição no CPF 111.444.777-35, score 320 e renda de R$ 8.000 insuficiente", leadLink: "/locacao/pessoas/clientes/lc1" } };
     const turno = await ateRevisao();
     const s = await turno("SIM");
-    expect(s.reply).toMatch(/^Reprovado\. Para revisão humana, use a tela do lead: /);
+    expect(s.reply).toMatch(/^Letícia Andrade foi recusado\(a\) na análise automática da Upestate \(Reprovado\)\.\nO motivo está na tela do lead: /);
     expect(s.reply).toMatch(LINK_LC1);
     expect(s.reply).not.toMatch(/score|restri|renda|8\.000|777/i);
     expect(s.fluxo).toBeNull();
   });
 
-  it("revisão (pré-aprovado): '{rótulo}. Para revisão humana…' — sem a justificativa", async () => {
-    requestResposta = { status: 200, body: { decision: "revisao", rotulo: "Pré-aprovado", justificativa: "Requer análise da mesa.", leadLink: "/locacao/pessoas/clientes/lc1" } };
+  it("revisão (pré-aprovado): explica e dá o próximo passo — sem a justificativa", async () => {
+    requestResposta = { status: 200, body: { decision: "revisao", rotulo: "Pré-aprovado", justificativa: "Requer análise da mesa.", podePedirHumanizada: true, leadLink: "/locacao/pessoas/clientes/lc1" } };
     const turno = await ateRevisao();
     const s = await turno("SIM");
-    expect(s.reply).toMatch(/^Pré-aprovado\. Para revisão humana, use a tela do lead: /);
+    expect(s.reply).toMatch(/^Letícia Andrade ficou em revisão na análise automática da Upestate \(Pré-aprovado\) — ainda não é aprovação\.\nPróximo passo: pedir a análise humanizada, com comprovantes de renda, na tela do lead\. O motivo também está lá: /);
+    expect(s.reply).toMatch(LINK_LC1);
     expect(s.reply).not.toContain("mesa");
+  });
+
+  it("revisão com rótulo 'Revisão' não repete o rótulo", async () => {
+    requestResposta = { status: 200, body: { decision: "revisao", rotulo: "Revisão", podePedirHumanizada: false, leadLink: "/locacao/pessoas/clientes/lc1" } };
+    const turno = await ateRevisao();
+    const s = await turno("SIM");
+    expect(s.reply).toMatch(/^Letícia Andrade ficou em revisão na análise automática da Upestate — ainda não é aprovação\.\nO motivo está na tela do lead: /);
   });
 
   /** B1: a justificativa (texto livre do provedor) nunca chega à resposta nem ao state, em nenhuma decisão. */
