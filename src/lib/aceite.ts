@@ -510,10 +510,33 @@ const VALIDADE_APRESENTACAO_DIAS = 7;
 /** Só o v1 trazia a apresentação; qualquer versão posterior a deixa para cá. */
 const BOAS_VINDAS_V1 = templatesDoKind("welcome").at(-1)?.name ?? "max_boas_vindas";
 
-/** Curto e sem pergunta: cumprimento, "ok", "obrigado". */
+/**
+ * Cumprimento, "ok", "obrigado" — e SÓ isso. Lista explícita, não "curto e sem
+ * pergunta": prod 13/10, "já foi criada" (resposta às boas-vindas dizendo que o
+ * acesso já existia) tinha 3 palavras e recebeu a apresentação de volta, com o
+ * "faça o primeiro acesso" que a pessoa acabara de dizer que fez. Afirmação
+ * curta é conteúdo e vai para o grafo.
+ */
+const UM_CUMPRIMENTO =
+  "(?:oi+|ola|opa|e ai|bom dia|boa tarde|boa noite|tudo bem|tudo bom|ok|okay|blz|beleza|certo|show|obrigad[oa]|muito obrigad[oa]|obg|valeu|vlw|tchau|ate mais)";
+// "oi, bom dia" / "ok e obrigado": todos os pedaços têm que ser cumprimento.
+const SO_CUMPRIMENTOS = new RegExp(`^${UM_CUMPRIMENTO}(?: (?:e )?${UM_CUMPRIMENTO})*$`);
+
 export function ehCumprimento(texto: string): boolean {
-  const t = texto.trim();
-  return t.length > 0 && !t.includes("?") && t.split(/\s+/).length <= 4;
+  const t = texto
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    // Emoji, pontuação e o vocativo ("oi, Max!") não mudam a intenção.
+    .replace(/\p{Extended_Pictographic}|[‍️]|[\u{1f3fb}-\u{1f3ff}]/gu, " ")
+    .replace(/\bmax\b/g, " ")
+    .replace(/[!.,;:~]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (texto.includes("?")) return false;
+  // Só emoji ("👍") também é reação, não conteúdo.
+  if (!t) return texto.trim().length > 0 && !/\p{L}/u.test(texto);
+  return SO_CUMPRIMENTOS.test(t);
 }
 
 async function apresentacaoPendente(
