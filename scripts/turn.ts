@@ -25,6 +25,7 @@ import { runTurn } from "../src/graph/graph";
 import { threadIdFor } from "../src/graph/graph";
 import { resolveIdentity } from "../src/lib/identity";
 import { normalizeBrPhone } from "../src/lib/phone";
+import { limparThreadDoCheckpointer } from "../src/lib/checkpointer-reset";
 import { query, db } from "../src/lib/db";
 
 function has(flag: string): boolean {
@@ -55,15 +56,7 @@ async function main() {
       const thread = threadIdFor(identity.candidate.orgId, e164);
       // As tabelas são do checkpointer do LangGraph. Limpar a thread aqui é
       // conveniência de teste — em produção nada apaga histórico.
-      for (const tabela of [
-        "checkpoint_writes",
-        "checkpoint_blobs",
-        "checkpoints",
-      ]) {
-        await query(`DELETE FROM ${tabela} WHERE thread_id = $1`, [
-          thread,
-        ]).catch(() => undefined);
-      }
+      await limparThreadDoCheckpointer(thread);
       console.log(`[harness] thread ${thread} limpa\n`);
     }
   }
