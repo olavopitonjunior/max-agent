@@ -118,14 +118,22 @@ export type Fluxo =
       natureza?: "venda" | "locacao";
       /** O pedido original — os dados que vierem nele não são pedidos de novo. */
       pedido?: string;
+      /** Nome que a pessoa deu ao cliente no pedido — vira o título do negócio, sem prefixo. */
+      nomeCliente?: string;
       atualizadoEm: number;
     }
   | {
       kind: "negocio";
-      etapa: "tipo" | "campos" | "revisao";
+      etapa: "tipo" | "campos" | "nome" | "revisao";
       tipo?: "venda" | "locacao";
       campos?: CampoDoPopup[];
       valores: Record<string, string>;
+      /**
+       * Título do negócio: SEMPRE o que a pessoa escreveu (nome do cliente,
+       * endereço ou o nome que ela respondeu). Nunca sintético. Sem ele (e sem
+       * padrão de título da org) o Max pergunta antes de criar.
+       */
+      titulo?: string;
       /** O servidor avisou de duplicado recente e a pessoa vai confirmar. */
       forcar?: boolean;
       chave?: Chave;
@@ -624,7 +632,9 @@ export function argsDaProposta(
       : "compra_venda_v1";
   return {
     schemaType,
-    title: d.proponente?.nome ? `Proposta — ${d.proponente.nome}` : undefined,
+    // Título = o que a pessoa escreveu (nome do proponente ou, na falta, o
+    // endereço), verbatim e sem prefixo.
+    title: d.proponente?.nome || d.imovel?.endereco || undefined,
     proponente: d.proponente,
     imovel: d.imovel,
     valor: d.valor,
@@ -993,6 +1003,8 @@ export async function iniciarFluxo(
     natureza?: "venda" | "locacao";
     /** O texto do pedido: dados que vierem nele não são pedidos de novo. */
     pedido?: string;
+    /** Nome do cliente dito pela pessoa: título do negócio, verbatim. */
+    nomeCliente?: string;
     policy: readonly Capability[];
     agora: number;
   },
@@ -1012,21 +1024,21 @@ export async function iniciarFluxo(
   const podeProposta = params.policy.includes("proposal.create");
   const podeNegocio = params.policy.includes("form.create");
   if (params.tipo !== "proposta" && podeNegocio) {
-    return carregarCamposDoNegocio(params.tipo, params.agora, deps);
+    return carregarCamposDoNegocio(params.tipo, params.agora, deps, params.nomeCliente);
   }
   if (podeProposta && podeNegocio) {
     return {
       reply: TEXTO_ESCOLHA,
-      fluxo: { kind: "escolha", natureza: params.natureza, pedido: params.pedido, atualizadoEm: params.agora },
+      fluxo: { kind: "escolha", natureza: params.natureza, pedido: params.pedido, nomeCliente: params.nomeCliente, atualizadoEm: params.agora },
       evento: "fluxo_escolha",
     };
   }
   if (podeProposta) return iniciarProposta(params.natureza, params.pedido, params.agora, deps);
   if (podeNegocio) {
-    if (params.natureza) return carregarCamposDoNegocio(params.natureza, params.agora, deps);
+    if (params.natureza) return carregarCamposDoNegocio(params.natureza, params.agora, deps, params.nomeCliente);
     return {
       reply: TEXTO_VENDA_OU_LOCACAO,
-      fluxo: { kind: "negocio", etapa: "tipo", valores: {}, atualizadoEm: params.agora },
+      fluxo: { kind: "negocio", etapa: "tipo", valores: {}, titulo: params.nomeCliente, atualizadoEm: params.agora },
       evento: "fluxo_negocio",
     };
   }
@@ -1138,11 +1150,11 @@ export async function conduzirFluxo(
     if (!tipo) {
       return {
         reply: TEXTO_VENDA_OU_LOCACAO,
-        fluxo: { kind: "negocio", etapa: "tipo", valores: {}, atualizadoEm: agora },
+        fluxo: { kind: "negocio", etapa: "tipo", valores: {}, titulo: fluxo.nomeCliente, atualizadoEm: agora },
         evento: "fluxo_negocio",
       };
     }
-    return carregarCamposDoNegocio(tipo, agora, deps);
+    return carregarCamposDoNegocio(tipo, agora, deps, fluxo.nomeCliente);
   }
 
   if (fluxo.kind === "negocio") return conduzirNegocio(fluxo, ctx, deps);
@@ -1157,7 +1169,8 @@ type FluxoProposta = Extract<Fluxo, { kind: "proposta" }>;
 async function carregarCamposDoNegocio(
   tipo: "venda" | "locacao",
   agora: number,
-  deps: DepsDoFluxo
+  deps: DepsDoFluxo,
+  nomeCliente?: string
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
   const r = await deps.acao("form.options", { tipo });
   if (!r) return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: "falha_form_options" };
@@ -1179,8 +1192,12 @@ async function carregarCamposDoNegocio(
   const campos = (Array.isArray(r.body.campos) ? (r.body.campos as CampoDoPopup[]) : []).filter(
     (c) => c && typeof c.chave === "string" && typeof c.rotulo === "string" && c.obrigatorio
   );
-  const f: FluxoNegocio = { kind: "negocio", etapa: "campos", tipo, campos, valores: {}, atualizadoEm: agora };
-  if (campos.length === 0) return { reply: resumoDoNegocio(f), fluxo: { ...f, etapa: "revisao" }, evento: "negocio_revisao" };
+  // Padrão de título da org: o título sai das peças (ex.: Endereço) que a pessoa
+  // já vai escrever, e o `title` é ignorado no servidor. Sem padrão, o `title`
+  // é opcional lá e cairia em "Negocio - <token>": por isso o nome vai explícito.
+  const titulo = campos.some((c) => c.chave.startsWith("titleParts.")) ? undefined : nomeCliente?.trim() || undefined;
+  const f: FluxoNegocio = { kind: "negocio", etapa: "campos", tipo, campos, valores: {}, titulo, atualizadoEm: agora };
+  if (campos.length === 0) return seguirDoNegocio(f);
   return {
     reply:
       `Para criar o formulário de ${tipo === "locacao" ? "locação" : "venda"}, me diga:\n` +
@@ -1191,12 +1208,28 @@ async function carregarCamposDoNegocio(
   };
 }
 
+const TEXTO_NOME_DO_NEGOCIO = "Que nome dou a esse negócio?";
+
+/** Sem padrão de título e sem nome dito: o Max pergunta (nunca inventa) antes do resumo. */
+function precisaDeNome(f: FluxoNegocio): boolean {
+  return !f.titulo && !(f.campos ?? []).some((c) => c.chave.startsWith("titleParts."));
+}
+
+/** Tudo coletado: pergunta o nome, se ainda não há um, ou mostra o resumo. */
+function seguirDoNegocio(f: FluxoNegocio): Extract<PassoDoFluxo, { reply: string }> {
+  if (precisaDeNome(f)) return { reply: TEXTO_NOME_DO_NEGOCIO, fluxo: { ...f, etapa: "nome" }, evento: "negocio_nome" };
+  return { reply: resumoDoNegocio(f), fluxo: { ...f, etapa: "revisao" }, evento: "negocio_revisao" };
+}
+
 function resumoDoNegocio(f: FluxoNegocio): string {
-  const linhas = (f.campos ?? []).map((c) => `${c.rotulo}: ${f.valores[c.chave] ?? "—"}`);
+  const linhas = [
+    ...(f.titulo ? [`Nome: ${f.titulo}`] : []),
+    ...(f.campos ?? []).map((c) => `${c.rotulo}: ${f.valores[c.chave] ?? "—"}`),
+  ];
   return (
     `*Formulário de ${f.tipo === "locacao" ? "locação" : "venda"}*` +
     (linhas.length ? `\n${linhas.join("\n")}` : "") +
-    "\n\nPosso criar? Responda *SIM* para gerar o link, ou me diga o que mudar."
+    "\n\nPosso criar? Responda *SIM* para gerar o link, ou me diga o que mudar (para trocar o nome: nome: ...)."
   );
 }
 
@@ -1220,11 +1253,27 @@ async function conduzirNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: Deps
   if (f.etapa === "tipo" || !f.tipo) {
     const tipo = lerNatureza(ctx.texto);
     if (!tipo) return { liberar: true, fluxo: null, evento: "tipo_encerrado" };
-    return carregarCamposDoNegocio(tipo, agora, deps);
+    // O nome dito no pedido espera aqui enquanto o Max pergunta venda/locação.
+    return carregarCamposDoNegocio(tipo, agora, deps, f.titulo);
   }
 
   const resposta = lerConfirmacao(ctx.texto);
+  if (f.etapa === "nome") {
+    // A resposta É o título, como a pessoa escreveu. "sim"/"não" não é nome, e
+    // pergunta ("pode ser o endereço?") também não: pergunta de novo.
+    const nome = ctx.texto.replace(/\s+/g, " ").trim().slice(0, 200);
+    if (!nome || resposta !== "nenhum" || nome.endsWith("?")) return { reply: TEXTO_NOME_DO_NEGOCIO, fluxo: f, evento: "negocio_nome" };
+    return { reply: resumoDoNegocio({ ...f, titulo: nome }), fluxo: { ...f, titulo: nome, etapa: "revisao", chave: undefined, atualizadoEm: agora }, evento: "negocio_revisao" };
+  }
   if (f.etapa === "revisao" && resposta === "sim") return criarNegocio(f, ctx, deps);
+  // Correção do nome no resumo: "nome: Casa da Praia" (o extrator só conhece as chaves do popup).
+  const novoNome = f.etapa === "revisao" || f.etapa === "campos" ? /^\s*nome\s*[:\-]\s*(.+)$/i.exec(ctx.texto)?.[1]?.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
+  if (novoNome) {
+    const g: FluxoNegocio = { ...f, titulo: novoNome, forcar: undefined, chave: undefined, atualizadoEm: agora };
+    const faltam = (f.campos ?? []).filter((c) => !f.valores[c.chave]);
+    if (faltam.length > 0) return { reply: `Anotado. Ainda falta: ${faltam.map((c) => c.rotulo).join("; ")}.`, fluxo: { ...g, etapa: "campos" }, evento: "negocio_campos" };
+    return { reply: resumoDoNegocio(g), fluxo: { ...g, etapa: "revisao" }, evento: "negocio_revisao" };
+  }
   if (f.etapa === "revisao" && resposta === "nao") {
     return { reply: "O que você quer mudar?", fluxo: { ...f, etapa: "campos", atualizadoEm: agora }, evento: "negocio_corrigir" };
   }
@@ -1250,14 +1299,14 @@ async function conduzirNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: Deps
   if (faltam.length > 0) {
     return { reply: `Anotado. Ainda falta: ${faltam.map((c) => c.rotulo).join("; ")}.`, fluxo: { ...g, etapa: "campos" }, evento: "negocio_campos" };
   }
-  return { reply: resumoDoNegocio(g), fluxo: { ...g, etapa: "revisao" }, evento: "negocio_revisao" };
+  return seguirDoNegocio(g);
 }
 
 async function criarNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const chave = chaveDe(f, f.forcar ? "form.create:force" : "form.create", ctx);
   const r = await deps.acao(
     "form.create",
-    { tipo: f.tipo, campos: { ...camposParaCriar(f.valores), ...(f.forcar ? { force: true } : {}) } },
+    { tipo: f.tipo, campos: { ...camposParaCriar(f.valores), ...(f.titulo ? { title: f.titulo } : {}), ...(f.forcar ? { force: true } : {}) } },
     chave.valor
   );
   if (!r || (r.status === 409 && r.body.error === "em_andamento")) {

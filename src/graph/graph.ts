@@ -1479,6 +1479,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
           tipo: args.tipo,
           natureza: args.natureza ?? (args.tipo === "proposta" ? undefined : args.tipo),
           pedido: userText,
+          nomeCliente: args.nomeCliente,
           policy: state.policy,
           agora: Date.now(),
         },
