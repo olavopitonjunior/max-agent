@@ -227,6 +227,10 @@ describe("pedeCredito", () => {
     ["crédito da Letícia", "status"],
     ["a análise de crédito do João já saiu?", "status"],
     ["qual o status do crédito da Letícia?", "status"],
+    ["faz a análise de crédito do Pedro Teste Recusado", "abrir"],
+    ["quero uma ficha de crédito da Ana Aprovada", "abrir"],
+    ["o crédito do João Silva recusado?", "status"],
+    ["pode ver se o crédito do João foi recusado", "status"],
     ["qual o score dele?", "score"],
     ["me passa o score da Letícia", "score"],
   ])("%s → %s", (t, esperado) => expect(pedeCredito(t)).toBe(esperado));
@@ -912,6 +916,18 @@ describe("M3: envio", () => {
     expect(s.reply).toMatch(/Quer fazer uma consulta nova mesmo assim\? Responda \*SIM\*\.$/);
     expect(pedidos()).toEqual([]);
     expect(s.fluxo).toMatchObject({ etapa: "revisao", novaConsulta: true });
+  });
+
+  it("D1: lead já existente (achado pelo CPF): a mensagem usa o nome da ficha, não 'do pretendente'", async () => {
+    leads.push({ id: "lc1", nome: "Mariana Lima", cpf: CPF_D, credito: { pretendente: { documento: CPF_D, nomeCompleto: "Mariana Lima" } } as Credito });
+    const turno = conversa();
+    let s = await turno("quero fazer uma análise de crédito");
+    for (const fala of ["sim", CPF, "CLT", "analista", "8 mil", "2500", "não tem", "não tem", "1", "não"]) s = await turno(fala);
+    expect(s.fluxo).toMatchObject({ etapa: "revisao", leaseClientId: "lc1" });
+    analises.push({ leaseClientId: "lc1", createdAt: new Date(Date.now() - 2 * 3600_000).toISOString(), status: "completed", decision: "reprovado", rotulo: "Reprovado" });
+    s = await turno("SIM");
+    expect(s.reply).toMatch(/^Já existe uma análise de Mariana Lima de \d{2}\/\d{2}: Reprovado\./);
+    expect(pedidos()).toEqual([]);
   });
 
   it("D1: depois da oferta, o SIM consulta de novo (uma vez, com a chave do SIM)", async () => {

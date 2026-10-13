@@ -34,6 +34,11 @@ export function db(): Pool {
  * `fromConnString` de antes criava uma pool SEM teto — furando a
  * contabilidade de conexões do Neon. Duas pools pequenas e explícitas é o
  * meio-termo: 3 + 2, somando 5 por instância.
+ *
+ * Espera por conexão de 15 s (não 5): o `putWrites` de um turno espera o
+ * client que outro `put` ainda segura. Longe do Neon (CLI local, ~150 ms por
+ * ida e volta) a transação do vizinho passava de 5 s e o turno caía com
+ * "timeout exceeded when trying to connect" — perdendo o checkpoint.
  */
 let ckptPool: Pool | null = null;
 
@@ -45,7 +50,7 @@ export function checkpointerPool(): Pool {
       connectionString,
       max: 2,
       idleTimeoutMillis: 10_000,
-      connectionTimeoutMillis: 5_000,
+      connectionTimeoutMillis: 15_000,
     });
   }
   return ckptPool;

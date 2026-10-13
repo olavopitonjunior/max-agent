@@ -678,7 +678,12 @@ export function pedeCredito(texto: string): "abrir" | "status" | "score" | "apro
   if (!nucleo && !STATUS_SEM_CREDITO.test(t)) return null;
   if (EXCLUI.test(t) || NEGACAO.test(t)) return null;
   if (/\bscore\b/.test(t)) return "score";
-  if (STATUS.test(t) || STATUS_SEM_CREDITO.test(t)) return "status";
+  // "Faz a análise de crédito do Pedro Recusado": com verbo de pedido fora do nome, a palavra
+  // de status dentro do nome não conta. Sem verbo ("crédito do João recusado?") segue status.
+  const citado = nomeCitado(texto);
+  const semNome = citado ? t.replace(normalizar(citado), " ") : t;
+  const statusAlvo = semNome !== t && PEDIDO.test(semNome) ? semNome : t;
+  if (STATUS.test(statusAlvo) || STATUS_SEM_CREDITO.test(t)) return "status";
   if (PROCESSO.test(t)) return null;
   if (PEDIDO.test(t)) return "abrir";
   return /\bcredito\s+(?:do|da|de|dos|das)\s+\w+/.test(t) ? "status" : "abrir";
@@ -879,7 +884,10 @@ async function revisar(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo,
   if (faltantes.length) return voltarAoFaltante(f, faltantes, ctx, prefixo);
   const c = abrirCofre(f, ctx);
   const lead = r.body.lead && typeof r.body.lead === "object" ? (r.body.lead as Record<string, unknown>) : {};
-  const nome = f.leadNome ?? (typeof lead.nome === "string" ? lead.nome : "o pretendente");
+  const nomeDoLead = typeof lead.nome === "string" && lead.nome.trim() ? lead.nome.trim() : undefined;
+  const nome = f.leadNome ?? nomeDoLead ?? "o pretendente";
+  // Lead achado pelo CPF: o nome veio do servidor e passa a valer nas mensagens seguintes.
+  if (!f.leadNome && nomeDoLead) f = { ...f, leadNome: nomeDoLead };
   const partes = [
     c.aluguel !== undefined ? `Aluguel ${brl(c.aluguel)}` : "",
     c.renda !== undefined ? `renda ${brl(c.renda)}` : "",
@@ -1164,6 +1172,8 @@ async function enviar(f: FluxoCredito, ctx: ContextoDoTurno, deps: DepsDoFluxo):
   if (pre.body.configurado !== true || pre.body.orgLigada !== true) {
     return resposta(null, textoInativa(ctx.orgName ?? "sua imobiliária"), "credito_inativo");
   }
+  const nomeDoLead = str(obj(pre.body.lead).nome);
+  if (!f.leadNome && nomeDoLead) f = { ...f, leadNome: nomeDoLead };
   const faltantes = lista(pre.body.faltantes);
   if (faltantes.length) return voltarAoFaltante(f, faltantes, ctx);
 
