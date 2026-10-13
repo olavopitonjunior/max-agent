@@ -751,11 +751,61 @@ describe("M3: envio", () => {
     s = await turno("sim");
     expect(pedidos()).toHaveLength(1);
     expect(s.reply).toMatch(/^Abrindo a proposta de locação de Letícia Andrade\.\n\n/);
-    expect(s.fluxo).toMatchObject({ kind: "proposta", natureza: "locacao", etapa: "coleta",
+    expect(s.fluxo).toMatchObject({ kind: "proposta", natureza: "locacao", etapa: "coleta", leaseClientId: "lc1",
       dados: { proponente: { nome: "Letícia Andrade" }, valor: 2500, finalidade: "residencial" } });
     // O CPF não vai para a proposta (o checkpoint seguiria com ele).
     expect(semCpf(s.fluxo)).toBe(true);
+    // Ligada ao lead: a coleta não pede Inquilino/CPF nem aluguel de novo (o `proposal.create` preenche).
+    expect(s.reply).not.toContain("CPF");
+    expect(s.reply).not.toContain("Valor do aluguel");
     expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("proposta ligada ao lead: o create leva o leaseClientId e o resumo some com nome/CPF/telefone crus", async () => {
+    const turno = await ateRevisao();
+    await turno("SIM");
+    await turno("sim");
+    llm.mockImplementation(async (p: { toolChoice?: string }) => {
+      if (p.toolChoice === "preencher_proposta") {
+        return { text: "", toolCalls: [{ name: "preencher_proposta",
+          args: { imovel: { endereco: "Rua Senador Godoi, 606" }, proponente: { telefone: "11999990000" } } }], usage: uso };
+      }
+      return { text: "", toolCalls: [], usage: uso };
+    });
+    let s = await turno("Rua Senador Godoi, 606, tel 11 99999-0000");
+    expect(s.fluxo).toMatchObject({ kind: "proposta", etapa: "revisao", leaseClientId: "lc1" });
+    expect(s.reply).toContain("Inquilino: Letícia Andrade (dados do lead analisado)");
+    expect(s.reply).not.toContain("11999990000");
+
+    acao.mockImplementation((async (p: { verb: string; args: Record<string, unknown>; idempotencyKey?: string }) => {
+      const base = await imobpro(p);
+      return p.verb === "proposal.create" ? { status: 201, body: { proposal: { id: "p1", codigo: "P-1" } } } : base;
+    }) as never);
+    s = await turno("sim");
+    expect(ultimo("proposal.create")!.args).toMatchObject({ leaseClientId: "lc1" });
+    expect(s.fluxo).toMatchObject({ kind: "proposta", etapa: "ajustes", propostaId: "p1" });
+  });
+
+  it("create recusa a POSSE do lead (404): oferece abrir sem vínculo", async () => {
+    const turno = await ateRevisao();
+    await turno("SIM");
+    await turno("sim");
+    llm.mockImplementation(async (p: { toolChoice?: string }) => {
+      if (p.toolChoice === "preencher_proposta") {
+        return { text: "", toolCalls: [{ name: "preencher_proposta",
+          args: { imovel: { endereco: "Rua Senador Godoi, 606" }, proponente: { telefone: "11999990000" } } }], usage: uso };
+      }
+      return { text: "", toolCalls: [], usage: uso };
+    });
+    await turno("Rua Senador Godoi, 606, tel 11 99999-0000");
+
+    acao.mockImplementation((async (p: { verb: string; args: Record<string, unknown>; idempotencyKey?: string }) => {
+      const base = await imobpro(p);
+      return p.verb === "proposal.create" ? { status: 404, body: { error: "lead_nao_encontrado" } } : base;
+    }) as never);
+    const s = await turno("sim");
+    expect(s.reply).toBe("Não consegui ligar a proposta ao lead agora. Quer abrir a proposta sem o vínculo? (SIM)");
+    expect(s.fluxo).toMatchObject({ kind: "proposta", ofertaSemVinculo: true, leaseClientId: "lc1" });
   });
 
   it("aprovado e NÃO: encerra com o link do lead", async () => {

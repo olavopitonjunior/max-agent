@@ -145,6 +145,12 @@ export type Fluxo =
       metodo?: MetodoDeAssinatura;
       assinantes?: Assinante[];
       chave?: Chave;
+      /** Crédito aprovado (M3): o `proposal.create` confere a posse e preenche nome/CPF/aluguel do lead — nunca CPF/renda aqui. */
+      leaseClientId?: string;
+      /** `proposal.create` recusou a POSSE do lead (404): oferta de abrir sem ele. 403 (RBAC/política, `POLITICA_NAO_CONCEDE`/`can`) e 400 (corpo inválido/idempotência) NÃO são posse — seguem o tratamento normal (sem permissão / recusa como sem lead), nunca esta oferta. */
+      ofertaSemVinculo?: boolean;
+      /** O lead ligado está sem nome/aluguel (422 ou 400 do `proposal.create` com `leaseClientId`): `faltandoNaProposta` para de relaxar esses campos até serem informados, mesmo com o vínculo mantido. */
+      leadIncompleto?: boolean;
       /** Dado mudou depois do rascunho e o servidor ainda não foi atualizado. */
       ajustePendente?: boolean;
       /** CPF do proponente recusado no envio de um rascunho retomado. */
@@ -253,14 +259,18 @@ const TEXTO_NAO_ENCONTREI = "Não encontrei essa proposta para você no sistema.
 const TEXTO_POLITICA_INDISPONIVEL =
   "Não consegui conferir sua permissão agora. Tenta de novo em instantes.";
 
-function textoCamposDaProposta(natureza: "venda" | "locacao"): string {
+/** `temLead`: proposta de locação aberta a partir de um crédito aprovado — o `proposal.create` já preenche nome, CPF e aluguel do lead. */
+function textoCamposDaProposta(natureza: "venda" | "locacao", temLead = false): string {
   const valor = natureza === "locacao" ? "Valor do aluguel" : "Valor da proposta";
+  const quem = natureza === "locacao" ? "Inquilino" : "Comprador";
   return (
     `Para a proposta de ${natureza === "locacao" ? "locação" : "venda"}, me mande ` +
     "(pode ser em uma ou várias mensagens, ou áudio):\n" +
-    `• *${natureza === "locacao" ? "Inquilino" : "Comprador"}*: nome completo, telefone e CPF\n` +
+    (temLead
+      ? `• *Telefone* do ${quem.toLowerCase()} (os demais dados dele já vêm da análise de crédito)\n`
+      : `• *${quem}*: nome completo, telefone e CPF\n`) +
     "• *Imóvel*: endereço completo\n" +
-    `• *${valor}*\n` +
+    (temLead ? "" : `• *${valor}*\n`) +
     "Opcional: vendedor (nome e telefone), matrícula, sinal e forma de pagamento, comissão.\n" +
     "Para desistir, diga CANCELAR."
   );
@@ -276,16 +286,20 @@ function linhaPessoa(p: Pessoa): string {
 }
 
 /** O corpo do resumo — montado do estado, nunca pelo modelo. */
-function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta }): string {
+function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string }): string {
   const d = f.dados;
   const im = d.imovel ?? {};
   const endereco = [im.endereco, im.numero, im.bairro, im.cidade, im.uf].filter(Boolean).join(", ");
   const quem = f.natureza === "locacao" ? "Inquilino" : "Comprador";
+  // Ligada ao lead: nome/CPF/aluguel vêm do `proposal.create`, não do estado (M1/pii) — o resumo diz isso em vez de repetir o que o Max não guarda.
+  const linhaQuem = f.leaseClientId
+    ? `${d.proponente?.nome ?? "o pretendente"} (dados do lead analisado)`
+    : linhaPessoa(d.proponente ?? {});
   const linhas = [
     `*Proposta de ${f.natureza === "locacao" ? "locação" : "venda"}*`,
-    `${quem}: ${linhaPessoa(d.proponente ?? {})}`,
+    `${quem}: ${linhaQuem}`,
     `Imóvel: ${endereco}${im.matricula ? ` (matrícula ${im.matricula})` : ""}`,
-    `${f.natureza === "locacao" ? "Aluguel" : "Valor"}: ${d.valor ? real(d.valor) : "—"}`,
+    `${f.natureza === "locacao" ? "Aluguel" : "Valor"}: ${d.valor ? real(d.valor) : f.leaseClientId ? "dados do lead analisado" : "—"}`,
   ];
   if (d.vendedor?.nome) linhas.push(`Vendedor: ${linhaPessoa(d.vendedor)}`);
   if (d.pagamento?.sinal || d.pagamento?.forma) {
@@ -304,7 +318,7 @@ function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProp
   return linhas.join("\n");
 }
 
-export function resumoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta }): string {
+export function resumoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string }): string {
   return `${corpoDaProposta(f)}\n\nEstá correto? Responda *SIM* para gerar o rascunho, ou me diga o que mudar.`;
 }
 
@@ -471,14 +485,17 @@ const cpfValido = (raw: string): boolean => {
  * `buildProposalPayload` (contractmaker), em frase de corretor. Vazio = pode
  * mostrar o resumo. O servidor continua sendo a autoridade.
  */
-export function faltandoNaProposta(d: DadosDaProposta): string[] {
+export function faltandoNaProposta(d: DadosDaProposta, opts: { temLead?: boolean } = {}): string[] {
   const falta: string[] = [];
   const p = d.proponente ?? {};
-  if (!p.nome) falta.push("nome completo do comprador");
-  else if (!nomeCompleto(p.nome)) falta.push(`sobrenome de ${p.nome}`);
+  // Ligada a um lead de crédito: nome, CPF e valor vêm do `proposal.create` (contractmaker #1580) — não pergunta de novo.
+  if (!opts.temLead) {
+    if (!p.nome) falta.push("nome completo do comprador");
+    else if (!nomeCompleto(p.nome)) falta.push(`sobrenome de ${p.nome}`);
+  }
   if (p.cpf && !cpfValido(p.cpf)) falta.push("CPF válido de quem faz a proposta");
   if (!d.imovel?.endereco) falta.push("endereço do imóvel");
-  if (!(typeof d.valor === "number" && d.valor > 0)) falta.push("valor");
+  if (!opts.temLead && !(typeof d.valor === "number" && d.valor > 0)) falta.push("valor");
   const canal = d.canal ?? canalPadrao(d);
   if (canal === "email" ? !emailUtil(p.email) : !telefoneUtil(p.telefone)) {
     falta.push(canal === "email" ? "e-mail do comprador" : "telefone do comprador, com DDD");
@@ -595,7 +612,7 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
  * desfaria em silêncio uma troca de canal feita pela tela.
  */
 export function argsDaProposta(
-  f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta },
+  f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string },
   opcoes: { atualizacao?: boolean } = {}
 ): Record<string, unknown> {
   const d = f.dados;
@@ -615,6 +632,8 @@ export function argsDaProposta(
     ...(d.vendedor?.nome ? { vendedor: d.vendedor } : {}),
     ...(d.pagamento?.sinal || d.pagamento?.forma ? { pagamento: d.pagamento } : {}),
     ...(d.comissao?.percentual || d.comissao?.valor ? { comissao: d.comissao } : {}),
+    // Só na CRIAÇÃO: o vínculo já foi decidido quando o rascunho nasceu.
+    ...(f.leaseClientId && !opcoes.atualizacao ? { leaseClientId: f.leaseClientId } : {}),
   };
 }
 
@@ -1014,18 +1033,24 @@ export async function iniciarFluxo(
   return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
 }
 
-/** `prefill`: dados que já vêm do sistema (crédito aprovado → proposta, M3). */
+/**
+ * `prefill`: dados que já vêm do sistema (crédito aprovado → proposta, M3).
+ * `leaseClientId`: o mesmo crédito aprovado, agora ligando a proposta ao lead —
+ * o `proposal.create` confere a posse e preenche nome/CPF/aluguel de lá (nunca
+ * guardados aqui: só o id, regra do M1/pii).
+ */
 export async function iniciarProposta(
   natureza: "venda" | "locacao" | undefined,
   pedido: string | undefined,
   agora: number,
   deps: DepsDoFluxo,
-  prefill?: DadosDaProposta
+  prefill?: DadosDaProposta,
+  leaseClientId?: string
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
   if (!natureza) {
     return {
       reply: TEXTO_VENDA_OU_LOCACAO,
-      fluxo: { kind: "proposta", etapa: "natureza", dados: {}, pedido, atualizadoEm: agora },
+      fluxo: { kind: "proposta", etapa: "natureza", dados: {}, pedido, leaseClientId, atualizadoEm: agora },
       evento: "fluxo_proposta",
     };
   }
@@ -1058,16 +1083,16 @@ export async function iniciarProposta(
     if (extraido) dados = mesclarDados({}, sanearDados(extraido));
   }
   if (prefill) dados = mesclarDados(dados, sanearDados(prefill));
-  const f: Fluxo = { kind: "proposta", etapa: "coleta", natureza, dados, atualizadoEm: agora };
+  const f: Fluxo = { kind: "proposta", etapa: "coleta", natureza, dados, leaseClientId, atualizadoEm: agora };
   // Sem ClickSign: segue (rascunho e PDF funcionam), mas avisa JÁ — antes de
   // a pessoa preencher tudo e descobrir no "sim" do envio (prod 07/10).
   const aviso = semAssinatura ? `${TEXTO_AVISO_SEM_ASSINATURA}\n\n` : "";
   const temAlgo = !igual(dados, mesclarDados({}, sanearDados({})));
-  if (!temAlgo) return { reply: `${aviso}${textoCamposDaProposta(natureza)}`, fluxo: f, evento: "proposta_campos" };
-  const falta = faltandoNaProposta(dados);
+  if (!temAlgo) return { reply: `${aviso}${textoCamposDaProposta(natureza, !!leaseClientId)}`, fluxo: f, evento: "proposta_campos" };
+  const falta = faltandoNaProposta(dados, { temLead: !!leaseClientId });
   if (falta.length === 0) return { reply: `${aviso}${resumoDaProposta(f)}`, fluxo: { ...f, etapa: "revisao" }, evento: "proposta_revisao" };
   return {
-    reply: `${aviso}${textoCamposDaProposta(natureza)}\n\nDo seu pedido já anotei o que deu; ainda falta: ${falta.join("; ")}.`,
+    reply: `${aviso}${textoCamposDaProposta(natureza, !!leaseClientId)}\n\nDo seu pedido já anotei o que deu; ainda falta: ${falta.join("; ")}.`,
     fluxo: f,
     evento: "proposta_campos",
   };
@@ -1298,7 +1323,24 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   if (f.etapa === "natureza" || (!f.natureza && !f.propostaId)) {
     const natureza = lerNatureza(ctx.texto);
     if (!natureza) return { liberar: true, fluxo: null, evento: "natureza_encerrada" };
-    return iniciarProposta(natureza, f.pedido, agora, deps);
+    return iniciarProposta(natureza, f.pedido, agora, deps, undefined, f.leaseClientId);
+  }
+
+  // O `proposal.create` recusou o vínculo com o lead: este "sim"/"não" é da
+  // OFERTA sem vínculo, não do resumo normal — nunca cai no `criarRascunho` de novo.
+  if (f.etapa === "revisao" && f.ofertaSemVinculo) {
+    if (resposta === "nao") {
+      return { reply: "Certo, não abri a proposta. A análise fica na tela do lead.", fluxo: null, evento: "proposta_lead_recusada" };
+    }
+    if (resposta !== "sim") return { liberar: true, fluxo: f, evento: "proposta_lead_oferta_liberada" };
+    const g: FluxoProposta = { ...f, leaseClientId: undefined, ofertaSemVinculo: undefined, leadIncompleto: undefined, chave: undefined, atualizadoEm: agora };
+    const falta = faltandoNaProposta(g.dados);
+    if (falta.length === 0) return { reply: resumoDaProposta(g), fluxo: { ...g, etapa: "revisao" }, evento: "proposta_sem_vinculo_revisao" };
+    return {
+      reply: `${textoCamposDaProposta(g.natureza ?? "locacao")}\n\nJá tenho o que você me mandou; ainda falta: ${falta.join("; ")}.`,
+      fluxo: { ...g, etapa: "coleta" },
+      evento: "proposta_sem_vinculo_coleta",
+    };
   }
 
   if (f.etapa === "revisao" && resposta === "sim") return criarRascunho(f, ctx, deps);
@@ -1330,10 +1372,21 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // Depois do rascunho: "ok/sim/não" = nada a ajustar → assinatura.
   if (f.etapa === "ajustes" && resposta !== "nenhum") return oferecerMetodos(f, ctx, deps);
 
-  // "sim" na coleta com tudo preenchido = quer ver o resumo de novo (depois de
-  // uma interrupção ou de uma pergunta no meio). Mostra; não escreve.
-  if (f.etapa === "coleta" && resposta === "sim" && faltandoNaProposta(f.dados).length === 0) {
-    return { reply: resumoDaProposta(f), fluxo: { ...f, etapa: "revisao", atualizadoEm: agora }, evento: "proposta_revisao" };
+  // "sim" na coleta: com tudo preenchido, quer ver o resumo de novo (depois de
+  // uma interrupção ou de uma pergunta no meio) — mostra, não escreve. Com algo
+  // faltando (ex.: lead incompleto depois de um 422), lembra o que falta em vez
+  // de liberar: sem isso, um "sim" repetido voltaria a liberar/resumir e o
+  // `criarRascunho` seguinte repetiria o mesmo 422 em loop.
+  if (f.etapa === "coleta" && resposta === "sim") {
+    const falta = faltandoNaProposta(f.dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
+    if (falta.length === 0) {
+      return { reply: resumoDaProposta(f), fluxo: { ...f, etapa: "revisao", atualizadoEm: agora }, evento: "proposta_revisao" };
+    }
+    return {
+      reply: `Ainda falta: ${falta.join("; ")}.`,
+      fluxo: { ...f, atualizadoEm: agora },
+      evento: "proposta_coleta_sim_incompleta",
+    };
   }
 
   if (f.etapa === "metodo" && !lerMetodo(ctx.texto, f.metodos ?? []) && pedeEnvio(ctx.texto)) {
@@ -1435,7 +1488,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
           ? { reply: resumoDoAjuste(f), fluxo: { ...f, etapa: "revisao_ajuste", atualizadoEm: agora }, evento: "proposta_revisao_ajuste" }
           : oferecerMetodos(f, ctx, deps);
       }
-      const falta = faltandoNaProposta(f.dados);
+      const falta = faltandoNaProposta(f.dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
       return {
         reply: falta.length
           ? `Ainda não há rascunho para enviar. Falta: ${falta.join("; ")}.`
@@ -1449,7 +1502,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   // Dado mudou: o "sim" anterior (e a chave dele) não vale para o resumo novo.
   const g: FluxoProposta = { ...f, dados, chave: undefined, atualizadoEm: agora };
-  const falta = parcial ? invalidosNoAjuste(dados) : faltandoNaProposta(dados);
+  const falta = parcial ? invalidosNoAjuste(dados) : faltandoNaProposta(dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
   const depoisDoRascunho = !!f.propostaId && (f.etapa === "ajustes" || f.etapa === "revisao_ajuste");
   if (falta.length > 0) {
     return {
@@ -1507,12 +1560,30 @@ async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsD
   if (!r || (r.status === 409 && r.body.error === "em_andamento")) {
     return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_proposal_create" };
   }
+  // Posse do lead recusada: o contractmaker responde SÓ 404 (nunca 403 nem
+  // 400 — a premissa de um 400 de posse "antes da promoção do #1580" era
+  // falsa: o master atual já ignora o campo desconhecido e responde 201).
+  // Nunca afirma que criou — oferece abrir sem o vínculo, pedindo nome/CPF/
+  // valor como antes desta feature.
+  if (f.leaseClientId && r.status === 404) {
+    return {
+      reply: "Não consegui ligar a proposta ao lead agora. Quer abrir a proposta sem o vínculo? (SIM)",
+      fluxo: { ...f, etapa: "revisao", ofertaSemVinculo: true, chave: undefined, atualizadoEm: ctx.agora },
+      evento: "proposta_lead_sem_vinculo",
+    };
+  }
+  // 403 é RBAC/política (`POLITICA_NAO_CONCEDE`/`can`), nunca posse — mesmo
+  // com leaseClientId, cai aqui e nunca na oferta sem vínculo.
   if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
   const recusa = recusaDoServidor(r);
   if (recusa || r.status === 422 || r.status === 400) {
+    // Com leaseClientId, a recusa pode ser porque o lead está sem nome/aluguel
+    // (ex.: "Falta o valor"): `leadIncompleto` faz `faltandoNaProposta` parar
+    // de relaxar esses campos, senão o próximo SIM repete o mesmo erro em
+    // loop (o vínculo com o lead é mantido; só o relaxamento muda).
     return {
       reply: `${recusa ?? "Algum dado não foi aceito pelo sistema."}\nMe mande e eu ajusto.`,
-      fluxo: { ...f, etapa: "coleta", chave: undefined },
+      fluxo: { ...f, etapa: "coleta", chave: undefined, ...(f.leaseClientId ? { leadIncompleto: true } : {}) },
       evento: "proposta_recusada",
     };
   }
