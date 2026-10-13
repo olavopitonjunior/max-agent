@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterAll } from "vitest";
  * @/lib/db aceita qualquer SQL, inclusive uma coluna que nao existe mais.
  * Este arquivo roda as DUAS consultas que a rota faz (dedupe por message_id e
  * o SELECT do rastro) importando as MESMAS strings de SQL que a rota usa
- * (RASTRO_SELECT_SQL / DEDUPE_SELECT_SQL, exportadas de route.ts) contra o
+ * (RASTRO_SELECT_SQL / DEDUPE_SELECT_SQL, de src/lib/playground-sql.ts, as mesmas que a rota usa) contra o
  * schema de verdade - se alguem trocar um nome de coluna na rota (ex.:
  * reply_text -> replyText, ou um campo que a migration 020 nao criou), o
  * Postgres rejeita a query e o teste cai, em vez de passar porque o mock nao
@@ -18,7 +18,7 @@ import { describe, it, expect, beforeEach, afterAll } from "vitest";
 const hasDb = Boolean(process.env.DATABASE_URL);
 const d = hasDb ? describe : describe.skip;
 
-const { RASTRO_SELECT_SQL, DEDUPE_SELECT_SQL } = await import("../admin/playground/route");
+const { RASTRO_SELECT_SQL, DEDUPE_SELECT_SQL } = await import("../../../lib/playground-sql");
 const { query, db } = await import("@/lib/db");
 
 const ORG = "org-playground-integration-test";

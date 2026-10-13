@@ -5,6 +5,7 @@ import { query } from "@/lib/db";
 import { runTurn, threadIdFor } from "@/graph/graph";
 import { resolveIdentity } from "@/lib/identity";
 import { limparThreadDoCheckpointer } from "@/lib/checkpointer-reset";
+import { RASTRO_SELECT_SQL, DEDUPE_SELECT_SQL } from "@/lib/playground-sql";
 import type { InboundMessage } from "@/lib/transport";
 
 export const dynamic = "force-dynamic";
@@ -47,17 +48,6 @@ export const maxDuration = 120;
  * de rodar a rota checa se ja existe conversation_turn com esse
  * message_id - se existir, devolve 409 sem rodar de novo.
  */
-export const RASTRO_SELECT_SQL = `SELECT org_id, kind, inbound_text, transcript, reply_text,
-            route, intent_json, tools_json, usage_json, timings_json,
-            signals_json, degradado, latency_ms, error, created_at
-       FROM conversation_turn
-      WHERE message_id = $1
-      ORDER BY created_at DESC
-      LIMIT 1`;
-
-export const DEDUPE_SELECT_SQL =
-  "SELECT 1 AS ja_existe FROM conversation_turn WHERE message_id = $1 LIMIT 1";
-
 const TELEFONE_E164 = /^\+[1-9]\d{6,14}$/;
 
 const bodySchema = z
