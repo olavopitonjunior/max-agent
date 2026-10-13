@@ -31,10 +31,11 @@ vi.mock("../orgs", () => ({
   }),
 }));
 
-const { resolveIdentity, markGreeted, clearIdentityCache } = await import(
+const { resolveIdentity, markGreeted, clearIdentityCache, avisouPrimeiroAcessoHoje } = await import(
   "../identity"
 );
 const { query, db } = await import("../db");
+const { enqueue } = await import("../outbox");
 
 const PHONE = "5511900000077";
 const E164 = "+5511900000077";
@@ -54,9 +55,13 @@ d("identity_cache", () => {
     vi.unstubAllGlobals();
     await query(`DELETE FROM identity_cache WHERE phone = $1`, [E164]);
     await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [E164]);
+    await query(`DELETE FROM outbox WHERE phone = $1`, [PHONE]);
+    await query(`DELETE FROM conversation_turn WHERE phone = $1`, [PHONE]);
   });
 
   afterAll(async () => {
+    await query(`DELETE FROM outbox WHERE phone = $1`, [PHONE]);
+    await query(`DELETE FROM conversation_turn WHERE phone = $1`, [PHONE]);
     await query(`DELETE FROM identity_cache WHERE phone = $1`, [E164]);
     await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [E164]);
     await db().end();
@@ -153,5 +158,72 @@ d("identity_cache", () => {
     const r = await resolveIdentity(PHONE);
     expect(r.kind).toBe("resolved");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Prod 13/10: as boas-vindas saem na aprovação do convite, mas o ImobPro só
+   * grava o `User.phone` no primeiro acesso. Nesse intervalo o `by-phone` dá
+   * 404 — e o Max respondia "não reconheci" a quem acabara de receber as
+   * boas-vindas dele, com o negativo preso 24h no cache.
+   */
+  describe("convidado sem primeiro acesso", () => {
+    async function boasVindasEnviadas() {
+      const r = await enqueue({
+        orgId: ORG.orgId,
+        dedupeKey: `welcome-${Date.now()}`,
+        audience: "platform_user",
+        phone: PHONE,
+        recipientName: "Aparecida",
+        title: "Boas-vindas",
+        body: "Olá, Aparecida! Eu sou o Max.",
+        linkUrl: null,
+        dealId: null,
+        orgName: ORG.orgName,
+        kind: "welcome",
+      });
+      if (r.status !== "queued") throw new Error("duplicata no setup");
+      await query(`UPDATE outbox SET status = 'sent', sent_at = now() WHERE id = $1`, [r.id]);
+    }
+
+    it("404 com boas-vindas enviadas: primeiroAcesso, sem negativo no cache", async () => {
+      mockScan(404);
+      await boasVindasEnviadas();
+
+      const r = await resolveIdentity(PHONE);
+      expect(r).toMatchObject({ kind: "unknown", primeiroAcesso: { orgId: ORG.orgId } });
+      const cache = await query(`SELECT 1 FROM identity_cache WHERE phone = $1`, [E164]);
+      expect(cache).toHaveLength(0);
+
+      // Fez o primeiro acesso: a mensagem seguinte já resolve, sem esperar TTL.
+      mockScan({ userId: "u1", name: "Aparecida" });
+      expect((await resolveIdentity(PHONE)).kind).toBe("resolved");
+    });
+
+    it("negativo cacheado ANTES das boas-vindas não segura o convidado", async () => {
+      mockScan(404);
+      await resolveIdentity(PHONE); // negativo de 24h
+      await boasVindasEnviadas();
+
+      const fetchMock = mockScan({ userId: "u1", name: "Aparecida" });
+      expect((await resolveIdentity(PHONE)).kind).toBe("resolved");
+      expect(fetchMock).toHaveBeenCalled();
+    });
+
+    it("sem boas-vindas, o desconhecido continua como antes", async () => {
+      mockScan(404);
+      const r = await resolveIdentity(PHONE);
+      expect(r).toMatchObject({ kind: "unknown", alreadyGreeted: false });
+      expect(r).not.toHaveProperty("primeiroAcesso");
+    });
+
+    it("um aviso de primeiro acesso por número a cada 24h", async () => {
+      expect(await avisouPrimeiroAcessoHoje(PHONE)).toBe(false);
+      await query(
+        `INSERT INTO conversation_turn (org_id, phone, message_id, inbound_text, reply_text, error)
+         VALUES ($1, $2, 'wamid.pa', 'oi', 'aviso', 'primeiro_acesso_pendente')`,
+        [ORG.orgId, PHONE]
+      );
+      expect(await avisouPrimeiroAcessoHoje(E164)).toBe(true);
+    });
   });
 });

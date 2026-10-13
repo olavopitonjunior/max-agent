@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 /**
  * O aceite roda ANTES da identidade e do modelo. Sem esta trava, tirar a
@@ -10,6 +10,11 @@ vi.mock("@/lib/aceite", () => ({ interceptar: vi.fn(), repassarDesconhecido: vi.
 vi.mock("@/lib/identity", async (orig) => ({
   ...(await orig<typeof import("@/lib/identity")>()),
   resolveIdentity: vi.fn().mockResolvedValue({ kind: "unknown", alreadyGreeted: true }),
+  avisouPrimeiroAcessoHoje: vi.fn().mockResolvedValue(false),
+}));
+vi.mock("@/lib/orgs", async (orig) => ({
+  ...(await orig<typeof import("@/lib/orgs")>()),
+  orgById: vi.fn().mockResolvedValue({ orgId: "org1", orgName: "RE/MAX Ativa", apiToken: "t" }),
 }));
 vi.mock("@/lib/turnlog", async (orig) => ({
   ...(await orig<typeof import("@/lib/turnlog")>()),
@@ -22,12 +27,13 @@ vi.mock("@/lib/llm", () => ({
 
 const { runTurn } = await import("../graph");
 const { interceptar, repassarDesconhecido } = await import("@/lib/aceite");
-const { resolveIdentity } = await import("@/lib/identity");
+const { resolveIdentity, avisouPrimeiroAcessoHoje } = await import("@/lib/identity");
 const { complete } = await import("@/lib/llm");
 
 const intercepta = interceptar as unknown as ReturnType<typeof vi.fn>;
 const repassa = repassarDesconhecido as unknown as ReturnType<typeof vi.fn>;
 const identidade = resolveIdentity as unknown as ReturnType<typeof vi.fn>;
+const avisou = avisouPrimeiroAcessoHoje as unknown as ReturnType<typeof vi.fn>;
 
 const MSG = {
   messageId: "wamid.T1",
@@ -47,6 +53,9 @@ describe("runTurn × aceite", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     repassa.mockResolvedValue(null);
+  });
+  afterEach(() => {
+    identidade.mockResolvedValue({ kind: "unknown", alreadyGreeted: true });
   });
 
   it("interceptado: responde o que o aceite devolveu sem identidade nem modelo", async () => {
@@ -86,5 +95,29 @@ describe("runTurn × aceite", () => {
     repassa.mockRejectedValueOnce(new Error("banco fora"));
     const r = await runTurn({ ...MSG, text: "oi", buttonPayload: null });
     expect(r.reply).toBeNull();
+  });
+
+  /** Prod 13/10: convidado sem primeiro acesso ouvia "não reconheci este número". */
+  it("convidado sem primeiro acesso: diz o que falta, uma vez por dia, sem repasse nem modelo", async () => {
+    intercepta.mockResolvedValue(null);
+    identidade.mockResolvedValue({ kind: "unknown", alreadyGreeted: true, primeiroAcesso: { orgId: "org1" } });
+
+    const r1 = await runTurn({ ...MSG, text: "No momento não posso atender", buttonPayload: null });
+    expect(r1.reply).toContain("RE/MAX Ativa");
+    expect(r1.reply).toContain("primeiro acesso");
+    expect(r1.reply).not.toContain("Não reconheci");
+
+    expect(repassa).not.toHaveBeenCalled();
+
+    // Insistiu depois do aviso: vai para o repasse; sem repasse, silêncio.
+    avisou.mockResolvedValue(true);
+    repassa.mockResolvedValueOnce({ reply: "Passei sua mensagem para a nossa equipe.", marca: "desconhecido_repassado" });
+    const r2 = await runTurn({ ...MSG, messageId: "wamid.T3", text: "meu acesso não funciona", buttonPayload: null });
+    expect(r2.reply).toBe("Passei sua mensagem para a nossa equipe.");
+    const r3 = await runTurn({ ...MSG, messageId: "wamid.T4", text: "oi", buttonPayload: null });
+    expect(r3.reply).toBeNull();
+    expect(repassa).toHaveBeenCalledTimes(2);
+    expect(complete).not.toHaveBeenCalled();
+    avisou.mockResolvedValue(false);
   });
 });
