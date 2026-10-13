@@ -366,6 +366,12 @@ d("apresentação do Max na primeira resposta (boas-vindas por template)", () =>
     );
     expect(row.released_at).not.toBeNull();
   });
+
+  it("afirmação curta não é cumprimento: \"já foi criada\" segue para o grafo sem reapresentar (prod 13/10)", async () => {
+    await enviada("ap-7", { kind: "welcome", template: "max_boas_vindas_v2", body: APRESENTACAO });
+    expect(await interceptar(msg({ text: "já foi criada" }))).toBeNull();
+    expect(await interceptar(msg({ text: "oi" }))).toBeNull();
+  });
 });
 
 /**

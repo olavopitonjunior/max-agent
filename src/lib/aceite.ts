@@ -510,10 +510,45 @@ const VALIDADE_APRESENTACAO_DIAS = 7;
 /** Só o v1 trazia a apresentação; qualquer versão posterior a deixa para cá. */
 const BOAS_VINDAS_V1 = templatesDoKind("welcome").at(-1)?.name ?? "max_boas_vindas";
 
-/** Curto e sem pergunta: cumprimento, "ok", "obrigado". */
+/**
+ * Cumprimento, "ok", "obrigado" — e SÓ isso. Lista explícita, não "curto e sem
+ * pergunta": prod 13/10, "já foi criada" (resposta às boas-vindas dizendo que o
+ * acesso já existia) tinha 3 palavras e recebeu a apresentação de volta, com o
+ * "faça o primeiro acesso" que a pessoa acabara de dizer que fez. Afirmação
+ * curta é conteúdo e vai para o grafo.
+ */
+const UM_CUMPRIMENTO =
+  "(?:" +
+  [
+    "oi+e*", "oie+", "ola+", "opa+", "e ?a[ei]+", "salve", "fala",
+    "bom dia+", "boa tarde+", "boa noite+",
+    "(?:tudo|td) (?:bem|bom|certo|joia|tranquilo)(?: com voce| e voce| e ai)?", "como vai",
+    "ok+", "okay", "blz", "beleza", "certo", "show", "joia",
+    "(?:muito )?obrigad[oa]+", "obg", "valeu+", "vlw", "tchau", "ate mais",
+    "rs+", "k{2,}", "(?:ha){2,}",
+    // Vocativo genérico no fim: "boa tarde, pessoal", "bom dia a todos".
+    "pessoal", "a todos", "gente", "equipe",
+  ].join("|") +
+  ")";
+// "oi, bom dia" / "ok e obrigado": todos os pedaços têm que ser cumprimento.
+const SO_CUMPRIMENTOS = new RegExp(`^${UM_CUMPRIMENTO}(?: (?:e )?${UM_CUMPRIMENTO})*$`);
+
 export function ehCumprimento(texto: string): boolean {
-  const t = texto.trim();
-  return t.length > 0 && !t.includes("?") && t.split(/\s+/).length <= 4;
+  const t = texto
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    // Emoji, pontuação e o vocativo ("oi, Max!") não mudam a intenção. O "?"
+    // também sai: "oi, tudo bem?" é cumprimento; pergunta de conteúdo não
+    // casa a lista de qualquer jeito.
+    .replace(/\p{Extended_Pictographic}|[\u200d\ufe0f]|[\u{1f3fb}-\u{1f3ff}]/gu, " ")
+    .replace(/\bmax\b/g, " ")
+    .replace(/[!?.,;:~()\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Só emoji ("👍") também é reação, não conteúdo.
+  if (!t) return /\p{Extended_Pictographic}/u.test(texto);
+  return SO_CUMPRIMENTOS.test(t);
 }
 
 async function apresentacaoPendente(
@@ -546,7 +581,7 @@ async function apresentacaoPendente(
   if (r.length === 0) return null;
   const a = r.reduce((x, y) => (new Date(y.sent_at) > new Date(x.sent_at) ? y : x));
   if (!ehCumprimento(texto) || !a.body.trim()) {
-    log.info("aceite.apresentacao_consumida", { orgId: a.org_id, motivo: "pergunta" });
+    log.info("aceite.apresentacao_consumida", { orgId: a.org_id, motivo: "nao_cumprimento" });
     return null;
   }
   return { reply: a.body.trim(), orgId: a.org_id, marca: "apresentacao_entregue" };
