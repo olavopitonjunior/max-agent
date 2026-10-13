@@ -55,6 +55,19 @@ describe("continuidade assinada", () => {
     expect(r.fluxo).not.toHaveProperty("alvo");
     expect(acao).toHaveBeenCalledWith("proposal.list", { busca: "maria" });
   });
+  it.each(["sim", "ok", "pode", "Sim"])("fluxo concluído não consome '%s': libera para o modelo e não escreve", async (texto) => {
+    const f: FluxoContinuidade = { ...fluxo(), etapa: "concluida", resultado: "Proposta convertida.\nNegócio: https://x/d1" };
+    const r = await conduzirContinuidade(f, { ...ctx, texto }, deps);
+    expect(r.liberar).toBe(true);
+    expect(r.fluxo).toMatchObject({ etapa: "concluida" });
+    expect(rebaixarFluxo(r.fluxo)).toMatchObject({ etapa: "concluida" });
+    expect(acao).not.toHaveBeenCalled();
+  });
+  it("fluxo concluído repete o resultado só quando a continuidade é pedida de novo", async () => {
+    const f: FluxoContinuidade = { ...fluxo(), etapa: "concluida", resultado: "Proposta convertida.", chave: { verbo: "proposal.convert", valor: "k" } };
+    const r = await conduzirContinuidade(f, { ...ctx, texto: "converter a proposta" }, deps);
+    expect(r.reply).toBe("Proposta convertida.");
+  });
   it("selecionar completa não exige permissão de envio", async () => {
     const r = await conduzirContinuidade({ ...fluxo(), etapa: "selecao", alvo: undefined, candidatos: [{ ...p, status: "completa" }] }, { ...ctx, texto: "1", policy: ["proposal.list", "proposal.create"] }, deps);
     expect(r.fluxo).toMatchObject({ etapa: "confirmacao", alvo: { id: "p1" } });

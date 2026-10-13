@@ -381,3 +381,21 @@ describe("escopo do Max no grafo (09/10)", () => {
     expect(acao).not.toHaveBeenCalledWith(expect.objectContaining({ verb: "proposal.list" }));
   });
 });
+
+describe("sim sequestrado por fluxo concluído (prod 13/10)", () => {
+  const concluida = () => ({ kind: "continuidade", etapa: "concluida", converter: true,
+    alvo: { id: "p1", codigo: "PROP-2026-0001", status: "convertida" },
+    resultado: "Proposta PROP-2026-0001 convertida em negócio, com os dados e o PDF assinado preservados.\nNegócio: https://imobpro.ia.br/deals/d1",
+    atualizadoEm: Date.now() });
+  it("o 'Sim' à pergunta do modelo vai para o modelo, não repete a conversão antiga", async () => {
+    llm.mockResolvedValueOnce({ text: "Você tem 1 negócio em andamento. Quer que eu te mostre as pendências deles no detalhe?", toolCalls: [], usage: uso });
+    const t1 = await run("Eu tenho algum negócio em andamento?", { fluxo: concluida() }, "m1");
+    expect(t1.reply).toContain("pendências");
+    llm.mockResolvedValueOnce({ text: "Pendências do negócio: falta a certidão.", toolCalls: [], usage: uso });
+    const t2 = await run("Sim", { fluxo: t1.fluxo }, "m2");
+    expect(llm).toHaveBeenCalledTimes(2);
+    expect(t2.reply).toContain("Pendências do negócio");
+    expect(t2.reply).not.toContain("convertida em negócio");
+    expect(acao).not.toHaveBeenCalled();
+  });
+});
