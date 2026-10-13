@@ -61,6 +61,7 @@ import {
   askWhichOrg,
   displayName,
   markGreeted,
+  avisouPrimeiroAcessoHoje,
   type Candidate,
 } from "@/lib/identity";
 import { complete, DEFAULT_MODEL, type LlmUsage,
@@ -68,6 +69,7 @@ import { complete, DEFAULT_MODEL, type LlmUsage,
 } from "@/lib/llm";
 import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
 import { checkpointerPool } from "@/lib/db";
+import { orgById } from "@/lib/orgs";
 import { conversationKey, phoneTag } from "@/lib/phone";
 import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
 import { rotaDoTurn } from "./rota";
@@ -2134,6 +2136,20 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
   // respondeu a um aviso, engano ou spam.
   if (identity.kind === "unknown") {
+    // Convidado sem primeiro acesso: o ImobPro só liga o telefone ao usuário
+    // quando ele define a senha. "Não reconheci" aqui desmentia as boas-vindas.
+    if (identity.primeiroAcesso) {
+      const { orgId } = identity.primeiroAcesso;
+      const jaAvisou = await avisouPrimeiroAcessoHoje(inbound.fromPhone).catch(() => true);
+      if (jaAvisou) return sair(null, { orgId, error: "primeiro_acesso_silenciado" });
+      const org = await orgById(orgId).catch(() => null);
+      return sair(
+        `Oi! Sou o Max${org ? `, da ${org.orgName}` : ""}. Para eu te atender por aqui, ` +
+          "falta concluir o seu primeiro acesso ao ImobPro pelo botão da mensagem de " +
+          "boas-vindas. Depois disso é só me chamar de novo.",
+        { orgId, error: "primeiro_acesso_pendente" }
+      );
+    }
     // Uma apresentação por ciclo do cache negativo, e depois silêncio:
     // responder cada mensagem de um número estranho consome cota da Z-API e
     // confirma ao spammer que o número é vivo.

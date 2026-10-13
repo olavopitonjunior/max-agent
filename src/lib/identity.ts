@@ -1,6 +1,6 @@
 import { listOrgs, orgById, type OrgConfig } from "./orgs";
 import { query } from "./db";
-import { normalizeBrPhone } from "./phone";
+import { conversationKey, normalizeBrPhone } from "./phone";
 import { fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS } from "./http";
 
 /**
@@ -77,7 +77,56 @@ export type Identity =
   | { kind: "pending"; candidates: Candidate[] }
   /** `alreadyGreeted`: este número desconhecido JÁ recebeu a apresentação —
    * a partir daí é silêncio até o cache negativo expirar. */
-  | { kind: "unknown"; alreadyGreeted?: boolean };
+  | {
+      kind: "unknown";
+      alreadyGreeted?: boolean;
+      /** Recebeu as boas-vindas desta org e ainda não fez o primeiro acesso. */
+      primeiroAcesso?: { orgId: string };
+    };
+
+/**
+ * Convidado que ainda não fez o primeiro acesso (prod 13/10).
+ *
+ * O ImobPro manda as boas-vindas quando o convite é aprovado, mas só grava o
+ * `User.phone` no primeiro acesso (`PASSWORD_INITIAL_SET`, "whatsapp:
+ * vinculado"). Nesse intervalo o `by-phone` devolve 404, e quem respondia às
+ * boas-vindas ouvia "não reconheci este número" de quem acabara de dar
+ * boas-vindas. Pior: o negativo ficava 24h no cache, e o primeiro acesso não
+ * o invalida — o Max seguia sem reconhecer a pessoa já liberada.
+ *
+ * A prova é a própria saída: boas-vindas ENVIADAS a este número. Com ela, o
+ * negativo não é cacheado (a próxima mensagem re-varre, e o primeiro acesso
+ * vale na hora) e a resposta diz o que falta.
+ */
+const PRIMEIRO_ACESSO_DIAS = 30;
+
+async function boasVindasEnviada(e164: string): Promise<{ orgId: string } | null> {
+  const rows = await query<{ org_id: string }>(
+    `SELECT org_id FROM outbox
+      WHERE phone = $1 AND kind = 'welcome' AND status = 'sent'
+        AND sent_at > now() - ($2 || ' days')::interval
+      ORDER BY sent_at DESC LIMIT 1`,
+    [conversationKey(e164), String(PRIMEIRO_ACESSO_DIAS)]
+  );
+  return rows[0] ? { orgId: rows[0].org_id } : null;
+}
+
+/**
+ * Um aviso de primeiro acesso por número a cada 24h. A resposta às boas-vindas
+ * costuma ser a mensagem automática do WhatsApp Business ("no momento não
+ * posso atender…", foi o caso de 13/10) — responder a cada uma viraria
+ * conversa de robô com robô.
+ */
+export async function avisouPrimeiroAcessoHoje(rawPhone: string): Promise<boolean> {
+  const rows = await query<{ n: number }>(
+    `SELECT 1 AS n FROM conversation_turn
+      WHERE phone = $1 AND error = 'primeiro_acesso_pendente'
+        AND created_at > now() - interval '24 hours'
+      LIMIT 1`,
+    [conversationKey(rawPhone)]
+  );
+  return rows.length > 0;
+}
 
 const BASE = imobproBase;
 
@@ -348,10 +397,12 @@ export async function resolveIdentity(rawPhone: string): Promise<Identity> {
     return null;
   });
   if (cached) {
-    if (cached.negative) {
+    // Negativo gravado antes das boas-vindas não vale: o convidado pode ter
+    // feito o primeiro acesso depois dele. Re-varre.
+    if (cached.negative && !(await boasVindasEnviada(e164).catch(() => null))) {
       return { kind: "unknown", alreadyGreeted: cached.greeted };
     }
-    if (cached.payload) {
+    if (!cached.negative && cached.payload) {
       const org = await orgById(cached.payload.orgId);
       if (org) return { kind: "resolved", org, candidate: cached.payload };
       // Org do cache sumiu: invalida e cai na varredura.
@@ -366,6 +417,11 @@ export async function resolveIdentity(rawPhone: string): Promise<Identity> {
     // Só cacheia o negativo de uma varredura COMPLETA: "não achei porque uma
     // org estava fora" gravado por 24h silenciaria um usuário legítimo até o
     // TTL vencer. Degradada, a próxima mensagem re-varre.
+    const convidado = await boasVindasEnviada(e164).catch(() => null);
+    if (convidado) {
+      await clearIdentityCache(e164).catch(() => undefined);
+      return { kind: "unknown", alreadyGreeted: false, primeiroAcesso: convidado };
+    }
     if (!degraded) await writeCache(e164, { negative: true }).catch(() => undefined);
     return { kind: "unknown", alreadyGreeted: false };
   }
