@@ -1253,14 +1253,16 @@ async function conduzirNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: Deps
   if (f.etapa === "tipo" || !f.tipo) {
     const tipo = lerNatureza(ctx.texto);
     if (!tipo) return { liberar: true, fluxo: null, evento: "tipo_encerrado" };
-    return carregarCamposDoNegocio(tipo, agora, deps);
+    // O nome dito no pedido espera aqui enquanto o Max pergunta venda/locação.
+    return carregarCamposDoNegocio(tipo, agora, deps, f.titulo);
   }
 
   const resposta = lerConfirmacao(ctx.texto);
   if (f.etapa === "nome") {
-    // A resposta É o título, como a pessoa escreveu. "sim"/"não" não é nome: pergunta de novo.
+    // A resposta É o título, como a pessoa escreveu. "sim"/"não" não é nome, e
+    // pergunta ("pode ser o endereço?") também não: pergunta de novo.
     const nome = ctx.texto.replace(/\s+/g, " ").trim().slice(0, 200);
-    if (!nome || resposta !== "nenhum") return { reply: TEXTO_NOME_DO_NEGOCIO, fluxo: f, evento: "negocio_nome" };
+    if (!nome || resposta !== "nenhum" || nome.endsWith("?")) return { reply: TEXTO_NOME_DO_NEGOCIO, fluxo: f, evento: "negocio_nome" };
     return { reply: resumoDoNegocio({ ...f, titulo: nome }), fluxo: { ...f, titulo: nome, etapa: "revisao", chave: undefined, atualizadoEm: agora }, evento: "negocio_revisao" };
   }
   if (f.etapa === "revisao" && resposta === "sim") return criarNegocio(f, ctx, deps);

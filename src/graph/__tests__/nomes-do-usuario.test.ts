@@ -101,6 +101,23 @@ describe("nome do negócio", () => {
     p = await F.conduzirFluxo(p.fluxo!, ctx("2"), d);
     expect(p.reply).toContain("Nome: Carlos");
   });
+
+  it("o nome do pedido sobrevive à pergunta 'venda ou locação?'", async () => {
+    const d = deps({ acao: acaoCom(SEM_CAMPOS) });
+    let p: Passo = await F.iniciarFluxo({ tipo: "proposta", nomeCliente: "Carlos", policy: ["form.create"], agora }, d);
+    expect(p.fluxo).toMatchObject({ kind: "negocio", etapa: "tipo" });
+    p = await F.conduzirFluxo(p.fluxo!, ctx("venda"), d);
+    expect(p.reply).toContain("Nome: Carlos");
+    expect(p.reply).not.toContain("Que nome");
+  });
+
+  it("pergunta na etapa do nome não vira nome", async () => {
+    const d = deps({ acao: acaoCom(SEM_CAMPOS) });
+    let p: Passo = await F.iniciarFluxo({ tipo: "venda", policy: [...TUDO], agora }, d);
+    p = await F.conduzirFluxo(p.fluxo!, ctx("pode ser o endereço?"), d);
+    expect(p.reply).toBe("Que nome dou a esse negócio?");
+    expect(p.fluxo).toMatchObject({ etapa: "nome" });
+  });
 });
 
 describe("nome da proposta", () => {
