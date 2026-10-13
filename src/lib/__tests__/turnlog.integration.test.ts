@@ -49,10 +49,12 @@ d("conversation_turn (Postgres real)", () => {
         { model: "m", promptTokens: 50, completionTokens: 5, latencyMs: 100, success: true },
       ] as never,
       latencyMs: 1234,
+      route: "modelo",
     });
 
     const [t] = await linhas();
     expect(t.message_id).toBe("M1");
+    expect(t.route).toBe("modelo");
     expect(t.latency_ms).toBe(1234);
     // Lista, não soma: é preciso enxergar QUAL chamada pesa.
     expect(t.usage_json).toHaveLength(2);
@@ -86,6 +88,8 @@ d("conversation_turn (Postgres real)", () => {
 
     const rows = await linhas();
     expect(new Set(rows.map((r) => r.phone))).toEqual(new Set(["5511900000003"]));
+    // Sem rota informada, a coluna fica NULL (linhas antigas e saídas por exceção).
+    expect(rows[0].route).toBeNull();
   });
 
   describe("poda por idade", () => {

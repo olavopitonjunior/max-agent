@@ -70,6 +70,7 @@ import { LLM_SHORT_TIMEOUT_MS } from "@/lib/http";
 import { checkpointerPool } from "@/lib/db";
 import { conversationKey, phoneTag } from "@/lib/phone";
 import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
+import { rotaDoTurn } from "./rota";
 import { tokenizar, destokenizarResposta, destokenizarArgs, redigir, redigirProfundo, redigirCredito, type MapaPii } from "@/lib/pii";
 import {
   assuntoBloqueado,
@@ -2080,6 +2081,8 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         replyText: reply,
         latencyMs: Date.now() - iniciadoEm,
         error: extra.error ?? null,
+        // Não chegou ao grafo: o motivo está em `error` (desconhecido, ambíguo…).
+        route: "pre_grafo",
       });
     },
   });
@@ -2349,6 +2352,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         tools,
         usage,
         timings,
+        route: rotaDoTurn(timings, tools, result.halt),
         latencyMs,
         error: desfecho,
       });
