@@ -14,14 +14,19 @@ export function lerOnly(argv: readonly string[]): string[] | null {
   let bruto: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    let valor: string | undefined;
     if (a === "--only") {
-      bruto = argv[i + 1];
-      if (bruto === undefined || bruto.startsWith("--")) {
-        throw new Error("--only precisa de nome(s): --only max_x[,max_y]");
-      }
+      valor = argv[i + 1];
+      if (valor === undefined) valor = "";
     } else if (a.startsWith("--only=")) {
-      bruto = a.slice("--only=".length);
+      valor = a.slice("--only=".length);
+    } else {
+      continue;
     }
+    // Repetir o flag é ambíguo (somar? último vale?) — melhor recusar.
+    if (bruto !== undefined) throw new Error("--only repetido: passe uma lista só, --only max_x,max_y");
+    if (valor.startsWith("--")) valor = "";
+    bruto = valor;
   }
   if (bruto === undefined) return null;
   const nomes = bruto

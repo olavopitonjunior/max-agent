@@ -48,8 +48,8 @@ const APPLY = process.argv.includes("--apply");
  * `--only max_x[,max_y]`: só esses templates entram na tabela e na submissão
  * (`lib/templates/only.ts`). Sem ele, `--apply` submete TODO ausente — inclusive
  * texto do catálogo que o Olavo ainda não revisou. Nome fora do catálogo aborta.
+ * Lido e validado no começo do `main`, ANTES de tocar o banco ou a Meta.
  */
-const ONLY = lerOnly(process.argv);
 /**
  * `--refresh`: lê da Graph API o status ATUAL de cada template do catálogo e
  * grava (`lib/templates/refresh.ts`, o mesmo que o cron horário roda). O
@@ -184,6 +184,12 @@ async function refresh(): Promise<void> {
 }
 
 async function main() {
+  const only = lerOnly(process.argv);
+  if (REFRESH && only) {
+    throw new Error("--refresh não aceita --only: o refresh sempre lê todos os templates do catálogo");
+  }
+  const catalogo = filtrarPorNomes(todosOsTemplates(), only);
+
   const host = (() => {
     try {
       return new URL(process.env.DATABASE_URL ?? "").host;
@@ -201,8 +207,7 @@ async function main() {
   }
 
   const atual = await estadoAtual();
-  const catalogo = filtrarPorNomes(todosOsTemplates(), ONLY);
-  if (ONLY) console.log(`--only: ${catalogo.map((d) => d.name).join(", ")}\n`);
+  if (only) console.log(`--only: ${catalogo.map((d) => d.name).join(", ")}\n`);
 
   console.log("nome".padEnd(34) + "status atual".padEnd(16) + "ação");
   console.log("-".repeat(80));

@@ -17,6 +17,15 @@ describe("lerOnly", () => {
     expect(() => lerOnly(["--only"])).toThrow(/precisa de nome/);
     expect(() => lerOnly(["--only", "--apply"])).toThrow(/precisa de nome/);
     expect(() => lerOnly(["--only="])).toThrow(/precisa de nome/);
+    expect(() => lerOnly(["--only", ","])).toThrow(/precisa de nome/);
+    expect(() => lerOnly(["--only=--apply"])).toThrow(/precisa de nome/);
+  });
+  it("vírgula sobrando é ignorada", () => {
+    expect(lerOnly(["--only", "max_a,"])).toEqual(["max_a"]);
+  });
+  it("--only repetido lança (não vale só o último em silêncio)", () => {
+    expect(() => lerOnly(["--only", "max_a", "--only", "max_b"])).toThrow(/repetido/);
+    expect(() => lerOnly(["--only=max_a", "--only=max_b"])).toThrow(/repetido/);
   });
 });
 
