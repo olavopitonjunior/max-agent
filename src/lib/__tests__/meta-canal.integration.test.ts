@@ -14,6 +14,11 @@ vi.mock("@/graph/graph", () => ({
 vi.mock("../identity", () => ({
   resolveIdentity: vi.fn().mockResolvedValue({ kind: "unknown" }),
 }));
+// Envolve a função real para um teste poder simular falha de banco na reserva.
+vi.mock("../atividades-pendentes", async (orig) => {
+  const real = await orig<typeof import("../atividades-pendentes")>();
+  return { ...real, reservarAvisoNeutro: vi.fn(real.reservarAvisoNeutro) };
+});
 vi.mock("../meta", async (orig) => ({
   ...(await orig<typeof import("../meta")>()),
   sendText: vi.fn().mockResolvedValue({ messageId: "wamid.MID" }),
@@ -28,12 +33,15 @@ const {
   MARCA_TEMPLATE_INVALIDO,
   MARCA_EXPIRADO,
   MARCA_ENVIO_INCERTO,
+  MARCA_ATIVIDADES_JA_AVISADAS,
+  MARCA_RESERVA_AVISO_FALHOU,
 } = await import("../outbox");
 const { MetaHttpError } = await import("../transport/erro");
 const { enqueueInbound } = await import("../inbound");
 const { janelaAberta } = await import("../janela24h");
+const { reservarAvisoNeutro } = await import("../atividades-pendentes");
 const { applyFalhaDeEnvio, applyStatusCallback } = await import("../delivery");
-const { query } = await import("../db");
+const { query, db } = await import("../db");
 const meta = await import("../meta");
 
 const PHONE = "5511900001111";
@@ -42,6 +50,9 @@ const metaSendTemplate = meta.sendTemplate as unknown as ReturnType<typeof vi.fn
 
 /** Template da linha padrão (`kind: form_completed`). */
 const TPL = "max_formulario_concluido";
+
+/** Template neutro das atividades (compartilhado por activity_assigned e activity_due). */
+const NEUTRO = "max_atividades_pendentes";
 
 async function linhaVencida(dedupeKey: string, kind: string | null = "form_completed") {
   await enqueue({
@@ -94,6 +105,7 @@ d("canal Meta (Postgres real)", () => {
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
     // Sem isto, um teste que aprova o template vazaria pro próximo.
     await query(`DELETE FROM wa_template WHERE name = $1`, [TPL]);
+    await query(`DELETE FROM wa_template WHERE name = $1`, [NEUTRO]);
   });
 
   afterEach(() => vi.unstubAllEnvs());
@@ -103,6 +115,7 @@ d("canal Meta (Postgres real)", () => {
     await query(`DELETE FROM conversation_window WHERE phone = $1`, [PHONE]);
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
     await query(`DELETE FROM wa_template WHERE name = $1`, [TPL]);
+    await query(`DELETE FROM wa_template WHERE name = $1`, [NEUTRO]);
   });
 
   describe("janela de 24h no outbox", () => {
@@ -440,6 +453,194 @@ d("canal Meta (Postgres real)", () => {
       const totals = await dispatchDue();
       expect(totals.held).toBe(1);
       expect(metaSend).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("atividades pendentes: um aviso neutro por janela", () => {
+    const aprovarNeutro = () =>
+      query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'APPROVED')`, [NEUTRO]);
+    const idDa = async (dedupeKey: string) =>
+      (await query<{ id: string }>(`SELECT id FROM outbox WHERE dedupe_key = $1`, [dedupeKey]))[0].id;
+
+    it("janela fechada: a PRIMEIRA sai pelo template neutro, com nome e org", async () => {
+      await aprovarNeutro();
+      await linhaVencida("k-ativ-1", "activity_assigned");
+      const totals = await dispatchDue();
+
+      expect(totals.sent).toBe(1);
+      expect(metaSend).not.toHaveBeenCalled();
+      expect(metaSendTemplate).toHaveBeenCalledTimes(1);
+      expect(metaSendTemplate.mock.calls[0][0]).toMatchObject({
+        name: NEUTRO,
+        lang: "pt_BR",
+        bodyParams: ["Ana", "FINCasa"],
+      });
+      expect(metaSendTemplate.mock.calls[0][0].botoes).toEqual([{ tipo: "url", param: await idDa("k-ativ-1") }]);
+      const l = await linha("k-ativ-1");
+      expect(l.status).toBe("sent");
+      expect(l.template_name).toBe(NEUTRO);
+    });
+
+    it("as seguintes (assigned ou due) com a janela ainda fechada: dropped com a marca, sem chamar a Meta", async () => {
+      await aprovarNeutro();
+      await linhaVencida("k-ativ-a", "activity_assigned");
+      await dispatchDue();
+      metaSendTemplate.mockClear();
+
+      await linhaVencida("k-ativ-b", "activity_assigned");
+      await linhaVencida("k-ativ-c", "activity_due");
+      const totals = await dispatchDue();
+
+      expect(metaSendTemplate).not.toHaveBeenCalled();
+      expect(metaSend).not.toHaveBeenCalled();
+      expect(totals.coalesced).toBe(2);
+      expect(totals.sent).toBe(0);
+      expect(totals.failed).toBe(0);
+      for (const k of ["k-ativ-b", "k-ativ-c"]) {
+        const l = await linha(k);
+        expect(l.status).toBe("dropped");
+        expect(l.last_error).toBe(MARCA_ATIVIDADES_JA_AVISADAS);
+        // `dropped` não é reportado ao contractmaker como falha (só `failed` é).
+        expect(l.reported_at).toBeNull();
+        expect(l.template_name).toBeNull();
+      }
+    });
+
+    it("rearma 24h depois do último aviso neutro", async () => {
+      await aprovarNeutro();
+      await linhaVencida("k-rearma-1", "activity_due");
+      await dispatchDue();
+      await query(`UPDATE outbox SET sent_at = now() - interval '25 hours' WHERE dedupe_key = 'k-rearma-1'`);
+      metaSendTemplate.mockClear();
+
+      await linhaVencida("k-rearma-2", "activity_assigned");
+      await dispatchDue();
+      expect(metaSendTemplate).toHaveBeenCalledTimes(1);
+      expect((await linha("k-rearma-2")).status).toBe("sent");
+    });
+
+    it("a pessoa escreveu de volta: a janela abre e as atividades saem como texto livre", async () => {
+      await aprovarNeutro();
+      await linhaVencida("k-livre-1", "activity_assigned");
+      await dispatchDue();
+      await query(
+        `INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now())
+         ON CONFLICT (phone) DO UPDATE SET last_inbound_at = now()`,
+        [PHONE]
+      );
+      metaSendTemplate.mockClear();
+
+      await linhaVencida("k-livre-2", "activity_due");
+      const totals = await dispatchDue();
+      expect(totals.sent).toBe(1);
+      expect(metaSend).toHaveBeenCalledTimes(1);
+      expect(metaSendTemplate).not.toHaveBeenCalled();
+      expect((await linha("k-livre-2")).template_name).toBeNull();
+    });
+
+    it("template neutro ainda não aprovado: represa (como qualquer template), não descarta", async () => {
+      await linhaVencida("k-pend-1", "activity_assigned");
+      await linhaVencida("k-pend-2", "activity_due");
+      const totals = await dispatchDue();
+      expect(totals.held).toBe(2);
+      expect(totals.coalesced).toBe(0);
+      expect(metaSendTemplate).not.toHaveBeenCalled();
+      for (const k of ["k-pend-1", "k-pend-2"]) {
+        const l = await linha(k);
+        expect(l.status).toBe("pending");
+        expect(l.last_error).toBe(MARCA_TEMPLATE_PENDENTE);
+      }
+    });
+
+    it("falha de banco na reserva: não envia, volta a pending sem queimar tentativa, com a marca", async () => {
+      await aprovarNeutro();
+      await linhaVencida("k-reserva-falha", "activity_assigned");
+      vi.mocked(reservarAvisoNeutro).mockRejectedValueOnce(new Error("conexão caiu"));
+      const totals = await dispatchDue();
+
+      expect(totals.held).toBe(1);
+      expect(totals.sent).toBe(0);
+      expect(totals.coalesced).toBe(0);
+      expect(metaSendTemplate).not.toHaveBeenCalled();
+      expect(metaSend).not.toHaveBeenCalled();
+      const l = await linha("k-reserva-falha");
+      expect(l.status).toBe("pending");
+      expect(l.attempts).toBe(0);
+      expect(l.last_error).toBe(MARCA_RESERVA_AVISO_FALHOU);
+      expect(new Date(l.deliver_after).getTime()).toBeGreaterThan(Date.now() + 4 * 60_000);
+    });
+
+    it("activity_completed, janela fechada: fora da régua (failed), não vira aviso neutro", async () => {
+      await aprovarNeutro();
+      await linhaVencida("k-concl", "activity_completed");
+      const totals = await dispatchDue();
+      expect(totals.failed).toBe(1);
+      expect(metaSendTemplate).not.toHaveBeenCalled();
+      expect((await linha("k-concl")).last_error).toBe(MARCA_FORA_DA_REGUA);
+    });
+
+    it("outro telefone não é afetado pelo aviso do primeiro", async () => {
+      await aprovarNeutro();
+      await linhaVencida("k-fone-1", "activity_assigned");
+      await dispatchDue();
+      const [{ id }] = await query<{ id: string }>(
+        `INSERT INTO outbox (id, org_id, dedupe_key, audience, phone, recipient_name, title, body, link_url, org_name, deliver_after, kind)
+         VALUES (gen_random_uuid()::text, 'org-meta', 'k-fone-2', 'platform_user', '5511900002222', 'Bia', 't', 'b',
+                 'https://imobpro.ia.br/atividades', 'FINCasa', now() - interval '1 minute', 'activity_assigned')
+         RETURNING id`
+      );
+      expect(await reservarAvisoNeutro({ rowId: id, phone: "5511900002222", templateName: NEUTRO })).toBe(true);
+      // A limpeza fica por conta do `DELETE ... org_id = 'org-meta'` do beforeEach/afterAll.
+    });
+
+    /**
+     * A corrida real: duas invocações do cron, linhas diferentes (SKIP LOCKED),
+     * mesmo telefone. Determinístico: a "vencedora" segura o advisory lock e já
+     * gravou a reserva, SEM commit; a segunda precisa ficar presa no lock. Sem o
+     * `pg_advisory_xact_lock` ela leria "nenhum aviso" (a reserva não está
+     * commitada) e retornaria `true` na hora.
+     */
+    it("reserva concorrente para o mesmo telefone: a segunda espera o lock e vê a reserva da primeira", async () => {
+      await linhaVencida("k-corrida-1", "activity_assigned");
+      await linhaVencida("k-corrida-2", "activity_due");
+      const ids = [await idDa("k-corrida-1"), await idDa("k-corrida-2")];
+      // Estado em que o claim do cron deixa a linha: `sending`.
+      await query(
+        `UPDATE outbox SET status = 'sending', attempts = 1, last_attempt_at = now() WHERE id = ANY($1::text[])`,
+        [ids]
+      );
+
+      const vencedora = await db().connect();
+      let resolvida = false;
+      let segunda: Promise<boolean> | null = null;
+      try {
+        await vencedora.query("BEGIN");
+        await vencedora.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`atividades_pendentes:${PHONE}`]);
+        await vencedora.query(
+          `UPDATE outbox SET send_started_at = now(), template_name = $2 WHERE id = $1`,
+          [ids[0], NEUTRO]
+        );
+
+        segunda = reservarAvisoNeutro({ rowId: ids[1], phone: PHONE, templateName: NEUTRO }).finally(() => {
+          resolvida = true;
+        });
+        await new Promise((r) => setTimeout(r, 300));
+        expect(resolvida).toBe(false);
+
+        await vencedora.query("COMMIT");
+      } catch (err) {
+        await vencedora.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        vencedora.release();
+      }
+      expect(await segunda).toBe(false);
+      // A segunda não gravou reserva: só a linha da vencedora tem marcador.
+      const reservadas = await query<{ id: string }>(
+        `SELECT id FROM outbox WHERE phone = $1 AND template_name = $2 AND send_started_at IS NOT NULL`,
+        [PHONE, NEUTRO]
+      );
+      expect(reservadas.map((r) => r.id)).toEqual([ids[0]]);
     });
   });
 
