@@ -316,8 +316,9 @@ export const CATALOGO: Record<string, TemplateDef> = {
     { tipo: "acoes", acoes: [CONVERTER, AGORA_NAO] },
     ["proposta"]
   ),
-  // Retorno solicitado em 07/10/2026. Texto preparado para aprovação do
-  // operador antes de templates-sync --apply; catálogo não submete à Meta.
+  // Retorno solicitado em 07/10/2026. Textos de `max_proposta_enviada` e
+  // `max_proposta_assinada_proponente` aprovados pelo Olavo em 14/10/2026.
+  // O catálogo não submete à Meta; quem submete é `templates-sync --apply`.
   proposal_sent: t(
     "max_proposta_enviada",
     "Olá, {{1}}! A proposta {{2}}, da {{3}}, foi enviada para assinatura. Acompanhe o andamento pelo botão abaixo.",

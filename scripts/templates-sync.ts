@@ -8,6 +8,7 @@
  * Uso:
  *   npx tsx scripts/templates-sync.ts             # dry-run: mostra a tabela final
  *   npx tsx scripts/templates-sync.ts --apply      # submete os que faltam
+ *   npx tsx scripts/templates-sync.ts --apply --only max_x   # só os nomeados
  *   npx tsx scripts/templates-sync.ts --refresh    # traz da Meta o status atual
  *   OUTBOX_ENV=.env.staging npx tsx scripts/templates-sync.ts
  *
@@ -40,8 +41,15 @@ import { query, db } from "../src/lib/db";
 import { botoesEmOrdem, todosOsTemplates, type TemplateDef } from "../src/lib/templates/catalog";
 import { refreshTemplates } from "../src/lib/templates/refresh";
 import { fetchWithTimeout, META_TIMEOUT_MS } from "../src/lib/http";
+import { filtrarPorNomes, lerOnly } from "../src/lib/templates/only";
 
 const APPLY = process.argv.includes("--apply");
+/**
+ * `--only max_x[,max_y]`: só esses templates entram na tabela e na submissão
+ * (`lib/templates/only.ts`). Sem ele, `--apply` submete TODO ausente — inclusive
+ * texto do catálogo que o Olavo ainda não revisou. Nome fora do catálogo aborta.
+ */
+const ONLY = lerOnly(process.argv);
 /**
  * `--refresh`: lê da Graph API o status ATUAL de cada template do catálogo e
  * grava (`lib/templates/refresh.ts`, o mesmo que o cron horário roda). O
@@ -193,7 +201,8 @@ async function main() {
   }
 
   const atual = await estadoAtual();
-  const catalogo = todosOsTemplates();
+  const catalogo = filtrarPorNomes(todosOsTemplates(), ONLY);
+  if (ONLY) console.log(`--only: ${catalogo.map((d) => d.name).join(", ")}\n`);
 
   console.log("nome".padEnd(34) + "status atual".padEnd(16) + "ação");
   console.log("-".repeat(80));
