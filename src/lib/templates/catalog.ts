@@ -11,7 +11,10 @@
  * SÓ estes temas têm template: formulário finalizado, formulário pendente,
  * contrato assinado, pesquisa de satisfação, mensagem da imobiliária,
  * onboarding (boas-vindas, configuração pendente e o repasse de dúvida) e
- * proposta (assinada, recusada, expirada, entregue). Nenhum texto cita o nome
+ * proposta (assinada, recusada, expirada, entregue) e, desde 14/10/2026
+ * (decisão do Olavo, atividades agendadas), um aviso NEUTRO de atividades
+ * pendentes (`activity_assigned` e `activity_due`, mesmo template, um por
+ * janela; `activity_completed` fica fora). Nenhum texto cita o nome
  * do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
  * janela de 24h e, fora dela, não sai pelo WhatsApp (`templateDoKind` devolve
  * `null` e o outbox desiste). Não existe mais template genérico — ele fazia
@@ -133,6 +136,13 @@ export interface TemplateDef {
    * proposta em andamento foi assinada" seria pior que não enviar.
    */
   paramsObrigatorios?: string[];
+  /**
+   * Aviso neutro de "um por janela" (atividades pendentes, 14/10/2026): fora
+   * da janela de 24h, o outbox manda este template só para a PRIMEIRA linha
+   * do telefone; as seguintes viram `dropped` até a pessoa escrever de novo
+   * ou 24h passarem do último aviso (`lib/atividades-pendentes.ts`).
+   */
+  umPorJanela?: boolean;
 }
 
 /** Fallback por fonte: a Meta recusa parâmetro vazio. */
@@ -170,6 +180,7 @@ const QUEM = { param: "quem" };
 
 const ABRIR_NEGOCIO: Botao = { tipo: "url", texto: "Abrir negócio" };
 const OK: Botao = { tipo: "ok", texto: "OK" };
+const VER_ATIVIDADES: Botao = { tipo: "url", texto: "Ver atividades" };
 
 const CONVERTER: AcaoItem = { texto: "Converter em negócio", acao: "converter" };
 const AGORA_NAO: AcaoItem = { texto: "Agora não", acao: "agora_nao" };
@@ -190,6 +201,26 @@ const MENSAGEM = t(
   ["Carlos", "RE/MAX Trio"],
   OK
 );
+
+/**
+ * Atividades agendadas: UM texto neutro para `activity_assigned` e
+ * `activity_due`. Não carrega dado da atividade (atividade, negócio, quando,
+ * recado ficam no texto livre da janela aberta, no e-mail e no sino): o
+ * catálogo não tem parâmetro opcional e o aviso é "tem coisa esperando você".
+ * O botão abre o `linkUrl` da linha que o disparou (`/r/<id>`), a página
+ * `/atividades?a=<id>` do contractmaker, que lista tudo. O TEXTO foi aprovado
+ * pelo Olavo em 14/10/2026.
+ */
+const ATIVIDADES_PENDENTES: TemplateDef = {
+  ...t(
+    "max_atividades_pendentes",
+    "Olá, {{1}}! Você tem atividades pendentes na {{2}}. Toque no botão abaixo para ver.",
+    [NOME, ORG],
+    ["Carlos", "RE/MAX Trio"],
+    VER_ATIVIDADES
+  ),
+  umPorJanela: true,
+};
 
 /**
  * `kind` → template. O que não está aqui é FORA DA RÉGUA (ver o topo).
@@ -331,6 +362,9 @@ export const CATALOGO: Record<string, TemplateDef> = {
     { tipo: "url", texto: "Abrir proposta" },
     ["proposta", "quem"]
   ),
+  // Atividades agendadas (14/10/2026): mesmo template para os dois avisos.
+  activity_assigned: ATIVIDADES_PENDENTES,
+  activity_due: ATIVIDADES_PENDENTES,
 };
 
 // Crédito Upestate (M3): o aviso `credit_result` não ganha template novo na

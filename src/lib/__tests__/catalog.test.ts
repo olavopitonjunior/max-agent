@@ -60,6 +60,8 @@ describe("a régua do Olavo (01/10/2026)", () => {
   it("só estes kinds têm template", () => {
     expect(Object.keys(CATALOGO).sort()).toEqual(
       [
+        "activity_assigned",
+        "activity_due",
         "contract_signed",
         "contract_signed_parte",
         "credit_result",
@@ -434,5 +436,63 @@ describe("parâmetro obrigatório (PR 3 — proposal_*, 05/10/2026)", () => {
         params: { proposta: "PROP-0042 Apto Rua das Flores", quem: "pelo proprietário" },
       })
     ).toEqual(["Carlos", "PROP-0042 Apto Rua das Flores", "RE/MAX Trio", "pelo proprietário"]);
+  });
+});
+
+/**
+ * Atividades agendadas (spec 2026-10-14, decisão do Olavo): fora da janela de
+ * 24h sai UM aviso neutro, e só o primeiro. Os dois kinds apontam para o MESMO
+ * template (como `manual_message` e `manual_message_parte`).
+ */
+describe("atividades pendentes (2026-10-14)", () => {
+  const linha = {
+    recipient_name: "Carlos Souza",
+    org_name: "RE/MAX Trio",
+    title: "Nova atividade para você: Conferir comprovante do sinal",
+    params: {
+      quem: "Marina Lopes",
+      atividade: "Conferir comprovante do sinal",
+      negocio: "Apto 142 · Rua Itapeva 538",
+      quando: "hoje, 14/10 (dia inteiro)",
+      recado: "O comprovante chegou por e-mail hoje cedo.",
+    },
+  };
+
+  it("activity_assigned e activity_due usam o MESMO template neutro", () => {
+    expect(CATALOGO.activity_assigned.name).toBe("max_atividades_pendentes");
+    expect(CATALOGO.activity_due).toBe(CATALOGO.activity_assigned);
+    expect(templatesDoKind("activity_assigned").map((d) => d.name)).toEqual(["max_atividades_pendentes"]);
+    expect(templatesDoKind("activity_due").map((d) => d.name)).toEqual(["max_atividades_pendentes"]);
+  });
+
+  it("sem repetição na submissão: o template aparece UMA vez em todosOsTemplates", () => {
+    expect(todosOsTemplates().filter((d) => d.name === "max_atividades_pendentes")).toHaveLength(1);
+  });
+
+  it("corpo neutro: só nome e org, sem dado da atividade, botão 'Ver atividades' (URL)", () => {
+    const def = CATALOGO.activity_assigned;
+    expect(def.body).toBe("Olá, {{1}}! Você tem atividades pendentes na {{2}}. Toque no botão abaixo para ver.");
+    expect(def.vars).toEqual(["nome", "org"]);
+    expect(def.category).toBe("UTILITY");
+    expect(def.botao).toEqual({ tipo: "url", texto: "Ver atividades" });
+    expect(botoesDaLinha(def, "r1")).toEqual([{ tipo: "url", param: "r1" }]);
+    expect(parametrosDoCorpo(def, linha)).toEqual(["Carlos", "RE/MAX Trio"]);
+  });
+
+  it("não exige params: o emissor manda o recado e o resto sem que o template dependa deles", () => {
+    expect(CATALOGO.activity_assigned.paramsObrigatorios).toBeUndefined();
+    expect(templateUsavel(CATALOGO.activity_assigned, { ...linha, params: null })).toBe(true);
+    expect(parametroObrigatorioFaltando(CATALOGO.activity_assigned, { ...linha, params: null })).toBeNull();
+  });
+
+  it("só este template é 'um por janela'", () => {
+    expect(CATALOGO.activity_assigned.umPorJanela).toBe(true);
+    expect(todosOsTemplates().filter((d) => d.umPorJanela).map((d) => d.name)).toEqual([
+      "max_atividades_pendentes",
+    ]);
+  });
+
+  it("activity_completed fica FORA da régua (só texto livre na janela de 24h)", () => {
+    expect(templateDoKind("activity_completed")).toBeNull();
   });
 });
