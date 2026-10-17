@@ -10,6 +10,10 @@ import {
   conduzirCredito, continuacaoCredito, creditoLigado, iniciarCredito, pedeCredito, responderStatusCredito,
   toolExtrairCredito, TEXTO_APROVAR, TEXTO_SCORE,
 } from "./credito";
+import {
+  captacaoLigada, conduzirCaptacao, continuacaoCaptacao, iniciarCaptacao, iniciarEnvioDeCaptacao, pedeCaptacao,
+  responderListaDeCaptacao, toolExtrairCaptacao,
+} from "./captacao";
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
@@ -191,6 +195,7 @@ export function encerrarTurno(messageId: string): void {
 function turnoSensivel(state: MaxStateType, update: MaxUpdate): boolean {
   const fluxoNovo = update.fluxo as Fluxo | null | undefined;
   return state.fluxo?.kind === "credito" || fluxoNovo?.kind === "credito" ||
+    state.fluxo?.kind === "captacao" || fluxoNovo?.kind === "captacao" ||
     turnoDeCredito([...(state.toolLog ?? []), ...((update.toolLog as ToolLogEntry[] | undefined) ?? [])]);
 }
 
@@ -852,6 +857,8 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
     extrairCampos: async (texto, campos) =>
       (await extrair(texto, toolExtrairCampos(campos))) as Record<string, string> | null,
     extrairCredito: async (texto, campo) => extrair(texto, toolExtrairCredito(campo)),
+    // Captação (P9): passa pelo MESMO `extrair`, que tokeniza o texto, destokeniza a saída e reporta o custo (AIUsage).
+    extrairCaptacao: async (texto, secao) => extrair(texto, toolExtrairCaptacao(secao)),
   };
 }
 
@@ -867,14 +874,15 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
   // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
   // resumo velhos não podem capturar um "2" dias depois (review 09/10).
-  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave);
+  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave);
   const atual = vencido ? (sobrevive ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
   const escritaEmAberto = !!(atual && "chave" in atual && atual.chave);
 
   // O que o Max faz, e o que não faz (contrato, cobrança): resposta do
   // sistema, nunca do modelo (prod 09/10). O fluxo em curso fica como está.
   // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
-  const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha" || atual?.kind === "credito";
+  const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha" || atual?.kind === "credito" ||
+    atual?.kind === "captacao";
   // Continuidade e gestão vêm antes: "converte a proposta… pra gerar o contrato" é conversão.
   // Rascunho aberto para ajuste (sem escrita pendente) não prende o turno: pedido
   // sobre OUTRA proposta ("muda o valor da proposta do João…"), consulta ou
@@ -911,6 +919,32 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
       toolLog: [{ name: "fluxo", args: { kind: "credito", pedido: credito }, outcome: passo.evento }],
     };
   }
+  // Captação (P9): antes da consulta e da criação ("captação" não é formulário nem proposta).
+  // Flag desligada = o Max segue como antes, sem citar captação.
+  const captacao = captacaoLigada() && livre && !escritaEmAberto ? pedeCaptacao(userText) : null;
+  if (captacao) {
+    const deps = depsDoFluxo(state, usage);
+    const pode = podeEscrever(state.identity);
+    const passo = captacao === "abrir"
+      ? await iniciarCaptacao(ctxDoTurno, deps, pode)
+      : captacao === "enviar"
+        ? await iniciarEnvioDeCaptacao(ctxDoTurno, deps, pode)
+        : await responderListaDeCaptacao(ctxDoTurno, deps, pode);
+    // Consulta não mexe no fluxo aberto (fica rebaixado, como na consulta de propostas).
+    const fluxo = captacao !== "listar" ? passo.fluxo : atual ? rebaixarFluxo(atual) : vencido ? null : undefined;
+    return {
+      ...(fluxo !== undefined ? { fluxo } : {}),
+      reply: passo.reply,
+      // O `blindarCredito` redige (CPF, valores) antes do checkpoint.
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
+      ...(usage.length > 0 ? { usage } : {}),
+      toolLog: [{ name: "fluxo", args: { kind: "captacao", pedido: captacao }, outcome: passo.evento }],
+    };
+  }
+  if (atual?.kind === "captacao" && !captacaoLigada()) {
+    // Flag desligada no meio do fluxo: o fluxo some e o turno segue normal.
+    return { fluxo: null, toolLog: [{ name: "fluxo", args: { kind: "captacao" }, outcome: "captacao_desligada" }] };
+  }
   if (atual?.kind === "credito" && !creditoLigado()) {
     // Flag desligada no meio da ficha: o fluxo some e o turno segue normal.
     return { fluxo: null, toolLog: [{ name: "fluxo", args: { kind: "credito" }, outcome: "credito_desligado" }] };
@@ -934,7 +968,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
         ? textoDoAndamentoDoContrato(linkDoNegocio)
         : negada
           ? textoDaNegacao(negada, userText)
-          : textoDeCapacidades(state.policy, podeEscrever(state.identity), creditoLigado());
+          : textoDeCapacidades(state.policy, podeEscrever(state.identity), creditoLigado(), captacaoLigada());
     const outcome = foraDoMax ? `fora_do_max_${foraDoMax}` : contratoPergunta ? "andamento_do_contrato" : negada ? `negou_${negada}` : "capacidades";
     return { reply, pendingAction: null, messages: [{ role: "user", content: userText }, { role: "assistant", content: reply }],
       toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome }] };
@@ -1014,14 +1048,16 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
 
   const passo = atual.kind === "credito"
     ? await conduzirCredito(atual, ctxDoTurno, depsDoFluxo(state, usage), podeEscrever(state.identity))
-    : await conduzirFluxo(atual, ctxDoTurno, depsDoFluxo(state, usage));
-  if (passo.liberar && atual.kind === "credito") {
+    : atual.kind === "captacao"
+      ? await conduzirCaptacao(atual, ctxDoTurno, depsDoFluxo(state, usage), podeEscrever(state.identity))
+      : await conduzirFluxo(atual, ctxDoTurno, depsDoFluxo(state, usage));
+  if (passo.liberar && (atual.kind === "credito" || atual.kind === "captacao")) {
     // Pergunta fora da ficha: o modelo responde e o `compose` acrescenta o
     // "Continuando a ficha…" (o fluxo volta marcado como pausado).
     return {
       fluxo: passo.fluxo,
       ...(usage.length > 0 ? { usage } : {}),
-      toolLog: [{ name: "fluxo", args: { kind: "credito" }, outcome: passo.evento }],
+      toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
     };
   }
   if (passo.liberar) {
@@ -1036,11 +1072,11 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     };
   }
   // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
-  const daFicha = atual.kind === "credito";
+  const daFicha = atual.kind === "credito" || atual.kind === "captacao";
   return {
     fluxo: passo.fluxo,
     messages: [
-      { role: "user", content: daFicha ? "(resposta da ficha de crédito)" : userText },
+      { role: "user", content: daFicha ? `(resposta da ficha de ${atual.kind === "captacao" ? "captação" : "crédito"})` : userText },
       { role: "assistant", content: passo.reply },
     ],
     reply: passo.reply,
@@ -1457,7 +1493,9 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
               ? "uma proposta"
               : state.fluxo.kind === "credito"
                 ? "uma ficha de crédito"
-                : "um pedido de criação";
+                : state.fluxo.kind === "captacao"
+                  ? "uma captação"
+                  : "um pedido de criação";
         const texto =
           `Você já tem ${emAndamento} em andamento comigo. Continue por aqui, ` +
           "ou diga CANCELAR para começar outro.";
@@ -1474,17 +1512,25 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
         };
       }
       const extra: LlmUsage[] = [];
-      let passo = await iniciarFluxo(
-        {
-          tipo: args.tipo,
-          natureza: args.natureza ?? (args.tipo === "proposta" ? undefined : args.tipo),
-          pedido: userText,
-          nomeCliente: args.nomeCliente,
-          policy: state.policy,
-          agora: Date.now(),
-        },
-        depsDoFluxo(state, extra)
-      );
+      // `captacao` (P9, só com a flag) tem fluxo próprio, com gate de capability e `captacao.options`.
+      let passo = args.tipo === "captacao"
+        ? await iniciarCaptacao(
+          { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+            politicaIndisponivel: state.politicaIndisponivel, agora: Date.now(), orgName: state.identity.orgName,
+            thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) },
+          depsDoFluxo(state, extra), podeEscrever(state.identity)
+        )
+        : await iniciarFluxo(
+          {
+            tipo: args.tipo,
+            natureza: args.natureza ?? (args.tipo === "proposta" ? undefined : args.tipo),
+            pedido: userText,
+            nomeCliente: args.nomeCliente,
+            policy: state.policy,
+            agora: Date.now(),
+          },
+          depsDoFluxo(state, extra)
+        );
       // Pedido de criação que cita proposta existente: o modelo quis um formulário
       // a partir dela, então é conversão. Continua a proposta em vez de recusar.
       if (passo.evento === "criacao_referencia_existente" && podeEscrever(state.identity)) {
@@ -1711,8 +1757,10 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   // ia cair de qualquer jeito. O resto fica guardado para o "quer ver?".
   const final = limitarTamanho(trava.texto);
   // Ficha de crédito pausada por uma pergunta: volta ao campo em aberto.
-  const pausada = state.fluxo?.kind === "credito" && state.fluxo.pausado ? state.fluxo : null;
-  const saida = pausada ? `${final.texto}\n\n${continuacaoCredito(pausada)}` : final.texto;
+  const pausada = (state.fluxo?.kind === "credito" || state.fluxo?.kind === "captacao") && state.fluxo.pausado ? state.fluxo : null;
+  const saida = pausada
+    ? `${final.texto}\n\n${pausada.kind === "captacao" ? continuacaoCaptacao(pausada) : continuacaoCredito(pausada)}`
+    : final.texto;
 
   return {
     ...(pausada ? { fluxo: { ...pausada, pausado: false } } : {}),
@@ -1729,7 +1777,8 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
 
 /** O turno passou pela ficha de crédito? Então não vai para resumo nem memória. */
 function turnoDeCredito(toolLog: readonly ToolLogEntry[] | undefined): boolean {
-  return (toolLog ?? []).some((t) => t.name === "fluxo" && t.args.kind === "credito");
+  // Captação (P9) entra aqui: CPF, telefone e e-mail de proprietário não vão ao checkpoint, ao resumo nem à memória.
+  return (toolLog ?? []).some((t) => t.name === "fluxo" && (t.args.kind === "credito" || t.args.kind === "captacao"));
 }
 
 /**
@@ -1742,7 +1791,7 @@ function turnoDeCredito(toolLog: readonly ToolLogEntry[] | undefined): boolean {
 async function compact(state: MaxStateType): Promise<MaxUpdate> {
   if (state.messages.length < COMPACT_AT) return {};
   // Turno da ficha de crédito não vai para o resumo (M1, `pulaMemoria`).
-  if (state.fluxo?.kind === "credito" || turnoDeCredito(state.toolLog)) return {};
+  if (state.fluxo?.kind === "credito" || state.fluxo?.kind === "captacao" || turnoDeCredito(state.toolLog)) return {};
 
   const keep = state.messages.slice(-KEEP_AFTER_COMPACT);
   const older = state.messages.slice(0, -KEEP_AFTER_COMPACT);
@@ -2113,7 +2162,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
         messageId: inbound.messageId,
         kind: inbound.kind,
         // Falha não sabe se o turno era da ficha: com a flag ligada, na dúvida redige.
-        inboundText: (creditoLigado() || pedeCredito(texto) ? redigirCredito(texto) : texto) || null,
+        inboundText: (creditoLigado() || captacaoLigada() || pedeCredito(texto) || pedeCaptacao(texto) ? redigirCredito(texto) : texto) || null,
         latencyMs: Date.now() - iniciadoEm,
         error: err instanceof Error ? err.message : String(err),
       });

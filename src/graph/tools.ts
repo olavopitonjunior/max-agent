@@ -3,6 +3,7 @@ import type { Capability } from "./policy";
 import type { ScopeQueryVerb } from "./scope-contract";
 import { ESTADOS_DE_PROPOSTA } from "./scope-contract";
 import type { Candidate } from "@/lib/identity";
+import { captacaoLigada } from "./captacao-flags";
 
 /**
  * Ferramentas do Max — e, mais importante, o que elas NÃO são.
@@ -27,9 +28,11 @@ export const PENDING_TTL_MS = 30 * 60 * 1000;
 
 /**
  * O que o Max sabe criar. `venda` e `locacao` são formulário em branco + link;
- * `proposta` é um RASCUNHO de proposta + link.
+ * `proposta` é um RASCUNHO de proposta + link; `captacao` (P9) abre o fluxo de
+ * captação (rascunho de contrato de captação) e SÓ vale com `MAX_CAPTACAO`:
+ * desligada, o modelo nem vê o valor no enum e `capabilityDaCriacao` o recusa.
  */
-export const TIPOS_CRIAVEIS = ["venda", "locacao", "proposta"] as const;
+export const TIPOS_CRIAVEIS = ["venda", "locacao", "proposta", "captacao"] as const;
 export type TipoCriavel = (typeof TIPOS_CRIAVEIS)[number];
 
 export interface PendingAction {
@@ -62,6 +65,8 @@ export const TOOL_PROPOR_FORM = "propor_criacao";
  * Bônus: a definição que vai no prompt fica ~1/3 do tamanho, em todo turn que
  * passa o prefiltro.
  */
+const TIPOS_SEM_CAPTACAO = TIPOS_CRIAVEIS.filter((t) => t !== "captacao");
+
 export const FORM_TOOL: LlmTool = {
   name: TOOL_PROPOR_FORM,
   /**
@@ -86,7 +91,7 @@ export const FORM_TOOL: LlmTool = {
     properties: {
       tipo: {
         type: "string",
-        enum: [...TIPOS_CRIAVEIS],
+        enum: TIPOS_SEM_CAPTACAO,
         description:
           "venda = formulário de compra e venda (comprador, imóvel à venda). " +
           "locacao = formulário de aluguel (inquilino, locação, locatário). " +
@@ -121,8 +126,35 @@ export const FORM_TOOL: LlmTool = {
   },
 };
 
-/** Lê o `tipo` da chamada do modelo. `null` quando ele mandou algo fora do enum. */
+/**
+ * A definição que o modelo VÊ neste turno: com `MAX_CAPTACAO` ligada, o enum
+ * ganha `captacao`; desligada, é o `FORM_TOOL` de antes do P9, byte a byte.
+ */
+export function formToolAtual(): LlmTool {
+  if (!captacaoLigada()) return FORM_TOOL;
+  const params = FORM_TOOL.parameters as { properties: { tipo: { description: string } } };
+  return {
+    ...FORM_TOOL,
+    parameters: {
+      ...FORM_TOOL.parameters,
+      properties: {
+        ...params.properties,
+        tipo: {
+          ...params.properties.tipo,
+          enum: [...TIPOS_CRIAVEIS],
+          description:
+            `${params.properties.tipo.description} ` +
+            "captacao = contrato de captação (autorização do proprietário para vender ou alugar o imóvel); " +
+            "pedido com a palavra 'captação' é deste tipo.",
+        },
+      },
+    },
+  };
+}
+
+/** Lê o `tipo` da chamada do modelo. `null` quando ele mandou algo fora do enum (ou `captacao` com a flag desligada). */
 export function lerTipo(bruto: unknown): TipoCriavel | null {
+  if (bruto === "captacao" && !captacaoLigada()) return null;
   return typeof bruto === "string" &&
     (TIPOS_CRIAVEIS as readonly string[]).includes(bruto)
     ? (bruto as TipoCriavel)
@@ -252,6 +284,7 @@ const NOME_DO_TIPO: Record<TipoCriavel, string> = {
   venda: "formulário de venda",
   locacao: "formulário de locação",
   proposta: "rascunho de proposta",
+  captacao: "rascunho de captação",
 };
 
 export function descreverPendencia(args: PendingAction["args"]): string {
@@ -448,12 +481,15 @@ export function capabilitiesDeOferta(e: EntradaDeTool): readonly Capability[] {
 export function capabilityDaCriacao(tipo: unknown): Capability | null {
   const t = lerTipo(tipo);
   if (!t) return null;
+  // `captacao` só existe com `MAX_CAPTACAO` (`lerTipo` já devolve null sem ela).
+  if (t === "captacao") return "captacao.create";
   return t === "proposta" ? "proposal.create" : "form.create";
 }
 
 export const PROPOR_CRIACAO: EntradaDeEscrita = {
   nome: TOOL_PROPOR_FORM,
-  def: FORM_TOOL,
+  // Getter: a definição acompanha a flag `MAX_CAPTACAO` do momento (default: o `FORM_TOOL` de sempre).
+  get def() { return formToolAtual(); },
   tipo: "escrita",
   capabilities: ["form.create", "proposal.create"],
   capabilityDaChamada: (args) => capabilityDaCriacao(args.tipo),

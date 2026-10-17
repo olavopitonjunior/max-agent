@@ -293,6 +293,11 @@ const CATALOGO_DO_IMOBPRO = [
   // C5/M2 (11/10/2026): crédito Upestate, fora do padrão.
   "credit.read",
   "credit.request",
+  // P8/P9 (16/10/2026): captação pelo Max, fora do padrão. `captacao.create` cobre
+  // options/create/preflight; `send` e `list` têm a sua.
+  "captacao.create",
+  "captacao.send",
+  "captacao.list",
 ];
 
 describe("paridade do catálogo de capabilities", () => {
@@ -323,5 +328,26 @@ describe("paridade do catálogo de capabilities", () => {
     expect(resolverPolitica({ politica: ligada, sujeito: gerente, role: "sales" })).toEqual(["proposal.list", "credit.read", "credit.request"]);
     const padrao = JSON.parse('{"byRole":{"*":["proposal.list"]}}') as MaxPolicy;
     expect(resolverPolitica({ politica: padrao, sujeito: gerente, role: "sales" })).not.toContain("credit.request");
+  });
+
+  /** Captação nasce desligada: só vale quando a org liga em `/admin/max`; o padrão emitido NÃO a traz. */
+  it("captação ligada pela org chega inteira; ausente do padrão, não aparece", () => {
+    const ligada = JSON.parse(
+      '{"byRole":{"*":["proposal.list","captacao.create","captacao.send","captacao.list"]}}'
+    ) as MaxPolicy;
+    expect(resolverPolitica({ politica: ligada, sujeito: gerente, role: "sales" })).toEqual([
+      "proposal.list",
+      "captacao.create",
+      "captacao.send",
+      "captacao.list",
+    ]);
+    const padrao = JSON.parse(
+      '{"byRole":{"*":["deal.list","deal.pending","proposal.list","form.create","proposal.create","proposal.send","proposal.delete"]},' +
+        '"byRecipient":{},"brokerDefault":["deal.list","deal.pending"]}'
+    ) as MaxPolicy;
+    const emitido = resolverPolitica({ politica: padrao, sujeito: gerente, role: "sales" });
+    expect(emitido.filter((c) => c.startsWith("captacao."))).toEqual([]);
+    // O corretor comissionado não herda captação: só o que o brokerDefault diz.
+    expect(resolverPolitica({ politica: padrao, sujeito: corretorSemOverride, role: null })).not.toContain("captacao.create");
   });
 });

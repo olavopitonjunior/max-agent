@@ -40,6 +40,7 @@ import { lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
+import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
@@ -113,6 +114,7 @@ export type Fluxo =
   | FluxoContinuidade
   | FluxoGestao
   | FluxoCredito
+  | FluxoCaptacao
   | {
       kind: "escolha";
       natureza?: "venda" | "locacao";
@@ -191,6 +193,8 @@ export interface DepsDoFluxo {
   extrairCampos(texto: string, campos: CampoDoPopup[]): Promise<Record<string, string> | null>;
   /** Crédito (M2): extrator de UM campo da ficha. Opcional: sem ele, só o código interpreta. */
   extrairCredito?(texto: string, campo: CampoCredito): Promise<Record<string, unknown> | null>;
+  /** Captação (P9): extrator de UMA seção (imóvel, endereço, pessoa). Opcional: sem ele, só o código interpreta. */
+  extrairCaptacao?(texto: string, secao: SecaoDeExtracao): Promise<Record<string, unknown> | null>;
 }
 
 export interface ContextoDoTurno {
@@ -727,6 +731,12 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
   // Crédito: a revisão (o SIM que envia, no M3) volta para a coleta; o servidor diz o que falta.
   if (f.kind === "credito") return f.etapa === "revisao" ? { ...f, etapa: "coleta", campoAtual: undefined } : f;
+  // Captação: o resumo (o "enviar" que escreve) volta para a conferência; o servidor refaz o resumo.
+  // Com `chave` (send sem resposta) a etapa fica: o "enviar" seguinte repete a mesma chave e args.
+  if (f.kind === "captacao") {
+    if (f.chave) return f.pausado ? { ...f, pausado: false } : f;
+    return f.etapa === "revisao" || f.etapa === "brancos" ? { ...f, etapa: "verificar", pausado: false } : f;
+  }
   if (f.kind === "negocio" && f.etapa === "revisao") return { ...f, etapa: "campos", forcar: undefined };
   if (f.kind === "proposta") {
     if (f.etapa === "revisao") return { ...f, etapa: "coleta" };
@@ -1113,7 +1123,7 @@ export async function iniciarProposta(
 // ─── O turno dentro de um fluxo ───────────────────────────────────────────
 
 export function fluxoExpirou(f: Fluxo, agora: number): boolean {
-  const longo = (f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave) || f.kind === "credito";
+  const longo = (f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave) || f.kind === "credito" || (f.kind === "captacao" && (!!f.captacaoId || !!f.chave));
   const ttl = longo ? FLUXO_TTL_POS_RASCUNHO_MS : FLUXO_TTL_MS;
   return agora - f.atualizadoEm > ttl;
 }
@@ -1130,6 +1140,7 @@ export async function conduzirFluxo(
   if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (fluxo.kind === "gestao") return conduzirGestao(fluxo, ctx, deps);
   if (fluxo.kind === "credito") return conduzirCredito(fluxo, ctx, deps);
+  if (fluxo.kind === "captacao") return conduzirCaptacao(fluxo, ctx, deps, ctx.policy.includes("captacao.create"));
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };
   }
