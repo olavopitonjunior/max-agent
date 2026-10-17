@@ -115,6 +115,17 @@ export const CAPABILITIES = [
    */
   "credit.read",
   "credit.request",
+  /**
+   * Captação pelo Max (P8/P9, 16/10/2026). `captacao.create`: `captacao.options`,
+   * `captacao.create` e `captacao.preflight`; `captacao.send`: o envio para
+   * assinatura; `captacao.list`: listar e conferir. FORA do `POLITICA_PADRAO`
+   * do ImobPro (a org liga em `/admin/max`), e o papel "Max (agente)" não as
+   * tem: os verbos rodam com a RBAC do sujeito. Mesma posição da lista de lá
+   * (teste de paridade).
+   */
+  "captacao.create",
+  "captacao.send",
+  "captacao.list",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
