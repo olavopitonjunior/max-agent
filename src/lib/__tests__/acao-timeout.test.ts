@@ -74,3 +74,77 @@ describe("credit.request: 503 de negócio × 5xx de falha (M3)", () => {
     expect(await request("credit.request")).toBeNull();
   });
 });
+
+describe("captação (P9): orçamento do envio e idempotência", () => {
+  afterEach(() => { delete process.env.IMOBPRO_CAPTACAO_SEND_TIMEOUT_MS; });
+
+  it("captacao.send espera 30 s por padrão (o servidor corre 20 s e responde 202)", async () => {
+    const fetch = upstream(25_000);
+    const result = request("captacao.send");
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(await result).toEqual({ status: 200, body: { enviada: true } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][1].headers).toHaveProperty("x-idempotency-key", "same-send");
+  });
+
+  it("estoura em 30 s como incerto, uma única chamada, sem retry", async () => {
+    const fetch = upstream(55_000);
+    const result = request("captacao.send");
+    let finished = false;
+    void result.then(() => { finished = true; });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(finished).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("IMOBPRO_CAPTACAO_SEND_TIMEOUT_MS muda o prazo; valor inválido cai no padrão", async () => {
+    process.env.IMOBPRO_CAPTACAO_SEND_TIMEOUT_MS = "12000";
+    upstream(55_000);
+    const curto = request("captacao.send");
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(await curto).toBeNull();
+    process.env.IMOBPRO_CAPTACAO_SEND_TIMEOUT_MS = "abc";
+    expect((await import("../http")).captacaoSendTimeoutMs()).toBe(30_000);
+    process.env.IMOBPRO_CAPTACAO_SEND_TIMEOUT_MS = "0";
+    expect((await import("../http")).captacaoSendTimeoutMs()).toBe(30_000);
+  });
+
+  it.each(["captacao.options", "captacao.create", "captacao.preflight", "captacao.list"] as const)(
+    "%s segue no teto comum de 8 s",
+    async (verb) => {
+      upstream(25_000);
+      const result = request(verb);
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(await result).toBeNull();
+    }
+  );
+
+  it("202 do envio é resposta de NEGÓCIO (chega ao fluxo)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ estado: "Enviando…" }), { status: 202 })));
+    expect(await request("captacao.send")).toEqual({ status: 202, body: { estado: "Enviando…" } });
+  });
+
+  it("502 falha_envio do envio chega ao fluxo; 502 sem a marca e 500 seguem como sem resposta", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "falha_envio" }), { status: 502 })));
+    expect(await request("captacao.send")).toEqual({ status: 502, body: { error: "falha_envio" } });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "gateway" }), { status: 502 })));
+    expect(await request("captacao.send")).toBeNull();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "falha_envio" }), { status: 500 })));
+    expect(await request("captacao.send")).toBeNull();
+    // A exceção é só do envio: outro verbo com 502 continua sem resposta.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "falha_envio" }), { status: 502 })));
+    expect(await request("captacao.create")).toBeNull();
+  });
+
+  it("só as escritas levam x-idempotency-key; as leituras não recebem chave", async () => {
+    const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    await executarAcao({ orgId: "org1", rawPhone: "5511999999999", subject: { kind: "user", userId: "u1" }, verb: "captacao.preflight", args: { captacaoId: "c1" } });
+    await executarAcao({ orgId: "org1", rawPhone: "5511999999999", subject: { kind: "user", userId: "u1" }, verb: "captacao.create", args: { tipo: "venda", nome: "x" }, idempotencyKey: "m1" });
+    const headers = fetch.mock.calls.map((c) => (c as unknown as [string, RequestInit])[1].headers as Record<string, string>);
+    expect(headers[0]).not.toHaveProperty("x-idempotency-key");
+    expect(headers[1]).toHaveProperty("x-idempotency-key", "m1");
+  });
+});

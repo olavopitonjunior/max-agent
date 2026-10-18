@@ -316,7 +316,7 @@ const NAO_NOME = new Set([
 ]);
 
 /** Nome completo plausível: 2+ palavras de letras, sem dígito. */
-function nomeValido(nome: string): boolean {
+export function nomeValido(nome: string): boolean {
   const partes = nome.trim().split(/\s+/);
   if (partes.length < 2 || partes.length > 8 || nome.length > 80) return false;
   if (!partes.every((p) => /^[\p{L}'-]+$/u.test(p))) return false;
