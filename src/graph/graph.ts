@@ -191,11 +191,19 @@ export function encerrarTurno(messageId: string): void {
   TURNO_CRU.delete(messageId);
 }
 
-/** Turno que passa pela ficha de crédito (fluxo aberto, aberto agora ou trilha no log). */
+/**
+ * Turno que passa pela ficha de crédito (fluxo aberto, aberto agora ou trilha
+ * no log) — OU, pra captação, o turno em que o fluxo de captação de fato
+ * trabalhou dados (achado 19: antes, `state.fluxo?.kind === "captacao"`
+ * marcava sensível TODO turno enquanto o rascunho ficasse aberto, até 24h,
+ * mesmo quando a pessoa só falava de outro negócio/crédito no meio — e esse
+ * turno era redigido e caía fora do resumo sem precisar). Captação usa só
+ * `turnoDeCredito` (toolLog DESTE turno); crédito mantém o comportamento
+ * antigo, mais amplo, de propósito.
+ */
 function turnoSensivel(state: MaxStateType, update: MaxUpdate): boolean {
   const fluxoNovo = update.fluxo as Fluxo | null | undefined;
   return state.fluxo?.kind === "credito" || fluxoNovo?.kind === "credito" ||
-    state.fluxo?.kind === "captacao" || fluxoNovo?.kind === "captacao" ||
     turnoDeCredito([...(state.toolLog ?? []), ...((update.toolLog as ToolLogEntry[] | undefined) ?? [])]);
 }
 
@@ -1054,10 +1062,23 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   if (passo.liberar && (atual.kind === "credito" || atual.kind === "captacao")) {
     // Pergunta fora da ficha: o modelo responde e o `compose` acrescenta o
     // "Continuando a ficha…" (o fluxo volta marcado como pausado).
+    // Achado 19: pra captação, `liberado: true` marca que este turno NÃO leu
+    // nem escreveu dado de proprietário — só deu de ombros pro fluxo pra deixar
+    // o modelo responder outra coisa — então não precisa redigir nem sumir do
+    // resumo (`turnoDeCredito` ignora esta marca). Crédito mantém sem a marca.
+    // Item D (revisão opus, round 2): `liberado` só pode valer quando o texto
+    // CRU deste turno não carrega PII nenhum — a "pergunta fora da ficha" pode
+    // ela mesma trazer CPF/telefone/e-mail (acontece quando `PERGUNTA_FORA`
+    // casa por causa do "?" no fim, mas a mensagem também tem um dado de
+    // contato: "Maria, 11 98765-4321, maria@x.com?" na etapa `proprietarios`,
+    // ou qualquer resposta de `faltantes` que termine em "?"). Sem este
+    // confere, aquele PII ia para `conversation_turn`, resumo e memória em
+    // claro — exatamente o que a marca deveria impedir.
+    const semPii = redigir(userText) === userText;
     return {
       fluxo: passo.fluxo,
       ...(usage.length > 0 ? { usage } : {}),
-      toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
+      toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "captacao" && semPii ? { liberado: true } : {}) }, outcome: passo.evento }],
     };
   }
   if (passo.liberar) {
@@ -1777,8 +1798,13 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
 
 /** O turno passou pela ficha de crédito? Então não vai para resumo nem memória. */
 function turnoDeCredito(toolLog: readonly ToolLogEntry[] | undefined): boolean {
-  // Captação (P9) entra aqui: CPF, telefone e e-mail de proprietário não vão ao checkpoint, ao resumo nem à memória.
-  return (toolLog ?? []).some((t) => t.name === "fluxo" && (t.args.kind === "credito" || t.args.kind === "captacao"));
+  // Captação (P9) entra aqui: CPF, telefone e e-mail de proprietário não vão ao
+  // checkpoint, ao resumo nem à memória. `liberado: true` (achado 19) é a
+  // pergunta FORA do fluxo de captação respondida pelo modelo — não carrega
+  // dado de proprietário, então não precisa ficar fora do resumo.
+  return (toolLog ?? []).some((t) => t.name === "fluxo" && (
+    t.args.kind === "credito" || (t.args.kind === "captacao" && t.args.liberado !== true)
+  ));
 }
 
 /**
@@ -1791,7 +1817,11 @@ function turnoDeCredito(toolLog: readonly ToolLogEntry[] | undefined): boolean {
 async function compact(state: MaxStateType): Promise<MaxUpdate> {
   if (state.messages.length < COMPACT_AT) return {};
   // Turno da ficha de crédito não vai para o resumo (M1, `pulaMemoria`).
-  if (state.fluxo?.kind === "credito" || state.fluxo?.kind === "captacao" || turnoDeCredito(state.toolLog)) return {};
+  // Captação (achado 19): NÃO usa `state.fluxo?.kind === "captacao"` — isso
+  // suspendia o resumo por até 24h (TTL do rascunho) mesmo nos turnos em que a
+  // pessoa só falava de outro negócio ou de crédito. `turnoDeCredito` já olha
+  // só o toolLog DESTE turno (e ignora o turno "liberado").
+  if (state.fluxo?.kind === "credito" || turnoDeCredito(state.toolLog)) return {};
 
   const keep = state.messages.slice(-KEEP_AFTER_COMPACT);
   const older = state.messages.slice(0, -KEEP_AFTER_COMPACT);

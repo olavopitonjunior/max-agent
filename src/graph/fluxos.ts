@@ -733,8 +733,18 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (f.kind === "credito") return f.etapa === "revisao" ? { ...f, etapa: "coleta", campoAtual: undefined } : f;
   // Captação: o resumo (o "enviar" que escreve) volta para a conferência; o servidor refaz o resumo.
   // Com `chave` (send sem resposta) a etapa fica: o "enviar" seguinte repete a mesma chave e args.
+  // Achado 17: as etapas em que o próximo "sim" GRAVA (criação do rascunho,
+  // lote de proprietários/extras) também não podem sobreviver a uma
+  // interrupção — senão um "sim" de outro assunto, minutos depois, dispararia
+  // a escrita sem o resumo ter sido mostrado de novo (mesmo risco do N1 que
+  // já valia pra revisão/brancos).
   if (f.kind === "captacao") {
     if (f.chave) return f.pausado ? { ...f, pausado: false } : f;
+    if (f.etapa === "confirmar_criacao") return { ...f, etapa: "condicoes", pausado: false };
+    if (f.etapa === "confirmar_pessoas") return { ...f, etapa: "extras", pausado: false };
+    // Item B: o "sim" de `confirmar_faltantes` grava — mesma regra, mesmo risco N1.
+    if (f.etapa === "confirmar_faltantes") return { ...f, etapa: "faltantes", pausado: false };
+    if (f.etapa === "canal") return { ...f, etapa: "verificar", pausado: false };
     return f.etapa === "revisao" || f.etapa === "brancos" ? { ...f, etapa: "verificar", pausado: false } : f;
   }
   if (f.kind === "negocio" && f.etapa === "revisao") return { ...f, etapa: "campos", forcar: undefined };
@@ -1140,7 +1150,19 @@ export async function conduzirFluxo(
   if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (fluxo.kind === "gestao") return conduzirGestao(fluxo, ctx, deps);
   if (fluxo.kind === "credito") return conduzirCredito(fluxo, ctx, deps);
-  if (fluxo.kind === "captacao") return conduzirCaptacao(fluxo, ctx, deps, ctx.policy.includes("captacao.create"));
+  // Achado 20: este caminho nunca é alcançado em produção (graph.ts despacha
+  // `captacao` direto pra `conduzirCaptacao`, com `podeEscrever(identity)` — não
+  // há `identity` aqui). `ctx.policy.includes("captacao.create")` como
+  // "podeEscrever" misturava a checagem de IDENTIDADE com a de CAPABILITY e
+  // travava quem só tem `captacao.send` mesmo antes de chegar na etapa certa
+  // (achado 21). Mantido só por tipagem (`Fluxo` inclui `captacao`); `true`
+  // aqui replica o padrão de `conduzirCredito` acima — a política real é
+  // conferida dentro de `conduzirCaptacao`, por etapa.
+  // Achado (nit da revisão opus): `true` aqui seria "capability liberada por
+  // garantia" se este caminho morto algum dia for alcançado por engano —
+  // viola o fail-closed da governança do Max. `false` replica o default
+  // seguro de qualquer capability nova.
+  if (fluxo.kind === "captacao") return conduzirCaptacao(fluxo, ctx, deps, false);
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };
   }
