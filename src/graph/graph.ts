@@ -11,7 +11,8 @@ import {
   toolExtrairCredito, TEXTO_APROVAR, TEXTO_SCORE,
 } from "./credito";
 import {
-  captacaoLigada, conduzirCaptacao, continuacaoCaptacao, iniciarCaptacao, iniciarEnvioDeCaptacao, pedeCaptacao,
+  captacaoAutorizacaoLigada, captacaoLigada, conduzirCaptacao, continuacaoCaptacao, iniciarCaptacao,
+  iniciarEnvioDeCaptacao, iniciarFilaDeAutorizacao, pedeCaptacao, pedeFilaDeAutorizacao,
   responderListaDeCaptacao, toolExtrairCaptacao,
 } from "./captacao";
 import { Annotation, StateGraph, END, START } from "@langchain/langgraph";
@@ -949,9 +950,38 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
       toolLog: [{ name: "fluxo", args: { kind: "captacao", pedido: captacao }, outcome: passo.evento }],
     };
   }
-  if (atual?.kind === "captacao" && !captacaoLigada()) {
+  // Fila de autorização do gerente (v2/PR7, par do contractmaker#1863): "tem pedido de
+  // autorização?", "pedidos pendentes". Atrás de `MAX_CAPTACAO_AUTORIZACAO` (própria, não
+  // depende de `MAX_CAPTACAO`) E da capability `captacao.autorizacao.decidir` — sem ela, nem
+  // chega a checar a flag, pelo mesmo motivo do resto do Max (regra 3 da governança).
+  const NA_FILA_DE_AUTORIZACAO = new Set(["autorizacao_fila", "autorizacao_motivo", "autorizacao_confirmar"]);
+  const naFilaDeAutorizacao = atual?.kind === "captacao" && NA_FILA_DE_AUTORIZACAO.has(atual.etapa);
+  // A capability barra PRIMEIRO (regra 3); mas a FLAG também precisa estar ligada aqui —
+  // senão "pedidos pendentes" (que o gatilho reconhece sem a palavra "autorização") é
+  // engolido por este intercepto mesmo com `MAX_CAPTACAO_AUTORIZACAO` desligada, colidindo
+  // com o gatilho de pendências do negócio (`PENDENCIAS_DO_NEGOCIO` em tools.ts) — achado
+  // de review 19/10.
+  const autorizacaoFila = state.policy.includes("captacao.autorizacao.decidir") && captacaoAutorizacaoLigada() && livre && !escritaEmAberto
+    ? pedeFilaDeAutorizacao(userText)
+    : false;
+  if (autorizacaoFila) {
+    const deps = depsDoFluxo(state, usage);
+    const passo = await iniciarFilaDeAutorizacao(ctxDoTurno, deps, podeEscrever(state.identity));
+    return {
+      fluxo: passo.fluxo,
+      reply: passo.reply,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
+      ...(usage.length > 0 ? { usage } : {}),
+      toolLog: [{ name: "fluxo", args: { kind: "captacao", pedido: "autorizacao_fila" }, outcome: passo.evento }],
+    };
+  }
+  if (atual?.kind === "captacao" && !naFilaDeAutorizacao && !captacaoLigada()) {
     // Flag desligada no meio do fluxo: o fluxo some e o turno segue normal.
     return { fluxo: null, toolLog: [{ name: "fluxo", args: { kind: "captacao" }, outcome: "captacao_desligada" }] };
+  }
+  if (naFilaDeAutorizacao && !captacaoAutorizacaoLigada()) {
+    // Flag da fila desligada no meio da decisão: o fluxo some e o turno segue normal.
+    return { fluxo: null, toolLog: [{ name: "fluxo", args: { kind: "captacao" }, outcome: "captacao_autorizacao_desligada" }] };
   }
   if (atual?.kind === "credito" && !creditoLigado()) {
     // Flag desligada no meio da ficha: o fluxo some e o turno segue normal.
@@ -976,7 +1006,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
         ? textoDoAndamentoDoContrato(linkDoNegocio)
         : negada
           ? textoDaNegacao(negada, userText)
-          : textoDeCapacidades(state.policy, podeEscrever(state.identity), creditoLigado(), captacaoLigada());
+          : textoDeCapacidades(state.policy, podeEscrever(state.identity), creditoLigado(), captacaoLigada(), captacaoAutorizacaoLigada());
     const outcome = foraDoMax ? `fora_do_max_${foraDoMax}` : contratoPergunta ? "andamento_do_contrato" : negada ? `negou_${negada}` : "capacidades";
     return { reply, pendingAction: null, messages: [{ role: "user", content: userText }, { role: "assistant", content: reply }],
       toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome }] };

@@ -740,12 +740,28 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   // já valia pra revisão/brancos).
   if (f.kind === "captacao") {
     if (f.chave) return f.pausado ? { ...f, pausado: false } : f;
+    // v2/PR7 (achado de review 19/10, item 2): retry de pedir/decidir sem resposta — a chave
+    // guardada não pode ser perdida (senão o próximo "sim" geraria uma chave nova), mesmo
+    // padrão de `f.chave` acima. Só nas etapas da própria autorização (review 19/10, 3ª
+    // rodada): fora delas a chave não pode segurar `revisao`/`brancos`.
+    if (f.autorizacaoChave && (f.etapa === "autorizacao_oferta" || f.etapa === "autorizacao_confirmar")) {
+      return f.pausado ? { ...f, pausado: false } : f;
+    }
     if (f.etapa === "confirmar_criacao") return { ...f, etapa: "condicoes", pausado: false };
     if (f.etapa === "confirmar_pessoas") return { ...f, etapa: "extras", pausado: false };
     // Item B: o "sim" de `confirmar_faltantes` grava — mesma regra, mesmo risco N1.
     if (f.etapa === "confirmar_faltantes") return { ...f, etapa: "faltantes", pausado: false };
     if (f.etapa === "canal") return { ...f, etapa: "verificar", pausado: false };
-    return f.etapa === "revisao" || f.etapa === "brancos" ? { ...f, etapa: "verificar", pausado: false } : f;
+    if (f.etapa === "revisao" || f.etapa === "brancos") return { ...f, etapa: "verificar", pausado: false };
+    // v2/PR7: a oferta ao corretor (o "sim" pede autorização) volta pra conferência — o
+    // próximo "sim" refaz o preflight e o bloqueio (se ainda existir) é oferecido de novo.
+    if (f.etapa === "autorizacao_oferta") return { ...f, etapa: "verificar", pausado: false, autorizacaoPedido: undefined };
+    // A confirmação do gerente (sim decide; motivo faz parte do texto, não escreve) volta pra
+    // lista — a decisão em curso é descartada, e a pessoa escolhe de novo.
+    if (f.etapa === "autorizacao_motivo" || f.etapa === "autorizacao_confirmar") {
+      return { ...f, etapa: "autorizacao_fila", pausado: false, autorizacaoDecisao: undefined };
+    }
+    return f;
   }
   if (f.kind === "negocio" && f.etapa === "revisao") return { ...f, etapa: "campos", forcar: undefined };
   if (f.kind === "proposta") {

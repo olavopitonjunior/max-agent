@@ -17,3 +17,15 @@ export function captacaoLigada(): boolean {
 export function captacaoEnvioLigado(): boolean {
   return captacaoLigada() && LIGADO.test(process.env.MAX_CAPTACAO_ENVIO ?? "");
 }
+
+/**
+ * `MAX_CAPTACAO_AUTORIZACAO` (default desligado, v2/PR7, par do
+ * contractmaker#1863): a fila de autorização do gerente (listar, aprovar,
+ * negar) pelo Max. Independente de `MAX_CAPTACAO`: o pedido do corretor
+ * (`captacao.autorizacao.pedir`) continua atrás de `MAX_CAPTACAO`, porque só
+ * existe dentro do fluxo de captação; a fila do gerente é um gatilho próprio,
+ * sem depender do rascunho estar ligado.
+ */
+export function captacaoAutorizacaoLigada(): boolean {
+  return LIGADO.test(process.env.MAX_CAPTACAO_AUTORIZACAO ?? "");
+}

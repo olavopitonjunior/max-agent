@@ -298,6 +298,10 @@ const CATALOGO_DO_IMOBPRO = [
   "captacao.create",
   "captacao.send",
   "captacao.list",
+  // v2/PR7 (19/10/2026, par do contractmaker#1863): autorização de reaproveitamento,
+  // fora do padrão. Posições 16 e 17 (0-based), FIXAS.
+  "captacao.autorizacao.pedir",
+  "captacao.autorizacao.decidir",
 ];
 
 describe("paridade do catálogo de capabilities", () => {
@@ -349,5 +353,30 @@ describe("paridade do catálogo de capabilities", () => {
     expect(emitido.filter((c) => c.startsWith("captacao."))).toEqual([]);
     // O corretor comissionado não herda captação: só o que o brokerDefault diz.
     expect(resolverPolitica({ politica: padrao, sujeito: corretorSemOverride, role: null })).not.toContain("captacao.create");
+  });
+
+  /**
+   * v2/PR7 (par do contractmaker#1863): as duas capabilities de autorização nascem fora
+   * do padrão — igual à captação. Concedidas separadamente (o corretor pede, o gerente
+   * decide): uma org pode conceder só `captacao.autorizacao.pedir` ao papel `sales`, sem
+   * `captacao.autorizacao.decidir`.
+   */
+  it("autorização de captação ligada pela org chega inteira, cada capability separada; ausente do padrão, não aparece", () => {
+    const ligada = JSON.parse(
+      '{"byRole":{"sales":["captacao.create","captacao.autorizacao.pedir"],"admin":["captacao.autorizacao.decidir"]}}'
+    ) as MaxPolicy;
+    expect(resolverPolitica({ politica: ligada, sujeito: gerente, role: "sales" })).toEqual([
+      "captacao.create",
+      "captacao.autorizacao.pedir",
+    ]);
+    expect(resolverPolitica({ politica: ligada, sujeito: gerente, role: "admin" })).toEqual([
+      "captacao.autorizacao.decidir",
+    ]);
+    const padrao = JSON.parse(
+      '{"byRole":{"*":["deal.list","deal.pending","proposal.list","form.create","proposal.create","proposal.send","proposal.delete"]},' +
+        '"byRecipient":{},"brokerDefault":["deal.list","deal.pending"]}'
+    ) as MaxPolicy;
+    const emitido = resolverPolitica({ politica: padrao, sujeito: gerente, role: "sales" });
+    expect(emitido.filter((c) => c.startsWith("captacao.autorizacao."))).toEqual([]);
   });
 });

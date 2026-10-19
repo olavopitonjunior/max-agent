@@ -1,7 +1,7 @@
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "./fluxos";
 import { lerConfirmacao, normalizar } from "./tools";
 import { brl, cpfValido, nomeValido, valoresNoTexto } from "./credito";
-import { captacaoEnvioLigado, captacaoLigada } from "./captacao-flags";
+import { captacaoAutorizacaoLigada, captacaoEnvioLigado, captacaoLigada } from "./captacao-flags";
 import { imobproBase } from "@/lib/http";
 import { RE_CNPJ, RE_CPF, redigir } from "@/lib/pii";
 import { normalizeBrPhone } from "@/lib/phone";
@@ -32,15 +32,25 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 
 // ─── Flags ───────────────────────────────────────────────────────────────
 
-/** `MAX_CAPTACAO` e `MAX_CAPTACAO_ENVIO`, ambas desligadas por padrão (ver `captacao-flags.ts`). */
-export { captacaoLigada, captacaoEnvioLigado };
+/** `MAX_CAPTACAO`, `MAX_CAPTACAO_ENVIO` e `MAX_CAPTACAO_AUTORIZACAO`, todas desligadas por padrão (ver `captacao-flags.ts`). */
+export { captacaoLigada, captacaoEnvioLigado, captacaoAutorizacaoLigada };
 
 // ─── Estado ──────────────────────────────────────────────────────────────
 
 export type TipoDeCaptacao = "venda" | "locacao";
 
-export interface ModeloDeCaptacao { id: string; nome: string; resumo?: string }
-export interface FaltanteDeCaptacao { path: string; rotulo: string; etapa?: string; proprietarioId?: string }
+export interface ModeloDeCaptacao { id: string; nome: string; resumo?: string; padrao?: boolean }
+export interface OpcaoDeCampo { valor: string; label: string }
+/**
+ * v2/PR5 (`docs/max.md` §18.12, aditivo): cada faltante pode trazer `tipo` e
+ * `nivel` (do catálogo da org), `lista:"proprietarios"` quando é por pessoa e
+ * `opcoes` quando o tipo é `lista_opcoes`. Tudo opcional: resposta antiga (sem
+ * estes campos) continua lida igual.
+ */
+export interface FaltanteDeCaptacao {
+  path: string; rotulo: string; etapa?: string; proprietarioId?: string;
+  tipo?: string; nivel?: string; lista?: string; opcoes?: OpcaoDeCampo[];
+}
 export interface DadosDeCaptacao {
   imovel?: Record<string, unknown>;
   condicoes?: Record<string, unknown>;
@@ -56,7 +66,10 @@ export interface FluxoCaptacao {
   etapa:
     | "natureza" | "nome" | "modelo" | "imovel" | "condicoes" | "confirmar_criacao" | "proprietarios" | "extras"
     | "confirmar_pessoas" | "verificar" | "faltantes" | "confirmar_faltantes" | "canal" | "selecao" | "revisao"
-    | "brancos" | "enviando";
+    | "brancos" | "enviando"
+    // v2/PR7 (autorização pelo Max, par do contractmaker#1863): oferta ao corretor (pedir) e
+    // fila do gerente (listar/aprovar/negar).
+    | "autorizacao_oferta" | "autorizacao_fila" | "autorizacao_motivo" | "autorizacao_confirmar";
   tipo?: TipoDeCaptacao;
   /** O que a pessoa disse, verbatim (regra #80): nunca sintético. */
   nome?: string;
@@ -110,6 +123,47 @@ export interface FluxoCaptacao {
   chave?: { verbo: string; valor: string; em?: number; version: number; confirmarBrancos?: boolean };
   /** Quantos campos vão em branco, dito no `confirmar_brancos`. */
   emBranco?: number;
+  /**
+   * v2/PR7: a oferta de pedir autorização em curso (corretor). `ref`/`tipo` são
+   * exatamente o `ref`/`tipo` do bloqueio do preflight — nenhum dado da pessoa.
+   */
+  autorizacaoPedido?: { tipo: "proprietario" | "imovel"; ref: string; justificativa?: string };
+  /**
+   * v2/PR7: os `ref` de bloqueio para os quais o corretor já recebeu 201/200 de
+   * `captacao.autorizacao.pedir` nesta conversa — para oferecer o PRÓXIMO
+   * bloqueio ainda não pedido (achado de review 19/10; sem isto, com 2
+   * proprietários bloqueados o segundo nunca era oferecido).
+   */
+  autorizacaoPedidosFeitos?: string[];
+  /**
+   * v2/PR7 (achado de review 19/10, item 3): os `ref` para os quais a pessoa
+   * respondeu "não" à oferta NESTA conversa — nunca mais reoferecidos (nem
+   * `*_aguarda_autorizacao` nem `*_autorizacao_negada`); a fala cai no
+   * bloqueio genérico. Sem isto, o próximo "sim" refaz o preflight e reoferece
+   * o MESMO ref que a pessoa já recusou, em loop.
+   */
+  autorizacaoPedidosRecusados?: string[];
+  /**
+   * v2/PR7 (achado de review 19/10, item 2): a chave de idempotência e os args
+   * da ÚLTIMA tentativa de `captacao.autorizacao.pedir`/`.decidir` SEM
+   * resposta do servidor — como `chave` faz para `captacao.send`: a MESMA
+   * confirmação ("sim") repete a MESMA chave e os MESMOS args, nunca uma chave
+   * nova (o servidor devolve o resultado gravado, não cria um segundo pedido).
+   */
+  autorizacaoChave?: { valor: string; args: Record<string, unknown> };
+  /**
+   * v2/PR7: a fila de autorização do gerente. `codigo`/`solicitante` e
+   * `documento` ou `imovel` identificam o pedido na confirmação (achado de
+   * review 19/10: "Autorizar o pedido 1?" não dizia quem nem o quê).
+   */
+  autorizacaoFila?: {
+    itens: { ref: number; id: string; tipo: string; codigo: string; solicitante: string; documento?: string; imovel?: string }[];
+  };
+  /** v2/PR7: a decisão em curso do gerente (depois de "aprovar N"/"negar N"). */
+  autorizacaoDecisao?: {
+    autorizacaoId: string; tipo: string; decisao: "aprovar" | "negar"; motivo?: string;
+    codigo: string; solicitante: string; documento?: string; imovel?: string;
+  };
   tentativas: number;
   pausado?: boolean;
   atualizadoEm: number;
@@ -254,33 +308,95 @@ export function textoDaLista(raw: unknown, total: number | null, busca?: string)
 export interface PreflightLido {
   pronto: boolean;
   faltantes: FaltanteDeCaptacao[];
-  bloqueios: { codigo: string }[];
+  /**
+   * v2/PR5 (aditivo): mesmo formato de `faltantes`, `nivel:"ficha"`. Só
+   * informativo — nunca bloqueia o envio nem muda `pronto` (o `pronto` vem
+   * direto do servidor). Ainda não roteado para texto nesta preparação.
+   */
+  pendentesFicha: FaltanteDeCaptacao[];
+  bloqueios: { codigo: string; ref?: string }[];
   emBranco: number;
   version: number | null;
+}
+
+function lerOpcoesDoCampo(v: unknown): OpcaoDeCampo[] | undefined {
+  const opcoes = lista(v).flatMap((x): OpcaoDeCampo[] => {
+    const o = obj(x);
+    const valor = str(o.valor);
+    const label = str(o.label);
+    return valor && label ? [{ valor, label }] : [];
+  });
+  return opcoes.length ? opcoes : undefined;
+}
+
+/** Um item de `faltantes[]`/`pendentesFicha[]`. `tipo`/`nivel`/`lista`/`opcoes` são opcionais (v2/PR5). */
+function lerFaltanteBruto(x: unknown): FaltanteDeCaptacao[] {
+  const f = obj(x);
+  const path = str(f.path);
+  const rotulo = str(f.rotulo);
+  if (!path || !rotulo) return [];
+  const etapa = str(f.etapa);
+  const dono = str(f.proprietarioId);
+  const tipo = str(f.tipo);
+  const nivel = str(f.nivel);
+  const listaCampo = str(f.lista);
+  const opcoes = lerOpcoesDoCampo(f.opcoes);
+  return [{
+    path, rotulo,
+    ...(etapa ? { etapa } : {}), ...(dono ? { proprietarioId: dono } : {}),
+    ...(tipo ? { tipo } : {}), ...(nivel ? { nivel } : {}),
+    ...(listaCampo ? { lista: listaCampo } : {}), ...(opcoes ? { opcoes } : {}),
+  }];
 }
 
 /** `captacao.preflight`: boolean `pronto` obrigatório; o resto tem padrão vazio. */
 export function lerPreflight(raw: unknown): PreflightLido | null {
   const o = obj(raw);
   if (typeof o.pronto !== "boolean") return null;
-  const faltantes = lista(o.faltantes).flatMap((x): FaltanteDeCaptacao[] => {
-    const f = obj(x);
-    const path = str(f.path);
-    const rotulo = str(f.rotulo);
-    if (!path || !rotulo) return [];
-    const etapa = str(f.etapa);
-    const dono = str(f.proprietarioId);
-    return [{ path, rotulo, ...(etapa ? { etapa } : {}), ...(dono ? { proprietarioId: dono } : {}) }];
-  });
+  const faltantes = lista(o.faltantes).flatMap(lerFaltanteBruto);
+  const pendentesFicha = lista(o.pendentesFicha).flatMap(lerFaltanteBruto);
   const bloqueios = lista(o.bloqueios).flatMap((x) => {
-    const codigo = str(obj(x).codigo);
-    return codigo ? [{ codigo }] : [];
+    const b = obj(x);
+    const codigo = str(b.codigo);
+    const ref = str(b.ref);
+    return codigo ? [{ codigo, ...(ref ? { ref } : {}) }] : [];
   });
   return {
-    pronto: o.pronto, faltantes, bloqueios,
+    pronto: o.pronto, faltantes, pendentesFicha, bloqueios,
     emBranco: typeof o.emBranco === "number" && o.emBranco > 0 ? Math.floor(o.emBranco) : 0,
     version: typeof o.version === "number" ? o.version : null,
   };
+}
+
+export interface CampoDeOpcoes {
+  path: string; rotulo: string; tipo: string; nivel: string; lista?: string; opcoes?: OpcaoDeCampo[];
+}
+
+/**
+ * Um item de `campos[]` de `captacao.options` (v2/PR5, preparação: ainda não
+ * lido em nenhum fluxo — só descrição do campo, nunca valor).
+ */
+export function lerCampoDeOpcoes(raw: unknown): CampoDeOpcoes | null {
+  const o = obj(raw);
+  const path = str(o.path);
+  const rotulo = str(o.rotulo);
+  const tipo = str(o.tipo);
+  const nivel = str(o.nivel);
+  if (!path || !rotulo || !tipo || !nivel) return null;
+  const listaCampo = str(o.lista);
+  const opcoes = lerOpcoesDoCampo(o.opcoes);
+  return { path, rotulo, tipo, nivel, ...(listaCampo ? { lista: listaCampo } : {}), ...(opcoes ? { opcoes } : {}) };
+}
+
+const CANAIS_VALIDOS = new Set(["email", "whatsapp", "aceite"]);
+
+/**
+ * `canalPadrao` de `captacao.options` (v2/PR5, preparação: ainda não lido em
+ * nenhum fluxo — não muda qual canal o Max usa nem pergunta mais cedo).
+ */
+export function lerCanalPadrao(raw: unknown): "email" | "whatsapp" | "aceite" | null {
+  const c = str(obj(raw).canalPadrao);
+  return c && CANAIS_VALIDOS.has(c) ? (c as "email" | "whatsapp" | "aceite") : null;
 }
 
 const ETAPA_DA_TELA: Record<string, string> = {
@@ -289,14 +405,205 @@ const ETAPA_DA_TELA: Record<string, string> = {
 /** Bloqueios do preflight (código do checklist, não do envio) que o Max sabe dizer em português. */
 const TEXTO_DO_BLOQUEIO: Record<string, string> = {
   soma_percentuais: "a soma dos percentuais dos proprietários não fecha 100%",
+  // v2/PR4/PR7: sem nome nem CPF — o `ref` do bloqueio é id, nunca dado da pessoa.
+  proprietario_aguarda_autorizacao: "este proprietário aguarda autorização do gerente para ser reaproveitado",
+  imovel_aguarda_autorizacao: "este imóvel aguarda autorização do gerente para ser reaproveitado",
+  proprietario_autorizacao_negada: "a autorização para reaproveitar este proprietário foi negada pelo gerente",
+  imovel_autorizacao_negada: "a autorização para reaproveitar este imóvel foi negada pelo gerente",
 };
-const bloqueioEmTexto = (codigo: string) => TEXTO_DO_BLOQUEIO[codigo] ?? `pendência "${codigo.replace(/_/g, " ")}"`;
+/**
+ * Os 4 códigos novos (v2/PR7) só têm texto amigável quando a org tem a
+ * capability `captacao.autorizacao.pedir` — sem ela o Max nunca oferece o
+ * pedido (achado de review 19/10, item 7), e o texto PRECISA continuar
+ * EXATAMENTE o de antes desta mudança: o fallback genérico por código,
+ * byte a byte. `soma_percentuais` (pré-existente) nunca passa por este gate.
+ */
+const CODIGOS_BLOQUEIO_SO_COM_CAPACIDADE = new Set([
+  "proprietario_aguarda_autorizacao", "imovel_aguarda_autorizacao",
+  "proprietario_autorizacao_negada", "imovel_autorizacao_negada",
+]);
+const bloqueioEmTexto = (codigo: string, podeAutorizar: boolean) => {
+  if (CODIGOS_BLOQUEIO_SO_COM_CAPACIDADE.has(codigo) && !podeAutorizar) return `pendência "${codigo.replace(/_/g, " ")}"`;
+  return TEXTO_DO_BLOQUEIO[codigo] ?? `pendência "${codigo.replace(/_/g, " ")}"`;
+};
+
+// ─── v2/PR7: autorização de reaproveitamento pelo Max ────────────────────
+
+/** Tipo do bloqueio pelo prefixo do código — nunca pelo `ref` (que é id, sem dado). */
+function tipoDoBloqueioDeAutorizacao(codigo: string): "proprietario" | "imovel" | null {
+  if (codigo.startsWith("proprietario_")) return "proprietario";
+  if (codigo.startsWith("imovel_")) return "imovel";
+  return null;
+}
+const CODIGOS_BLOQUEIO_AGUARDA = new Set(["proprietario_aguarda_autorizacao", "imovel_aguarda_autorizacao"]);
+const CODIGOS_BLOQUEIO_NEGADA = new Set(["proprietario_autorizacao_negada", "imovel_autorizacao_negada"]);
+
+interface BloqueioDeAutorizacao { codigo: string; ref: string; tipo: "proprietario" | "imovel"; negada: boolean }
+
+/**
+ * O próximo bloqueio de autorização do preflight AINDA NÃO pedido, se houver —
+ * para oferecer o pedido. `jaPedidos` são os `ref` para os quais o corretor já
+ * recebeu 201/200 de `captacao.autorizacao.pedir` nesta conversa: como
+ * `*_aguarda_autorizacao` vale tanto para "nunca pedido" quanto para "pedido
+ * pendente", sem este filtro o preflight sempre devolve o MESMO primeiro
+ * bloqueio e um segundo proprietário bloqueado nunca chega a ser oferecido
+ * (achado de review 19/10). `*_autorizacao_negada` nunca é pulado: é sempre
+ * uma nova decisão a oferecer, mesmo que o `ref` já tenha sido pedido antes.
+ */
+function bloqueioDeAutorizacao(
+  bloqueios: { codigo: string; ref?: string }[],
+  jaPedidos: ReadonlySet<string> = new Set(),
+  recusados: ReadonlySet<string> = new Set(),
+): BloqueioDeAutorizacao | null {
+  for (const b of bloqueios) {
+    if (!b.ref) continue;
+    // Achado de review 19/10 (item 3): "não" na oferta NESTA conversa — nunca reoferece o
+    // MESMO ref (nem `aguarda`, nem `negada`); sem isto, o próximo "sim" refaz o preflight e
+    // reoferece o que a pessoa já recusou, em loop. A fala cai no bloqueio genérico.
+    if (recusados.has(b.ref)) continue;
+    const aguarda = CODIGOS_BLOQUEIO_AGUARDA.has(b.codigo);
+    const negada = CODIGOS_BLOQUEIO_NEGADA.has(b.codigo);
+    if (!aguarda && !negada) continue;
+    if (aguarda && jaPedidos.has(b.ref)) continue;
+    const tipo = tipoDoBloqueioDeAutorizacao(b.codigo);
+    if (tipo) return { codigo: b.codigo, ref: b.ref, tipo, negada };
+  }
+  return null;
+}
+
+/**
+ * A lista literal de `CODIGOS_DE_ERRO_DA_AUTORIZACAO` do ImobPro
+ * (`captacao-vectors.ts`, `CODIGOS_DA_AUTORIZACAO_LITERAL`), na mesma ordem.
+ * Cobre os erros de `captacao.autorizacao.pedir` e `.decidir` juntos.
+ */
+export const CODIGOS_DA_AUTORIZACAO = [
+  "tipo_invalido", "ref_obrigatorio", "captacao_id_obrigatorio", "justificativa_grande", "nao_e_rascunho",
+  "nao_precisa_autorizacao", "documento_invalido", "pedido_invalido", "autorizacao_id_obrigatorio",
+  "decisao_invalida", "motivo_obrigatorio", "nao_pendente", "solicitante_nao_decide",
+  "motivo_grande",
+] as const;
+export type CodigoDeAutorizacao = (typeof CODIGOS_DA_AUTORIZACAO)[number];
+
+interface ParamsTextoAutorizacao { link: string }
+
+/** Um texto por código — `Record` exaustivo: código novo no tipo não compila sem texto. */
+export const TEXTO_POR_CODIGO_AUTORIZACAO: Record<CodigoDeAutorizacao, (p: ParamsTextoAutorizacao) => string> = {
+  tipo_invalido: (p) => `Não consegui identificar o que pedir. Ajuste pela tela: ${p.link}`,
+  ref_obrigatorio: (p) => `Não consegui identificar o alvo do pedido. Ajuste pela tela: ${p.link}`,
+  captacao_id_obrigatorio: (p) => `Não consegui registrar o pedido agora. Tente pela tela: ${p.link}`,
+  justificativa_grande: () => "Essa justificativa ficou grande demais (até 300 caracteres). Pode resumir?",
+  nao_e_rascunho: (p) => `Esta captação não está mais em rascunho. Veja na tela: ${p.link}`,
+  nao_precisa_autorizacao: () => "Não é mais necessário pedir: já foi liberado ou o bloqueio sumiu. Vou conferir de novo.",
+  documento_invalido: (p) => `O cadastro dessa pessoa não tem um documento válido para autorizar. Ajuste pela tela: ${p.link}`,
+  pedido_invalido: (p) => `Não consegui registrar o pedido. Tente pela tela: ${p.link}`,
+  autorizacao_id_obrigatorio: () => "Não consegui identificar o pedido. Tente de novo.",
+  decisao_invalida: () => "Não entendi a decisão. Responda *aprovar* ou *negar*.",
+  motivo_obrigatorio: () => "Para negar, preciso de um motivo (até 500 caracteres).",
+  nao_pendente: () => "Esse pedido já foi decidido.",
+  solicitante_nao_decide: () => "Quem pediu não pode decidir o próprio pedido.",
+  motivo_grande: () => "Esse motivo ficou grande demais (até 500 caracteres). Pode resumir?",
+};
+
+/** Código desconhecido (servidor mais novo que este lado) vira texto neutro mais o link. */
+export function textoDoCodigoDeAutorizacao(codigo: string, p: ParamsTextoAutorizacao): string {
+  const f = (TEXTO_POR_CODIGO_AUTORIZACAO as Record<string, ((x: ParamsTextoAutorizacao) => string) | undefined>)[codigo];
+  return f ? f(p) : `Não consegui processar o pedido. Veja na tela: ${p.link}`;
+}
+
+export interface AutorizacaoPedidoLida { id: string; status: string; tipo: string; ref: string }
+
+/** `captacao.autorizacao.pedir`: `{autorizacao:{id,status},tipo,ref}` — sem nome, sem CPF, sem motivo. */
+export function lerAutorizacaoPedido(raw: unknown): AutorizacaoPedidoLida | null {
+  const o = obj(raw);
+  const aut = obj(o.autorizacao);
+  const id = str(aut.id);
+  const status = str(aut.status);
+  const tipo = str(o.tipo);
+  const ref = str(o.ref);
+  return id && status && tipo && ref ? { id, status, tipo, ref } : null;
+}
+
+export interface ItemDaFilaDeAutorizacao {
+  ref: number; id: string; tipo: string; codigo: string; solicitante: string;
+  documento?: string; imovel?: string; criadoEm: string; justificativa?: string;
+}
+
+/** Um item de `captacao.autorizacao.listar`: documento SEMPRE mascarado pelo servidor (nunca tratado aqui). */
+export function lerItemDaFilaDeAutorizacao(raw: unknown): ItemDaFilaDeAutorizacao | null {
+  const o = obj(raw);
+  const id = str(o.id);
+  const tipo = str(o.tipo);
+  const codigo = str(o.codigo);
+  const solicitante = str(o.solicitante);
+  const criadoEm = str(o.criadoEm);
+  // `ref` é o número que a pessoa digita ("aprovar N"): sem um inteiro ≥ 1 válido, o item é
+  // DESCARTADO (fail-closed), nunca numerado como 0 — "aprovar 0" nunca bateria em nada, mas
+  // um 0 fabricado colidiria silenciosamente com qualquer filtro que teste `!ref` (achado de
+  // review 19/10).
+  const ref = typeof o.ref === "number" && Number.isInteger(o.ref) && o.ref >= 1 ? o.ref : null;
+  if (!id || !tipo || !codigo || !solicitante || !criadoEm || ref === null) return null;
+  const documento = str(o.documento);
+  const imovel = str(o.imovel);
+  const justificativa = str(o.justificativa);
+  return {
+    ref,
+    id, tipo, codigo, solicitante, criadoEm,
+    ...(documento ? { documento } : {}), ...(imovel ? { imovel } : {}), ...(justificativa ? { justificativa } : {}),
+  };
+}
+
+export function lerFilaDeAutorizacoes(raw: unknown): { items: ItemDaFilaDeAutorizacao[]; total: number } {
+  const o = obj(raw);
+  const items = lista(o.items).map(lerItemDaFilaDeAutorizacao).filter((x): x is ItemDaFilaDeAutorizacao => !!x);
+  return { items, total: typeof o.total === "number" ? o.total : items.length };
+}
+
+/** "o proprietário ***.456.789-**" / "o imóvel Rua Augusta, 1250" — nunca CPF/CNPJ inteiro nem nome do dono. */
+function alvoDaAutorizacao(i: { tipo: string; documento?: string; imovel?: string }): string {
+  return i.tipo === "proprietario"
+    ? `o proprietário${i.documento ? ` ${i.documento}` : ""}`
+    : `o imóvel${i.imovel ? ` ${i.imovel}` : ""}`;
+}
+
+/** Uma linha por pedido pendente — nunca CPF/CNPJ inteiro (o `documento` já chega mascarado) nem nome do dono da carteira. */
+export function textoDoItemDaFila(i: ItemDaFilaDeAutorizacao): string {
+  const partes = [
+    `${i.ref}. ${i.codigo} · ${i.solicitante} pede ${alvoDaAutorizacao(i)}`,
+    i.justificativa ? `   "${i.justificativa}"` : "",
+  ];
+  return partes.filter(Boolean).join("\n");
+}
+
+export function textoDaFilaDeAutorizacoes(raw: unknown): string {
+  const { items } = lerFilaDeAutorizacoes(raw);
+  if (!items.length) return "Nenhum pedido aguardando você.";
+  return items.map(textoDoItemDaFila).join("\n\n");
+}
+
+export interface AutorizacaoDecisaoLida { id: string; status: string }
+
+/** `captacao.autorizacao.decidir`: `{autorizacao:{id,status}}`. */
+export function lerAutorizacaoDecisao(raw: unknown): AutorizacaoDecisaoLida | null {
+  const aut = obj(obj(raw).autorizacao);
+  const id = str(aut.id);
+  const status = str(aut.status);
+  return id && status ? { id, status } : null;
+}
+
+/** "Tem pedido de autorização?", "pedidos pendentes" — gatilho determinístico da fila do gerente. */
+const PEDE_FILA_DE_AUTORIZACAO =
+  /\b(tem\s+pedidos?\s+(?:de\s+)?autorizac\w*|pedidos?\s+(?:de\s+autorizac\w*\s+)?pendentes?|autorizac(?:oes|ao)?\s+pendentes?|fila\s+(?:de\s+)?autorizac\w*|pedidos?\s+(?:de\s+)?autorizac\w*\s+(?:aguardando|esperando))\b/;
+
+export function pedeFilaDeAutorizacao(texto: string): boolean {
+  const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "").trim();
+  return PEDE_FILA_DE_AUTORIZACAO.test(t);
+}
 
 /**
  * O que a conferência diz, em frase. `nomes` liga `proprietarioId` ao nome que
  * o fluxo guardou — o preflight não traz nome (nem valor) de propósito.
  */
-export function textoDoPreflight(raw: unknown, nomes: Record<string, string> = {}): string {
+export function textoDoPreflight(raw: unknown, nomes: Record<string, string> = {}, podeAutorizar = false): string {
   const pf = lerPreflight(raw);
   if (!pf) return "Não consegui ler a conferência da captação.";
   const linhas: string[] = [];
@@ -308,7 +615,7 @@ export function textoDoPreflight(raw: unknown, nomes: Record<string, string> = {
     });
     linhas.push(`Para enviar ainda falta: ${itens.join("; ")}.`);
   }
-  if (pf.bloqueios.length) linhas.push(`Antes de enviar: ${pf.bloqueios.map((b) => bloqueioEmTexto(b.codigo)).join("; ")}.`);
+  if (pf.bloqueios.length) linhas.push(`Antes de enviar: ${pf.bloqueios.map((b) => bloqueioEmTexto(b.codigo, podeAutorizar)).join("; ")}.`);
   if (pf.emBranco > 0) linhas.push(`${pf.emBranco} campo(s) vão em branco no contrato.`);
   if (pf.pronto && !pf.emBranco) linhas.push("Tudo preenchido para o envio.");
   return linhas.join("\n") || "Conferência sem pendências.";
@@ -741,6 +1048,27 @@ const TIPO_DO_PATH: Record<string, TipoDeCampo> = {
   "locacao.aluguel": "moeda", "locacao.condominio": "moeda", "locacao.iptu": "moeda", "locacao.taxa_administracao": "percentual",
 };
 
+/**
+ * O tipo de UM faltante: SEMPRE `TIPO_DO_PATH[fa.path]`, igual a antes do
+ * v2/PR5. O `tipo` que o servidor manda (CM) é só parseado e mantido em
+ * `fa.tipo` (ver `lerFaltanteBruto`) — nunca decide aqui.
+ *
+ * Por quê: o catálogo do CM (`field-catalog.ts`) manda `tipo:"texto"` genérico
+ * para paths que o Max trata de forma especializada aqui — `imovel.endereco`
+ * (endereco_imovel), `imovel.tipo` (tipo_imovel, escreve `imovel.kind`),
+ * `proprietarios[].nome` (nome), `estado_civil`, `endereco_completo`
+ * (endereco_pessoa). Deixar o `tipo` do servidor mandar sobrescreveria esses
+ * tipos especializados pelo genérico "texto" (B1) e, pior, faria QUALQUER
+ * path novo/desconhecido do servidor virar perguntável via
+ * `TIPO_DO_CATALOGO[fa.tipo]` mesmo sem o Max saber validar/escrever aquele
+ * campo (B2) — o preflight do CM entraria em loop. `TIPO_DO_PATH` continua
+ * sendo a allowlist E o decisor; path fora dela é SEMPRE da tela, com
+ * qualquer `tipo` que o servidor mande.
+ */
+export function tipoDoFaltante(fa: FaltanteDeCaptacao): TipoDeCampo | undefined {
+  return TIPO_DO_PATH[fa.path];
+}
+
 /** O que a pergunta de cada faltante diz como exemplo. */
 const DICA: Partial<Record<TipoDeCampo, string>> = {
   endereco_imovel: " (rua, número, bairro, cidade/UF)",
@@ -761,7 +1089,7 @@ function nomeDoDono(f: FluxoCaptacao, id?: string): string | undefined {
 }
 
 function perguntaDoFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao): string {
-  const tipo = TIPO_DO_PATH[fa.path];
+  const tipo = tipoDoFaltante(fa);
   const dono = nomeDoDono(f, fa.proprietarioId);
   const de = fa.path.startsWith("proprietarios[]") ? (dono ? ` de ${dono}` : " do proprietário") : fa.path.startsWith("imovel.") && fa.path !== "imovel.endereco" ? " do imóvel" : "";
   const dica = tipo ? (DICA[tipo] ?? "") : "";
@@ -805,7 +1133,7 @@ export function semRotulo(texto: string, rotulo: string): string {
 
 /** Lê a resposta a UM faltante e devolve o patch (só aquele campo) ou o erro. */
 async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: string, extrair: ExtratorDeSecao): Promise<Leitura> {
-  const tipo = TIPO_DO_PATH[fa.path];
+  const tipo = tipoDoFaltante(fa);
   if (!tipo) return { erro: "campo_desconhecido" };
   const [grupo, campo] = fa.path.replace("[]", "").split(".") as [string, string];
   const dono = fa.proprietarioId ? f.proprietarios?.find((p) => p.id === fa.proprietarioId) : undefined;
@@ -887,7 +1215,14 @@ async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: stri
 
 // ─── Gate e escrita ──────────────────────────────────────────────────────
 
-type CapacidadeDoFluxo = "captacao.create" | "captacao.send" | "captacao.list";
+type CapacidadeDoFluxo =
+  | "captacao.create" | "captacao.send" | "captacao.list"
+  | "captacao.autorizacao.pedir" | "captacao.autorizacao.decidir";
+
+/** "Não está ligada" da fila de autorização do gerente (`MAX_CAPTACAO_AUTORIZACAO` desligada). */
+const TEXTO_AUTORIZACAO_DESLIGADA = "A fila de autorização pelo Max não está ligada para a sua imobiliária. Fale com o administrador.";
+/** Sem fila para decidir (403 do `captacao.autorizacao.listar`). */
+const TEXTO_SEM_FILA = "Você não tem pedidos de autorização para decidir.";
 
 function gatePolitica(ctx: ContextoDoTurno, podeEscrever: boolean, cap: CapacidadeDoFluxo): Resposta | null {
   if (!podeEscrever) return resposta(null, TEXTO_CAPTACAO_SEM_POLITICA, "captacao_sem_usuario");
@@ -956,7 +1291,10 @@ async function depoisDaNatureza(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: De
     const m = obj(x);
     const id = str(m.id);
     const nome = str(m.nome);
-    return id && nome ? [{ id, nome, ...(str(m.resumo) ? { resumo: str(m.resumo)! } : {}) }] : [];
+    // `padrao` (v2/PR5) é só lido aqui; a escolha ainda pergunta sempre que há mais de um modelo.
+    return id && nome
+      ? [{ id, nome, ...(str(m.resumo) ? { resumo: str(m.resumo)! } : {}), ...(typeof m.padrao === "boolean" ? { padrao: m.padrao } : {}) }]
+      : [];
   });
   if (!modelos.length) {
     return resposta(null, `Sua imobiliária não tem um modelo de captação de ${NOME_DA_ESTEIRA[f.tipo!]} ativo. Um administrador ativa em Modelos, no sistema; depois é só me pedir de novo.`, "captacao_sem_modelo");
@@ -1092,9 +1430,53 @@ export async function iniciarEnvioDeCaptacao(ctx: ContextoDoTurno, deps: DepsDoF
   return resposta({ ...base, etapa: "selecao", candidatos }, `Achei mais de um rascunho:\n${linhas}\n\nQual envio? Responda com o número.`, "captacao_envio_selecao");
 }
 
+// ─── v2/PR7: fila de autorização do gerente ──────────────────────────────
+
+/**
+ * "Tem pedido de autorização?", "pedidos pendentes": gatilho determinístico,
+ * atrás de `MAX_CAPTACAO_AUTORIZACAO` (desligada por padrão) E da capability
+ * `captacao.autorizacao.decidir`. Sem a capability, nem a flag chegam a
+ * importar: o gate (política) responde primeiro — o mesmo texto de sempre,
+ * sem dizer que a fila existe.
+ */
+export async function iniciarFilaDeAutorizacao(ctx: ContextoDoTurno, deps: DepsDoFluxo, podeEscrever: boolean): Promise<Resposta> {
+  const barrado = gatePolitica(ctx, podeEscrever, "captacao.autorizacao.decidir");
+  if (barrado) return barrado;
+  if (!captacaoAutorizacaoLigada()) return resposta(null, TEXTO_AUTORIZACAO_DESLIGADA, "captacao_autorizacao_fila_desligada");
+  return listarFilaDeAutorizacao(ctx, deps);
+}
+
+/** `captacao.autorizacao.listar{}`: até 10 pendentes, numerados — vazio é frase própria, nunca lista vazia muda. */
+async function listarFilaDeAutorizacao(ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<Resposta> {
+  const r = await deps.acao("captacao.autorizacao.listar", {});
+  if (!r) return resposta(null, TEXTO_SEM_RESPOSTA, "captacao_autorizacao_listar_sem_resposta");
+  if (r.status === 403) return resposta(null, TEXTO_SEM_FILA, "captacao_autorizacao_listar_403");
+  if (r.status !== 200) return resposta(null, TEXTO_SEM_RESPOSTA, `captacao_autorizacao_listar_${r.status}`);
+  const { items } = lerFilaDeAutorizacoes(r.body);
+  const texto = textoDaFilaDeAutorizacoes(r.body);
+  if (!items.length) return resposta(null, texto, "captacao_autorizacao_fila_vazia");
+  const f: FluxoCaptacao = {
+    kind: "captacao", etapa: "autorizacao_fila", tentativas: 0, atualizadoEm: ctx.agora,
+    autorizacaoFila: {
+      itens: items.map((i) => ({
+        ref: i.ref, id: i.id, tipo: i.tipo, codigo: i.codigo, solicitante: i.solicitante,
+        ...(i.documento ? { documento: i.documento } : {}), ...(i.imovel ? { imovel: i.imovel } : {}),
+      })),
+    },
+  };
+  return resposta(f, `${texto}\n\nResponda "aprovar N" ou "negar N" (o número da lista).`, "captacao_autorizacao_fila");
+}
+
 // ─── Condução ────────────────────────────────────────────────────────────
 
 const CANCELA = /^(cancela|cancelar|desisto|desistir|para|parar|pare)$/;
+/**
+ * Achado de review 19/10 (item 5): dentro de `autorizacao_motivo` o texto
+ * INTEIRO é o motivo da negativa — só "cancelar"/"cancela" EXATOS cancelam;
+ * frases que contêm "desisto"/"não quero mais" no MEIO (a própria razão do
+ * gerente negar) são motivo, nunca cancelamento.
+ */
+const CANCELA_MOTIVO = /^(cancela|cancelar)$/;
 const FIM = /^(fim|fim\.?|terminei|acabou|pronto|so isso|e so isso|so esse|so esses|nao tem mais|sem mais|nenhum|nenhuma|nao|n|ja deu|chega)$/;
 const PULAR = /^(pular|pula|depois|deixa|deixa pra depois|completo depois|completo na tela|pulei)$/;
 // "sim" solto NÃO envia: o resumo ensina a palavra, e um "sim" a outra pergunta do modelo não pode disparar o envio.
@@ -1131,17 +1513,28 @@ export function continuacaoCaptacao(f: FluxoCaptacao): string {
     case "revisao": return `${cab}responda *enviar* para enviar, ou CANCELAR.`;
     case "brancos": return `${cab}responda *enviar assim mesmo*, ou CANCELAR.`;
     case "enviando": return `Sobre o envio da captação${lembrete(f)}: ainda estou conferindo; me pergunte "como está a captação" que eu confiro.`;
+    case "autorizacao_oferta": return `${cab}quer que eu peça a autorização ao gerente? Responda sim ou não.`;
+    case "autorizacao_fila": return `Sobre os pedidos de autorização: responda "aprovar N" ou "negar N".`;
+    case "autorizacao_motivo": return "Sobre a negativa do pedido de autorização: qual o motivo? (até 500 caracteres)";
+    case "autorizacao_confirmar": return "Confirma a decisão do pedido de autorização? Responda sim ou não.";
     default: return `${cab}mande CANCELAR para parar.`;
   }
 }
 
 function cancelar(f: FluxoCaptacao): Resposta {
+  // Review 19/10 (3ª rodada): pedir/decidir sem resposta também é escrita incerta.
+  if (f.autorizacaoChave) return respostaDeAutorizacaoIncerta("captacao_cancelado_autorizacao_incerta");
   if (f.chave) {
     return resposta(null, `Parei. Se o envio chegou ao sistema, o estado aparece na tela: ${linkDe(f.captacaoId)}`, "captacao_cancelado_envio_incerto");
   }
   return f.captacaoId
     ? resposta(null, `Parei. O rascunho${lembrete(f)} fica salvo na tela: ${linkDe(f.captacaoId)}`, "captacao_cancelado")
     : resposta(null, "Parei. Nada foi criado.", "captacao_cancelado");
+}
+
+/** Parar depois de um pedir/decidir SEM resposta: a escrita pode ter chegado — nunca dizer "nada aconteceu". */
+function respostaDeAutorizacaoIncerta(evento: string): Resposta {
+  return resposta(null, `Parei. A última tentativa não teve resposta, então ela pode ter chegado ao sistema — confira na tela: ${linkDe()}`, evento);
 }
 
 function pausar(f: FluxoCaptacao): PassoDoFluxo {
@@ -1171,13 +1564,24 @@ function capacidadeDaEtapa(etapa: FluxoCaptacao["etapa"]): CapacidadeDoFluxo {
   // exigir create aqui travava esse usuário pra sempre, sem conseguir nem
   // retomar o próprio envio.
   if (etapa === "verificar") return "captacao.list";
+  // v2/PR7: a oferta ao corretor pede autorização; a fila do gerente lista/decide.
+  if (etapa === "autorizacao_oferta") return "captacao.autorizacao.pedir";
+  if (etapa === "autorizacao_fila" || etapa === "autorizacao_motivo" || etapa === "autorizacao_confirmar") return "captacao.autorizacao.decidir";
   return "captacao.create";
 }
 
 export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, podeEscrever: boolean): Promise<PassoDoFluxo> {
   const t = normalizar(ctx.texto);
-  if (CANCELA.test(t) || /\b(cancela a captacao|desisto|nao quero mais)\b/.test(t)) return cancelar(f);
+  // `autorizacao_motivo` (achado de review 19/10, item 5): o texto inteiro É o motivo da
+  // negativa — pode conter "cancela"/"desisto"/"não quero mais"/"captação" NO MEIO de uma
+  // frase legítima ("o cliente desistiu, não quero mais correr esse risco"). Nem este
+  // intercepto global de cancelamento nem o de `pedeCaptacao` (abaixo) podem roubar essa
+  // mensagem — só o `CANCELA_MOTIVO` exato, dentro de `conduzirAutorizacaoMotivo`, cancela ali.
+  if (f.etapa !== "autorizacao_motivo" && (CANCELA.test(t) || /\b(cancela a captacao|desisto|nao quero mais)\b/.test(t))) {
+    return cancelar(f);
+  }
 
+  const ETAPAS_DA_FILA = new Set(["autorizacao_fila", "autorizacao_motivo", "autorizacao_confirmar"]);
   const capNecessaria = capacidadeDaEtapa(f.etapa);
   // Achado 21: quem só tem `captacao.send` consegue terminar o ENVIO de um rascunho
   // já existente; completar dado que falta exige `captacao.create` — e, faltando
@@ -1190,9 +1594,15 @@ export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, d
   }
   const barrado = gatePolitica(ctx, podeEscrever, capNecessaria);
   if (barrado) return { ...barrado, fluxo: ctx.politicaIndisponivel ? { ...f, atualizadoEm: ctx.agora } : null };
+  // Flag desligada no meio da fila (achado defensivo: o kill-switch de `graph.ts` já cobre a
+  // maioria dos casos, mas uma checagem aqui também não deixa a fila seguir sem a flag).
+  if (ETAPAS_DA_FILA.has(f.etapa) && !captacaoAutorizacaoLigada()) {
+    return { reply: TEXTO_AUTORIZACAO_DESLIGADA, fluxo: null, evento: "captacao_autorizacao_fila_desligada_no_fluxo" };
+  }
 
-  // Consulta no meio do fluxo: resposta fixa, e o fluxo continua.
-  const outro = pedeCaptacao(ctx.texto);
+  // Consulta no meio do fluxo: resposta fixa, e o fluxo continua. (Não em `autorizacao_motivo`:
+  // o texto é o motivo, nunca um pedido de listagem — ver comentário acima, item 5.)
+  const outro = f.etapa === "autorizacao_motivo" ? null : pedeCaptacao(ctx.texto);
   if (outro === "listar" && f.etapa !== "enviando") {
     const r = await responderListaDeCaptacao(ctx, deps, podeEscrever);
     const gg = g(f, ctx);
@@ -1217,6 +1627,10 @@ export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, d
     case "revisao": return conduzirRevisao(f, ctx, deps);
     case "brancos": return conduzirBrancos(f, ctx, deps);
     case "enviando": return conferirEnvio(f, ctx, deps);
+    case "autorizacao_oferta": return conduzirAutorizacaoOferta(f, t, ctx, deps);
+    case "autorizacao_fila": return conduzirAutorizacaoFila(f, t, ctx, deps);
+    case "autorizacao_motivo": return conduzirAutorizacaoMotivo(f, ctx);
+    case "autorizacao_confirmar": return conduzirAutorizacaoConfirmar(f, ctx, deps);
   }
 }
 
@@ -1703,16 +2117,33 @@ async function verificar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFlu
   const nomes = Object.fromEntries((f.proprietarios ?? []).map((p) => [p.id, p.nome]));
   const base = g(f, ctx, { version, tentativas: 0 });
 
-  // Só pergunta o que o Max sabe preencher; o resto (campo personalizado…) é da tela.
-  const perguntaveis = pf.faltantes.filter((x) => TIPO_DO_PATH[x.path]);
-  const daTela = pf.faltantes.filter((x) => !TIPO_DO_PATH[x.path]);
+  // Só pergunta o que o Max sabe preencher; o resto (campo personalizado, lista fechada…) é da tela.
+  const perguntaveis = pf.faltantes.filter((x) => tipoDoFaltante(x));
+  const daTela = pf.faltantes.filter((x) => !tipoDoFaltante(x));
   if (perguntaveis.length) {
     const cab = `${prefixo}${textoDoPreflight({ ...r.body, bloqueios: [], emBranco: 0 }, nomes)}\n`;
     const fa = perguntaveis[0]!;
     return resposta(g(base, ctx, { etapa: "faltantes", faltantes: perguntaveis }), `${cab}${perguntaDoFaltante(base, fa)}`, "captacao_faltantes");
   }
+  // v2/PR7: bloqueio de autorização (dono ou imóvel fora da carteira). Sem a capability
+  // `captacao.autorizacao.pedir`, o Max NÃO oferece — cai no aviso genérico de sempre,
+  // que já não tem nome nem CPF (`bloqueioEmTexto`). Só impede o ENVIO, nunca o complemento:
+  // esta checagem só acontece aqui, na conferência, nunca nas etapas de coleta.
+  const bloqAut = bloqueioDeAutorizacao(pf.bloqueios, new Set(f.autorizacaoPedidosFeitos ?? []), new Set(f.autorizacaoPedidosRecusados ?? []));
+  if (bloqAut && ctx.policy.includes("captacao.autorizacao.pedir")) {
+    const alvo = bloqAut.tipo === "proprietario" ? "Esse proprietário" : "Esse imóvel";
+    const texto = bloqAut.negada
+      ? `${alvo} teve a autorização negada pelo gerente. Você pode tirar pela tela (${linkDe(f.captacaoId)}) ou pedir de novo. Quer que eu peça de novo? (Pode mandar uma justificativa curta, ou responda *sim*/*não*.)`
+      : `${alvo} já está na carteira de outro corretor. Para seguir, seu gerente precisa autorizar. Quer que eu peça a autorização? (Pode mandar uma justificativa curta, ou responda *sim*/*não*.)`;
+    return resposta(
+      g(base, ctx, { etapa: "autorizacao_oferta", autorizacaoPedido: { tipo: bloqAut.tipo, ref: bloqAut.ref } }),
+      `${prefixo}${texto}`,
+      "captacao_autorizacao_oferta"
+    );
+  }
   if (daTela.length || pf.bloqueios.length) {
-    return resposta(g(base, ctx, { etapa: "verificar" }), `${prefixo}${textoDoPreflight(r.body, nomes)}\nO rascunho${lembrete(f)} está salvo. Ajuste pela tela: ${linkDe(f.captacaoId)}`, "captacao_bloqueios");
+    const podeAutorizar = ctx.policy.includes("captacao.autorizacao.pedir");
+    return resposta(g(base, ctx, { etapa: "verificar" }), `${prefixo}${textoDoPreflight(r.body, nomes, podeAutorizar)}\nO rascunho${lembrete(f)} está salvo. Ajuste pela tela: ${linkDe(f.captacaoId)}`, "captacao_bloqueios");
   }
   return resumir(base, pf, ctx, deps, prefixo);
 }
@@ -2051,4 +2482,272 @@ async function conferirEnvio(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsD
   if (!item?.estado) return resposta(g(f, ctx), `Ainda não consegui conferir. Veja na tela: ${url}`, "captacao_envio_sem_conferencia");
   if (/enviando/i.test(item.estado)) return resposta(g(f, ctx), `Ainda em andamento (${item.estado}). Veja na tela: ${url}`, "captacao_envio_andamento");
   return resposta(null, `Não reenviei. A captação${lembrete(f)} está como "${item.estado}": ${url}`, "captacao_envio_conferido");
+}
+
+// ─── v2/PR7: autorização de reaproveitamento — condução ──────────────────
+
+/**
+ * Oferta ao corretor (`verificar` disparou por um bloqueio de autorização).
+ * "sim" direto pede sem justificativa; qualquer texto que não seja sim/não
+ * (e não seja pergunta fora do assunto) é lido como justificativa curta — a
+ * pessoa confirma antes do pedido valer (a chave de idempotência só nasce no
+ * "sim" que de fato confirma, nunca antes).
+ */
+async function conduzirAutorizacaoOferta(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const pedido = f.autorizacaoPedido;
+  if (!pedido) return verificar(g(f, ctx, { etapa: "verificar" }), ctx, deps, "");
+  if (lerConfirmacao(ctx.texto) === "nao") {
+    if (f.autorizacaoChave) return respostaDeAutorizacaoIncerta("captacao_autorizacao_recusada_incerta");
+    // Achado de review 19/10 (item 3): guarda o `ref` recusado NESTA conversa — sem isto, o
+    // próximo "sim" refaz o preflight e reoferece o MESMO ref, em loop (a fala passa a ser a
+    // genérica do bloqueio quando a conferência roda de novo, ver `bloqueioEmTexto`).
+    const recusados = Array.from(new Set([...(f.autorizacaoPedidosRecusados ?? []), pedido.ref]));
+    return resposta(
+      g(f, ctx, { etapa: "verificar", autorizacaoPedido: undefined, autorizacaoChave: undefined, autorizacaoPedidosRecusados: recusados }),
+      `Tudo bem, não vou pedir agora. O rascunho${lembrete(f)} está salvo; ajuste pela tela: ${linkDe(f.captacaoId)}`,
+      "captacao_autorizacao_recusada"
+    );
+  }
+  if (lerConfirmacao(ctx.texto) === "sim") return pedirAutorizacao(f, ctx, deps, pedido);
+  // "sim, <justificativa>" / "sim - <justificativa>" (achado de review 19/10, item 6): já
+  // confirma, levando o texto depois da vírgula/hífen como justificativa — sem o passo extra de
+  // "peço com essa justificativa?" (a pessoa já confirmou na MESMA mensagem). Roda ANTES do
+  // `PERGUNTA_FORA`: essa justificativa pode legitimamente terminar em "?".
+  const simComJustificativa = pedido.justificativa === undefined ? /^sim\s*[,\-–]\s*(.+)$/is.exec(ctx.texto.trim()) : null;
+  if (simComJustificativa) {
+    const justificativa = simComJustificativa[1]!.trim();
+    if (justificativa.length > 300) {
+      return falhou(f, "Essa justificativa ficou grande demais (até 300 caracteres). Pode resumir, ou responda *sim* para pedir sem justificativa.", ctx);
+    }
+    return pedirAutorizacao(f, ctx, deps, { ...pedido, justificativa });
+  }
+  // Uma justificativa em texto livre que termine em "?" (ex.: "ele pediu, posso?") é ambígua com
+  // uma pergunta fora do assunto — fica a favor de PAUSAR, como já era (achado de review 19/10,
+  // item 6: só o caso claro "sim, …" acima é tratado como justificativa).
+  if (PERGUNTA_FORA.test(t)) return pausar(f);
+  if (pedido.justificativa !== undefined) {
+    // Já tinha pedido confirmação da justificativa: só sim/não valem aqui.
+    return falhou(f, "Responda *sim* para eu pedir a autorização, ou *não* para deixar como está.", ctx);
+  }
+  const justificativa = ctx.texto.trim();
+  if (justificativa.length > 300) {
+    return falhou(f, "Essa justificativa ficou grande demais (até 300 caracteres). Pode resumir, ou responda *sim* para pedir sem justificativa.", ctx);
+  }
+  return resposta(
+    g(f, ctx, { autorizacaoPedido: { ...pedido, justificativa } }),
+    `Peço a autorização com essa justificativa: "${justificativa}"? Responda *sim* (ou *não* para desistir).`,
+    "captacao_autorizacao_justificativa"
+  );
+}
+
+/** Achado de review 19/10 (item 2): mesma comparação usada por `pedirAutorizacao`/`decidirAutorizacao` para saber se o retry é da MESMA tentativa (args idênticos) ou de uma intenção nova. */
+const mesmosArgs = (a: Record<string, unknown>, b: Record<string, unknown>) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * `captacao.autorizacao.pedir{captacaoId,tipo,ref,justificativa?}`. A chave de
+ * idempotência é a `messageId` do "sim" que confirmou. Achado de review 19/10
+ * (item 2): quando o servidor não responde, a chave e os args ficam guardados
+ * em `autorizacaoChave` (como `chave` faz para `captacao.send`) — o PRÓXIMO
+ * "sim" com os MESMOS args repete a MESMA chave, nunca uma nova (que criaria
+ * um segundo pedido). O Max nunca manda CPF: o `ref` já é só o id do preflight.
+ */
+async function pedirAutorizacao(
+  f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo,
+  pedido: { tipo: "proprietario" | "imovel"; ref: string; justificativa?: string }
+): Promise<Resposta> {
+  const args: Record<string, unknown> = {
+    captacaoId: f.captacaoId, tipo: pedido.tipo, ref: pedido.ref,
+    ...(pedido.justificativa ? { justificativa: pedido.justificativa } : {}),
+  };
+  const mesmo = f.autorizacaoChave && mesmosArgs(f.autorizacaoChave.args, args);
+  const valor = mesmo ? f.autorizacaoChave!.valor : ctx.messageId;
+  const r = await deps.acao("captacao.autorizacao.pedir", args, valor);
+  const url = linkDe(f.captacaoId);
+  if (!r) {
+    return resposta(
+      g(f, ctx, { etapa: "autorizacao_oferta", autorizacaoChave: { valor, args } }),
+      `${TEXTO_SEM_RESPOSTA} Responda *sim* de novo para eu tentar outra vez — não duplica.`,
+      "captacao_autorizacao_pedir_sem_resposta"
+    );
+  }
+  if (r.status === 201 || r.status === 200) {
+    const texto = r.status === 201
+      ? "Pedido enviado ao seu gerente. Te aviso quando ele decidir; enquanto isso dá para continuar preenchendo."
+      : "Já tem um pedido aguardando o gerente.";
+    // 201 (criado) ou 200 (já pendente): os dois significam "há um pedido em
+    // voo para este ref" — guarda para a próxima conferência oferecer o
+    // PRÓXIMO bloqueio, não repetir este (achado de review 19/10).
+    const pedidosFeitos = Array.from(new Set([...(f.autorizacaoPedidosFeitos ?? []), pedido.ref]));
+    return resposta(
+      g(f, ctx, { etapa: "verificar", autorizacaoPedido: undefined, autorizacaoPedidosFeitos: pedidosFeitos, autorizacaoChave: undefined }),
+      texto,
+      `captacao_autorizacao_pedido_${r.status}`
+    );
+  }
+  const erro = str(r.body.error);
+  if (erro === "nao_precisa_autorizacao") {
+    return verificar(
+      g(f, ctx, { etapa: "verificar", autorizacaoPedido: undefined, autorizacaoChave: undefined }), ctx, deps,
+      `${TEXTO_POR_CODIGO_AUTORIZACAO.nao_precisa_autorizacao({ link: url })}\n`
+    );
+  }
+  if (r.status === 403) { const n = textoDeNegado(r); return resposta(null, n.reply, n.evento); }
+  if (r.status === 404) return resposta(null, `Não achei essa captação (ou o item). Veja na tela: ${linkDe()}`, "captacao_autorizacao_pedir_404");
+  if (erro) {
+    return resposta(
+      g(f, ctx, { etapa: "autorizacao_oferta", autorizacaoChave: undefined }),
+      textoDoCodigoDeAutorizacao(erro, { link: url }),
+      `captacao_autorizacao_pedir_${erro}`
+    );
+  }
+  return resposta(null, TEXTO_SEM_RESPOSTA, `captacao_autorizacao_pedir_${r.status}`);
+}
+
+const APROVAR_N = /^aprov(?:ar|a|o)\s+(?:o\s+|a\s+)?(\d{1,2})$/;
+const NEGAR_N = /^neg(?:ar|a|o)\s+(?:o\s+|a\s+)?(\d{1,2})$/;
+
+/** A fila (gerente): "aprovar N" → confirmação direta; "negar N" → pede o motivo primeiro. */
+/** "Autorizar Ana Souza a captar com o proprietário ***.456.789-** na CAP-2026-0007?" (contrato do Max, §18.12). */
+function textoDeConfirmarAutorizacao(i: { solicitante: string; codigo: string; tipo: string; documento?: string; imovel?: string }): string {
+  return `Autorizar ${i.solicitante} a captar com ${alvoDaAutorizacao(i)} na ${i.codigo}?`;
+}
+
+async function conduzirAutorizacaoFila(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const itens = f.autorizacaoFila?.itens ?? [];
+  const mAprovar = APROVAR_N.exec(t);
+  if (mAprovar) {
+    const item = itens.find((i) => i.ref === Number(mAprovar[1]));
+    if (!item) return falhou(f, "Não achei esse número na lista.", ctx);
+    return resposta(
+      g(f, ctx, {
+        etapa: "autorizacao_confirmar",
+        autorizacaoDecisao: {
+          autorizacaoId: item.id, tipo: item.tipo, decisao: "aprovar",
+          codigo: item.codigo, solicitante: item.solicitante,
+          ...(item.documento ? { documento: item.documento } : {}), ...(item.imovel ? { imovel: item.imovel } : {}),
+        },
+      }),
+      // Achado de review 19/10: "Autorizar o pedido N?" não dizia quem nem o quê — o contrato
+      // pede o texto com `solicitante`/alvo/`codigo` (o `id` decidido continua o do item mostrado).
+      `${textoDeConfirmarAutorizacao(item)} Responda *sim* (ou *não*).`,
+      "captacao_autorizacao_confirmar_aprovar"
+    );
+  }
+  const mNegar = NEGAR_N.exec(t);
+  if (mNegar) {
+    const item = itens.find((i) => i.ref === Number(mNegar[1]));
+    if (!item) return falhou(f, "Não achei esse número na lista.", ctx);
+    return resposta(
+      g(f, ctx, {
+        etapa: "autorizacao_motivo",
+        autorizacaoDecisao: {
+          autorizacaoId: item.id, tipo: item.tipo, decisao: "negar",
+          codigo: item.codigo, solicitante: item.solicitante,
+          ...(item.documento ? { documento: item.documento } : {}), ...(item.imovel ? { imovel: item.imovel } : {}),
+        },
+      }),
+      "Qual o motivo da negativa? (até 500 caracteres)",
+      "captacao_autorizacao_pede_motivo"
+    );
+  }
+  if (/\b(atualiz\w*|de novo|novamente|recarreg\w*)\b/.test(t)) return listarFilaDeAutorizacao(ctx, deps);
+  if (PERGUNTA_FORA.test(t)) return pausar(f);
+  return falhou(f, 'Responda "aprovar N" ou "negar N" (o número da lista).', ctx);
+}
+
+/**
+ * O motivo da negativa (obrigatório, ≤ 500 caracteres): NUNCA chama
+ * `captacao.autorizacao.decidir` diretamente — só guarda o motivo e pede
+ * confirmação verbatim. A escrita só acontece no "sim" de `autorizacao_confirmar`.
+ */
+async function conduzirAutorizacaoMotivo(f: FluxoCaptacao, ctx: ContextoDoTurno): Promise<PassoDoFluxo> {
+  const decisao = f.autorizacaoDecisao;
+  if (!decisao) return resposta(null, TEXTO_SEM_RESPOSTA, "captacao_autorizacao_motivo_sem_contexto");
+  // Achado de review 19/10 (item 5): só "cancelar"/"cancela" EXATOS cancelam aqui — o texto
+  // inteiro é o motivo, e frases com "desisto"/"não quero mais" no MEIO são a própria razão.
+  if (CANCELA_MOTIVO.test(normalizar(ctx.texto))) {
+    if (f.autorizacaoChave) return respostaDeAutorizacaoIncerta("captacao_autorizacao_cancelado_incerto");
+    return resposta(null, "Tudo bem, não decidi nada.", "captacao_autorizacao_cancelado");
+  }
+  const motivo = ctx.texto.trim();
+  if (!motivo) return falhou(f, "Preciso de um motivo para negar.", ctx);
+  if (motivo.length > 500) return falhou(f, "Esse motivo ficou grande demais (até 500 caracteres). Pode resumir?", ctx);
+  // Negar confirma com o MESMO identificador do aprovar, mais o motivo verbatim (achado de review 19/10).
+  const alvo = alvoDaAutorizacao(decisao);
+  return resposta(
+    g(f, ctx, { etapa: "autorizacao_confirmar", autorizacaoDecisao: { ...decisao, motivo } }),
+    `Negar ${decisao.solicitante} a captar com ${alvo} na ${decisao.codigo} com o motivo: "${motivo}"? Responda *sim* (ou *não*).`,
+    "captacao_autorizacao_confirmar_negar"
+  );
+}
+
+/** O "sim"/"não" final: só aqui `captacao.autorizacao.decidir` é chamado. */
+async function conduzirAutorizacaoConfirmar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const decisao = f.autorizacaoDecisao;
+  if (!decisao) return resposta(null, TEXTO_SEM_RESPOSTA, "captacao_autorizacao_confirmar_sem_contexto");
+  if (lerConfirmacao(ctx.texto) === "nao") {
+    if (f.autorizacaoChave) return respostaDeAutorizacaoIncerta("captacao_autorizacao_decisao_cancelada_incerta");
+    return resposta(null, "Tudo bem, não decidi nada.", "captacao_autorizacao_decisao_cancelada");
+  }
+  if (lerConfirmacao(ctx.texto) !== "sim") return pausar(f);
+  return decidirAutorizacao(f, ctx, deps, decisao);
+}
+
+/**
+ * `captacao.autorizacao.decidir{autorizacaoId,decisao,motivo?}`. A chave de
+ * idempotência é a `messageId` do "sim" de confirmação. Achado de review
+ * 19/10 (item 2): mesmo padrão de `pedirAutorizacao` — sem resposta do
+ * servidor, a chave e os args ficam guardados em `autorizacaoChave`, e o
+ * PRÓXIMO "sim" com os MESMOS args repete a MESMA chave.
+ */
+async function decidirAutorizacao(
+  f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo,
+  decisao: { autorizacaoId: string; tipo: string; decisao: "aprovar" | "negar"; motivo?: string }
+): Promise<Resposta> {
+  const args: Record<string, unknown> = {
+    autorizacaoId: decisao.autorizacaoId, decisao: decisao.decisao, ...(decisao.motivo ? { motivo: decisao.motivo } : {}),
+  };
+  const mesmo = f.autorizacaoChave && mesmosArgs(f.autorizacaoChave.args, args);
+  const valor = mesmo ? f.autorizacaoChave!.valor : ctx.messageId;
+  const r = await deps.acao("captacao.autorizacao.decidir", args, valor);
+  if (!r) {
+    return resposta(
+      g(f, ctx, { etapa: "autorizacao_confirmar", autorizacaoChave: { valor, args } }),
+      `${TEXTO_SEM_RESPOSTA} Responda *sim* de novo — não duplica.`,
+      "captacao_autorizacao_decidir_sem_resposta"
+    );
+  }
+  if (r.status === 200) {
+    const d = lerAutorizacaoDecisao(r.body);
+    const status = d?.status === "aprovada" ? "aprovado" : d?.status === "negada" ? "negado" : "decidido";
+    return resposta(null, `Pedido ${status}.`, `captacao_autorizacao_decidida_${status}`);
+  }
+  // Códigos ESPECÍFICOS (inclusive os que chegam com status 403/409, como
+  // `solicitante_nao_decide`) vêm antes do 403/404 genéricos: senão o 403 de
+  // política roubaria o texto certo de `solicitante_nao_decide` (achado do
+  // teste — os dois usam o mesmo status HTTP). Mas só um código CONHECIDO
+  // (`CODIGOS_DA_AUTORIZACAO`) pode entrar aqui: o 404/403 GENÉRICO do servidor
+  // (`{error:"Not Found"}`/`{error:"Forbidden"}`) também tem `error` truthy e
+  // NÃO é um código da autorização — tratá-lo como código fazia a fala cair no
+  // "Não consegui processar o pedido" com link vazio (achado de review 19/10).
+  // Achado de review 19/10 (item 1): o link destes códigos é o da LISTA de
+  // captações — a decisão não carrega o `captacaoId` do pedido (só o
+  // `autorizacaoId`), então não há um link específico; `linkDe()` sem id
+  // continua uma URL válida, nunca vazia (`{ link: "" }` gerava "tela: " com
+  // nada depois).
+  const linkGenerico = linkDe();
+  const erro = str(r.body.error);
+  if (erro === "motivo_obrigatorio") {
+    return resposta(
+      g(f, ctx, { etapa: "autorizacao_motivo", autorizacaoChave: undefined }),
+      TEXTO_POR_CODIGO_AUTORIZACAO.motivo_obrigatorio({ link: linkGenerico }),
+      "captacao_autorizacao_decidir_motivo_obrigatorio"
+    );
+  }
+  if (erro && (CODIGOS_DA_AUTORIZACAO as readonly string[]).includes(erro)) {
+    return resposta(null, textoDoCodigoDeAutorizacao(erro, { link: linkGenerico }), `captacao_autorizacao_decidir_${erro}`);
+  }
+  if (r.status === 404) return resposta(null, "Esse pedido não está mais com você.", "captacao_autorizacao_decidir_404");
+  if (r.status === 403) { const n = textoDeNegado(r); return resposta(null, n.reply, n.evento); }
+  return resposta(null, TEXTO_SEM_RESPOSTA, `captacao_autorizacao_decidir_${r.status}`);
 }
