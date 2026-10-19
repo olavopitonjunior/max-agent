@@ -37,8 +37,18 @@ export { captacaoLigada, captacaoEnvioLigado };
 
 export type TipoDeCaptacao = "venda" | "locacao";
 
-export interface ModeloDeCaptacao { id: string; nome: string; resumo?: string }
-export interface FaltanteDeCaptacao { path: string; rotulo: string; etapa?: string; proprietarioId?: string }
+export interface ModeloDeCaptacao { id: string; nome: string; resumo?: string; padrao?: boolean }
+export interface OpcaoDeCampo { valor: string; label: string }
+/**
+ * v2/PR5 (`docs/max.md` §18.12, aditivo): cada faltante pode trazer `tipo` e
+ * `nivel` (do catálogo da org), `lista:"proprietarios"` quando é por pessoa e
+ * `opcoes` quando o tipo é `lista_opcoes`. Tudo opcional: resposta antiga (sem
+ * estes campos) continua lida igual.
+ */
+export interface FaltanteDeCaptacao {
+  path: string; rotulo: string; etapa?: string; proprietarioId?: string;
+  tipo?: string; nivel?: string; lista?: string; opcoes?: OpcaoDeCampo[];
+}
 export interface DadosDeCaptacao {
   imovel?: Record<string, unknown>;
   condicoes?: Record<string, unknown>;
@@ -215,33 +225,95 @@ export function textoDaLista(raw: unknown, total: number | null, busca?: string)
 export interface PreflightLido {
   pronto: boolean;
   faltantes: FaltanteDeCaptacao[];
-  bloqueios: { codigo: string }[];
+  /**
+   * v2/PR5 (aditivo): mesmo formato de `faltantes`, `nivel:"ficha"`. Só
+   * informativo — nunca bloqueia o envio nem muda `pronto` (o `pronto` vem
+   * direto do servidor). Ainda não roteado para texto nesta preparação.
+   */
+  pendentesFicha: FaltanteDeCaptacao[];
+  bloqueios: { codigo: string; ref?: string }[];
   emBranco: number;
   version: number | null;
+}
+
+function lerOpcoesDoCampo(v: unknown): OpcaoDeCampo[] | undefined {
+  const opcoes = lista(v).flatMap((x): OpcaoDeCampo[] => {
+    const o = obj(x);
+    const valor = str(o.valor);
+    const label = str(o.label);
+    return valor && label ? [{ valor, label }] : [];
+  });
+  return opcoes.length ? opcoes : undefined;
+}
+
+/** Um item de `faltantes[]`/`pendentesFicha[]`. `tipo`/`nivel`/`lista`/`opcoes` são opcionais (v2/PR5). */
+function lerFaltanteBruto(x: unknown): FaltanteDeCaptacao[] {
+  const f = obj(x);
+  const path = str(f.path);
+  const rotulo = str(f.rotulo);
+  if (!path || !rotulo) return [];
+  const etapa = str(f.etapa);
+  const dono = str(f.proprietarioId);
+  const tipo = str(f.tipo);
+  const nivel = str(f.nivel);
+  const listaCampo = str(f.lista);
+  const opcoes = lerOpcoesDoCampo(f.opcoes);
+  return [{
+    path, rotulo,
+    ...(etapa ? { etapa } : {}), ...(dono ? { proprietarioId: dono } : {}),
+    ...(tipo ? { tipo } : {}), ...(nivel ? { nivel } : {}),
+    ...(listaCampo ? { lista: listaCampo } : {}), ...(opcoes ? { opcoes } : {}),
+  }];
 }
 
 /** `captacao.preflight`: boolean `pronto` obrigatório; o resto tem padrão vazio. */
 export function lerPreflight(raw: unknown): PreflightLido | null {
   const o = obj(raw);
   if (typeof o.pronto !== "boolean") return null;
-  const faltantes = lista(o.faltantes).flatMap((x): FaltanteDeCaptacao[] => {
-    const f = obj(x);
-    const path = str(f.path);
-    const rotulo = str(f.rotulo);
-    if (!path || !rotulo) return [];
-    const etapa = str(f.etapa);
-    const dono = str(f.proprietarioId);
-    return [{ path, rotulo, ...(etapa ? { etapa } : {}), ...(dono ? { proprietarioId: dono } : {}) }];
-  });
+  const faltantes = lista(o.faltantes).flatMap(lerFaltanteBruto);
+  const pendentesFicha = lista(o.pendentesFicha).flatMap(lerFaltanteBruto);
   const bloqueios = lista(o.bloqueios).flatMap((x) => {
-    const codigo = str(obj(x).codigo);
-    return codigo ? [{ codigo }] : [];
+    const b = obj(x);
+    const codigo = str(b.codigo);
+    const ref = str(b.ref);
+    return codigo ? [{ codigo, ...(ref ? { ref } : {}) }] : [];
   });
   return {
-    pronto: o.pronto, faltantes, bloqueios,
+    pronto: o.pronto, faltantes, pendentesFicha, bloqueios,
     emBranco: typeof o.emBranco === "number" && o.emBranco > 0 ? Math.floor(o.emBranco) : 0,
     version: typeof o.version === "number" ? o.version : null,
   };
+}
+
+export interface CampoDeOpcoes {
+  path: string; rotulo: string; tipo: string; nivel: string; lista?: string; opcoes?: OpcaoDeCampo[];
+}
+
+/**
+ * Um item de `campos[]` de `captacao.options` (v2/PR5, preparação: ainda não
+ * lido em nenhum fluxo — só descrição do campo, nunca valor).
+ */
+export function lerCampoDeOpcoes(raw: unknown): CampoDeOpcoes | null {
+  const o = obj(raw);
+  const path = str(o.path);
+  const rotulo = str(o.rotulo);
+  const tipo = str(o.tipo);
+  const nivel = str(o.nivel);
+  if (!path || !rotulo || !tipo || !nivel) return null;
+  const listaCampo = str(o.lista);
+  const opcoes = lerOpcoesDoCampo(o.opcoes);
+  return { path, rotulo, tipo, nivel, ...(listaCampo ? { lista: listaCampo } : {}), ...(opcoes ? { opcoes } : {}) };
+}
+
+const CANAIS_VALIDOS = new Set(["email", "whatsapp", "aceite"]);
+
+/**
+ * `canalPadrao` de `captacao.options` (v2/PR5, preparação: ainda não lido em
+ * nenhum fluxo — não muda qual canal o Max usa nem pergunta mais cedo).
+ */
+export function lerCanalPadrao(raw: unknown): "email" | "whatsapp" | "aceite" | null {
+  const c = str(obj(raw).canalPadrao);
+  return c && CANAIS_VALIDOS.has(c) ? (c as "email" | "whatsapp" | "aceite") : null;
 }
 
 const ETAPA_DA_TELA: Record<string, string> = {
@@ -664,6 +736,27 @@ const TIPO_DO_PATH: Record<string, TipoDeCampo> = {
   "locacao.aluguel": "moeda", "locacao.condominio": "moeda", "locacao.iptu": "moeda", "locacao.taxa_administracao": "percentual",
 };
 
+/**
+ * O tipo de UM faltante: SEMPRE `TIPO_DO_PATH[fa.path]`, igual a antes do
+ * v2/PR5. O `tipo` que o servidor manda (CM) é só parseado e mantido em
+ * `fa.tipo` (ver `lerFaltanteBruto`) — nunca decide aqui.
+ *
+ * Por quê: o catálogo do CM (`field-catalog.ts`) manda `tipo:"texto"` genérico
+ * para paths que o Max trata de forma especializada aqui — `imovel.endereco`
+ * (endereco_imovel), `imovel.tipo` (tipo_imovel, escreve `imovel.kind`),
+ * `proprietarios[].nome` (nome), `estado_civil`, `endereco_completo`
+ * (endereco_pessoa). Deixar o `tipo` do servidor mandar sobrescreveria esses
+ * tipos especializados pelo genérico "texto" (B1) e, pior, faria QUALQUER
+ * path novo/desconhecido do servidor virar perguntável via
+ * `TIPO_DO_CATALOGO[fa.tipo]` mesmo sem o Max saber validar/escrever aquele
+ * campo (B2) — o preflight do CM entraria em loop. `TIPO_DO_PATH` continua
+ * sendo a allowlist E o decisor; path fora dela é SEMPRE da tela, com
+ * qualquer `tipo` que o servidor mande.
+ */
+export function tipoDoFaltante(fa: FaltanteDeCaptacao): TipoDeCampo | undefined {
+  return TIPO_DO_PATH[fa.path];
+}
+
 /** O que a pergunta de cada faltante diz como exemplo. */
 const DICA: Partial<Record<TipoDeCampo, string>> = {
   endereco_imovel: " (rua, número, bairro, cidade/UF)",
@@ -684,7 +777,7 @@ function nomeDoDono(f: FluxoCaptacao, id?: string): string | undefined {
 }
 
 function perguntaDoFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao): string {
-  const tipo = TIPO_DO_PATH[fa.path];
+  const tipo = tipoDoFaltante(fa);
   const dono = nomeDoDono(f, fa.proprietarioId);
   const de = fa.path.startsWith("proprietarios[]") ? (dono ? ` de ${dono}` : " do proprietário") : fa.path.startsWith("imovel.") && fa.path !== "imovel.endereco" ? " do imóvel" : "";
   const dica = tipo ? (DICA[tipo] ?? "") : "";
@@ -728,7 +821,7 @@ export function semRotulo(texto: string, rotulo: string): string {
 
 /** Lê a resposta a UM faltante e devolve o patch (só aquele campo) ou o erro. */
 async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: string, extrair: ExtratorDeSecao): Promise<Leitura> {
-  const tipo = TIPO_DO_PATH[fa.path];
+  const tipo = tipoDoFaltante(fa);
   if (!tipo) return { erro: "campo_desconhecido" };
   const [grupo, campo] = fa.path.replace("[]", "").split(".") as [string, string];
   const dono = fa.proprietarioId ? f.proprietarios?.find((p) => p.id === fa.proprietarioId) : undefined;
@@ -870,7 +963,10 @@ async function depoisDaNatureza(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: De
     const m = obj(x);
     const id = str(m.id);
     const nome = str(m.nome);
-    return id && nome ? [{ id, nome, ...(str(m.resumo) ? { resumo: str(m.resumo)! } : {}) }] : [];
+    // `padrao` (v2/PR5) é só lido aqui; a escolha ainda pergunta sempre que há mais de um modelo.
+    return id && nome
+      ? [{ id, nome, ...(str(m.resumo) ? { resumo: str(m.resumo)! } : {}), ...(typeof m.padrao === "boolean" ? { padrao: m.padrao } : {}) }]
+      : [];
   });
   if (!modelos.length) {
     return resposta(null, `Sua imobiliária não tem um modelo de captação de ${NOME_DA_ESTEIRA[f.tipo!]} ativo. Um administrador ativa em Modelos, no sistema; depois é só me pedir de novo.`, "captacao_sem_modelo");
@@ -1260,9 +1356,9 @@ async function verificar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFlu
   const nomes = Object.fromEntries((f.proprietarios ?? []).map((p) => [p.id, p.nome]));
   const base = g(f, ctx, { version, tentativas: 0 });
 
-  // Só pergunta o que o Max sabe preencher; o resto (campo personalizado…) é da tela.
-  const perguntaveis = pf.faltantes.filter((x) => TIPO_DO_PATH[x.path]);
-  const daTela = pf.faltantes.filter((x) => !TIPO_DO_PATH[x.path]);
+  // Só pergunta o que o Max sabe preencher; o resto (campo personalizado, lista fechada…) é da tela.
+  const perguntaveis = pf.faltantes.filter((x) => tipoDoFaltante(x));
+  const daTela = pf.faltantes.filter((x) => !tipoDoFaltante(x));
   if (perguntaveis.length) {
     const cab = `${prefixo}${textoDoPreflight({ ...r.body, bloqueios: [], emBranco: 0 }, nomes)}\n`;
     const fa = perguntaveis[0]!;
