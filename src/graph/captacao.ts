@@ -3,7 +3,9 @@ import { lerConfirmacao, normalizar } from "./tools";
 import { brl, cpfValido, nomeValido, valoresNoTexto } from "./credito";
 import { captacaoAutorizacaoLigada, captacaoEnvioLigado, captacaoLigada } from "./captacao-flags";
 import { imobproBase } from "@/lib/http";
-import { RE_CNPJ, RE_CPF } from "@/lib/pii";
+import { RE_CNPJ, RE_CPF, redigir } from "@/lib/pii";
+import { normalizeBrPhone } from "@/lib/phone";
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 
 /**
  * Fluxo `captacao` (P9, par do P8 do ImobPro — `docs/max.md` §18.12): o Max
@@ -57,17 +59,33 @@ export interface DadosDeCaptacao {
   assinantes?: Record<string, unknown>;
 }
 
+export type CanalDeEnvio = "email" | "whatsapp" | "aceite";
+
 export interface FluxoCaptacao {
   kind: "captacao";
   etapa:
-    | "natureza" | "nome" | "modelo" | "imovel" | "condicoes" | "proprietarios" | "extras"
-    | "verificar" | "faltantes" | "selecao" | "revisao" | "brancos" | "enviando"
+    | "natureza" | "nome" | "modelo" | "imovel" | "condicoes" | "confirmar_criacao" | "proprietarios" | "extras"
+    | "confirmar_pessoas" | "verificar" | "faltantes" | "confirmar_faltantes" | "canal" | "selecao" | "revisao"
+    | "brancos" | "enviando"
     // v2/PR7 (autorização pelo Max, par do contractmaker#1863): oferta ao corretor (pedir) e
     // fila do gerente (listar/aprovar/negar).
     | "autorizacao_oferta" | "autorizacao_fila" | "autorizacao_motivo" | "autorizacao_confirmar";
   tipo?: TipoDeCaptacao;
   /** O que a pessoa disse, verbatim (regra #80): nunca sintético. */
   nome?: string;
+  /**
+   * O 1º pedido ("cria uma captação... Rua X, 88... sem exclusividade, aceite
+   * por WhatsApp"), pra aproveitar endereço/condições/canal dali antes de
+   * perguntar de novo (achados 22/23/28). NUNCA verbatim (achado 1 da revisão
+   * opus): CPF/CNPJ/e-mail/telefone já vêm REDIGIDOS antes de entrar aqui —
+   * nenhum deles é usado nesta etapa (endereço, condições e canal não
+   * dependem de documento/contato), e redigir ANTES de guardar é o que evita
+   * tanto o checkpoint em claro quanto o envio cru ao extrator (LLM) em
+   * `aproveitarPedidoOriginal`. Limpo (achado 1) assim que consumido, pra não
+   * sobreviver no checkpoint depois de ter servido. */
+  pedidoOriginal?: string;
+  /** Canal já dito pela pessoa (ou escolhido na pergunta de canal). Aplicado aos proprietários ao gravar. */
+  canalDito?: CanalDeEnvio;
   modelos?: ModeloDeCaptacao[];
   modeloId?: string;
   /** Imóvel e condições já colhidos, aguardando a criação (ou o replay dela). */
@@ -77,7 +95,28 @@ export interface FluxoCaptacao {
   version?: number;
   /** Só id e nome (e PJ): os documentos e contatos vão direto ao ImobPro. */
   proprietarios?: { id: string; nome: string; pj?: boolean }[];
+  /** Testemunhas/avulsos lidos mas ainda não gravados — só nome aqui (sem contato); o resto vai no `cofre`. */
+  extrasPendentes?: { id: string; nome: string; testemunha: boolean }[];
+  /**
+   * CPF, e-mail e telefone dos proprietários/extras lidos mas AINDA NÃO
+   * gravados (achado 17: só vão ao servidor depois do "sim") ficam aqui,
+   * CIFRADOS — nunca em claro no checkpoint (regra de topo do arquivo: nenhum
+   * dado pessoal de proprietário no estado). Ver `cifrarCofreCaptacao`.
+   */
+  cofre?: string;
+  /** Chave de idempotência do lote de `confirmar_pessoas` em curso — guardada
+   *  entre turnos pra um "sim" incerto/retentado nunca gerar um segundo lote
+   *  (nit da revisão opus). Limpa junto do `cofre` quando o lote é gravado. */
+  gravarPessoasChave?: string;
   faltantes?: FaltanteDeCaptacao[];
+  /**
+   * Nit 1 (revisão opus, round 3): rótulos (sem valor) dos faltantes já
+   * respondidos nesta rodada, ainda no cofre — pra `pedirConfirmacaoDeFaltantes`
+   * listar TODOS, não só o último. Sobrevive a um PULAR no meio (os já
+   * respondidos antes continuam no resumo); limpa junto do `cofre` quando o
+   * lote é gravado (ou quando a confirmação é cancelada/encerrada).
+   */
+  faltantesAcumulados?: { path: string; rotulo: string }[];
   /** Rascunhos candidatos ao envio pedido por nome ("envia a captação da Maria"). */
   candidatos?: { ref: number; id: string; codigo: string; nome: string }[];
   /** O envio em curso: `valor` é a `messageId` do "enviar" (`x-idempotency-key`). */
@@ -633,6 +672,19 @@ export function tipoDito(texto: string): TipoDeCaptacao | null {
   return null;
 }
 
+const RE_ACEITE_WHATSAPP = /\baceite\b[^.?!\n]{0,30}\bwhatsapp\b|\bwhatsapp\b[^.?!\n]{0,30}\baceite\b/;
+const RE_WHATSAPP_CANAL = /\bwhatsapp\b|\bzap\b/;
+const RE_EMAIL_CANAL = /\be-?mail\b/;
+
+/** O canal que a pessoa já disse ("por e-mail", "aceite por WhatsApp"): achados 23/28. */
+export function canalDoTexto(texto: string): CanalDeEnvio | null {
+  const t = normalizar(texto);
+  if (RE_ACEITE_WHATSAPP.test(t)) return "aceite";
+  if (RE_WHATSAPP_CANAL.test(t)) return "whatsapp";
+  if (RE_EMAIL_CANAL.test(t)) return "email";
+  return null;
+}
+
 // ─── Leitura de dados (em CÓDIGO) ────────────────────────────────────────
 
 const so = (x: string) => x.replace(/\D/g, "");
@@ -695,7 +747,8 @@ export function lerEmails(texto: string): string[] {
 }
 
 const ESTADO_CIVIL = /\b(solteir[oa]|casad[oa]|divorciad[oa]|viuv[oa]|separad[oa]|uniao estavel)\b/;
-const ROTULOS_SOLTOS = /\b(cpf|cnpj|rg|tel\w*|cel\w*|whats\w*|fone|zap|e-?mail|email|nome|proprietari[oa]s?|pj|pessoa juridica|pessoa fisica|percentual|casad[oa]|solteir[oa]|divorciad[oa]|viuv[oa]|separad[oa]|uniao estavel|razao social|empresa)\b/gi;
+// Achado 18: "propriet[aá]ri[oa]s?"/"don[oa]s?" com acento (a pessoa escreve "proprietário:") também contam como rótulo.
+const ROTULOS_SOLTOS = /\b(cpf|cnpj|rg|tel\w*|cel\w*|whats\w*|fone|zap|e-?mail|email|nome|propriet[aá]ri[oa]s?|don[oa]s?|pj|pessoa juridica|pessoa fisica|percentual|casad[oa]|solteir[oa]|divorciad[oa]|viuv[oa]|separad[oa]|uniao estavel|razao social|empresa)\b/gi;
 
 /** O texto citado está de fato na mensagem? (mesmo teste do `credito`) */
 function noTexto(trecho: string, texto: string): boolean {
@@ -772,6 +825,10 @@ const TIPOS_DE_IMOVEL = ["apartamento", "casa", "terreno", "sala", "loja", "galp
 
 export interface ImovelLido { dados: Record<string, unknown>; erro?: string }
 
+/** "apto 42", "bloco B", "fundos", "casa 2"… — um complemento de verdade tem número ou uma destas palavras. */
+const PALAVRA_DE_COMPLEMENTO = /\b(ap(?:to|artamento)?|bloco|bl|casa|fundos|sala|loja|cobertura|andar|quadra|lote|torre|conjunto|conj|sobrado|km)\b/i;
+const pareceComplemento = (c: string) => /\d/.test(c) || PALAVRA_DE_COMPLEMENTO.test(c);
+
 /** Endereço pelo extrator (conferido contra o texto); matrícula, área, vagas e tipo em código. */
 export async function lerImovel(texto: string, extrair: ExtratorDeSecao): Promise<ImovelLido> {
   const dados: Record<string, unknown> = {};
@@ -791,6 +848,16 @@ export async function lerImovel(texto: string, extrair: ExtratorDeSecao): Promis
   for (const campo of ["rua", "numero", "complemento", "bairro", "cidade"] as const) {
     const v = str(r?.[campo]);
     if (v && v.length <= 160 && noTexto(v, texto)) dados[campo] = v;
+  }
+  // Achado 26: "Rua TESTE Max Aceite, 88" às vezes volta rua="Rua TESTE" +
+  // complemento="Max Aceite" — o extrator corta o fim do logradouro como se
+  // fosse complemento. Sem número nem palavra de complemento, é parte da rua.
+  if (typeof dados.rua === "string" && typeof dados.complemento === "string" && !pareceComplemento(dados.complemento)) {
+    const juntos = `${dados.rua} ${dados.complemento}`.trim();
+    if (noTexto(juntos, texto)) {
+      dados.rua = juntos;
+      delete dados.complemento;
+    }
   }
   const uf = str(r?.uf)?.toUpperCase();
   if (uf && /^[A-Z]{2}$/.test(uf) && new RegExp(String.raw`(?<![\p{L}])${uf}(?![\p{L}])`, "iu").test(texto)) dados.uf = uf;
@@ -925,6 +992,16 @@ function ecoDasCondicoes(c: CondicoesLidas): string {
 }
 
 const vazioDeCondicoes = (c: CondicoesLidas) => !Object.keys(c.condicoes).length && !Object.keys(c.locacao).length;
+
+/** Eco de "Rua X, 100, Bairro, Cidade/UF" a partir do `dados.imovel` já lido. */
+function ecoDoImovel(imovel: Record<string, unknown> | undefined): string {
+  if (!imovel) return "";
+  const cidadeUf = [imovel.cidade, imovel.uf].filter(Boolean).join("/");
+  return [imovel.rua, imovel.numero, imovel.bairro, cidadeUf].filter(Boolean).join(", ");
+}
+
+const temCondicoesEm = (d: DadosDeCaptacao) =>
+  !!(d.condicoes && Object.keys(d.condicoes).length) || !!(d.locacao && Object.keys(d.locacao).length);
 
 // ─── Ferramenta do extrator ──────────────────────────────────────────────
 
@@ -1093,7 +1170,8 @@ async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: stri
     case "telefone": {
       const n = lerNumeros(texto);
       const tel = n.telefones[0] ?? (so(texto).length === 10 || so(texto).length === 11 ? so(texto) : undefined);
-      return tel ? { dados: colocar(tel), eco: "telefone anotado" } : { erro: "Mande o telefone com DDD." };
+      // Achado 27: grava em E.164 (+55…), não os dígitos crus.
+      return tel ? { dados: colocar(normalizeBrPhone(tel) ?? tel), eco: "telefone anotado" } : { erro: "Mande o telefone com DDD." };
     }
     case "data":
       return dataValida(limpo) ? { dados: colocar(limpo), eco: `${fa.rotulo}: ${limpo}` } : { erro: "Mande a data como dd/mm/aaaa." };
@@ -1190,7 +1268,15 @@ export async function iniciarCaptacao(ctx: ContextoDoTurno, deps: DepsDoFluxo, p
   if (barrado) return barrado;
   const nome = nomeDaCaptacao(ctx.texto) ?? undefined;
   const tipo = tipoDito(ctx.texto) ?? undefined;
-  const f: FluxoCaptacao = { kind: "captacao", etapa: "natureza", tentativas: 0, atualizadoEm: ctx.agora, ...(nome ? { nome } : {}), ...(tipo ? { tipo } : {}) };
+  const canalDito = canalDoTexto(ctx.texto) ?? undefined;
+  // Achado 1 (revisão opus): nunca o texto verbatim — CPF/CNPJ/e-mail/telefone
+  // saem redigidos ANTES de entrar no estado (que o LangGraph GRAVA a cada
+  // super-step) e antes de qualquer chance de ir ao extrator por LLM.
+  const pedidoOriginal = redigir(ctx.texto, ["CPF", "CNPJ", "EMAIL", "TEL"]);
+  const f: FluxoCaptacao = {
+    kind: "captacao", etapa: "natureza", tentativas: 0, atualizadoEm: ctx.agora, pedidoOriginal,
+    ...(nome ? { nome } : {}), ...(tipo ? { tipo } : {}), ...(canalDito ? { canalDito } : {}),
+  };
   if (!tipo) return resposta(f, TEXTO_NATUREZA, "captacao_natureza");
   return depoisDaNatureza(f, ctx, deps, "");
 }
@@ -1220,12 +1306,69 @@ async function depoisDaNatureza(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: De
     const linhas = modelos.map((m, i) => `${i + 1}. ${m.nome}${m.resumo ? ` — ${m.resumo}` : ""}`).join("\n");
     return resposta(g(f, ctx, { etapa: "modelo", modelos }), `${prefixo}${aviso}Qual modelo uso?\n${linhas}\n\nResponda com o número.`, "captacao_modelo");
   }
-  return seguirParaNomeOuImovel(g(f, ctx, { modeloId: modelos[0]!.id, modelos: undefined }), ctx, `${prefixo}${aviso}`);
+  return seguirParaNomeOuImovel(g(f, ctx, { modeloId: modelos[0]!.id, modelos: undefined }), ctx, deps, `${prefixo}${aviso}`);
 }
 
-function seguirParaNomeOuImovel(f: FluxoCaptacao, ctx: ContextoDoTurno, prefixo: string): Resposta {
+async function seguirParaNomeOuImovel(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, prefixo: string): Promise<Resposta> {
   if (!f.nome) return resposta(g(f, ctx, { etapa: "nome" }), `${prefixo}${TEXTO_NOME}`, "captacao_nome");
+  return aproveitarPedidoOriginal(f, ctx, deps, prefixo);
+}
+
+// Sem "apto" solto: "Apto da Dona Maria" é NOME da captação, não endereço — só
+// dispara a extração (que custa um LLM) com sinal forte de rua/CEP de verdade.
+const PARECE_ENDERECO = /\brua\b|\bavenida\b|\bav\.?\s|\bendere[çc]o\b|\d{5}-?\d{3}\b|\bn[uú]mero\s*\d|\balameda\b|\btravessa\b|\brodovia\b/i;
+
+/**
+ * O 1º pedido já tinha endereço, condições ou canal ("…Rua X, 88, sem
+ * exclusividade, aceite por WhatsApp")? Aproveita o que der e só pergunta o
+ * que falta (achados 22/28) — nunca pede de novo o que a pessoa já disse.
+ */
+async function aproveitarPedidoOriginal(fOriginal: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, prefixo: string): Promise<Resposta> {
+  const pedido = fOriginal.pedidoOriginal;
+  // Achado 1 (revisão opus): consumido uma vez só — não sobrevive no estado
+  // depois desta chamada, em NENHUM dos desfechos abaixo.
+  const f = g(fOriginal, ctx, { pedidoOriginal: undefined });
+  const lidas = pedido ? lerCondicoes(pedido, f.tipo ?? "venda") : { condicoes: {}, locacao: {} };
+  const dados: DadosDeCaptacao = {};
+  if (Object.keys(lidas.condicoes).length) dados.condicoes = lidas.condicoes;
+  if (Object.keys(lidas.locacao).length) dados.locacao = lidas.locacao;
+
+  let imovel: Record<string, unknown> | undefined;
+  if (pedido && PARECE_ENDERECO.test(pedido)) {
+    const extrair: ExtratorDeSecao = async (texto, secao) => (deps.extrairCaptacao ? deps.extrairCaptacao(texto, secao) : null);
+    const r = await lerImovel(pedido, extrair);
+    if (!r.erro) imovel = r.dados;
+  }
+  if (imovel) dados.imovel = imovel;
+
+  if (imovel && temCondicoesEm(dados)) {
+    const eco = `Já anotei do seu pedido: imóvel ${ecoDoImovel(imovel)}; ${ecoDasCondicoes(lidas)}.\n`;
+    return pedirConfirmacaoDeCriacao(g(f, ctx, { criacao: { chave: "", dados } }), ctx, `${prefixo}${eco}`);
+  }
+  if (imovel) {
+    const eco = `Já anotei o imóvel do seu pedido: ${ecoDoImovel(imovel)}.\n`;
+    return resposta(g(f, ctx, { etapa: "condicoes", criacao: { chave: "", dados } }), `${prefixo}${eco}${textoDasCondicoes(f.tipo ?? "venda")}`, "captacao_condicoes");
+  }
+  if (temCondicoesEm(dados)) {
+    const eco = `Já anotei do seu pedido: ${ecoDasCondicoes(lidas)}.\n`;
+    return resposta(g(f, ctx, { etapa: "imovel", criacao: { chave: "", dados } }), `${prefixo}${eco}${TEXTO_IMOVEL}`, "captacao_imovel");
+  }
   return resposta(g(f, ctx, { etapa: "imovel" }), `${prefixo}${TEXTO_IMOVEL}`, "captacao_imovel");
+}
+
+/** Resumo de imóvel + condições e o "sim" que de fato cria (achado 17: nunca grava sem confirmação). */
+function pedirConfirmacaoDeCriacao(f: FluxoCaptacao, ctx: ContextoDoTurno, prefixo: string): Resposta {
+  const dados = f.criacao?.dados ?? {};
+  const linhas = [
+    ecoDoImovel(dados.imovel) ? `Imóvel: ${ecoDoImovel(dados.imovel)}.` : "",
+    temCondicoesEm(dados) ? `Condições: ${ecoDasCondicoes({ condicoes: dados.condicoes ?? {}, locacao: dados.locacao ?? {} })}.` : "",
+  ].filter(Boolean);
+  const titulo = f.nome ? ` ("${f.nome}")` : "";
+  return resposta(
+    g(f, ctx, { etapa: "confirmar_criacao", tentativas: 0 }),
+    `${prefixo}${linhas.join("\n")}${linhas.length ? "\n" : ""}Posso criar o rascunho${titulo}? Responda *sim* (ou CANCELAR).`,
+    "captacao_confirmar_criacao"
+  );
 }
 
 // ─── Consulta (listar / status) ──────────────────────────────────────────
@@ -1275,7 +1418,9 @@ export async function iniciarEnvioDeCaptacao(ctx: ContextoDoTurno, deps: DepsDoF
   if (!itens.length) {
     return resposta(null, busca ? `Não achei rascunho de captação para "${busca}".` : "Você não tem rascunhos de captação para enviar.", "captacao_envio_sem_rascunho");
   }
-  const base: FluxoCaptacao = { kind: "captacao", etapa: "verificar", tentativas: 0, atualizadoEm: ctx.agora };
+  // Achado 23/28: "...para mandar por aceite no WhatsApp" já dispensa a pergunta do canal.
+  const canalDito = canalDoTexto(ctx.texto) ?? undefined;
+  const base: FluxoCaptacao = { kind: "captacao", etapa: "verificar", tentativas: 0, atualizadoEm: ctx.agora, ...(canalDito ? { canalDito } : {}) };
   if (itens.length === 1) {
     const i = itens[0]!;
     return verificar({ ...base, captacaoId: i.id, codigo: i.codigo, nome: i.nome }, ctx, deps, `Captação ${i.codigo} (${i.nome}). `);
@@ -1354,12 +1499,16 @@ export function continuacaoCaptacao(f: FluxoCaptacao): string {
     case "modelo": return `${cab}qual modelo uso? Responda com o número.`;
     case "imovel": return `${cab}${TEXTO_IMOVEL}`;
     case "condicoes": return `${cab}${textoDasCondicoes(f.tipo ?? "venda")}`;
+    case "confirmar_criacao": return `${cab}responda *sim* para criar o rascunho, ou CANCELAR.`;
     case "proprietarios": return `${cab}mande o próximo proprietário, ou FIM.`;
     case "extras": return `${cab}tem testemunha ou outra pessoa para assinar? Mande nome e e-mail/telefone, ou diga NÃO.`;
+    case "confirmar_pessoas": return `${cab}responda *sim* para gravar os dados, ou CANCELAR.`;
     case "faltantes": {
       const fa = f.faltantes?.[0];
       return fa ? `${cab}${perguntaDoFaltante(f, fa)}` : `${cab}mande CANCELAR para parar.`;
     }
+    case "confirmar_faltantes": return `${cab}responda *sim* para eu gravar estes dados, ou CANCELAR.`;
+    case "canal": return `${cab}por qual canal envio: 1) e-mail 2) WhatsApp 3) aceite por WhatsApp?`;
     case "selecao": return `${cab}qual rascunho envio? Responda com o número.`;
     case "revisao": return `${cab}responda *enviar* para enviar, ou CANCELAR.`;
     case "brancos": return `${cab}responda *enviar assim mesmo*, ou CANCELAR.`;
@@ -1400,6 +1549,27 @@ function falhou(f: FluxoCaptacao, motivo: string, ctx: ContextoDoTurno): Respost
   return resposta(g(f, ctx, { tentativas }), `${motivo} ${continuacaoCaptacao({ ...f, etapa: f.etapa }).replace(/^Continuando a captação[^:]*: /, "")}`, "captacao_invalido");
 }
 
+/** A capability que ESTA etapa exige — usada pelo gate e pelo aviso de "send-only" (achado 21). */
+function capacidadeDaEtapa(etapa: FluxoCaptacao["etapa"]): CapacidadeDoFluxo {
+  // "canal" entra no caminho de ENVIO (escolhido antes do resumo): quem só tem
+  // `captacao.send` precisa poder escolher o canal de um rascunho que já
+  // existe. O complemento que ele dispara (se houver `proprietarios` conhecidos)
+  // ainda passa pela RBAC real do servidor.
+  if (etapa === "revisao" || etapa === "brancos" || etapa === "selecao" || etapa === "canal") return "captacao.send";
+  if (etapa === "enviando") return "captacao.list";
+  // Achado 2 (revisão opus): "verificar" só LÊ (`captacao.preflight`) — nunca
+  // deveria exigir `captacao.create`. Quem foi REBAIXADO de canal/revisão/
+  // brancos (`rebaixarFluxo`, interrupção no meio do envio) ou ficou sem
+  // resposta do preflight (`verificar`, abaixo) continua só com send/list;
+  // exigir create aqui travava esse usuário pra sempre, sem conseguir nem
+  // retomar o próprio envio.
+  if (etapa === "verificar") return "captacao.list";
+  // v2/PR7: a oferta ao corretor pede autorização; a fila do gerente lista/decide.
+  if (etapa === "autorizacao_oferta") return "captacao.autorizacao.pedir";
+  if (etapa === "autorizacao_fila" || etapa === "autorizacao_motivo" || etapa === "autorizacao_confirmar") return "captacao.autorizacao.decidir";
+  return "captacao.create";
+}
+
 export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, podeEscrever: boolean): Promise<PassoDoFluxo> {
   const t = normalizar(ctx.texto);
   // `autorizacao_motivo` (achado de review 19/10, item 5): o texto inteiro É o motivo da
@@ -1411,17 +1581,17 @@ export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, d
     return cancelar(f);
   }
 
-  const caminhoDeEnvio = f.etapa === "revisao" || f.etapa === "brancos";
   const ETAPAS_DA_FILA = new Set(["autorizacao_fila", "autorizacao_motivo", "autorizacao_confirmar"]);
-  const capNecessaria: CapacidadeDoFluxo = caminhoDeEnvio
-    ? "captacao.send"
-    : f.etapa === "enviando"
-      ? "captacao.list"
-      : f.etapa === "autorizacao_oferta"
-        ? "captacao.autorizacao.pedir"
-        : ETAPAS_DA_FILA.has(f.etapa)
-          ? "captacao.autorizacao.decidir"
-          : "captacao.create";
+  const capNecessaria = capacidadeDaEtapa(f.etapa);
+  // Achado 21: quem só tem `captacao.send` consegue terminar o ENVIO de um rascunho
+  // já existente; completar dado que falta exige `captacao.create` — e, faltando
+  // só essa, a mensagem é clara (não "captação não liberada", que ela TEM).
+  if (
+    podeEscrever && !ctx.politicaIndisponivel && capNecessaria === "captacao.create" &&
+    !ctx.policy.includes("captacao.create") && ctx.policy.includes("captacao.send") && f.captacaoId
+  ) {
+    return resposta(null, `Você pode enviar esta captação, mas completar o que falta exige outra permissão. Peça a alguém com acesso, ou complete pela tela: ${linkDe(f.captacaoId)}`, "captacao_sem_permissao_de_completar");
+  }
   const barrado = gatePolitica(ctx, podeEscrever, capNecessaria);
   if (barrado) return { ...barrado, fluxo: ctx.politicaIndisponivel ? { ...f, atualizadoEm: ctx.agora } : null };
   // Flag desligada no meio da fila (achado defensivo: o kill-switch de `graph.ts` já cobre a
@@ -1441,14 +1611,18 @@ export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, d
 
   switch (f.etapa) {
     case "natureza": return conduzirNatureza(f, t, ctx, deps);
-    case "nome": return conduzirNome(f, ctx);
+    case "nome": return conduzirNome(f, ctx, deps);
     case "modelo": return conduzirModelo(f, t, ctx, deps);
     case "imovel": return conduzirImovel(f, t, ctx, deps);
     case "condicoes": return conduzirCondicoes(f, t, ctx, deps);
+    case "confirmar_criacao": return conduzirConfirmarCriacao(f, t, ctx, deps);
     case "proprietarios": return conduzirProprietarios(f, t, ctx, deps);
     case "extras": return conduzirExtras(f, t, ctx, deps);
+    case "confirmar_pessoas": return conduzirConfirmarPessoas(f, t, ctx, deps);
     case "verificar": return verificar(f, ctx, deps, "");
     case "faltantes": return conduzirFaltantes(f, t, ctx, deps);
+    case "confirmar_faltantes": return conduzirConfirmarFaltantes(f, t, ctx, deps);
+    case "canal": return conduzirCanal(f, t, ctx, deps);
     case "selecao": return conduzirSelecao(f, t, ctx, deps);
     case "revisao": return conduzirRevisao(f, ctx, deps);
     case "brancos": return conduzirBrancos(f, ctx, deps);
@@ -1471,11 +1645,11 @@ async function conduzirNatureza(f: FluxoCaptacao, t: string, ctx: ContextoDoTurn
   return depoisDaNatureza(g(f, ctx, { tipo, tentativas: 0 }), ctx, deps, "");
 }
 
-function conduzirNome(f: FluxoCaptacao, ctx: ContextoDoTurno): PassoDoFluxo {
+async function conduzirNome(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const nome = ctx.texto.trim().replace(/[.!]+$/, "");
   if (PERGUNTA_FORA.test(normalizar(ctx.texto))) return pausar(f);
   if (nome.length < 2 || nome.length > 120 || nome.includes("\n")) return falhou(f, "O nome precisa ter até 120 caracteres.", ctx);
-  return resposta(g(f, ctx, { nome, etapa: "imovel", tentativas: 0 }), `Certo, "${nome}". ${TEXTO_IMOVEL}`, "captacao_imovel");
+  return aproveitarPedidoOriginal(g(f, ctx, { nome, tentativas: 0 }), ctx, deps, `Certo, "${nome}". `);
 }
 
 async function conduzirModelo(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
@@ -1488,23 +1662,25 @@ async function conduzirModelo(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno,
   const g1 = g(f, ctx, { modeloId: m.id, modelos: undefined, tentativas: 0 });
   // 409 `escolher_modelo` no meio da criação: os dados já colhidos seguem e a criação é refeita.
   if (f.criacao) return criar(g1, ctx, deps, f.criacao.dados, `Modelo: ${m.nome}. `);
-  return seguirParaNomeOuImovel(g1, ctx, `Modelo: ${m.nome}. `);
+  return seguirParaNomeOuImovel(g1, ctx, deps, `Modelo: ${m.nome}. `);
 }
 
-// ── imóvel e condições → cria o rascunho ──
+// ── imóvel e condições → confirmação → cria o rascunho ──
 
 async function conduzirImovel(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
-  if (PULAR.test(t)) return resposta(g(f, ctx, { etapa: "condicoes", tentativas: 0, criacao: { chave: "", dados: {} } }), `Sem imóvel por ora. ${textoDasCondicoes(f.tipo ?? "venda")}`, "captacao_condicoes");
+  if (PULAR.test(t)) {
+    const dados: DadosDeCaptacao = { ...(f.criacao?.dados ?? {}) };
+    if (temCondicoesEm(dados)) return pedirConfirmacaoDeCriacao(g(f, ctx, { criacao: { chave: "", dados } }), ctx, "Sem imóvel por ora. ");
+    return resposta(g(f, ctx, { etapa: "condicoes", tentativas: 0, criacao: { chave: "", dados } }), `Sem imóvel por ora. ${textoDasCondicoes(f.tipo ?? "venda")}`, "captacao_condicoes");
+  }
   if (PERGUNTA_FORA.test(t)) return pausar(f);
   const extrair: ExtratorDeSecao = async (texto, secao) => (deps.extrairCaptacao ? deps.extrairCaptacao(texto, secao) : null);
   const r = await lerImovel(ctx.texto, extrair);
   if (r.erro) return falhou(f, r.erro, ctx);
-  const ecos = [r.dados.rua, r.dados.numero, r.dados.bairro, [r.dados.cidade, r.dados.uf].filter(Boolean).join("/")].filter(Boolean).join(", ");
-  return resposta(
-    g(f, ctx, { etapa: "condicoes", tentativas: 0, criacao: { chave: "", dados: { imovel: r.dados } } }),
-    `Anotei o imóvel: ${ecos}.\n${textoDasCondicoes(f.tipo ?? "venda")}`,
-    "captacao_condicoes"
-  );
+  const dados: DadosDeCaptacao = { ...(f.criacao?.dados ?? {}), imovel: r.dados };
+  const eco = `Anotei o imóvel: ${ecoDoImovel(r.dados)}.\n`;
+  if (temCondicoesEm(dados)) return pedirConfirmacaoDeCriacao(g(f, ctx, { criacao: { chave: "", dados } }), ctx, eco);
+  return resposta(g(f, ctx, { etapa: "condicoes", tentativas: 0, criacao: { chave: "", dados } }), `${eco}${textoDasCondicoes(f.tipo ?? "venda")}`, "captacao_condicoes");
 }
 
 async function conduzirCondicoes(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
@@ -1524,7 +1700,15 @@ async function conduzirCondicoes(f: FluxoCaptacao, t: string, ctx: ContextoDoTur
     if (Object.keys(c.locacao).length) dados.locacao = c.locacao;
     eco = `Anotei: ${ecoDasCondicoes(c)}.\n`;
   }
-  return criar(g(f, ctx, { tentativas: 0 }), ctx, deps, dados, eco);
+  return pedirConfirmacaoDeCriacao(g(f, ctx, { tentativas: 0, criacao: { chave: "", dados } }), ctx, eco);
+}
+
+/** Achado 17: só grava quando a pessoa confirma — "sim" aqui usa a PRÓPRIA messageId como chave de idempotência. */
+async function conduzirConfirmarCriacao(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  if (lerConfirmacao(ctx.texto) === "sim") return criar(f, ctx, deps, f.criacao?.dados ?? {}, "");
+  if (lerConfirmacao(ctx.texto) === "nao") return cancelar(f);
+  if (PERGUNTA_FORA.test(t)) return pausar(f);
+  return falhou(f, "Responda *sim* para eu criar o rascunho, ou CANCELAR.", ctx);
 }
 
 function nomeDaEsteira(f: FluxoCaptacao) { return NOME_DA_ESTEIRA[f.tipo ?? "venda"]; }
@@ -1578,24 +1762,63 @@ async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, 
 
 // ── complemento (proprietários, extras, faltantes) ──
 
+type ResultadoComplemento =
+  | { ok: true; f: FluxoCaptacao; prefixo: string }
+  | { ok: false; r: Resposta }
+  /**
+   * Item 1 (revisão opus, round 3): só aparece quando `opcoes.semRetentativaDeVersao`
+   * é passado. Quem chama assim está prestes a mandar algo que o usuário NUNCA
+   * viu (o canal escolhido, aplicado só na hora do "enviar") — então a versão
+   * desatualizada não pode ser corrigida sozinha e reenviada por baixo do pano;
+   * o chamador tem que voltar pro resumo, não pro `r.r` genérico.
+   */
+  | { ok: false; versaoDesatualizada: true };
+
 /**
- * `captacao.create{captacaoId, version, dados}`. Versão desatualizada: o Max
- * diz que alguém mexeu na tela, confere de novo (preflight) e refaz UMA vez com
- * a versão nova — o merge do servidor nunca apaga o que a tela digitou.
+ * `captacao.create{captacaoId, version, dados}`. Versão desatualizada: por
+ * padrão, o Max diz que alguém mexeu na tela, confere de novo (preflight) e
+ * refaz UMA vez com a versão nova — o merge do servidor nunca apaga o que a
+ * tela digitou. Com `opcoes.semRetentativaDeVersao`, NÃO refaz sozinho: um
+ * 409 vira `{ok:false, versaoDesatualizada:true}` pro chamador decidir (hoje,
+ * só `confirmarEEnviar` usa isso — aplicar o canal escolhido não pode virar
+ * um reenvio silencioso de conteúdo que o resumo mostrado nunca refletiu).
+ *
+ * Duas assinaturas (achado nit, revisão opus round 3): sem `opcoes`, o
+ * retorno NUNCA inclui `versaoDesatualizada` — os chamadores antigos
+ * (`if (!r.ok) return r.r`) continuam type-checando sem precisar saber da
+ * variante nova, que só existe para quem pede `semRetentativaDeVersao: true`.
  */
+function complementar(
+  f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, dados: DadosDeCaptacao,
+  chaveBase?: string,
+): Promise<{ ok: true; f: FluxoCaptacao; prefixo: string } | { ok: false; r: Resposta }>;
+function complementar(
+  f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, dados: DadosDeCaptacao,
+  chaveBase: string, opcoes: { semRetentativaDeVersao: true },
+): Promise<ResultadoComplemento>;
 async function complementar(
   f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, dados: DadosDeCaptacao,
-): Promise<{ ok: true; f: FluxoCaptacao; prefixo: string } | { ok: false; r: Resposta }> {
+  /** Base da chave de idempotência; por padrão a `messageId` desta mensagem.
+   *  Um chamador com retry ENTRE turnos (achado nit da revisão opus:
+   *  `conduzirConfirmarPessoas`) passa a chave GUARDADA do primeiro "sim" —
+   *  senão um "sim" incerto seguido de outro "sim" gera DUAS chaves e um
+   *  possível lote em dobro. */
+  chaveBase: string = ctx.messageId,
+  opcoes: { semRetentativaDeVersao?: boolean } = {},
+): Promise<ResultadoComplemento> {
   let atual = f;
   let prefixo = "";
   for (let tentativa = 0; tentativa < 2; tentativa++) {
-    const r = await deps.acao("captacao.create", { captacaoId: atual.captacaoId, version: atual.version, dados }, `${ctx.messageId}${tentativa ? ":r" : ""}`);
+    const r = await deps.acao("captacao.create", { captacaoId: atual.captacaoId, version: atual.version, dados }, `${chaveBase}${tentativa ? ":r" : ""}`);
     if (!r) return { ok: false, r: resposta(g(f, ctx), `${TEXTO_SEM_RESPOSTA} Mande de novo em instantes.`, "captacao_complemento_sem_resposta") };
     if (r.status === 200 || r.status === 201) {
       const v = obj(r.body.captacao).version;
       return { ok: true, f: g(atual, ctx, { version: typeof v === "number" ? v : (atual.version ?? 0) + 1 }), prefixo };
     }
     const erro = str(r.body.error);
+    if (r.status === 409 && erro === "versao_desatualizada" && opcoes.semRetentativaDeVersao) {
+      return { ok: false, versaoDesatualizada: true };
+    }
     if (r.status === 409 && erro === "versao_desatualizada" && tentativa === 0) {
       const pf = await deps.acao("captacao.preflight", { captacaoId: atual.captacaoId });
       const lido = pf?.status === 200 ? lerPreflight(pf.body) : null;
@@ -1622,44 +1845,258 @@ async function complementar(
   return { ok: false, r: resposta(g(f, ctx), "Não consegui gravar agora. Mande de novo em instantes.", "captacao_complemento_falhou") };
 }
 
+/** "nome:"/"proprietário:" explícito, ou documento — senão não é declaração de pessoa (achado 18). */
+const ROTULO_DE_PESSOA = /\b(propriet[aá]ri[oa]s?|don[oa]s?|nome)\s*[:\-–]/i;
+function pareceProprietario(texto: string, p: PessoaLida): boolean {
+  return !!(p.cpf || p.cnpj || ROTULO_DE_PESSOA.test(texto));
+}
+
+// ─── Cofre de pendentes (CPF, e-mail, telefone de quem ainda não foi gravado) ─
+//
+// Achado 17: proprietário/extra só é gravado depois do "sim" do resumo. Até
+// lá, o dado de contato não pode sentar em claro no checkpoint — a mesma
+// regra que já vale pro resto do fluxo (topo do arquivo). Mesmo desenho do
+// cofre do crédito (`cifrarCofre`/`decifrarCofre`), com subchave e AAD
+// próprios: um cofre não abre o do outro fluxo.
+
+interface PendentesDeCaptacao {
+  proprietarios: Record<string, unknown>[];
+  testemunhas: Record<string, unknown>[];
+  avulsos: Record<string, unknown>[];
+  /**
+   * Item B (revisão opus, round 2): respostas de `faltantes` (CPF, telefone,
+   * matrícula…) ainda não gravadas. Mesma regra do resto do cofre — só vão ao
+   * servidor depois do "sim" de `confirmar_faltantes`, nunca no mesmo turno
+   * em que a pessoa respondeu.
+   */
+  faltantes?: DadosDeCaptacao;
+}
+const PENDENTES_VAZIOS: PendentesDeCaptacao = { proprietarios: [], testemunhas: [], avulsos: [] };
+
+/**
+ * Mescla dois patches de `DadosDeCaptacao` (item B): acumula várias respostas
+ * de faltante no cofre antes do "sim" que grava tudo junto. Proprietário
+ * mescla por `id` — nunca manda dois objetos do mesmo id na mesma chamada
+ * (o merge por id do servidor é só pra patches de CHAMADAS diferentes).
+ */
+function mesclarDadosDeCaptacao(a: DadosDeCaptacao, b: DadosDeCaptacao): DadosDeCaptacao {
+  const out: DadosDeCaptacao = { ...a };
+  if (b.imovel) out.imovel = { ...(out.imovel ?? {}), ...b.imovel };
+  if (b.condicoes) out.condicoes = { ...(out.condicoes ?? {}), ...b.condicoes };
+  if (b.locacao) out.locacao = { ...(out.locacao ?? {}), ...b.locacao };
+  if (b.assinantes) out.assinantes = { ...(out.assinantes ?? {}), ...b.assinantes };
+  if (b.proprietarios) {
+    const merged = [...(out.proprietarios ?? [])];
+    for (const p of b.proprietarios) {
+      const i = merged.findIndex((x) => x.id === p.id);
+      if (i >= 0) merged[i] = { ...merged[i], ...p };
+      else merged.push(p);
+    }
+    out.proprietarios = merged;
+  }
+  return out;
+}
+/** GCM padrão: 16 bytes — explícito (achado da revisão opus) pra `setAuthTag`
+ *  nunca aceitar uma tag truncada/alongada por adulteração do payload. */
+const TAMANHO_DA_TAG = 16;
+
+function chaveDoCofreCaptacao(): Buffer {
+  const raw = process.env.MAX_ENCRYPTION_KEY;
+  if (!raw) throw new Error("MAX_ENCRYPTION_KEY não configurada");
+  const mestra = Buffer.from(raw, "base64");
+  if (mestra.length !== 32) throw new Error("MAX_ENCRYPTION_KEY deve ser 32 bytes em base64");
+  return Buffer.from(hkdfSync("sha256", mestra, Buffer.alloc(0), "max-captacao-cofre", 32));
+}
+/** Exportado só para teste direto (roundtrip/adulteração/chave ausente). */
+export function cifrarCofreCaptacao(texto: string, thread: string): string {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", chaveDoCofreCaptacao(), iv, { authTagLength: TAMANHO_DA_TAG });
+  c.setAAD(Buffer.from(thread, "utf8"));
+  const enc = Buffer.concat([c.update(texto, "utf8"), c.final()]);
+  return [iv, c.getAuthTag(), enc].map((b) => b.toString("base64")).join(".");
+}
+export function decifrarCofreCaptacao(payload: string, thread: string): string {
+  const [iv, tag, dado] = payload.split(".");
+  if (!iv || !tag || !dado) throw new Error("cofre malformado");
+  const tagBuf = Buffer.from(tag, "base64");
+  // Achado (nit da revisão opus): valida o tamanho da tag ANTES de abrir —
+  // uma tag curta/longa (payload truncado ou remendado) tem que falhar aqui,
+  // nunca ser aceita por engano por `setAuthTag`.
+  if (tagBuf.length !== TAMANHO_DA_TAG) throw new Error("cofre malformado: tag de autenticação com tamanho inválido");
+  const d = createDecipheriv("aes-256-gcm", chaveDoCofreCaptacao(), Buffer.from(iv, "base64"), { authTagLength: TAMANHO_DA_TAG });
+  d.setAAD(Buffer.from(thread, "utf8"));
+  d.setAuthTag(tagBuf);
+  return Buffer.concat([d.update(Buffer.from(dado, "base64")), d.final()]).toString("utf8");
+}
+const threadDaCaptacao = (ctx: ContextoDoTurno) => ctx.thread ?? "sem-thread";
+
+/**
+ * `{ok:true}` com os pendentes (vazios quando não há cofre ainda), ou
+ * `{ok:false}` quando HAVIA cofre e não abriu — chave ausente/rotacionada,
+ * thread trocada, payload adulterado. Achado 5 (revisão opus): a versão
+ * antiga devolvia vazio nos dois casos, e aquele segundo caso é PERDA DE
+ * DADO silenciosa (o resumo seguia mostrando "Vou gravar: Maria" com o cofre
+ * já ilegível) — nunca lança (chave ausente lançava sem try/catch no
+ * chamador) e nunca finge que não havia nada pendente.
+ */
+type AberturaDoCofreCaptacao = { ok: true; pendentes: PendentesDeCaptacao } | { ok: false };
+function abrirCofreCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno): AberturaDoCofreCaptacao {
+  if (!f.cofre) return { ok: true, pendentes: PENDENTES_VAZIOS };
+  try {
+    const pendentes = { ...PENDENTES_VAZIOS, ...(JSON.parse(decifrarCofreCaptacao(f.cofre, threadDaCaptacao(ctx))) as Partial<PendentesDeCaptacao>) };
+    return { ok: true, pendentes };
+  } catch {
+    return { ok: false };
+  }
+}
+/** `null` quando a chave falta/é inválida (nunca lança) — mesmo motivo do `abrirCofreCaptacao`. */
+function fecharCofreCaptacao(p: PendentesDeCaptacao, ctx: ContextoDoTurno): string | null {
+  try {
+    return cifrarCofreCaptacao(JSON.stringify(p), threadDaCaptacao(ctx));
+  } catch {
+    return null;
+  }
+}
+/** Resposta fixa pra qualquer falha do cofre (abrir OU fechar): nunca escreve, sempre avisa. */
+function cofrePerdido(f: FluxoCaptacao): Resposta {
+  const msg = "Não consegui ler os dados ainda não gravados desta captação (proprietário/testemunha mandados nesta conversa). Nada foi perdido do que já está salvo; mande essas pessoas de novo, por favor.";
+  return f.captacaoId
+    ? resposta(null, `${msg} O que já está salvo continua na tela: ${linkDe(f.captacaoId)}`, "captacao_cofre_perdido")
+    : resposta(null, msg, "captacao_cofre_perdido");
+}
+
 async function conduzirProprietarios(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const donos = f.proprietarios ?? [];
   if (FIM.test(t)) {
     if (!donos.length) return resposta(g(f, ctx), `Preciso de pelo menos um proprietário. ${TEXTO_PROPRIETARIOS}`, "captacao_sem_proprietario");
     return resposta(g(f, ctx, { etapa: "extras", tentativas: 0 }), "Tem testemunha ou outra pessoa para assinar? Mande nome e e-mail/telefone (uma por mensagem, e diga \"testemunha\" se for o caso), ou diga NÃO.", "captacao_extras");
   }
-  if (PERGUNTA_FORA.test(t)) return pausar(f);
+  // Achado 6 (revisão opus): o teste de "pergunta fora do assunto" olha só a
+  // pontuação ("?" no fim) — "Maria, CPF 111.444.777-35, casada?" bate nisso
+  // ANTES de qualquer leitura, e `pausar` manda o texto CRU (com o CPF) pro
+  // atendimento normal, que não redige nada do fluxo de captação. Um sinal
+  // barato (regex, sem LLM) de documento/rótulo de proprietário destrava o
+  // "?" antes de pausar — só então lê a pessoa de verdade.
+  if (PERGUNTA_FORA.test(t)) {
+    const n = lerNumeros(ctx.texto);
+    if (!n.cpfs.length && !n.cnpjs.length && !ROTULO_DE_PESSOA.test(ctx.texto)) return pausar(f);
+  }
   if (donos.length >= 20) return resposta(g(f, ctx), "Chegamos ao limite de 20 proprietários. Diga FIM para seguir.", "captacao_limite_proprietarios");
   const extrair: ExtratorDeSecao = async (texto, secao) => (deps.extrairCaptacao ? deps.extrairCaptacao(texto, secao) : null);
   const p = await lerPessoa(ctx.texto, extrair);
   if (p.erro) return falhou(f, p.erro, ctx);
+  if (!pareceProprietario(ctx.texto, p)) {
+    return falhou(f, "Preciso do CPF (ou CNPJ) do proprietário, ou escreva \"proprietário: nome\".", ctx);
+  }
+  const canalDito = canalDoTexto(ctx.texto) ?? f.canalDito;
   const id = `p${donos.length + 1}`;
   const item: Record<string, unknown> = {
     id, papel: "proprietario", tipo_pessoa: p.pj ? "juridica" : "fisica",
     ...(p.pj ? { razao_social: p.nome, cnpj: p.cnpj } : { nome: p.nome, cpf: p.cpf }),
-    ...(p.email ? { email: p.email } : {}), ...(p.telefone ? { telefone1: p.telefone } : {}),
+    ...(p.email ? { email: p.email } : {}), ...(p.telefone ? { telefone1: normalizeBrPhone(p.telefone) ?? p.telefone } : {}),
     ...(p.estadoCivil ? { estado_civil: p.estadoCivil } : {}), ...(p.percentual !== undefined ? { percentual: p.percentual } : {}),
+    ...(canalDito ? { canal: canalDito } : {}),
   };
-  const r = await complementar(f, ctx, deps, { proprietarios: [item] });
-  if (!r.ok) return r.r;
-  const novo = g(r.f, ctx, { proprietarios: [...donos, { id, nome: p.nome!, ...(p.pj ? { pj: true } : {}) }], tentativas: 0 });
+  // Achado 17: só escreve depois do "sim" — o item (com CPF/telefone/e-mail)
+  // fica no cofre cifrado; só id+nome (sem PII) entra no estado em claro.
+  // Achado 5: se o cofre JÁ TINHA gente pendente e não abre (chave rotacionada,
+  // thread trocada, payload adulterado), NÃO soma este item a um cofre vazio
+  // em silêncio — avisa e para, sem gravar nada.
+  const abertura = abrirCofreCaptacao(f, ctx);
+  if (!abertura.ok) return cofrePerdido(f);
+  const cofre = fecharCofreCaptacao({ ...abertura.pendentes, proprietarios: [...abertura.pendentes.proprietarios, item] }, ctx);
+  if (cofre === null) return cofrePerdido(f);
+  const novo = g(f, ctx, {
+    proprietarios: [...donos, { id, nome: p.nome!, ...(p.pj ? { pj: true } : {}) }],
+    cofre,
+    // Achado E (revisão opus, round 2): o cofre MUDOU — uma `gravarPessoasChave`
+    // guardada de uma confirmação anterior (incerta/retentada) não pode
+    // sobreviver a isto. Senão o PRÓXIMO "sim" reusa a chave velha pra um lote
+    // MAIOR, e um servidor que faz replay por idempotency key (não por
+    // conteúdo) devolve a resposta do lote de ANTES — quem acabou de ser
+    // somado (este proprietário) nunca é gravado, sem erro nenhum.
+    gravarPessoasChave: undefined,
+    ...(canalDito ? { canalDito } : {}),
+    tentativas: 0,
+  });
   const guardou = [p.cpf ? "CPF" : p.cnpj ? "CNPJ" : "", p.telefone ? "telefone" : "", p.email ? "e-mail" : "", p.estadoCivil ? "estado civil" : ""].filter(Boolean);
-  return resposta(novo, `${r.prefixo}Anotei ${p.nome}${guardou.length ? ` (${guardou.join(", ")})` : ""}. Mande o próximo proprietário, ou FIM.`, "captacao_proprietario");
+  return resposta(novo, `Anotei ${p.nome}${guardou.length ? ` (${guardou.join(", ")})` : ""}. Mande o próximo proprietário, ou FIM.`, "captacao_proprietario");
 }
 
 async function conduzirExtras(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
-  if (FIM.test(t) || PULAR.test(t)) return verificar(g(f, ctx, { etapa: "verificar", tentativas: 0 }), ctx, deps, "");
-  if (PERGUNTA_FORA.test(t)) return pausar(f);
+  if (FIM.test(t) || PULAR.test(t)) return pedirConfirmacaoDePessoas(f, ctx);
+  // Achado 6 (mesmo caso do proprietário): "Carlos, carlos@ex.com, ele confirma?"
+  // termina em "?" — um sinal barato de contato destrava antes de pausar (sem
+  // ele, o e-mail/telefone ia cru pro atendimento normal).
+  if (PERGUNTA_FORA.test(t)) {
+    const semContato = !lerNumeros(ctx.texto).telefones.length && !lerEmails(ctx.texto).length;
+    if (semContato) return pausar(f);
+  }
   const extrair: ExtratorDeSecao = async (texto, secao) => (deps.extrairCaptacao ? deps.extrairCaptacao(texto, secao) : null);
   const p = await lerPessoa(ctx.texto, extrair);
   if (p.erro) return falhou(f, p.erro, ctx);
   if (!p.email && !p.telefone) return falhou(f, "Preciso do e-mail ou do telefone dessa pessoa.", ctx);
   const testemunha = /\btestemunha\b/.test(t);
   const id = `x${ctx.messageId.replace(/[^a-zA-Z0-9]/g, "").slice(-12) || ctx.agora}`;
-  const pessoa = { id, nome: p.nome, ...(p.cpf ? { cpf: p.cpf } : {}), ...(p.email ? { email: p.email } : {}), ...(p.telefone ? { telefone: p.telefone } : {}) };
-  const r = await complementar(f, ctx, deps, { assinantes: testemunha ? { testemunhas: [pessoa] } : { avulsos: [pessoa] } });
-  if (!r.ok) return r.r;
-  return resposta(g(r.f, ctx, { tentativas: 0 }), `${r.prefixo}Anotei ${p.nome} como ${testemunha ? "testemunha" : "assinante"}. Mais alguém? Mande a próxima pessoa, ou diga NÃO.`, "captacao_extra");
+  const pessoa = {
+    id, nome: p.nome, ...(p.cpf ? { cpf: p.cpf } : {}), ...(p.email ? { email: p.email } : {}),
+    ...(p.telefone ? { telefone: normalizeBrPhone(p.telefone) ?? p.telefone } : {}),
+  };
+  // Achado 17: também fica pendente (cifrada) até o "sim" do resumo de pessoas.
+  // Achado 5: mesmo cuidado do proprietário — cofre que não abre não pode
+  // virar "perdi o que já tinha" em silêncio.
+  const abertura = abrirCofreCaptacao(f, ctx);
+  if (!abertura.ok) return cofrePerdido(f);
+  const chave = testemunha ? "testemunhas" : "avulsos";
+  const cofre = fecharCofreCaptacao({ ...abertura.pendentes, [chave]: [...abertura.pendentes[chave], pessoa] }, ctx);
+  if (cofre === null) return cofrePerdido(f);
+  const novo = g(f, ctx, {
+    extrasPendentes: [...(f.extrasPendentes ?? []), { id, nome: p.nome!, testemunha }],
+    cofre,
+    // Achado E: mesmo cuidado de `conduzirProprietarios` — o cofre mudou, a
+    // chave velha de uma confirmação anterior não pode sobreviver.
+    gravarPessoasChave: undefined,
+    tentativas: 0,
+  });
+  return resposta(novo, `Anotei ${p.nome} como ${testemunha ? "testemunha" : "assinante"}. Mais alguém? Mande a próxima pessoa, ou diga NÃO.`, "captacao_extra");
+}
+
+/** Resumo de quem vai ser gravado (proprietários + testemunhas/avulsos pendentes) e o "sim" que grava. */
+function pedirConfirmacaoDePessoas(f: FluxoCaptacao, ctx: ContextoDoTurno): Resposta {
+  const nomes = [
+    ...(f.proprietarios ?? []).map((p) => p.nome),
+    ...(f.extrasPendentes ?? []).map((p) => p.nome),
+  ];
+  const resumoPessoas = nomes.length ? `Vou gravar: ${listaDeNomes(nomes)}.\n` : "";
+  return resposta(g(f, ctx, { etapa: "confirmar_pessoas", tentativas: 0 }), `${resumoPessoas}Posso gravar estes dados na captação? Responda *sim* (ou CANCELAR).`, "captacao_confirmar_pessoas");
+}
+
+/** Achado 17: o "sim" aqui grava proprietários e extras pendentes NUM lote só, com a própria messageId como chave. */
+async function conduzirConfirmarPessoas(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  if (lerConfirmacao(ctx.texto) === "sim") {
+    const abertura = abrirCofreCaptacao(f, ctx);
+    if (!abertura.ok) return cofrePerdido(f);
+    const pendentes = abertura.pendentes;
+    const dados: DadosDeCaptacao = {};
+    if (pendentes.proprietarios.length) dados.proprietarios = pendentes.proprietarios;
+    if (pendentes.testemunhas.length || pendentes.avulsos.length) {
+      dados.assinantes = {
+        ...(pendentes.testemunhas.length ? { testemunhas: pendentes.testemunhas } : {}),
+        ...(pendentes.avulsos.length ? { avulsos: pendentes.avulsos } : {}),
+      };
+    }
+    if (!Object.keys(dados).length) return verificar(g(f, ctx, { etapa: "verificar" }), ctx, deps, "");
+    // Nit (revisão opus): a chave sobrevive a um "sim" incerto/falho — o
+    // PRÓXIMO "sim" reusa a MESMA chave em vez de abrir uma nova gravação.
+    const chave = f.gravarPessoasChave || ctx.messageId;
+    const r = await complementar(g(f, ctx, { gravarPessoasChave: chave }), ctx, deps, dados, chave);
+    if (!r.ok) return r.r;
+    const limpo = g(r.f, ctx, { etapa: "verificar", tentativas: 0, cofre: undefined, extrasPendentes: undefined, gravarPessoasChave: undefined });
+    return verificar(limpo, ctx, deps, `${r.prefixo}Gravado.\n`);
+  }
+  if (lerConfirmacao(ctx.texto) === "nao") return cancelar(f);
+  if (PERGUNTA_FORA.test(t)) return pausar(f);
+  return falhou(f, "Responda *sim* para eu gravar estes dados, ou CANCELAR.", ctx);
 }
 
 // ── conferência (preflight), faltantes e resumo ──
@@ -1715,6 +2152,17 @@ async function conduzirFaltantes(f: FluxoCaptacao, t: string, ctx: ContextoDoTur
   const fa = f.faltantes?.[0];
   if (!fa) return verificar(f, ctx, deps, "");
   if (PULAR.test(t)) {
+    // Item 2 (revisão opus, round 3): "pular" para de PERGUNTAR — mas não pode
+    // jogar fora resposta que a pessoa já tinha dado nesta rodada (acumulada
+    // no cofre, ainda não gravada), nem GRAVAR sozinho. Toda escrita exige
+    // resumo + "sim" explícito (regra de topo do arquivo) — "pular" não é
+    // exceção: se há algo pendente no cofre, mostra o resumo de novo e só
+    // grava no próximo "sim" (com a messageId DESSE "sim" como chave).
+    const abertura = abrirCofreCaptacao(f, ctx);
+    if (!abertura.ok) return cofrePerdido(f);
+    if (abertura.pendentes.faltantes && Object.keys(abertura.pendentes.faltantes).length) {
+      return pedirConfirmacaoDeFaltantes(g(f, ctx, { faltantes: [] }), ctx, "Certo, paro de perguntar. ");
+    }
     return resposta(null, `Certo. O rascunho${lembrete(f)} fica salvo; complete pela tela: ${linkDe(f.captacaoId)}`, "captacao_faltante_pulado");
   }
   if (PERGUNTA_FORA.test(t)) return pausar(f);
@@ -1722,9 +2170,65 @@ async function conduzirFaltantes(f: FluxoCaptacao, t: string, ctx: ContextoDoTur
   const lido = await lerFaltante(f, fa, ctx.texto, extrair);
   if (lido === "vazio") return falhou(f, "Não entendi.", ctx);
   if ("erro" in lido) return falhou(f, lido.erro, ctx);
-  const r = await complementar(f, ctx, deps, lido.dados);
-  if (!r.ok) return r.r;
-  return verificar(g(r.f, ctx, { faltantes: undefined }), ctx, deps, `${r.prefixo}Anotei: ${lido.eco}.\n`);
+  // Item B (revisão opus, round 2 — regra de escrita): a resposta a um
+  // faltante NUNCA grava direto. Acumula no cofre (mesma regra do resto do
+  // fluxo — CPF/telefone/e-mail não sentam em claro no checkpoint) e só vai
+  // ao servidor quando a pessoa confirmar explicitamente, com a messageId
+  // DESSA confirmação como chave de idempotência.
+  const abertura = abrirCofreCaptacao(f, ctx);
+  if (!abertura.ok) return cofrePerdido(f);
+  const acumulado = mesclarDadosDeCaptacao(abertura.pendentes.faltantes ?? {}, lido.dados);
+  const cofre = fecharCofreCaptacao({ ...abertura.pendentes, faltantes: acumulado }, ctx);
+  if (cofre === null) return cofrePerdido(f);
+  const resto = (f.faltantes ?? []).slice(1);
+  // Nit 1: acumula o rótulo (sem o valor) deste faltante — dedupe por path,
+  // pra `pedirConfirmacaoDeFaltantes` conseguir listar TODOS os respondidos.
+  const rotulosAcumulados = [...(f.faltantesAcumulados ?? []).filter((x) => x.path !== fa.path), { path: fa.path, rotulo: fa.rotulo }];
+  const base = g(f, ctx, { faltantes: resto, cofre, faltantesAcumulados: rotulosAcumulados, tentativas: 0 });
+  if (resto.length) {
+    return resposta(base, `Anotei: ${lido.eco}.\n${perguntaDoFaltante(base, resto[0]!)}`, "captacao_faltantes");
+  }
+  return pedirConfirmacaoDeFaltantes(base, ctx, "");
+}
+
+/**
+ * Resumo do que foi respondido (ainda no cofre) e o "sim" que de fato grava —
+ * mesmo molde de `pedirConfirmacaoDePessoas`. Nit 1 (revisão opus, round 3):
+ * lista TODOS os campos pendentes por RÓTULO (nunca o valor — mesma regra do
+ * resto do cofre), incluindo os de uma rodada anterior (PULAR no meio).
+ */
+function pedirConfirmacaoDeFaltantes(f: FluxoCaptacao, ctx: ContextoDoTurno, prefixo: string): Resposta {
+  const rotulos = (f.faltantesAcumulados ?? []).map((x) => x.rotulo);
+  const resumoCampos = rotulos.length ? `Vou gravar: ${listaDeNomes(rotulos)}.\n` : "";
+  return resposta(
+    g(f, ctx, { etapa: "confirmar_faltantes", tentativas: 0 }),
+    `${prefixo}${resumoCampos}Posso gravar estes dados na captação? Responda *sim* (ou CANCELAR).`,
+    "captacao_confirmar_faltantes"
+  );
+}
+
+/** Item B: o "sim" aqui grava o(s) faltante(s) pendente(s) no cofre, com a própria messageId como chave. */
+async function conduzirConfirmarFaltantes(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  if (lerConfirmacao(ctx.texto) === "sim") {
+    const abertura = abrirCofreCaptacao(f, ctx);
+    if (!abertura.ok) return cofrePerdido(f);
+    const dados = abertura.pendentes.faltantes;
+    if (!dados || !Object.keys(dados).length) return verificar(g(f, ctx, { etapa: "verificar" }), ctx, deps, "");
+    const r = await complementar(f, ctx, deps, dados, ctx.messageId);
+    if (!r.ok) return r.r;
+    // Nit 3 (revisão opus, round 3): a gravação JÁ aconteceu — os faltantes
+    // pendentes têm que sumir do cofre de qualquer jeito. Se `fecharCofreCaptacao`
+    // falhar (chave rotacionada etc.), manter o `f.cofre` ANTIGO intacto
+    // deixava o que acabou de ser gravado lá dentro, pra um "sim"/PULAR
+    // seguinte reenviar (e reexibir) de novo. Fail-closed: descarta o cofre
+    // inteiro em vez de arriscar reenvio de dado já gravado.
+    const cofre = fecharCofreCaptacao({ ...abertura.pendentes, faltantes: undefined }, ctx);
+    const limpo = g(r.f, ctx, { etapa: "verificar", tentativas: 0, cofre: cofre ?? undefined, faltantesAcumulados: undefined });
+    return verificar(limpo, ctx, deps, `${r.prefixo}Gravado.\n`);
+  }
+  if (lerConfirmacao(ctx.texto) === "nao") return cancelar(f);
+  if (PERGUNTA_FORA.test(t)) return pausar(f);
+  return falhou(f, "Responda *sim* para eu gravar estes dados, ou CANCELAR.", ctx);
 }
 
 const CANAL: Record<string, string> = { email: "e-mail", whatsapp: "WhatsApp", aceite: "aceite por WhatsApp" };
@@ -1732,6 +2236,23 @@ const CANAL: Record<string, string> = { email: "e-mail", whatsapp: "WhatsApp", a
 function listaDeNomes(nomes: string[]): string {
   if (nomes.length <= 1) return nomes.join("");
   return `${nomes.slice(0, -1).join(", ")} e ${nomes[nomes.length - 1]}`;
+}
+
+/**
+ * Nit 2 (revisão opus, round 3): o canal escolhido nesta conversa só existe
+ * localmente até o "enviar" aplicar de verdade — mas já pode ser mostrado no
+ * resumo. Troca o `canal` dos assinantes do servidor que batem com um
+ * proprietário LOCAL (por nome); quem não bate (testemunha, outro assinante)
+ * mantém o canal que já está no servidor — nunca inventado.
+ */
+function comCanalLocalAplicado(raw: unknown, proprietarios: { nome: string }[] | undefined, canalDito: CanalDeEnvio | undefined): unknown {
+  if (!canalDito || !proprietarios?.length) return raw;
+  const nomes = new Set(proprietarios.map((p) => p.nome));
+  return lista(raw).map((x) => {
+    const a = obj(x);
+    const nome = str(a.nome);
+    return nome && nomes.has(nome) ? { ...a, canal: canalDito } : a;
+  });
 }
 
 /** "Envio para Maria e João por e-mail?" — nomes e canais de `captacao.options{captacaoId}`. */
@@ -1761,11 +2282,64 @@ async function resumir(f: FluxoCaptacao, pf: PreflightLido, ctx: ContextoDoTurno
   if (dados && dados.assinaturaConfigurada === false) {
     return resposta(null, `${doResumo.join("\n")}\n${TEXTO_POR_CODIGO.clicksign_nao_conectada({ link: "" })}`, "captacao_pronta_sem_clicksign");
   }
-  const quem = dados ? frasesDoEnvio(dados.assinantes) : null;
+  // Achado 3 (revisão opus): o canal dito/escolhido só é aplicado no servidor
+  // quando há IDS locais de proprietário (`f.proprietarios`, só existe no
+  // caminho de CRIAÇÃO). No caminho de ENVIO de um rascunho JÁ EXISTENTE
+  // (`iniciarEnvioDeCaptacao`), `f.proprietarios` nunca é preenchido — o Max
+  // não tem como saber o id de quem já está na captação, então não há como
+  // mandar `captacao.create{proprietarios:[{id,canal}]}`. Antes, isso fazia
+  // "por aceite no WhatsApp" ir por e-mail, em silêncio. Agora avisa — nunca
+  // finge que aplicou.
+  const semIdsLocais = !f.proprietarios?.length;
+  // Achado 23/28: o canal só se pergunta se a pessoa nunca disse qual quer — e as
+  // 3 opções aparecem ANTES do resumo de envio, não depois de propor e-mail sem perguntar.
+  // Item C (revisão opus, round 2): SEM ids locais, não há como aplicar
+  // NENHUMA resposta ao 1/2/3 (achado 3, acima) — perguntar só pra depois
+  // avisar "não consigo trocar" é pergunta inútil. Só pergunta quando dá pra
+  // valer a escolha; sem ids locais, segue direto pro resumo com o canal que
+  // já está no servidor, e o aviso (abaixo) fica reservado pra quando a
+  // pessoa MESMO ASSIM nomeou um canal (na mensagem, não pelo 1/2/3).
+  if (!f.canalDito && !semIdsLocais) {
+    return resposta(
+      g(f, ctx, { etapa: "canal", emBranco: pf.emBranco }),
+      `${doResumo.join("\n")}\nPor qual canal envio? Responda com o número:\n1. E-mail\n2. WhatsApp\n3. Aceite por WhatsApp`,
+      "captacao_pergunta_canal"
+    );
+  }
+  const avisoCanal = semIdsLocais && f.canalDito
+    ? `Não consigo trocar o canal deste rascunho por aqui (sem acesso aos ids de proprietário já cadastrados); o envio usa o canal que já está na tela. Para mudar, ajuste em: ${linkDe(f.captacaoId)}\n`
+    : "";
+  // Nit 2: com ids locais, usa a prévia do servidor (que já traz testemunhas e
+  // outros assinantes, não só os proprietários) e aplica o canal ESCOLHIDO
+  // nesta conversa por cima — sem `dados`, cai no fallback só-proprietários
+  // de antes (ainda correto, só não lista quem mais assina).
+  const quem = !semIdsLocais
+    ? dados
+      ? frasesDoEnvio(comCanalLocalAplicado(dados.assinantes, f.proprietarios, f.canalDito))
+      : `${listaDeNomes(f.proprietarios!.map((p) => p.nome))} por ${CANAL[f.canalDito!]}`
+    : dados ? frasesDoEnvio(dados.assinantes) : null;
   const pergunta = quem
     ? `Envio para ${quem}? Responda *enviar* (ou CANCELAR).`
     : `Envio para as pessoas marcadas para assinar? Responda *enviar* (ou CANCELAR).`;
-  return resposta(g(f, ctx, { etapa: "revisao", chave: f.chave, emBranco: pf.emBranco }), `${doResumo.join("\n")}\n${pergunta}`, "captacao_revisao");
+  return resposta(g(f, ctx, { etapa: "revisao", chave: f.chave, emBranco: pf.emBranco }), `${doResumo.join("\n")}\n${avisoCanal}${pergunta}`, "captacao_revisao");
+}
+
+/**
+ * Achado 23/28: lê o canal escolhido. Item A (revisão opus, round 2 — regra
+ * de escrita): escolher o canal NÃO é "sim"/"enviar" — só GUARDA a escolha.
+ * O resumo (`resumir()`) já mostra o canal escolhido na frase ("Envio para
+ * Maria por WhatsApp?"), e é o "enviar" explícito ali (`conduzirRevisao`) que
+ * aplica a escolha no servidor, com a messageId DESSA confirmação como chave.
+ */
+async function conduzirCanal(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const POR_NUMERO: Record<string, CanalDeEnvio> = { "1": "email", "2": "whatsapp", "3": "aceite" };
+  const n = /^(?:opcao\s*|numero\s*|n\s*)?([123])$/.exec(t);
+  const canal = (n ? POR_NUMERO[n[1]!] : undefined) ?? canalDoTexto(ctx.texto);
+  if (!canal) {
+    if (PERGUNTA_FORA.test(t)) return pausar(f);
+    return falhou(f, "Responda 1 para e-mail, 2 para WhatsApp ou 3 para aceite por WhatsApp.", ctx);
+  }
+  return verificar(g(f, ctx, { canalDito: canal, etapa: "verificar", tentativas: 0 }), ctx, deps, "");
 }
 
 async function conduzirSelecao(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
@@ -1781,10 +2355,49 @@ async function conduzirSelecao(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno
 // ── envio ──
 
 async function conduzirRevisao(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
-  if (confirmaEnvio(ctx.texto)) return enviar(f, ctx, deps, false);
+  // Achado 25: o resumo já avisou os campos em branco — então o "enviar" aqui
+  // já manda `confirmarBrancos`, numa confirmação só (não pede "enviar assim
+  // mesmo" de novo por um branco que já tinha sido dito).
+  if (confirmaEnvio(ctx.texto)) return confirmarEEnviar(f, ctx, deps, (f.emBranco ?? 0) > 0);
   if (lerConfirmacao(ctx.texto) === "nao") return cancelar(f);
   // Qualquer outra coisa NÃO envia: o resumo vale só para o "enviar" explícito.
   return pausar(f);
+}
+
+/**
+ * Item A: o "enviar" É a confirmação — aplica o canal escolhido (quando há
+ * ids locais pra aplicar, achado 3) com uma chave PRÓPRIA (`:canal`, nunca a
+ * mesma do envio) e só então manda o `captacao.send`, com a versão que o
+ * complemento devolveu. `!f.chave` é o que distingue a PRIMEIRA tentativa
+ * deste "enviar" de um retry do MESMO envio (send sem resposta, 202 em
+ * andamento…): reaplicar o canal a cada retry bumpa a versão à toa e troca a
+ * chave de idempotência do `captacao.send` debaixo do pé do "não duplica".
+ */
+async function confirmarEEnviar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, confirmarBrancos: boolean): Promise<PassoDoFluxo> {
+  const precisaAplicarCanal = !f.chave && !!f.canalDito && !!f.proprietarios?.length;
+  if (!precisaAplicarCanal) return enviar(f, ctx, deps, confirmarBrancos);
+  // Achado 4 (revisão opus, mantido): a escrita do canal exige captacao.create
+  // de verdade — a política é relida a cada turno e pode ter mudado.
+  if (!ctx.policy.includes("captacao.create")) {
+    return resposta(
+      g(f, ctx, { etapa: "verificar", tentativas: 0 }),
+      "Não consigo gravar o canal agora (sua permissão de criação mudou). Ajuste pela tela, ou responda de novo para eu tentar.",
+      "captacao_canal_sem_permissao"
+    );
+  }
+  const alvo = f.proprietarios!.map((p) => ({ id: p.id, canal: f.canalDito! }));
+  const r = await complementar(f, ctx, deps, { proprietarios: alvo }, `${ctx.messageId}:canal`, { semRetentativaDeVersao: true });
+  if (!r.ok) {
+    // Item 1 (revisão opus, round 3): a tela pode ter mudado ENTRE o resumo
+    // mostrado e este "enviar" — reenviar sozinho com a versão nova mandaria
+    // conteúdo que o usuário nunca viu. Volta pro resumo (novo preflight,
+    // nova confirmação), a confirmação antiga não vale mais.
+    if ("versaoDesatualizada" in r) {
+      return verificar(g(f, ctx, { etapa: "verificar", chave: undefined }), ctx, deps, `${TEXTO_POR_CODIGO.versao_desatualizada({ link: linkDe(f.captacaoId) })}\n`);
+    }
+    return r.r;
+  }
+  return enviar(r.f, ctx, deps, confirmarBrancos);
 }
 
 async function conduzirBrancos(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {

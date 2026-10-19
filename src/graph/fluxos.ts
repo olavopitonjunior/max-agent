@@ -733,16 +733,25 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (f.kind === "credito") return f.etapa === "revisao" ? { ...f, etapa: "coleta", campoAtual: undefined } : f;
   // Captação: o resumo (o "enviar" que escreve) volta para a conferência; o servidor refaz o resumo.
   // Com `chave` (send sem resposta) a etapa fica: o "enviar" seguinte repete a mesma chave e args.
+  // Achado 17: as etapas em que o próximo "sim" GRAVA (criação do rascunho,
+  // lote de proprietários/extras) também não podem sobreviver a uma
+  // interrupção — senão um "sim" de outro assunto, minutos depois, dispararia
+  // a escrita sem o resumo ter sido mostrado de novo (mesmo risco do N1 que
+  // já valia pra revisão/brancos).
   if (f.kind === "captacao") {
     if (f.chave) return f.pausado ? { ...f, pausado: false } : f;
     // v2/PR7 (achado de review 19/10, item 2): retry de pedir/decidir sem resposta — a chave
     // guardada não pode ser perdida (senão o próximo "sim" geraria uma chave nova), mesmo
-    // padrão de `f.chave` acima.
-    // Só nas etapas da própria autorização (review 19/10, 3ª rodada): fora delas a chave não
-    // pode segurar `revisao`/`brancos` — o "enviar" seguinte sairia sem resumo novo.
+    // padrão de `f.chave` acima. Só nas etapas da própria autorização (review 19/10, 3ª
+    // rodada): fora delas a chave não pode segurar `revisao`/`brancos`.
     if (f.autorizacaoChave && (f.etapa === "autorizacao_oferta" || f.etapa === "autorizacao_confirmar")) {
       return f.pausado ? { ...f, pausado: false } : f;
     }
+    if (f.etapa === "confirmar_criacao") return { ...f, etapa: "condicoes", pausado: false };
+    if (f.etapa === "confirmar_pessoas") return { ...f, etapa: "extras", pausado: false };
+    // Item B: o "sim" de `confirmar_faltantes` grava — mesma regra, mesmo risco N1.
+    if (f.etapa === "confirmar_faltantes") return { ...f, etapa: "faltantes", pausado: false };
+    if (f.etapa === "canal") return { ...f, etapa: "verificar", pausado: false };
     if (f.etapa === "revisao" || f.etapa === "brancos") return { ...f, etapa: "verificar", pausado: false };
     // v2/PR7: a oferta ao corretor (o "sim" pede autorização) volta pra conferência — o
     // próximo "sim" refaz o preflight e o bloqueio (se ainda existir) é oferecido de novo.
@@ -1157,14 +1166,19 @@ export async function conduzirFluxo(
   if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (fluxo.kind === "gestao") return conduzirGestao(fluxo, ctx, deps);
   if (fluxo.kind === "credito") return conduzirCredito(fluxo, ctx, deps);
-  // v2/PR7: o gerente da fila de autorização pode não ter `captacao.create` — o gate exato
-  // por etapa é feito dentro de `conduzirCaptacao` (`gatePolitica`); aqui só decide se este
-  // sujeito tem QUALQUER capability de captação, para não bloquear antes de saber qual etapa.
-  if (fluxo.kind === "captacao") {
-    const podeEscrever = ctx.policy.includes("captacao.create") ||
-      ctx.policy.includes("captacao.autorizacao.pedir") || ctx.policy.includes("captacao.autorizacao.decidir");
-    return conduzirCaptacao(fluxo, ctx, deps, podeEscrever);
-  }
+  // Achado 20: este caminho nunca é alcançado em produção (graph.ts despacha
+  // `captacao` direto pra `conduzirCaptacao`, com `podeEscrever(identity)` — não
+  // há `identity` aqui). `ctx.policy.includes("captacao.create")` como
+  // "podeEscrever" misturava a checagem de IDENTIDADE com a de CAPABILITY e
+  // travava quem só tem `captacao.send` mesmo antes de chegar na etapa certa
+  // (achado 21). Mantido só por tipagem (`Fluxo` inclui `captacao`); `true`
+  // aqui replica o padrão de `conduzirCredito` acima — a política real é
+  // conferida dentro de `conduzirCaptacao`, por etapa.
+  // Achado (nit da revisão opus): `true` aqui seria "capability liberada por
+  // garantia" se este caminho morto algum dia for alcançado por engano —
+  // viola o fail-closed da governança do Max. `false` replica o default
+  // seguro de qualquer capability nova.
+  if (fluxo.kind === "captacao") return conduzirCaptacao(fluxo, ctx, deps, false);
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };
   }

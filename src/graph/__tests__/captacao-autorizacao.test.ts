@@ -79,8 +79,8 @@ describe("captacaoAutorizacaoLigada (MAX_CAPTACAO_AUTORIZACAO)", () => {
 // ─── corretor: oferta e pedido ────────────────────────────────────────────
 
 describe("corretor: oferta de autorização (verificar → autorizacao_oferta)", () => {
-  const SEM_CAP = ["captacao.create"];
-  const COM_CAP = ["captacao.create", "captacao.autorizacao.pedir"];
+  const SEM_CAP = ["captacao.create", "captacao.list"];
+  const COM_CAP = ["captacao.create", "captacao.list", "captacao.autorizacao.pedir"];
 
   function fluxoNaOferta(tipo: "proprietario" | "imovel" = "proprietario", ref = "p1"): FluxoCaptacao {
     return {
