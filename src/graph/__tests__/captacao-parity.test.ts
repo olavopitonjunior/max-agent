@@ -17,6 +17,7 @@ import {
   textoDoCodigoDeAutorizacao,
   textoDoCodigoDeEnvio,
   textoDoItemDaCaptacao,
+  textoDoItemDaFila,
   textoDoPreflight,
   tipoDoFaltante,
 } from "../captacao";
@@ -561,6 +562,38 @@ describe("paridade: captacao.autorizacao.listar (lado max-agent)", () => {
     expect(texto).not.toMatch(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/);
     expect(texto).not.toContain("Carlos Dono");
     expect(texto).not.toContain("Maria Silva");
+  });
+
+  // ── segunda camada de máscara do documento (achado defensivo) ──────────
+  it("documento JÁ mascarado pelo servidor passa intacto, byte a byte — o vetor de paridade não muda", () => {
+    const { items } = lerFilaDeAutorizacoes(JSON.parse(AUTORIZACOES_LISTA_SERIALIZADO));
+    expect(items[0]!.documento).toBe("***.456.789-**");
+  });
+
+  it("documento com 11 dígitos em claro (CPF sem máscara) é mascarado NESTE lado antes de guardar", () => {
+    const base = { ref: 1, id: "aut-1", tipo: "proprietario", codigo: "CAP-2026-0007", solicitante: "Ana Souza", criadoEm: "2026-10-19T12:00:00.000Z" };
+    const item = lerItemDaFilaDeAutorizacao({ ...base, documento: "123.456.789-09" });
+    expect(item?.documento).toBe("***.456.789-**");
+    expect(item?.documento).not.toContain("123");
+    expect(item?.documento).not.toContain("09");
+  });
+
+  it("documento com 14 dígitos em claro (CNPJ sem máscara) mostra só os dígitos do meio", () => {
+    const base = { ref: 1, id: "aut-1", tipo: "proprietario", codigo: "CAP-2026-0007", solicitante: "Ana Souza", criadoEm: "2026-10-19T12:00:00.000Z" };
+    const item = lerItemDaFilaDeAutorizacao({ ...base, documento: "12.345.678/0001-95" });
+    expect(item?.documento).toMatch(/^\*\*\.\d{3}\.\d{3}\/\d{4}-\*\*$/);
+    expect(item?.documento).not.toMatch(/^12/);
+    expect(item?.documento).not.toContain("95");
+  });
+
+  // ── a justificativa (texto livre de OUTRO corretor) nunca aparece com PII na fala do gerente ──
+  it("justificativa com CPF nunca aparece inteiro na fala ao gerente (redigida antes de exibir)", () => {
+    const base = { ref: 1, id: "aut-1", tipo: "proprietario", codigo: "CAP-2026-0007", solicitante: "Ana Souza", documento: "***.456.789-**", criadoEm: "2026-10-19T12:00:00.000Z" };
+    const item = lerItemDaFilaDeAutorizacao({ ...base, justificativa: "Já atendi esse cliente, CPF 111.444.777-35, antes" })!;
+    const texto = textoDoItemDaFila(item);
+    expect(texto).not.toContain("111.444.777-35");
+    expect(texto).not.toMatch(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/);
+    expect(texto).toContain("Ana Souza"); // o resto da linha segue normal
   });
 
   it.each(

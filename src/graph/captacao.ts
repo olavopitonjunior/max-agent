@@ -528,7 +528,22 @@ export interface ItemDaFilaDeAutorizacao {
   documento?: string; imovel?: string; criadoEm: string; justificativa?: string;
 }
 
-/** Um item de `captacao.autorizacao.listar`: documento SEMPRE mascarado pelo servidor (nunca tratado aqui). */
+/**
+ * Segunda camada de máscara (achado defensivo): o servidor já manda
+ * `documento` mascarado (`***.456.789-**`), mas se algum dia vier em claro
+ * (11 ou 14 dígitos — CPF/CNPJ sem máscara), este lado mascara ANTES de
+ * guardar/exibir ao gerente — nunca confia só no servidor para um dado que
+ * vai para a tela de outra pessoa. Já mascarado (poucos dígitos, o resto é
+ * `*`/pontuação) não bate 11 nem 14 dígitos e passa intacto, byte a byte.
+ */
+function mascararDocumentoLocal(doc: string): string {
+  const digitos = doc.replace(/\D/g, "");
+  if (digitos.length === 11) return `***.${digitos.slice(3, 6)}.${digitos.slice(6, 9)}-**`;
+  if (digitos.length === 14) return `**.${digitos.slice(2, 5)}.${digitos.slice(5, 8)}/${digitos.slice(8, 12)}-**`;
+  return doc;
+}
+
+/** Um item de `captacao.autorizacao.listar`: documento mascarado pelo servidor; `mascararDocumentoLocal` é a segunda camada. */
 export function lerItemDaFilaDeAutorizacao(raw: unknown): ItemDaFilaDeAutorizacao | null {
   const o = obj(raw);
   const id = str(o.id);
@@ -548,7 +563,7 @@ export function lerItemDaFilaDeAutorizacao(raw: unknown): ItemDaFilaDeAutorizaca
   return {
     ref,
     id, tipo, codigo, solicitante, criadoEm,
-    ...(documento ? { documento } : {}), ...(imovel ? { imovel } : {}), ...(justificativa ? { justificativa } : {}),
+    ...(documento ? { documento: mascararDocumentoLocal(documento) } : {}), ...(imovel ? { imovel } : {}), ...(justificativa ? { justificativa } : {}),
   };
 }
 
@@ -565,11 +580,28 @@ function alvoDaAutorizacao(i: { tipo: string; documento?: string; imovel?: strin
     : `o imóvel${i.imovel ? ` ${i.imovel}` : ""}`;
 }
 
+/**
+ * A justificativa é texto livre de OUTRA pessoa (o corretor que pediu),
+ * exibida ao gerente (ou ecoada de volta ao próprio corretor) — nunca passa
+ * sem redação. `redigir()` devolve o token fixo `⟨CPF⟩` (bom para log, mas
+ * ilegível numa fala de WhatsApp); troca pelo `[dado]` que `destokenizarResposta`
+ * já usa como convenção de exibição — nunca o token cru, nunca o valor.
+ */
+function justificativaSegura(justificativa: string): string {
+  // Só documento e e-mail (review 19/10): valor/telefone/CEP fazem parte do argumento
+  // ("fechou por R$ 500 mil") e o código CAP precisa sobreviver. Depois, rede local sem
+  // checar DV: um CPF pontuado com DV inválido ("123.456.789-00") passaria inteiro.
+  return redigir(justificativa, ["CPF", "CNPJ", "EMAIL"])
+    .replace(/⟨[A-Z]+⟩/g, "[dado]")
+    .replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, "[dado]")
+    .replace(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b/g, "[dado]");
+}
+
 /** Uma linha por pedido pendente — nunca CPF/CNPJ inteiro (o `documento` já chega mascarado) nem nome do dono da carteira. */
 export function textoDoItemDaFila(i: ItemDaFilaDeAutorizacao): string {
   const partes = [
     `${i.ref}. ${i.codigo} · ${i.solicitante} pede ${alvoDaAutorizacao(i)}`,
-    i.justificativa ? `   "${i.justificativa}"` : "",
+    i.justificativa ? `   "${justificativaSegura(i.justificativa)}"` : "",
   ];
   return partes.filter(Boolean).join("\n");
 }
@@ -2534,8 +2566,10 @@ async function conduzirAutorizacaoOferta(f: FluxoCaptacao, t: string, ctx: Conte
     return falhou(f, "Essa justificativa ficou grande demais (até 300 caracteres). Pode resumir, ou responda *sim* para pedir sem justificativa.", ctx);
   }
   return resposta(
+    // A fala ecoa REDIGIDA (`justificativaSegura`); o valor verbatim é o que vai pro servidor —
+    // guardado sem redação em `autorizacaoPedido`, nunca o que aparece na tela.
     g(f, ctx, { autorizacaoPedido: { ...pedido, justificativa } }),
-    `Peço a autorização com essa justificativa: "${justificativa}"? Responda *sim* (ou *não* para desistir).`,
+    `Peço a autorização com essa justificativa: "${justificativaSegura(justificativa)}"? Responda *sim* (ou *não* para desistir).`,
     "captacao_autorizacao_justificativa"
   );
 }
@@ -2612,7 +2646,28 @@ function textoDeConfirmarAutorizacao(i: { solicitante: string; codigo: string; t
   return `Autorizar ${i.solicitante} a captar com ${alvoDaAutorizacao(i)} na ${i.codigo}?`;
 }
 
+/**
+ * Achado do smoke em staging (19/10): repetir o gatilho da fila DENTRO da
+ * fila ("tem pedido de autorização?" de novo, com o fluxo já em
+ * `autorizacao_fila`) caía no `PERGUNTA_FORA` (o texto termina em "?") e
+ * PAUSAVA — o modelo reescrevia a lista a partir do histórico, cortando o
+ * código CAP e perdendo o documento mascarado. Refaz a listagem
+ * DETERMINISTICAMENTE (nunca libera para o modelo) e descarta qualquer
+ * decisão em curso. Mesma regex de `pedeFilaDeAutorizacao` (a que `graph.ts`
+ * usa para abrir a fila). NUNCA chamar isto em `autorizacao_motivo`: ali o
+ * texto INTEIRO é o motivo da negativa, nunca o gatilho.
+ */
+async function relistarSeGatilhoDaFila(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo | null> {
+  if (!pedeFilaDeAutorizacao(ctx.texto)) return null;
+  // Escrita incerta em voo (a `acao` anterior ficou sem resposta e guardou a
+  // chave): não descarta sem avisar — mesmo tratamento de `cancelar()`.
+  if (f.autorizacaoChave) return respostaDeAutorizacaoIncerta("captacao_autorizacao_relistar_incerta");
+  return listarFilaDeAutorizacao(ctx, deps);
+}
+
 async function conduzirAutorizacaoFila(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const relist = await relistarSeGatilhoDaFila(f, ctx, deps);
+  if (relist) return relist;
   const itens = f.autorizacaoFila?.itens ?? [];
   const mAprovar = APROVAR_N.exec(t);
   if (mAprovar) {
@@ -2685,6 +2740,8 @@ async function conduzirAutorizacaoMotivo(f: FluxoCaptacao, ctx: ContextoDoTurno)
 async function conduzirAutorizacaoConfirmar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const decisao = f.autorizacaoDecisao;
   if (!decisao) return resposta(null, TEXTO_SEM_RESPOSTA, "captacao_autorizacao_confirmar_sem_contexto");
+  const relist = await relistarSeGatilhoDaFila(f, ctx, deps);
+  if (relist) return relist;
   if (lerConfirmacao(ctx.texto) === "nao") {
     if (f.autorizacaoChave) return respostaDeAutorizacaoIncerta("captacao_autorizacao_decisao_cancelada_incerta");
     return resposta(null, "Tudo bem, não decidi nada.", "captacao_autorizacao_decisao_cancelada");
