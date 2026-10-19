@@ -6,6 +6,7 @@ import {
   captacaoAutorizacaoLigada,
   TEXTO_CAPTACAO_SEM_POLITICA,
   CODIGOS_DA_AUTORIZACAO,
+  textoDoItemDaFila,
   type FluxoCaptacao,
 } from "../captacao";
 import { rebaixarFluxo, type ContextoDoTurno, type DepsDoFluxo, type RespostaDoServidor } from "../fluxos";
@@ -228,6 +229,28 @@ describe("corretor: oferta de autorização (verificar → autorizacao_oferta)",
     expect(acao).not.toHaveBeenCalled();
     expect(passo.reply).toContain('"o cliente pediu pra eu atender"');
     expect(passo.fluxo?.kind === "captacao" ? passo.fluxo.etapa : null).toBe("autorizacao_oferta");
+  });
+
+  it("justificativa livre com CPF: a confirmação ecoa REDIGIDA (nunca o CPF inteiro), mas o valor VERBATIM é o que vai pro servidor no 'sim'", async () => {
+    const acao = vi.fn(async (verb: string, args: Record<string, unknown>): Promise<RespostaDoServidor | null> => {
+      expect(verb).toBe("captacao.autorizacao.pedir");
+      // O que vai pro servidor é o texto ORIGINAL, sem redação — só a FALA é redigida.
+      expect(args).toEqual({
+        captacaoId: "cap-1", tipo: "proprietario", ref: "p1",
+        justificativa: "o CPF 111.444.777-35 já é cliente nosso",
+      });
+      return { status: 201, body: { autorizacao: { id: "aut-1", status: "pendente" }, tipo: "proprietario", ref: "p1" } };
+    });
+    const passo1 = await conduzirCaptacao(
+      fluxoNaOferta(), ctxDe("o CPF 111.444.777-35 já é cliente nosso", COM_CAP), depsCom(acao), true
+    );
+    expect(acao).not.toHaveBeenCalled();
+    expect(passo1.reply).not.toContain("111.444.777-35");
+    expect(passo1.reply).not.toMatch(CPF_INTEIRO);
+    expect(passo1.fluxo?.kind === "captacao" ? passo1.fluxo.etapa : null).toBe("autorizacao_oferta");
+    const passo2 = await conduzirCaptacao(passo1.fluxo as FluxoCaptacao, ctxDe("sim", COM_CAP), depsCom(acao), true);
+    expect(acao).toHaveBeenCalledTimes(1);
+    expect(passo2.reply).toContain("Pedido enviado ao seu gerente");
   });
 
   it("justificativa > 300 caracteres é recusada antes de perguntar confirmação", async () => {
@@ -559,6 +582,112 @@ describe("gerente: fila de autorização", () => {
     expect(passo.reply).toContain("Rua Augusta, 1250");
     expect(passo.reply).toContain("CAP-2026-0008");
     expect(passo.fluxo?.kind === "captacao" ? passo.fluxo.etapa : null).toBe("autorizacao_confirmar");
+  });
+
+  // ── achado do smoke em staging 19/10: repetir o gatilho da fila DENTRO da fila não pode liberar pro modelo ──
+  describe("repetir o gatilho da fila DENTRO da fila nunca libera pro modelo (achado do smoke 19/10)", () => {
+    it("em autorizacao_fila, 'tem pedido de autorização?' refaz a listagem (chama listar de novo) e NÃO pausa", async () => {
+      process.env.MAX_CAPTACAO_AUTORIZACAO = "true";
+      const acao = vi.fn(async (verb: string): Promise<RespostaDoServidor | null> => {
+        expect(verb).toBe("captacao.autorizacao.listar");
+        return {
+          status: 200,
+          body: {
+            items: [
+              { ref: 1, id: "aut-1", tipo: "proprietario", codigo: "CAP-2026-0007", solicitante: "Ana Souza", documento: "***.456.789-**", criadoEm: "2026-10-19T12:00:00.000Z" },
+            ],
+            total: 1,
+          },
+        };
+      });
+      const passo = await conduzirCaptacao(fluxoNaFila(), ctxDe("tem pedido de autorização?", COM_CAP), depsCom(acao), true);
+      expect(acao).toHaveBeenCalledTimes(1);
+      expect(acao).toHaveBeenCalledWith("captacao.autorizacao.listar", {});
+      expect(passo.reply).toContain("1. CAP-2026-0007");
+      expect(passo.reply).toContain("***.456.789-**");
+      expect(passo.reply).not.toMatch(/CAP-\s*$/); // código nunca cortado
+      // Nunca libera: nem `liberar` nem o evento de pausa.
+      expect(passo.liberar).toBeUndefined();
+      expect(passo.evento).not.toBe("captacao_pausado");
+      expect(passo.fluxo?.kind === "captacao" ? passo.fluxo.etapa : null).toBe("autorizacao_fila");
+    });
+
+    it("em autorizacao_confirmar, 'pedidos pendentes' refaz a listagem SEM chamar decidir, e NÃO pausa", async () => {
+      process.env.MAX_CAPTACAO_AUTORIZACAO = "true";
+      const acao = vi.fn(async (verb: string): Promise<RespostaDoServidor | null> => {
+        expect(verb).toBe("captacao.autorizacao.listar"); // nunca "captacao.autorizacao.decidir"
+        return { status: 200, body: { items: [], total: 0 } };
+      });
+      const f: FluxoCaptacao = {
+        kind: "captacao", etapa: "autorizacao_confirmar", tentativas: 0, atualizadoEm: Date.now(),
+        autorizacaoDecisao: { autorizacaoId: "aut-1", tipo: "proprietario", decisao: "aprovar", codigo: "CAP-2026-0007", solicitante: "Ana Souza", documento: "***.456.789-**" },
+      };
+      const passo = await conduzirCaptacao(f, ctxDe("pedidos pendentes", COM_CAP), depsCom(acao), true);
+      expect(acao).toHaveBeenCalledTimes(1);
+      expect(acao).toHaveBeenCalledWith("captacao.autorizacao.listar", {});
+      expect(passo.reply).toBe("Nenhum pedido aguardando você.");
+      expect(passo.liberar).toBeUndefined();
+      expect(passo.evento).not.toBe("captacao_pausado");
+      expect(passo.fluxo).toBeNull(); // lista vazia: `listarFilaDeAutorizacao` não inicia fluxo
+    });
+
+    it("em autorizacao_motivo, o MESMO texto do gatilho é tratado como o motivo (nunca reinterpretado)", async () => {
+      process.env.MAX_CAPTACAO_AUTORIZACAO = "true";
+      const acao = vi.fn(async (): Promise<RespostaDoServidor | null> => { throw new Error("não deveria chamar"); });
+      const f: FluxoCaptacao = {
+        kind: "captacao", etapa: "autorizacao_motivo", tentativas: 0, atualizadoEm: Date.now(),
+        autorizacaoDecisao: { autorizacaoId: "aut-2", tipo: "imovel", decisao: "negar", codigo: "CAP-2026-0008", solicitante: "Bruno Lima", imovel: "Rua Augusta, 1250" },
+      };
+      const passo = await conduzirCaptacao(f, ctxDe("tem pedido de autorização?", COM_CAP), depsCom(acao), true);
+      expect(acao).not.toHaveBeenCalled();
+      // Virou o motivo verbatim na confirmação — não a listagem.
+      expect(passo.reply).toContain('"tem pedido de autorização?"');
+      expect(passo.fluxo?.kind === "captacao" ? passo.fluxo.etapa : null).toBe("autorizacao_confirmar");
+    });
+    it("relistar com escrita incerta (autorizacaoChave) avisa que pode ter chegado e não chama listar nem decidir", async () => {
+      process.env.MAX_CAPTACAO_AUTORIZACAO = "true";
+      const acao = vi.fn(async (): Promise<RespostaDoServidor | null> => { throw new Error("não deveria chamar"); });
+      const f: FluxoCaptacao = {
+        kind: "captacao", etapa: "autorizacao_confirmar", tentativas: 0, atualizadoEm: Date.now(),
+        autorizacaoDecisao: { autorizacaoId: "aut-1", tipo: "proprietario", decisao: "aprovar", codigo: "CAP-2026-0007", solicitante: "Ana Souza", documento: "***.456.789-**" },
+        autorizacaoChave: { valor: "msg-um", args: { autorizacaoId: "aut-1", decisao: "aprovar" } },
+      };
+      const passo = await conduzirCaptacao(f, ctxDe("tem pedido de autorização?", COM_CAP), depsCom(acao), true);
+      expect(acao).not.toHaveBeenCalled();
+      expect(passo.reply).toContain("pode ter chegado ao sistema");
+    });
+
+    it("relistar em autorizacao_confirmar com lista NÃO vazia: o 'sim' seguinte não decide (a confirmação antiga caiu)", async () => {
+      process.env.MAX_CAPTACAO_AUTORIZACAO = "true";
+      const verbos: string[] = [];
+      const acao = vi.fn(async (verb: string): Promise<RespostaDoServidor | null> => {
+        verbos.push(verb);
+        return {
+          status: 200,
+          body: { items: [{ ref: 1, id: "aut-9", tipo: "proprietario", codigo: "CAP-2026-0009", solicitante: "Carla Dias", documento: "***.111.222-**", criadoEm: "2026-10-19T12:00:00.000Z" }], total: 1 },
+        };
+      });
+      const f: FluxoCaptacao = {
+        kind: "captacao", etapa: "autorizacao_confirmar", tentativas: 0, atualizadoEm: Date.now(),
+        autorizacaoDecisao: { autorizacaoId: "aut-1", tipo: "proprietario", decisao: "aprovar", codigo: "CAP-2026-0007", solicitante: "Ana Souza", documento: "***.456.789-**" },
+      };
+      const p1 = await conduzirCaptacao(f, ctxDe("pedidos pendentes", COM_CAP, "msg-lista"), depsCom(acao), true);
+      expect(p1.fluxo?.kind === "captacao" ? p1.fluxo.etapa : null).toBe("autorizacao_fila");
+      await conduzirCaptacao(p1.fluxo as FluxoCaptacao, ctxDe("sim", COM_CAP, "msg-sim"), depsCom(acao), true);
+      expect(verbos).not.toContain("captacao.autorizacao.decidir");
+    });
+  });
+
+  describe("justificativa exibida ao gerente (review 19/10)", () => {
+    const base = { ref: 1, id: "aut-1", tipo: "proprietario" as const, codigo: "CAP-2026-0007", solicitante: "Ana Souza", documento: "***.456.789-**", criadoEm: "2026-10-19T12:00:00.000Z" };
+    it("mantém valores e o código CAP; esconde CPF válido, CPF pontuado com DV inválido e e-mail", () => {
+      const t = textoDoItemDaFila({ ...base, justificativa: "fechou por R$ 500 mil na CAP-2026-0003; CPF 123.456.789-00, outro 529.982.247-25, mail ana@x.com" });
+      expect(t).toContain("R$ 500 mil");
+      expect(t).toContain("CAP-2026-0003");
+      expect(t).not.toContain("123.456.789-00");
+      expect(t).not.toContain("529.982.247-25");
+      expect(t).not.toContain("ana@x.com");
+    });
   });
 
   it('achado de review 19/10 (item 5): motivo com "desisto"/"não quero mais" NO MEIO da frase é motivo — não cancela, e não é roubado por `pedeCaptacao`', async () => {
