@@ -29,7 +29,7 @@ export function pedeCapacidades(texto: string): boolean {
   return PEDE_CAPACIDADES.test(t.trim());
 }
 
-export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: boolean, credito = false, captacao = false): string {
+export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: boolean, credito = false, captacao = false, autorizacao = false): string {
   const tem = (c: Capability) => policy.includes(c);
   const linhas: string[] = [];
   const proposta: string[] = [];
@@ -58,6 +58,10 @@ export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: 
     } else if (tem("captacao.list")) {
       linhas.push("- Captação: consultar e ver o status.");
     }
+  }
+  // Fila de autorização (v2/PR7): só pra quem decide (gerente/admin), e só com a flag ligada.
+  if (autorizacao && tem("captacao.autorizacao.decidir")) {
+    linhas.push("- Autorização de captação: listar pedidos pendentes, aprovar e negar.");
   }
   if (!linhas.length) return "Por aqui eu tiro dúvidas sobre o processo da imobiliária. Para o resto, fale com a imobiliária.";
   linhas.push("Contrato e cobrança são pela tela do negócio no sistema.");

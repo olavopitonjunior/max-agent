@@ -50,6 +50,11 @@ export const VERBOS_DE_ACAO = [
   "captacao.preflight",
   "captacao.send",
   "captacao.list",
+  // Autorização de reaproveitamento (v2/PR7, par do contractmaker#1863): `pedir` e
+  // `decidir` levam `x-idempotency-key` (a `messageId` do "sim"); `listar` não.
+  "captacao.autorizacao.pedir",
+  "captacao.autorizacao.listar",
+  "captacao.autorizacao.decidir",
 ] as const;
 export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
 

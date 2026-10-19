@@ -1,12 +1,20 @@
 import { describe, it, expect } from "vitest";
 import {
+  CODIGOS_DA_AUTORIZACAO,
   CODIGOS_DO_ENVIO,
   TEXTO_POR_CODIGO,
+  TEXTO_POR_CODIGO_AUTORIZACAO,
+  lerAutorizacaoDecisao,
+  lerAutorizacaoPedido,
   lerCampoDeOpcoes,
   lerCanalPadrao,
+  lerFilaDeAutorizacoes,
   lerItemDaCaptacao,
+  lerItemDaFilaDeAutorizacao,
   lerPreflight,
+  textoDaFilaDeAutorizacoes,
   textoDaLista,
+  textoDoCodigoDeAutorizacao,
   textoDoCodigoDeEnvio,
   textoDoItemDaCaptacao,
   textoDoPreflight,
@@ -452,5 +460,165 @@ describe("paridade: canalPadrao de captacao.options (v2/PR5, preparação — ai
   it("sem canalPadrao, ou com valor fora do catálogo, devolve null (fail-closed)", () => {
     expect(lerCanalPadrao({})).toBeNull();
     expect(lerCanalPadrao({ canalPadrao: "pombo-correio" })).toBeNull();
+  });
+});
+
+/**
+ * v2/PR7 (par do contractmaker#1863, PR#86): autorização de reaproveitamento pelo Max.
+ * Literais COPIADOS BYTE A BYTE de `captacao-vectors.ts` do contractmaker — nunca
+ * importados (regra 1 da governança do Max). `AUTORIZACAO_PEDIDO`/`AUTORIZACAO_DECISAO`
+ * e `FILA_DE_AUTORIZACOES` (ambos em `docs/max.md` §18.12) ficam de lado como referência
+ * do que o servidor NUNCA manda ao Max — nome, CPF inteiro, motivo, corretor dono.
+ */
+const AUTORIZACAO_PEDIDO_SERIALIZADO =
+  '{"autorizacao":{"id":"aut-1","status":"pendente"},"tipo":"proprietario","ref":"p1"}';
+
+const AUTORIZACOES_LISTA_SERIALIZADO =
+  '{"items":[{"ref":1,"id":"aut-1","tipo":"proprietario","codigo":"CAP-2026-0007","solicitante":"Ana Souza",' +
+  '"documento":"***.456.789-**","criadoEm":"2026-10-19T12:00:00.000Z","justificativa":"Cliente pediu para eu atender"},' +
+  '{"ref":2,"id":"aut-2","tipo":"imovel","codigo":"CAP-2026-0008","solicitante":"Bruno Lima",' +
+  '"imovel":"Rua Augusta, 1250","criadoEm":"2026-10-19T13:30:00.000Z"}],"total":2}';
+
+const AUTORIZACAO_DECISAO_SERIALIZADO = '{"autorizacao":{"id":"aut-1","status":"aprovada"}}';
+
+/** Lista fechada de `CODIGOS_DE_ERRO_DA_AUTORIZACAO`, mesma ordem do ImobPro. */
+const CODIGOS_DA_AUTORIZACAO_LITERAL = [
+  "tipo_invalido", "ref_obrigatorio", "captacao_id_obrigatorio", "justificativa_grande", "nao_e_rascunho",
+  "nao_precisa_autorizacao", "documento_invalido", "pedido_invalido", "autorizacao_id_obrigatorio",
+  "decisao_invalida", "motivo_obrigatorio", "nao_pendente", "solicitante_nao_decide",
+  "motivo_grande",
+];
+
+describe("paridade: captacao.autorizacao.pedir (lado max-agent)", () => {
+  it("lê autorização, tipo e ref exatamente como o ImobPro emite — sem nome, CPF, motivo nem outro corretor", () => {
+    const lido = lerAutorizacaoPedido(JSON.parse(AUTORIZACAO_PEDIDO_SERIALIZADO));
+    expect(lido).toEqual({ id: "aut-1", status: "pendente", tipo: "proprietario", ref: "p1" });
+  });
+
+  it("sem autorização.id/status ou tipo/ref não é lido (fail-closed)", () => {
+    expect(lerAutorizacaoPedido({})).toBeNull();
+    expect(lerAutorizacaoPedido({ autorizacao: { id: "x" }, tipo: "proprietario", ref: "p1" })).toBeNull();
+  });
+
+  it.each(caminhos(JSON.parse(AUTORIZACAO_PEDIDO_SERIALIZADO)).map((c) => [c.join(".")] as const))(
+    "remover `%s` muda a estrutura lida — prova que a chave é LIDA",
+    (caminho) => {
+      const completo = lerAutorizacaoPedido(JSON.parse(AUTORIZACAO_PEDIDO_SERIALIZADO));
+      const mutilado = lerAutorizacaoPedido(semChave(AUTORIZACAO_PEDIDO_SERIALIZADO, caminho.split(".")));
+      expect(mutilado, caminho).not.toEqual(completo);
+    }
+  );
+});
+
+describe("paridade: captacao.autorizacao.listar (lado max-agent)", () => {
+  it("lê os dois itens (proprietario com documento mascarado, imovel com endereço curto) exatamente como o ImobPro emite", () => {
+    const { items, total } = lerFilaDeAutorizacoes(JSON.parse(AUTORIZACOES_LISTA_SERIALIZADO));
+    expect(total).toBe(2);
+    expect(items).toEqual([
+      {
+        ref: 1, id: "aut-1", tipo: "proprietario", codigo: "CAP-2026-0007", solicitante: "Ana Souza",
+        documento: "***.456.789-**", criadoEm: "2026-10-19T12:00:00.000Z", justificativa: "Cliente pediu para eu atender",
+      },
+      {
+        ref: 2, id: "aut-2", tipo: "imovel", codigo: "CAP-2026-0008", solicitante: "Bruno Lima",
+        imovel: "Rua Augusta, 1250", criadoEm: "2026-10-19T13:30:00.000Z",
+      },
+    ]);
+  });
+
+  it("lista vazia diz 'Nenhum pedido aguardando você.'", () => {
+    expect(textoDaFilaDeAutorizacoes({ items: [], total: 0 })).toBe("Nenhum pedido aguardando você.");
+  });
+
+  it("item sem `ref` válido (inteiro ≥ 1) é DESCARTADO — nunca vira 0 (achado de review 19/10)", () => {
+    const base = { id: "aut-1", tipo: "proprietario", codigo: "CAP-2026-0007", solicitante: "Ana Souza", criadoEm: "2026-10-19T12:00:00.000Z" };
+    expect(lerItemDaFilaDeAutorizacao({ ...base })).toBeNull(); // sem `ref`
+    expect(lerItemDaFilaDeAutorizacao({ ...base, ref: 0 })).toBeNull(); // 0 não é um número de item válido
+    expect(lerItemDaFilaDeAutorizacao({ ...base, ref: -1 })).toBeNull();
+    expect(lerItemDaFilaDeAutorizacao({ ...base, ref: 1.5 })).toBeNull();
+    expect(lerItemDaFilaDeAutorizacao({ ...base, ref: "1" })).toBeNull();
+    expect(lerItemDaFilaDeAutorizacao({ ...base, ref: 1 })?.ref).toBe(1);
+  });
+
+  it("na lista inteira, um item sem `ref` válido é removido (não aparece como ref:0)", () => {
+    const { items, total } = lerFilaDeAutorizacoes({
+      items: [
+        { id: "aut-1", tipo: "proprietario", codigo: "CAP-2026-0007", solicitante: "Ana Souza", criadoEm: "2026-10-19T12:00:00.000Z" },
+        { ref: 2, id: "aut-2", tipo: "imovel", codigo: "CAP-2026-0008", solicitante: "Bruno Lima", criadoEm: "2026-10-19T13:30:00.000Z" },
+      ],
+      total: 2,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]!.ref).toBe(2);
+    expect(items.some((i) => i.ref === 0)).toBe(false);
+    expect(total).toBe(2); // `total` é o que o servidor mandou, não recontado
+  });
+
+  it("o texto da fila nunca traz CPF/CNPJ inteiro nem nome do corretor dono da carteira (ausentes do vetor)", () => {
+    const texto = textoDaFilaDeAutorizacoes(JSON.parse(AUTORIZACOES_LISTA_SERIALIZADO));
+    expect(texto).toContain("Ana Souza");
+    expect(texto).toContain("***.456.789-**");
+    expect(texto).not.toMatch(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/);
+    expect(texto).not.toContain("Carlos Dono");
+    expect(texto).not.toContain("Maria Silva");
+  });
+
+  it.each(
+    // Exceto `total`: removê-lo cai no fallback `items.length`, que já vale 2 neste vetor — não
+    // provaria menos sobre a leitura, só coincide com o valor-padrão (mesma ressalva do preflight).
+    caminhos(JSON.parse(AUTORIZACOES_LISTA_SERIALIZADO)).map((c) => c.join(".")).filter((c) => c !== "total").map((c) => [c] as const)
+  )(
+    "remover `%s` muda a estrutura lida — prova que a chave é LIDA",
+    (caminho) => {
+      const completo = lerFilaDeAutorizacoes(JSON.parse(AUTORIZACOES_LISTA_SERIALIZADO));
+      const mutilado = lerFilaDeAutorizacoes(semChave(AUTORIZACOES_LISTA_SERIALIZADO, caminho.split(".")));
+      expect(mutilado, caminho).not.toEqual(completo);
+    }
+  );
+});
+
+describe("paridade: captacao.autorizacao.decidir (lado max-agent)", () => {
+  it("lê id e status exatamente como o ImobPro emite", () => {
+    expect(lerAutorizacaoDecisao(JSON.parse(AUTORIZACAO_DECISAO_SERIALIZADO))).toEqual({ id: "aut-1", status: "aprovada" });
+  });
+
+  it("sem autorizacao.id/status não é lido (fail-closed)", () => {
+    expect(lerAutorizacaoDecisao({})).toBeNull();
+  });
+
+  it.each(caminhos(JSON.parse(AUTORIZACAO_DECISAO_SERIALIZADO)).map((c) => [c.join(".")] as const))(
+    "remover `%s` muda a estrutura lida — prova que a chave é LIDA",
+    (caminho) => {
+      const completo = lerAutorizacaoDecisao(JSON.parse(AUTORIZACAO_DECISAO_SERIALIZADO));
+      const mutilado = lerAutorizacaoDecisao(semChave(AUTORIZACAO_DECISAO_SERIALIZADO, caminho.split(".")));
+      expect(mutilado, caminho).not.toEqual(completo);
+    }
+  );
+});
+
+describe("paridade: códigos da autorização (lado max-agent)", () => {
+  it("a lista de códigos é a literal do ImobPro, na mesma ordem", () => {
+    expect([...CODIGOS_DA_AUTORIZACAO]).toEqual(CODIGOS_DA_AUTORIZACAO_LITERAL);
+  });
+
+  it("o mapa de texto cobre exatamente esses códigos, na mesma ordem", () => {
+    expect(Object.keys(TEXTO_POR_CODIGO_AUTORIZACAO)).toEqual(CODIGOS_DA_AUTORIZACAO_LITERAL);
+  });
+
+  it("todo código tem texto próprio em português, sem 'undefined' e sem PII (o parser do max-agent lê cada um)", () => {
+    const link = "https://imobpro.ia.br/imoveis/captacoes/cap-1";
+    const textos = CODIGOS_DA_AUTORIZACAO_LITERAL.map((c) => textoDoCodigoDeAutorizacao(c, { link }));
+    for (const t of textos) {
+      expect(t.length).toBeGreaterThan(5);
+      expect(t).not.toContain("undefined");
+      expect(t).not.toMatch(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/);
+    }
+  });
+
+  it("código desconhecido vira texto neutro mais o link, nunca o que o servidor escreveu", () => {
+    const link = "https://imobpro.ia.br/imoveis/captacoes/cap-1";
+    const t = textoDoCodigoDeAutorizacao("codigo_do_futuro", { link });
+    expect(t).toContain(link);
+    expect(t).not.toContain("codigo_do_futuro");
   });
 });

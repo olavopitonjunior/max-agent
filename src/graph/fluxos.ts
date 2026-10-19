@@ -735,7 +735,24 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   // Com `chave` (send sem resposta) a etapa fica: o "enviar" seguinte repete a mesma chave e args.
   if (f.kind === "captacao") {
     if (f.chave) return f.pausado ? { ...f, pausado: false } : f;
-    return f.etapa === "revisao" || f.etapa === "brancos" ? { ...f, etapa: "verificar", pausado: false } : f;
+    // v2/PR7 (achado de review 19/10, item 2): retry de pedir/decidir sem resposta — a chave
+    // guardada não pode ser perdida (senão o próximo "sim" geraria uma chave nova), mesmo
+    // padrão de `f.chave` acima.
+    // Só nas etapas da própria autorização (review 19/10, 3ª rodada): fora delas a chave não
+    // pode segurar `revisao`/`brancos` — o "enviar" seguinte sairia sem resumo novo.
+    if (f.autorizacaoChave && (f.etapa === "autorizacao_oferta" || f.etapa === "autorizacao_confirmar")) {
+      return f.pausado ? { ...f, pausado: false } : f;
+    }
+    if (f.etapa === "revisao" || f.etapa === "brancos") return { ...f, etapa: "verificar", pausado: false };
+    // v2/PR7: a oferta ao corretor (o "sim" pede autorização) volta pra conferência — o
+    // próximo "sim" refaz o preflight e o bloqueio (se ainda existir) é oferecido de novo.
+    if (f.etapa === "autorizacao_oferta") return { ...f, etapa: "verificar", pausado: false, autorizacaoPedido: undefined };
+    // A confirmação do gerente (sim decide; motivo faz parte do texto, não escreve) volta pra
+    // lista — a decisão em curso é descartada, e a pessoa escolhe de novo.
+    if (f.etapa === "autorizacao_motivo" || f.etapa === "autorizacao_confirmar") {
+      return { ...f, etapa: "autorizacao_fila", pausado: false, autorizacaoDecisao: undefined };
+    }
+    return f;
   }
   if (f.kind === "negocio" && f.etapa === "revisao") return { ...f, etapa: "campos", forcar: undefined };
   if (f.kind === "proposta") {
@@ -1140,7 +1157,14 @@ export async function conduzirFluxo(
   if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (fluxo.kind === "gestao") return conduzirGestao(fluxo, ctx, deps);
   if (fluxo.kind === "credito") return conduzirCredito(fluxo, ctx, deps);
-  if (fluxo.kind === "captacao") return conduzirCaptacao(fluxo, ctx, deps, ctx.policy.includes("captacao.create"));
+  // v2/PR7: o gerente da fila de autorização pode não ter `captacao.create` — o gate exato
+  // por etapa é feito dentro de `conduzirCaptacao` (`gatePolitica`); aqui só decide se este
+  // sujeito tem QUALQUER capability de captação, para não bloquear antes de saber qual etapa.
+  if (fluxo.kind === "captacao") {
+    const podeEscrever = ctx.policy.includes("captacao.create") ||
+      ctx.policy.includes("captacao.autorizacao.pedir") || ctx.policy.includes("captacao.autorizacao.decidir");
+    return conduzirCaptacao(fluxo, ctx, deps, podeEscrever);
+  }
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };
   }
