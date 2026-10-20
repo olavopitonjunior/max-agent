@@ -1,3 +1,4 @@
+import { expireLeases } from "@/lib/runtime/store";
 import { NextRequest, NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/auth";
 import { podarTextoDaFila, sweepInbound } from "@/lib/inbound";
@@ -31,6 +32,7 @@ export async function GET(req: NextRequest) {
   if (denied) return denied;
 
   try {
+    if(process.env.MAX_RUNTIME_V1 === "true" || process.env.MAX_MARKETING === "true") await expireLeases();
     const totals = await sweepInbound();
     // Carona no cron que já existe, mas UMA vez por hora (minuto 0): o TTL é
     // de meio ano — varrer a tabela sem índice de updated_at a cada minuto

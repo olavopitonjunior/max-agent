@@ -1,3 +1,4 @@
+import { withBotFence } from "./runtime/handoff";
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, type InboundMessage } from "./transport";
@@ -46,6 +47,8 @@ export interface InboundRow extends Record<string, unknown> {
   button_payload: string | null;
   attempts: number;
   reply_text: string | null;
+  control_org_id?: string | null;
+  control_version?: number | null;
   /** Turno da ficha de crédito: `reply_text` está redigido (migration 021). */
   sensivel?: boolean;
   /** O envio COMEÇOU numa tentativa (ver migration 007). */
@@ -103,7 +106,7 @@ export async function enqueueInbound(
 
 const CLAIM_COLUMNS = `id, message_id, from_phone, group_id, kind, text,
   media_url, mime_type, sender_name, reply_to_message_id, timestamp_ms,
-  button_payload, attempts, reply_text, sensivel, last_send_started_at`;
+  button_payload, attempts, reply_text, sensivel, last_send_started_at, control_org_id, control_version`;
 
 /**
  * Dá pra responder agora?
@@ -313,8 +316,13 @@ export const TEXTO_REENVIO_SENSIVEL =
   "Tive um problema para enviar sua resposta. Mande *RESUMO* para ver a ficha de novo.";
 
 export async function runQueued(row: InboundRow): Promise<SettleStatus> {
+  if (process.env.MAX_OUTBOUND_KILL === "true") {
+    await query(`UPDATE inbound_queue SET status='pending',attempts=GREATEST(attempts-1,0),last_error='outbound_disabled: held without attempt' WHERE id=$1`,[row.id]);
+    return "retry";
+  }
   try {
     let reply = row.reply_text;
+    let control = row.control_org_id && row.control_version != null ? { orgId: row.control_org_id, controlVersion: row.control_version } : undefined;
     /**
      * Trabalho pós-resposta do turn — hoje, a extração de memória.
      *
@@ -327,6 +335,8 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
     if (reply == null) {
       const turn = await runTurn(toInboundMessage(row));
       reply = turn.reply;
+      control = turn.control;
+      if (control) await query(`UPDATE inbound_queue SET control_org_id=$2,control_version=$3 WHERE id=$1`, [row.id, control.orgId, control.controlVersion]);
       afterReply = turn.afterReply;
       // Grava mesmo quando é null: "o grafo decidiu não responder" é resultado,
       // e sem persistir isso a retentativa rodaria o modelo de novo à toa.
@@ -380,11 +390,20 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
       );
       let res;
       try {
-        res = await sendText({
-          to: row.from_phone,
-          body: reply,
-          quoteMessageId: row.message_id,
-        });
+        const send = () => sendText({ to: row.from_phone, body: reply!, quoteMessageId: row.message_id });
+        if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
+        if (process.env.MAX_HANDOFF === "true" && control) {
+          const dispatch = await withBotFence(control.orgId, row.from_phone, control.controlVersion, send);
+          if (!dispatch.sent) {
+            await query(`UPDATE inbound_queue SET status='done',settled_at=now(),last_error='control_version_changed: bot reply suppressed' WHERE id=$1`, [row.id]);
+            if (afterReply) await afterReply();
+            return "done";
+          }
+          res = dispatch.result;
+        } else if (process.env.MAX_HANDOFF === "true" && row.reply_text != null && !control) {
+          await query(`UPDATE inbound_queue SET status='done',settled_at=now(),last_error='control_version_missing: stale bot reply suppressed' WHERE id=$1`, [row.id]);
+          return "done";
+        } else res = await send();
       } catch (err) {
         /**
          * Envio FALHOU: limpa o marcador para que a retentativa reenvie de

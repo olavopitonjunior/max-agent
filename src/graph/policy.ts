@@ -137,6 +137,14 @@ export const CAPABILITIES = [
    */
   "captacao.autorizacao.pedir",
   "captacao.autorizacao.decidir",
+  "notification.list",
+  "activity.list",
+  "metrics.get",
+  "property.list",
+  "property.detail",
+  "contract.status",
+  "marketing.read",
+  "marketing.generate",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

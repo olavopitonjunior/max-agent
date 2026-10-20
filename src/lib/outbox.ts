@@ -354,6 +354,7 @@ export async function dispatchDue(
   iniciadoEm?: number
 ): Promise<DispatchTotals> {
   const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0, held: 0, expired: 0, coalesced: 0 };
+  if (process.env.MAX_OUTBOUND_KILL === "true") return totals;
 
   /**
    * ── A checagem que faltava ─────────────────────────────────────────────

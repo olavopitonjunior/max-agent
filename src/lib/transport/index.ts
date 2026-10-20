@@ -1,3 +1,4 @@
+import { currentExecution } from "../runtime/context";
 /**
  * A porta única do Max para o WhatsApp.
  *
@@ -54,6 +55,8 @@ export async function sendText(params: {
   body: string;
   quoteMessageId?: string;
 }): Promise<SendResult> {
+  if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
+  if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
   provider();
   return meta.sendText(params);
 }
@@ -69,6 +72,8 @@ export async function sendTemplate(params: {
   bodyParams: string[];
   botoes: BotaoEnviado[];
 }): Promise<SendResult> {
+  if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
+  if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
   provider();
   return meta.sendTemplate(params);
 }

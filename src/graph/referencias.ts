@@ -68,7 +68,7 @@ function rotuloDe(item: Record<string, unknown>, tipo: TipoDeReferencia): string
     const v = item[campo];
     if (typeof v === "string" && v.trim()) return v.trim().slice(0, 80);
   }
-  return tipo === "proposta" ? "Proposta" : "Negócio";
+  return ({proposta:"Proposta",negocio:"Negócio",imovel:"Imóvel",atividade:"Atividade",notificacao:"Notificação",contrato:"Contrato"})[tipo];
 }
 
 /**

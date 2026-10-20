@@ -1,3 +1,10 @@
+import { privacyEpoch, protectCheckpoint } from "@/lib/runtime/privacy";
+import { marketingStep, type MarketingPending } from "./marketing";
+import { withExecution, withExistingExecution, currentExecution } from "@/lib/runtime/context";
+import { WORKFLOW_VERSION, contentDigest, type ExecutionContext } from "@/lib/runtime/contracts";
+import { startTask, finishTask, executeIntent } from "@/lib/runtime/store";
+import { getControl, assertBotWrite } from "@/lib/runtime/handoff";
+import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
@@ -115,7 +122,7 @@ import {
 } from "./fluxos";
 import { executarAcao, type VerboDeAcao } from "@/lib/acao";
 import { OrgSuspensaError, TEXTO_ORG_SUSPENSA } from "@/lib/org-suspensa";
-import { subjectDe } from "@/lib/scope";
+import { subjectDe, consultarEscopo } from "@/lib/scope";
 import { chaveDePolitica } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
 import { SEM_ORG } from "@/lib/sem-org";
@@ -233,6 +240,7 @@ function blindarCredito(state: MaxStateType, update: MaxUpdate): MaxUpdate {
 }
 
 export const MaxState = Annotation.Root({
+  marketingPending: Annotation<MarketingPending | null>({ reducer: (_p,n) => n, default: () => null }),
   inbound: Annotation<InboundMessage>,
   /** Resolvida ANTES do grafo — é ela que determina o `thread_id`. */
   identity: Annotation<Candidate>,
@@ -555,7 +563,7 @@ export type MaxUpdate = typeof MaxState.Update;
  * cada call-site, é o que impede o próximo caminho de entrada de reabrir o bug.
  */
 export function threadIdFor(orgId: string, phone: string): string {
-  return `${orgId}:${conversationKey(phone)}`;
+  return scopedThreadId(orgId, phone);
 }
 
 /**
@@ -643,6 +651,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
   if (orgSuspensa) {
     console.warn(`[gate] org suspensa no ImobPro: ${state.identity.orgId}`);
     return {
+      marketingPending: null,
       halt: "org_suspensa",
       pendingAction: null,
       restoDaResposta: null,
@@ -653,6 +662,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
 
   if (profile && !profile.enabled) {
     return {
+      marketingPending: null,
       halt: "desligado",
       pendingAction: null,
       restoDaResposta: null,
@@ -686,6 +696,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       `[gate] assunto bloqueado (${bloqueado}) em ${state.identity.orgId}`
     );
     return {
+      marketingPending: null,
       halt: `assunto_bloqueado:${bloqueado}`,
       // Ver o descarte no kill switch acima: `halt` desvia do `confirm`, e uma
       // pendência que atravessa o turn vira escrita confirmada por engano.
@@ -879,6 +890,15 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const agora = Date.now();
   const userText = textoDoTurno(state).trim();
   const usage: LlmUsage[] = [];
+  const marketing = await marketingStep({ text: userText, messageId: state.inbound.messageId, now: agora, canWrite: podeEscrever(state.identity), policy: state.policy, pending: state.marketingPending }, async (verb,args,key) => {
+    if (verb === "property.list") {
+      if (!state.policy.includes("property.list")) return null;
+      const result = await consultarEscopo({orgId:state.identity.orgId,rawPhone:state.inbound.fromPhone,subject:subjectDe(state.identity),verb:"property.list",args});
+      return result ? {status:200,body:{...result}} : null;
+    }
+    return depsDoFluxo(state,usage).acao(verb,args,key);
+  });
+  if (marketing) return { reply: marketing.reply, marketingPending: marketing.pending, pendingAction: null, fluxo: rebaixarFluxo(state.fluxo), messages: [{role:"user",content:userText},{role:"assistant",content:marketing.reply}], toolLog: [{name:"marketing",args:{},outcome:marketing.event}] };
   const vencido = state.fluxo && fluxoExpirou(state.fluxo, agora);
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
   // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
@@ -1255,7 +1275,17 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
  * Fora do `confirm` para que aquele nó continue legível como máquina de estado:
  * lá se decide SE executa, aqui O QUE se executa.
  */
-async function executar(
+async function executar(state:MaxStateType,args:PendingAction["args"],idempotencyKey:string):Promise<string>{
+  const execution=currentExecution();
+  if(!execution)return executarCriacaoDireta(state,args,idempotencyKey);
+  if(process.env.MAX_WRITES_KILL==="true")throw new Error("writes_disabled");
+  await assertBotWrite(execution.context,state.inbound.fromPhone);
+  const result=await executeIntent({verb:args.tipo==="proposta"?"proposal.create":"form.create",key:idempotencyKey,args},async()=>({status:200,body:{url:await executarCriacaoDireta(state,args,idempotencyKey)}}));
+  if(!result||result.status!==200||typeof result.body.url!=="string")throw new Error("execution_unknown");
+  return result.body.url;
+}
+
+async function executarCriacaoDireta(
   state: MaxStateType,
   args: PendingAction["args"],
   idempotencyKey: string
@@ -1981,7 +2011,11 @@ function cronometrar(
 ): (state: MaxStateType) => Promise<MaxUpdate> {
   return async (state) => {
     const iniciadoEm = Date.now();
+    runEvent("agent.started", no);
     const update = blindarCredito(state, await fn(state));
+    const specialized = (update.fluxo as {kind?:string}|null|undefined)?.kind ?? (no === "conduzir" ? state.fluxo?.kind : undefined);
+    if (specialized) { runEvent("specialist.completed", specialized, { implementation: "deterministic-flow", model: null }); }
+    runEvent("agent.completed", no, { durationMs: Date.now() - iniciadoEm });
     return { ...update, timings: [{ no, ms: Date.now() - iniciadoEm }] };
   };
 }
@@ -2047,6 +2081,10 @@ export async function getCheckpointer(): Promise<PostgresSaver> {
     // Só vira singleton DEPOIS do setup: um saver cujo DDL falhou não pode
     // ficar cacheado, senão a instância inteira fica presa a ele até o próximo
     // cold start (é o que o `getApp` promete ao não cachear falha).
+    const put = saver.put.bind(saver);
+    const putWrites = saver.putWrites.bind(saver);
+    saver.put = ((...args: Parameters<typeof put>) => protectCheckpoint(() => put(...args))) as typeof saver.put;
+    saver.putWrites = ((...args: Parameters<typeof putWrites>) => protectCheckpoint(() => putWrites(...args))) as typeof saver.putWrites;
     checkpointer = saver;
   }
   return checkpointer;
@@ -2078,6 +2116,16 @@ export function getApp(): Promise<AppCompilado> {
   return appCompilado;
 }
 
+/** Playground uses this exact compiled graph while raw text stays out of checkpoints. */
+export async function invokeIsolatedGraph(inbound: InboundMessage, identity: Candidate, threadId: string) {
+  const app = await getApp();
+  TURNO_CRU.set(inbound.messageId, { texto: inbound.text ?? "" });
+  try {
+    const result = await app.invoke({ ...RESET_DO_TURN, identity, facts: {}, inbound: { ...inbound, text: null } }, { configurable: { thread_id: threadId } });
+    return { ...result, reply: TURNO_CRU.get(inbound.messageId)?.reply ?? result.reply };
+  } finally { TURNO_CRU.delete(inbound.messageId); }
+}
+
 /**
  * Um turn completo.
  *
@@ -2087,6 +2135,7 @@ export function getApp(): Promise<AppCompilado> {
  * conversa em duas memórias.
  */
 export interface TurnResult {
+  control?: { orgId: string; controlVersion: number };
   reply: string | null;
   /**
    * Trabalho que só pode acontecer DEPOIS de a resposta sair: o registro de
@@ -2163,7 +2212,7 @@ export const RESET_DO_TURN = {
     piiMap: {},
 };
 
-export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
+async function runTurnCore(inbound: InboundMessage): Promise<TurnResult> {
   // Latência do TURN, não do modelo: inclui identidade, transcrição, RAG e
   // checkpoint. É esse número que a pessoa sente, e é o que o painel mostra.
   const iniciadoEm = Date.now();
@@ -2595,4 +2644,33 @@ async function transcreverMidia(
     mimeType,
     data: baixado.data,
   });
+}
+
+/** Opt-in durable execution. Existing deterministic paths stay on the same graph. */
+export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
+ if (currentExecution() || (process.env.MAX_RUNTIME_V1 !== "true" && process.env.MAX_HANDOFF !== "true" && process.env.MAX_MARKETING !== "true")) return runTurnCore(inbound);
+ if (process.env.MAX_CHAT_KILL === "true") return { reply: null, afterReply: async () => {} };
+ const identity = await resolveIdentity(inbound.fromPhone);
+ if (identity.kind !== "resolved") return runTurnCore(inbound);
+ const orgId = identity.candidate.orgId;
+ const control = await getControl(orgId, inbound.fromPhone);
+ const fence = { orgId, controlVersion: control.controlVersion };
+ // No automatic return to the bot and no public draft while a human owns this conversation.
+ const hash = contentDigest({ orgId, messageId: inbound.messageId });
+ const taskId = `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-8${hash.slice(17,20)}-${hash.slice(20,32)}`;
+ const personDigest = contentDigest(conversationKey(inbound.fromPhone));
+ const epoch = await privacyEpoch(personDigest);
+ const context: ExecutionContext = { personDigest, privacyEpoch: epoch, orgId, subject: subjectDe(identity.candidate), conversationId: threadIdFor(orgId, inbound.fromPhone), taskId, mode: "live", workflowVersion: WORKFLOW_VERSION, controlVersion: control.controlVersion, deadline: Date.now() + 110000, budgetUsd: 0.25, maxConcurrency: 3 };
+ if (control.state !== "bot") return { reply: null, control: fence, afterReply: () => withExecution(context, async () => { await registrarTurn({orgId,phone:inbound.fromPhone,messageId:inbound.messageId,kind:inbound.kind,inboundText:inbound.text ? redigirCredito(inbound.text) : null,replyText:null,route:"human",error:"human_control"}); }) };
+ if (!await startTask(context)) throw new Error("execution_already_started");
+ return withExecution(context, async () => {
+  const execution = currentExecution()!;
+  runEvent("run.started", "max");
+  try {
+   const result = await runTurnCore(inbound);
+   runEvent("run.completed", "max");
+   await finishTask(context, "succeeded", execution.events);
+   return { ...result, control: fence, afterReply: () => withExistingExecution(execution, async () => { await result.afterReply(); await finishTask(context, "succeeded", execution.events); }) };
+  } catch (error) { runEvent("run.unknown", "max"); await finishTask(context, "unknown", execution.events); throw error; }
+ });
 }

@@ -1,3 +1,8 @@
+import { currentExecution, runEvent } from "./runtime/context";
+import { executeIntent } from "./runtime/store";
+import { executableTool, isWriteVerb } from "./runtime/catalog";
+import { contentDigest } from "./runtime/contracts";
+import { assertBotWrite } from "./runtime/handoff";
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import {
@@ -55,6 +60,11 @@ export const VERBOS_DE_ACAO = [
   "captacao.autorizacao.pedir",
   "captacao.autorizacao.listar",
   "captacao.autorizacao.decidir",
+  "marketing.options",
+  "marketing.library",
+  "marketing.prepare",
+  "marketing.generate",
+  "marketing.status",
 ] as const;
 export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
 
@@ -71,7 +81,7 @@ export interface RespostaDeAcao {
   body: Record<string, unknown>;
 }
 
-export async function executarAcao(params: {
+async function executarAcaoDireta(params: {
   orgId: string;
   rawPhone: string;
   subject: ScopeSubject;
@@ -131,4 +141,21 @@ export async function executarAcao(params: {
     );
     return null;
   }
+}
+
+/** Shared gateway used by deterministic flows, marketing and future adapters. */
+export async function executarAcao(params: Parameters<typeof executarAcaoDireta>[0]): Promise<RespostaDeAcao | null> {
+  if (!executableTool(params.verb)) return { status: 403, body: { error: "capability_disabled" } };
+  const e = currentExecution();
+  if (e && (e.context.orgId !== params.orgId || contentDigest(e.context.subject) !== contentDigest(params.subject))) throw new Error("execution_tenant_mismatch");
+  runEvent("tool.started", params.verb);
+  if (e?.context.mode === "simulation") { runEvent("tool.simulated", params.verb); return { status: 409, body: { error: "simulation_effect_denied", simulated: true } }; }
+  if (!isWriteVerb(params.verb)) return executarAcaoDireta(params);
+  if (process.env.MAX_WRITES_KILL === "true" || ((params.verb === "marketing.generate" || params.verb === "credit.request") && process.env.MAX_PAID_KILL === "true")) return { status: 503, body: { error: "writes_disabled" } };
+  if (e) {
+    await assertBotWrite(e.context, params.rawPhone);
+    if (!params.idempotencyKey) return { status: 400, body: { error: "idempotency_required" } };
+    return executeIntent({ verb: params.verb, key: params.idempotencyKey, args: params.args }, () => executarAcaoDireta(params));
+  }
+  return executarAcaoDireta(params);
 }

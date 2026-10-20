@@ -1,3 +1,4 @@
+import { contentDigest } from "@/lib/runtime/contracts";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireHmac } from "@/lib/auth";
@@ -80,12 +81,26 @@ export async function POST(req: NextRequest) {
   const deleted: Record<string, number> = {};
   try {
     await client.query("BEGIN");
+    // Epoch bump and callback/checkpoint writes share these locks. An old run
+    // can finish upstream silently, but cannot recreate erased local state.
+    const personDigests = bare.map(contentDigest).sort();
+    for (const digest of personDigests) {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`privacy:${digest}`]);
+      await client.query(`INSERT INTO runtime_privacy_epoch(person_digest,epoch) VALUES($1,1) ON CONFLICT(person_digest) DO UPDATE SET epoch=runtime_privacy_epoch.epoch+1,updated_at=now()`, [digest]);
+    }
+    const harnessThreads = await client.query(`SELECT conversation_id FROM runtime_task WHERE person_digest=ANY($1)`, [personDigests]);
+    const harnessThreadIds = harnessThreads.rows.map((r) => r.conversation_id);
+
 
     const del = async (table: string, sql: string, params: unknown[]) => {
       const r = await client.query(sql, params);
       deleted[table] = r.rowCount ?? 0;
     };
 
+    await del("runtime_task", `DELETE FROM runtime_task WHERE person_digest=ANY($1)`, [personDigests]);
+    await del("playground_session", `DELETE FROM playground_session WHERE phone_digest=ANY($1)`, [personDigests]);
+    await del("conversation_control", `DELETE FROM conversation_control WHERE phone=ANY($1)`, [bare]);
+    await del("handoff_send", `DELETE FROM handoff_send WHERE phone=ANY($1)`, [bare]);
     await del("memory_facts", `DELETE FROM memory_facts WHERE phone = ANY($1)`, [bare]);
     await del("phone_org_choice", `DELETE FROM phone_org_choice WHERE phone = ANY($1)`, [plus]);
     await del("identity_cache", `DELETE FROM identity_cache WHERE phone = ANY($1)`, [plus]);
@@ -155,7 +170,7 @@ export async function POST(req: NextRequest) {
       }
       // thread_id = orgId:telefone — o sufixo pega a pessoa em TODAS as orgs.
       const conds = bare.map((_, i) => `thread_id LIKE '%:' || $${i + 1}`).join(" OR ");
-      const r = await client.query(`DELETE FROM ${t} WHERE ${conds}`, bare);
+      const r = await client.query(`DELETE FROM ${t} WHERE (${conds}) OR thread_id=ANY($${bare.length + 1}::text[])`, [...bare, harnessThreadIds]);
       deleted[t] = r.rowCount ?? 0;
     }
 
