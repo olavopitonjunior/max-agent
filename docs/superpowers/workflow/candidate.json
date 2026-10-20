@@ -422,7 +422,7 @@
       "dot": "cyan",
       "title": "Como ler · arquitetura alvo",
       "items": [
-        "Este HTML representa o plano aprovado, não um deploy concluído. EXISTENTE = serviço atual; ADAPTAR = evolução; NOVO / INTEGRAR = trabalho desta execução; FUTURO = desligado.",
+        "Mapa do pacote de execução e da expansão futura. NOVO / ADAPTAR identificam mudanças desta entrega; não comprovam deploy. Disponibilidade real vem do catálogo do runtime. Novas capacidades exigem habilitação e política por tenant.",
         "Entrada → identidade → tarefa → especialista → policy → executor → resposta. Marketing e atendimento usam o mesmo contexto e as mesmas guardas. As raias mostram responsabilidades; os cartões detalham todos os agentes."
       ]
     },
@@ -431,7 +431,7 @@
       "title": "Coordenador Max",
       "items": [
         "Instrução: reconhecer intenção, resolver organização e tarefa, selecionar só o especialista necessário. Leituras simples diretas. Não inventar status nem afirmar assinatura / envio antes de evidência.",
-        "Skills max.route / context / response; tools capabilities.list, task.get / create / cancel, handoff.request. Contexto org / subject / conversation / task / mode / controlVersion / workflowVersion; máximo 3 subtarefas com orçamento da tarefa pai.",
+        "Runtime LangGraph e fluxos de domínio; skills confirmation, tenant-projection e effect-idempotency. Catálogo em GET /api/admin/catalog; tarefas em /api/admin/runtime; controle humano em /api/admin/handoff. Contexto org / subject / conversation / task / mode / controlVersion / workflowVersion; até 3 chamadas concorrentes por execução.",
         "Modelo baseline: MAX_MODEL, default openai / gpt-5.4-nano via OpenRouter; versão / custo registrados. Fallback preserva restrições; mudança decidida por eval, sem upgrade LangGraph neste pacote."
       ]
     },
@@ -458,7 +458,7 @@
       "title": "Captação e crédito",
       "items": [
         "Captação: skill max.acquisition; tools captacao.options / create / preflight / send / list, captacao.autorizacao.pedir / listar / decidir. Pedido não equivale a autorização concedida; respeitar hierarquia.",
-        "Crédito: skill max.credit; tools credit.preflight / status / request, lead.upsert. Consentimento e propósito no servidor; Ficha Certa / Serasa por adaptadores ImobPro; nunca memória geral ou marketing.",
+        "Crédito: tools credit.preflight / status / request e lead.upsert. Provedor Upestate pelo adaptador ImobPro; consentimento e propósito no servidor. Dados de crédito não alimentam memória geral nem marketing.",
         "Modelo extrai, não inventa resultado nem decide concessão. Contratos: serviços ImobPro analyst / legal / editor / curator através de chamadas limitadas futuras, sem duplicar lógica."
       ]
     },
@@ -466,7 +466,7 @@
       "dot": "cyan",
       "title": "Marketing coordenador",
       "items": [
-        "Skill marketing.brief, origem Rankd / marketingskills adaptada e versionada. Tools property.detail, brand.get, template.list, marketing.brief.create, quota.reserve, marketing.generate, marketing.job.get, asset.list.",
+        "Entrada Max: property.list e marketing.options / prepare / generate / status / library. API scope-action encaminha ao mesmo executeMarketingAction do estúdio. Marca, templates, aprovações e reserva de cota são serviços internos ImobPro; não são tools extras fictícias.",
         "Instrução: exigir imóvel / fotos autorizados, marca / template e brief com snapshot de preço / disponibilidade; prévia e confirmação antes de efeito. Sem fonte ou cota definida: bloquear pago.",
         "Cota mensal por corretor / modalidade; gerente autoriza exceção. Reserve → settle; unknown preserva reserva. Unidades comerciais separadas de custo técnico. Máximo 2 revisões; sem publicação social."
       ]
@@ -475,25 +475,25 @@
       "dot": "cyan",
       "title": "Copy e roteiro",
       "items": [
-        "Skills marketing.copy / script: Rankd + marketingskills adaptados PT-BR. Tools brief.get, brand.get; saída estruturada sem efeito externo.",
+        "Workers marketing.brief e marketing.copy-script; skills marketing-brief-v1 e marketing-factual-copy-v1. Reuso Rankd e marketingskills documentado; recebem snapshot autorizado de imóvel e marca.",
         "Instrução: fundamentar título, CTA, legenda e roteiro no brief. Não inventar preço, área, financiamento, vista ou retorno; campos obrigatórios e tom da marca.",
-        "Modelo por perfil com versão / custo; contexto só brief / brand. Evals de fatos, marca e revisão humana calibrada."
+        "Primeira entrega determinística: model=null, sem chamada LLM de criação e sem custo de tokens fictício. Variação com modelo será uma evolução avaliada separadamente; revisão humana da qualidade permanece no rollout."
       ]
     },
     {
       "dot": "cyan",
       "title": "Layout, vídeo e QA",
       "items": [
-        "Layout: skill marketing.layout, tools template.render / asset.create. Gerente governa logo / fontes / cores / avisos; corretor edita conteúdo, contato e fotos. Sem editor gráfico livre.",
-        "Vídeo: skill marketing.video, tools video.render / status. Creatomate com fotos reais e narração; validar slots; URL não prova sucesso, esperar succeeded. Remotion / OpenMontage futuros, com licença revisada.",
-        "QA: skill marketing.qa; tools asset.inspect / source.freshness. Verificar fatos / preço / disponibilidade / foto / marca / direitos. Artefato registra source / brand / template / promptVersion; mudanças marcam stale. Apagamento bloqueia callbacks tardios."
+        "Worker marketing.template-layout: renderArtwork em SVG; skill marketing-template-layout-v1. Gerente governa logo, fontes, cores e avisos; corretor revisa título e CTA permitidos. Sem editor gráfico livre.",
+        "Worker marketing.video: skill marketing-creatomate-v1, submit / inspect do adaptador Creatomate. Fotos reais e narração em template auditado; succeeded e identidade confirmados antes do arquivo privado. Remotion / OpenMontage são candidatos futuros.",
+        "Worker marketing.qa: evaluateCampaign, skill marketing-factual-qa-v1. Fatos, foto e marca verificados; no máximo 2 reparos. Snapshots e versões vinculam aprovação; mudanças tornam derivados indisponíveis. Eventos sanitizados entram no trace."
       ]
     },
     {
       "dot": "cyan",
       "title": "Integrações / APIs / MCPs",
       "items": [
-        "Existentes: Meta Cloud API, scope-query / scope-action HMAC, ClickSign, Ficha Certa, Serasa, Drive / Docs, storage, OpenRouter, transcrição via ImobPro. Cada chamada conserva autorização e projeção.",
+        "WhatsApp Meta / Z-API conforme configuração; OpenRouter e ImobPro scope-query / scope-action com credencial por tenant. HMAC protege os endpoints internos de admin / notify. ClickSign, Upestate, Drive / Docs e storage pertencem ao ImobPro; ter integração não libera uma tool do Max automaticamente.",
         "MCP ImobPro: selecionar capacidades, não expor catálogo inteiro. mark_deal_signed legado não equivale a assinatura. MCP é fachada, não segunda política.",
         "Engine marketing independente com proveniência Rankd; nenhuma auth / DB / billing compartilhada. Creatomate / voz adaptadores assíncronos. Futuro: agenda, CRM, finanças leitura, estudos com Deep Agents restrito; sem shell / SQL / MCP livre."
       ]
@@ -520,9 +520,9 @@
       "dot": "cyan",
       "title": "Admin e avaliações",
       "items": [
-        "Admin: saúde, filas, inbox, tasks / unknown, catálogo, versões / canary, cotas / custo, marcas, memória e qualidade. Broker próprio; gerente equipe; suporte metadata ou grant limitado; superadmin auditado.",
+        "Admin super-admin: /admin/max, /admin/max/runtime, /admin/max/catalog, /admin/max/custos e /admin/max/playground. Tenant: /settings/max/atendimento e /marketing. Marca e cotas exigem gestão; assumir conversa não concede acesso a domínio.",
         "Killswitches separados chat / escritas / pagos / outbound; callbacks / reconcile seguem. Alertas: inbound>2min, erro>5% / 15min com min20, deadline / heartbeat, unknown / sem owner, orçamento80% / 100%, violação tenant.",
-        "Playground mesmo runtime em namespace isolado: simulação sem efeitos, staging sintético; histórico, traces reais, custos / artefatos. Export sanitizado → eval; replay mock. Holdout por entidade / conversa, modelos repetidos, juízes calibrados."
+        "Playground: sessão isolada e simulação com modelo sintético, ou staging com identidade permitida. Histórico e traces reais; export sem texto livre exige entrada sintética revisada. Replay valida controle, não qualidade do modelo real; holdout e avaliação humana são gate de canary."
       ]
     },
     {
