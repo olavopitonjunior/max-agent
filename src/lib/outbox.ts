@@ -3,6 +3,7 @@ import { query } from "./db";
 import { nextDeliveryTime } from "./window";
 import { sendText, sendTemplate, connectionStatus, provider, type ConnectionState } from "./transport";
 import { janelaAberta } from "./janela24h";
+import { reservarAvisoNeutro } from "./atividades-pendentes";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
@@ -62,6 +63,20 @@ export const MARCA_FORA_DA_REGUA =
 export function marcaParametroAusente(param: string): string {
   return `parametro_ausente: ${param} — falta o parâmetro obrigatório do template, não enviado`;
 }
+
+/**
+ * Atividades agendadas, janela fechada: o telefone JÁ recebeu o aviso neutro
+ * (`max_atividades_pendentes`) e a pessoa não escreveu desde então. Terminal e
+ * `dropped`, não `failed`: não é falha, é omissão deliberada (decisão do
+ * Olavo, 14/10/2026) — o sino e o e-mail já cobriram, e `failed` seria
+ * reportado ao contractmaker como "falhou". Rearma 24h depois do último aviso.
+ */
+export const MARCA_ATIVIDADES_JA_AVISADAS =
+  "atividades_ja_avisadas: aviso neutro de atividades pendentes já enviado a este telefone e a janela de 24h segue fechada — não enviado";
+
+/** Não deu para reservar o aviso neutro (banco): volta a `pending` sem queimar tentativa; na dúvida não envia. */
+export const MARCA_RESERVA_AVISO_FALHOU =
+  "reserva_aviso_neutro_falhou: não foi possível checar o aviso neutro de atividades — tenta de novo";
 
 /**
  * Botões na ordem do template, preenchidos para ESTA linha. O id da linha é o
@@ -238,6 +253,8 @@ export interface DispatchTotals {
   held: number;
   /** Represados que passaram de `HORAS_PARA_EXPIRAR` e viraram `dropped`. */
   expired: number;
+  /** Avisos de atividade omitidos porque o telefone já recebeu o aviso neutro (viraram `dropped`). */
+  coalesced: number;
 }
 
 interface OutboxRow extends Record<string, unknown> {
@@ -336,7 +353,7 @@ export async function dispatchDue(
   /** `Date.now()` do início da requisição — âncora do prazo de seed. */
   iniciadoEm?: number
 ): Promise<DispatchTotals> {
-  const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0, held: 0, expired: 0 };
+  const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0, held: 0, expired: 0, coalesced: 0 };
 
   /**
    * ── A checagem que faltava ─────────────────────────────────────────────
@@ -639,6 +656,52 @@ export async function dispatchDue(
         });
         totals.held += 1;
         continue;
+      }
+      /**
+       * ── Aviso neutro: um por janela (atividades pendentes) ───────────────
+       * Só depois de escolher o template APROVADO: template ainda pendente
+       * continua represando/expirando como sempre. A decisão e a reserva são
+       * atômicas por telefone (`reservarAvisoNeutro`, advisory lock): sem
+       * isso, duas invocações do cron mandavam o template em dobro.
+       */
+      if (def.umPorJanela) {
+        const reservado = await reservarAvisoNeutro({
+          rowId: row.id,
+          phone: row.phone,
+          templateName: def.name,
+        }).catch((err) => {
+          log.warn("outbox.reserva_aviso_neutro_falhou", {
+            rowId: row.id,
+            orgId: row.org_id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return null;
+        });
+        if (reservado === null) {
+          await query(
+            `UPDATE outbox
+                SET status = 'pending',
+                    attempts = GREATEST(attempts - 1, 0),
+                    send_started_at = NULL,
+                    deliver_after = now() + interval '5 minutes',
+                    last_error = $2
+              WHERE id = $1 AND status = 'sending'`,
+            [row.id, MARCA_RESERVA_AVISO_FALHOU]
+          );
+          totals.held += 1;
+          continue;
+        }
+        if (!reservado) {
+          await query(
+            `UPDATE outbox
+                SET status = 'dropped', last_error = $2, send_started_at = NULL
+              WHERE id = $1 AND status = 'sending'`,
+            [row.id, MARCA_ATIVIDADES_JA_AVISADAS]
+          );
+          log.info("outbox.atividades_ja_avisadas", { rowId: row.id, orgId: row.org_id, kind: row.kind });
+          totals.coalesced += 1;
+          continue;
+        }
       }
       envioTemplate = def;
     }
