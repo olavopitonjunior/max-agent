@@ -897,15 +897,6 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const agora = Date.now();
   const userText = textoDoTurno(state).trim();
   const usage: LlmUsage[] = [];
-  const marketing = await marketingStep({ text: userText, messageId: state.inbound.messageId, now: agora, canWrite: podeEscrever(state.identity), policy: state.policy, pending: state.marketingPending }, async (verb,args,key) => {
-    if (verb === "property.list") {
-      if (!state.policy.includes("property.list")) return null;
-      const result = await consultarEscopo({orgId:state.identity.orgId,rawPhone:state.inbound.fromPhone,subject:subjectDe(state.identity),verb:"property.list",args});
-      return result ? {status:200,body:{...result}} : null;
-    }
-    return depsDoFluxo(state,usage).acao(verb,args,key);
-  });
-  if (marketing) return { reply: marketing.reply, marketingPending: marketing.pending, pendingAction: null, fluxo: rebaixarFluxo(state.fluxo), messages: [{role:"user",content:userText},{role:"assistant",content:marketing.reply}], toolLog: [{name:"marketing",args:{},outcome:marketing.event}] };
   const vencido = state.fluxo && fluxoExpirou(state.fluxo, agora);
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
   // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
@@ -927,6 +918,18 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const rascunhoAberto = atual?.kind === "proposta" && !!atual.propostaId && !atual.chave &&
     ["ajustes", "revisao_ajuste", "metodo"].includes(atual.etapa);
   const livre = !coletando || rascunhoAberto;
+
+  if (livre && !escritaEmAberto) {
+    const marketing = await marketingStep({ text: userText, messageId: state.inbound.messageId, now: agora, canWrite: podeEscrever(state.identity), policy: state.policy, pending: state.marketingPending }, async (verb,args,key) => {
+      if (verb === "property.list") {
+        if (!state.policy.includes("property.list")) return null;
+        const result = await consultarEscopo({orgId:state.identity.orgId,rawPhone:state.inbound.fromPhone,subject:subjectDe(state.identity),verb:"property.list",args});
+        return result ? {status:200,body:{...result}} : null;
+      }
+      return depsDoFluxo(state,usage).acao(verb,args,key);
+    });
+    if (marketing) return { reply: marketing.reply, marketingPending: marketing.pending, pendingAction: null, fluxo: rebaixarFluxo(state.fluxo), messages: [{role:"user",content:userText},{role:"assistant",content:marketing.reply}], toolLog: [{name:"marketing",args:{},outcome:marketing.event}] };
+  }
 
   // Crédito (M2): antes da consulta e da criação ("ficha de crédito" não é
   // formulário). Flag desligada = o Max segue como antes, sem citar crédito.
@@ -1023,7 +1026,9 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // sistema (eval 09/10 — o modelo confundia o contrato com o envio da
   // proposta e dizia "não consigo excluir"). A negação só sem fluxo aberto:
   // dentro de um, o "não" é a resposta ao resumo e o fluxo a trata.
-  const contratoPergunta = coletando || gestao || continuidade ? false : perguntaDoContrato(userText);
+  const contratoLeitura = process.env.MAX_EXTENDED_QUERIES === "true" && state.policy.includes("contract.status") &&
+    !/\b(quem|signat[aá]ri|falta(?:m)? assinar)/i.test(userText);
+  const contratoPergunta = coletando || gestao || continuidade || contratoLeitura ? false : perguntaDoContrato(userText);
   if (!coletando && !gestao && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
     const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
     const linkDoNegocio = resultado?.match(/Negócio: (\S+)/)?.[1] ?? null;
@@ -1416,6 +1421,14 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
 
   const userText = textoDoTurno(state).trim() || "(mensagem sem texto)";
   const history = state.messages.slice(-MAX_HISTORY);
+  // Short follow-ups inherit only read intent; authorization is still checked
+  // by the offering registry and the dispatcher on every turn.
+  const ultimaConsulta = [...history].reverse().find(m => m.role === "user" && /contrat|im[oó]ve[il]/i.test(m.content))?.content ?? "";
+  const continuacao = /^(mais|continue|pr[oó]xima(?: p[aá]gina)?)[.!?\s]*$/i.test(userText)
+    ? state.referencias?.continuacao?.tool ?? "" : "";
+  const selecao = /^\d+[.!?\s]*$/.test(userText) && state.referencias && ultimaConsulta
+    ? /contrat/i.test(ultimaConsulta) ? "contrato" : "imóvel" : "";
+  const contextoLeitura = `${continuacao} ${selecao} ${perguntaDoContrato(userText) ? "negócios" : ""}`;
 
   /**
    * O que entra no prompt deste turn — escrita E leitura pelo MESMO crivo
@@ -1435,7 +1448,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     state.toolRounds === 0
       ? ferramentasDoTurno({
           policy: state.policy,
-          texto: userText,
+          texto: `${userText} ${contextoLeitura}`,
           identity: state.identity,
           textoAnterior: pedidoEmAberto(history),
         })
@@ -2410,7 +2423,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
    * não lida, e o prompt diz ao modelo que ele não lê anexo.
    */
   if (!turnText && (inbound.kind === "image" || inbound.kind === "document")) {
-    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
     return sair(textoSemLeituraDeMidia(null), {
       orgId: identity.candidate.orgId,
       error: `sem_texto_${inbound.kind}`,
@@ -2420,7 +2433,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   // O que o parse não reconheceu: silêncio é pior, e passar pelo modelo com
   // "(mensagem sem texto)" pagava um turn por uma resposta genérica.
   if (!turnText && inbound.kind === "unknown") {
-    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
     return sair(
       "Não consegui entender esse tipo de mensagem. Pode mandar por escrito?",
       { orgId: identity.candidate.orgId, error: `sem_texto_${inbound.kind}` }
@@ -2436,7 +2449,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
     if (!transcrito) {
       // A pessoa pode ter dito "sim" NESTE áudio — e não ouvimos. A pendência
       // não pode sobreviver a um turn que não a confirmou (D3).
-      await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+      await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
       // Dizer que não deu, sempre. Silêncio faria a pessoa esperar resposta de
       // uma coisa que o agente nunca recebeu — e no WhatsApp ela não tem como
       // saber a diferença entre "ignorou" e "não chegou".
@@ -2607,19 +2620,21 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
  * não aviso: a pendência sobreviveu, e quem lê o log precisa saber disso. O
  * TTL de 30 min continua sendo o teto.
  */
-async function descartarPendencias(orgId: string, phone: string): Promise<void> {
+async function descartarPendencias(orgId: string, phone: string, identity: Candidate): Promise<void> {
   try {
     const app = await getApp();
-    const config = { configurable: { thread_id: threadIdFor(orgId, phone) } };
+    const config = { configurable: { thread_id: currentExecution()?.context.conversationId ?? liveNamespaceFor(orgId, phone, subjectDe(identity)) } };
     const atual = await app.getState(config);
     const v = atual.values as Partial<MaxStateType> | undefined;
     // Thread sem nada a descartar não ganha checkpoint novo à toa.
     const fluxoRebaixado = rebaixarFluxo(v?.fluxo);
     const fluxoMudou = JSON.stringify(fluxoRebaixado ?? null) !== JSON.stringify(v?.fluxo ?? null);
-    if (!v?.pendingAction && !v?.restoDaResposta && !fluxoMudou) return;
+    const marketingAcionavel = !!v?.marketingPending && v.marketingPending.phase !== "tracking";
+    if (!v?.pendingAction && !v?.restoDaResposta && !fluxoMudou && !marketingAcionavel) return;
     await app.updateState(config, {
       pendingAction: null,
       restoDaResposta: null,
+      ...(marketingAcionavel ? { marketingPending: null } : {}),
       // O fluxo fica, mas fora de qualquer etapa em que o próximo "sim" escreve.
       ...(fluxoMudou ? { fluxo: fluxoRebaixado } : {}),
     });

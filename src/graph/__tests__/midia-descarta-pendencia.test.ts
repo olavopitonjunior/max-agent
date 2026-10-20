@@ -29,9 +29,13 @@ vi.mock("@/lib/identity", async (orig) => ({
   ...(await orig<typeof import("@/lib/identity")>()),
   resolveIdentity: vi.fn(),
 }));
+vi.mock("@/lib/acao", () => ({ executarAcao: vi.fn() }));
 vi.mock("@/lib/turnlog", () => ({ registrarTurn: vi.fn().mockResolvedValue(undefined) }));
 
-const { runTurn, buildGraph, getCheckpointer, threadIdFor } = await import("../graph");
+const { runTurn, buildGraph, getCheckpointer } = await import("../graph");
+const { liveNamespaceFor } = await import("@/lib/runtime/context");
+const { subjectDe } = await import("@/lib/scope");
+const threadIdFor = (orgId: string, phone: string) => liveNamespaceFor(orgId, phone, subjectDe(CANDIDATO));
 const { resolveIdentity } = await import("@/lib/identity");
 const { criarFormularioVenda } = await import("@/lib/cm");
 const identidade = vi.mocked(resolveIdentity);
@@ -98,4 +102,24 @@ describe("D3 — saída antecipada descarta a pendência", () => {
 
     expect(criar).not.toHaveBeenCalled();
   }, 30_000);
+});
+
+describe('marketing approval interrupted through runTurn',()=>{
+ itDb.each(['image','document','audio'] as const)('%s invalidates prepared approval before a later sim',async kind=>{
+  vi.stubEnv('MAX_MARKETING','true');
+  try {
+   const { fetchProfile }=await import('@/lib/cm');const { executarAcao }=await import('@/lib/acao');const { complete }=await import('@/lib/llm');
+   vi.mocked(fetchProfile).mockResolvedValue({enabled:true,model:'fixture',maxPolicy:{byRole:{'*':['marketing.read','marketing.generate']}}} as never);
+   vi.mocked(executarAcao).mockResolvedValue({status:200,body:{briefId:'fixture-brief',confirmationDigest:'a'.repeat(64),expiresAt:new Date(Date.now()+600000).toISOString(),snapshot:{copy:'Conteúdo sintético',template:'Modelo',quotaUnits:1}}});
+   vi.mocked(complete).mockResolvedValue({text:'Peça uma nova prévia.',toolCalls:[],usage:{model:'fixture',promptTokens:0,completionTokens:0,latencyMs:0,success:true}} as never);
+   const phone=`55117${String(Math.floor(Math.random()*1e8)).padStart(8,'0')}`;
+   await runTurn(msg('text',phone,'marketing imóvel fixture-property template fixture-template vídeo'));
+   const app=buildGraph().compile({checkpointer:await getCheckpointer()});const config={configurable:{thread_id:threadIdFor(CANDIDATO.orgId,phone)}};
+   expect((await app.getState(config)).values.marketingPending).toMatchObject({phase:'approval'});
+   await runTurn(msg(kind,phone));
+   expect((await app.getState(config)).values.marketingPending).toBeNull();
+   await runTurn(msg('text',phone,'sim'));
+   expect(vi.mocked(executarAcao).mock.calls.map(([p])=>p.verb)).toEqual(['marketing.prepare']);
+  } finally { vi.unstubAllEnvs(); }
+ },30000);
 });

@@ -1,3 +1,4 @@
+import { CAPABILITIES, type Capability } from "@/graph/policy";
 import { MARKETING_WORKERS } from "./marketing-events";
 import { VERBOS_DE_ACAO,timeoutDoVerbo } from '../acao';
 import { VERBOS_DE_LEITURA } from '@/graph/scope-contract';
@@ -8,15 +9,39 @@ export function isWriteVerb(verb:string):boolean {return !READ_ACTIONS.has(verb)
 export const NEW_QUERIES=['notification.list','activity.list','metrics.get','property.list','property.detail','contract.status'];
 export interface CatalogTool {
  id:string;version:string;status:'current'|'disabled'|'planned';installed:boolean;enabled:boolean;executor:'scope-action'|'scope-query'|'graph'|null;effect:'read'|'write'|'paid';flag?:string;
- schema:Record<string,unknown>;permission:string;projection:string;dataClass:string;timeoutMs:number;retry:string;reconciliation:string;confirmation:boolean;evaluationCases:string[];provenance:string;
+ schema:Record<string,unknown>;permission:Capability|null;policyCapability:Capability|null;domainScope:string;projection:string;dataClass:string;timeoutMs:number;retry:string;reconciliation:string;confirmation:boolean;evaluationCases:string[];provenance:string;
 }
-function capability(id:string):string {
+const POLICY_MAPPING: Record<string, Capability | null> = {
+ 'proposal.status': null, 'proposal.options': null, 'proposal.preflight': null,
+ 'proposal.update': 'proposal.create', 'proposal.cancel': 'proposal.send',
+ 'proposal.complete': 'proposal.send', 'proposal.recreate': 'proposal.create',
+ 'proposal.convert': 'proposal.create', 'proposal.duplicate': 'proposal.create',
+ 'form.options': 'form.create',
+};
+const DOMAIN_SCOPE: Record<string, string> = {
+ 'proposal.list': 'Authenticated user; tenant + proposalScopeWhere visibility (scope-action); scope-query also applies Max policy.',
+ 'proposal.status': 'Authenticated user; tenant + proposalScopeWhere visibility.',
+ 'proposal.options': 'Authenticated user; tenant + proposalScopeWhere visibility.',
+ 'proposal.preflight': 'Authenticated user; organization configuration and proposal schema validation; no target mutation.',
+ 'proposal.create': 'PROPOSAL_CREATE; tenant + subject permissions.',
+ 'proposal.update': 'PROPOSAL_CREATE or PROPOSAL_SEND; proposalScopeWhere + creator ownership + editable state.',
+ 'proposal.cancel': 'PROPOSAL_CANCEL; proposalScopeWhere + envelope state.',
+ 'proposal.complete': 'PROPOSAL_SEND; proposalScopeWhere + proposal state.',
+ 'proposal.recreate': 'PROPOSAL_CREATE; proposalScopeWhere + proposal state.',
+ 'proposal.convert': 'PROPOSAL_CONVERT; DEAL_CREATE or LEASE_CREATE; proposalScopeWhere + pipeline scope.',
+ 'proposal.duplicate': 'PROPOSAL_CREATE; proposalScopeWhere + proposal state.',
+ 'proposal.delete': 'PROPOSAL_DELETE; proposalScopeWhere + deletion constraints.',
+ 'form.options': 'DEAL_CREATE or LEASE_CREATE; department pipeline scope + enabled module.',
+ 'form.create': 'DEAL_CREATE or LEASE_CREATE; department pipeline scope + enabled module.',
+};
+function capability(id:string):Capability|null {
+ if(Object.hasOwn(POLICY_MAPPING,id))return POLICY_MAPPING[id];
  if(id.startsWith('marketing.'))return id==='marketing.generate'||id==='marketing.prepare'?'marketing.generate':'marketing.read';
  if(id.startsWith('credit.'))return id==='credit.request'?'credit.request':'credit.read';
  if(id==='lead.upsert')return 'credit.request';
  if(id.startsWith('captacao.')&&!['captacao.send','captacao.list','captacao.autorizacao.pedir','captacao.autorizacao.decidir','captacao.autorizacao.listar'].includes(id))return 'captacao.create';
  if(id==='captacao.autorizacao.listar')return 'captacao.autorizacao.decidir';
- return id;
+ return (CAPABILITIES as readonly string[]).includes(id)?id as Capability:null;
 }
 function tool(id:string,executor:CatalogTool['executor']):CatalogTool {
  const isQuery=executor==='scope-query';
@@ -28,7 +53,7 @@ function tool(id:string,executor:CatalogTool['executor']):CatalogTool {
  if(id==='marketing.prepare')Object.assign(schema,{required:['propertyId','templateId','modality'],properties:{propertyId:{type:'string'},templateId:{type:'string'},modality:{enum:['copy','artwork','video']},headline:{type:'string'},callToAction:{type:'string'}}});
  if(id==='marketing.generate')Object.assign(schema,{required:['briefId','confirmationDigest','confirmed','idempotencyKey'],properties:{briefId:{type:'string'},confirmationDigest:{type:'string',pattern:'^[a-f0-9]{64}$'},confirmed:{const:true},idempotencyKey:{type:'string',minLength:8,maxLength:160}}});
  if(isQuery)Object.assign(schema,{properties:{limite:{type:'integer',minimum:1,maximum:50},cursor:{type:'string'},estado:{type:'string'},negocio_id:{type:'string'},proposta_id:{type:'string'},imovel_id:{type:'string'}}});
- return {id,version:CATALOG_VERSION,status:enabled?'current':'disabled',installed:true,enabled,executor,effect,...(flag?{flag}:{}),schema,permission:capability(id),projection:isQuery?'ImobPro server projection per subject; broker restricted':'ImobPro live subject RBAC and domain projection',dataClass:id.startsWith('credit.')||id==='lead.upsert'?'sensitive-credit':effect==='read'?'tenant-operational':'tenant-write',timeoutMs:executor==='scope-action'?timeoutDoVerbo(id as Parameters<typeof timeoutDoVerbo>[0]):8000,retry:effect==='read'?'caller-controlled; fresh read':'never automatically retry uncertain effect; stable idempotency key',reconciliation:effect==='read'?'fresh-query':id.startsWith('marketing.')?'marketing.status':'domain status plus execution_intent unknown review',confirmation:effect!=='read',evaluationCases:effect==='read'?['tenant-isolation','role-revocation','projection','pagination']:['approval-content-bound','idempotency','lost-ack-unknown','takeover-fence'],provenance:executor==='scope-action'?'src/lib/acao.ts → ImobPro scope-action':'src/lib/scope.ts → ImobPro scope-query'};
+ return {id,version:CATALOG_VERSION,status:enabled?'current':'disabled',installed:true,enabled,executor,effect,...(flag?{flag}:{}),schema,permission:capability(id),policyCapability:capability(id),domainScope:executor===null?'Planned; no executable permission.':DOMAIN_SCOPE[id]??'Live ImobPro subject RBAC, tenant scope and domain guards; Max policy alone does not grant domain access.',projection:isQuery?'ImobPro server projection per subject; broker restricted':'ImobPro live subject RBAC and domain projection',dataClass:id.startsWith('credit.')||id==='lead.upsert'?'sensitive-credit':effect==='read'?'tenant-operational':'tenant-write',timeoutMs:executor==='scope-action'?timeoutDoVerbo(id as Parameters<typeof timeoutDoVerbo>[0]):8000,retry:effect==='read'?'caller-controlled; fresh read':'never automatically retry uncertain effect; stable idempotency key',reconciliation:effect==='read'?'fresh-query':id.startsWith('marketing.')?'marketing.status':'domain status plus execution_intent unknown review',confirmation:effect!=='read',evaluationCases:effect==='read'?['tenant-isolation','role-revocation','projection','pagination']:['approval-content-bound','idempotency','lost-ack-unknown','takeover-fence'],provenance:executor==='scope-action'?'src/lib/acao.ts → ImobPro scope-action':'src/lib/scope.ts → ImobPro scope-query'};
 }
 export function catalog() {
  const tools:CatalogTool[]=[...VERBOS_DE_ACAO.map(id=>tool(id,'scope-action')),...VERBOS_DE_LEITURA.filter(id=>!VERBOS_DE_ACAO.includes(id as typeof VERBOS_DE_ACAO[number])).map(id=>tool(id,'scope-query')),...['deep-research','calendar.external','finance.read','documents.create','rental.manage'].map(id=>({...tool(id,null),status:'planned' as const,installed:false,enabled:false,executor:null}))];

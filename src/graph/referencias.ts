@@ -48,6 +48,8 @@ export interface MapaDeReferencias {
    */
   turno: string;
   itens: ItemReferenciado[];
+  /** Opaque server continuation; never included in model results. */
+  continuacao?: { tool: string; cursor: string; args: Record<string, unknown>; subjectKey: string; criadoEm: number };
 }
 
 /**

@@ -451,6 +451,18 @@ describe("coleta completa até a revisão (SIM no M2 não envia)", () => {
 });
 
 describe("caminhos da coleta", () => {
+  it("marketing enabled preserves active profession collection without marketing policy", async () => {
+    vi.stubEnv('MAX_MARKETING', 'true');
+    try {
+      const turno = conversa();
+      await turno('faz a ficha de crédito da Letícia Andrade'); await turno('sim'); await turno(CPF); await turno('CLT');
+      const s = await turno('analista de marketing');
+      expect(s.fluxo).toMatchObject({ kind: 'credito', campoAtual: 'renda' });
+      expect(leads[0].credito.pretendente?.profissao).toBe('analista de marketing');
+      expect(chamadas.some(c => c.verb.startsWith('marketing.'))).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   async function ateRenda() {
     const turno = conversa();
     await turno("faz a ficha de crédito da Letícia Andrade");
