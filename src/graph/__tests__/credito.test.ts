@@ -26,6 +26,8 @@ vi.mock("@/lib/identity", async (orig) => ({
 const { buildGraph, RESET_DO_TURN, runTurn, respostaDoTurno, encerrarTurno } = await import("../graph");
 const { redigir, redigirCredito } = await import("@/lib/pii");
 const { resolveIdentity } = await import("@/lib/identity");
+const { liveNamespaceFor } = await import("@/lib/runtime/context");
+const { subjectDe } = await import("@/lib/scope");
 type Candidate = import("@/lib/identity").Candidate;
 const credito = await import("../credito");
 const {
@@ -188,7 +190,7 @@ beforeEach(() => {
   });
   acao.mockImplementation(imobpro as never);
 });
-afterEach(() => { delete process.env.MAX_CREDITO; delete process.env.MAX_CREDITO_ENVIO; });
+afterEach(() => { vi.useRealTimers(); delete process.env.MAX_CREDITO; delete process.env.MAX_CREDITO_ENVIO; });
 
 function conversa(identity: Candidate = usuario) {
   const app = buildGraph().compile({ checkpointer: new MemorySaver() });
@@ -1198,6 +1200,27 @@ describe("cofre: subchave própria e AAD = thread", () => {
   });
 });
 
+// A bare income must be a complete number: timestamps such as :58.000Z
+// contain "8.000" too. Keep matching bare/currency amounts in every storage surface.
+const RENDA_INTEIRA = "(^|[^0-9])8[.]000([^0-9]|$)";
+
+/** Test fixtures must reset and inspect the same subject thread as runTurn. */
+function threadCredito(orgId: string, phone: string) {
+  return liveNamespaceFor(orgId, phone, subjectDe({ ...usuario, orgId }));
+}
+async function limparCredito(orgId: string, phone: string) {
+  const { query } = await import("@/lib/db");
+  for (const table of ["checkpoint_writes", "checkpoint_blobs", "checkpoints"]) {
+    await query(`DELETE FROM ${table} WHERE thread_id = $1`, [threadCredito(orgId, phone)]);
+    const [remaining] = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ${table} WHERE thread_id = $1`, [threadCredito(orgId, phone)]);
+    expect(remaining!.n, `${table}: cleanup must remove the actual subject thread`).toBe(0);
+  }
+  await query(`DELETE FROM conversation_turn WHERE org_id = $1`, [orgId]);
+  await query(`DELETE FROM memory_facts WHERE org_id = $1`, [orgId]);
+  await query(`DELETE FROM live_conversation_binding WHERE org_id = $1`, [orgId]);
+}
+
 /**
  * M3: os turnos de ENVIO e RESULTADO (envio incerto, 2º SIM, aprovado, proposta
  * aberta) pelo `runTurn` de verdade — todos sensíveis, e nenhum CPF/renda nos
@@ -1205,19 +1228,16 @@ describe("cofre: subchave própria e AAD = thread", () => {
  */
 function itDbEnvio() {
   const hasDb = Boolean(process.env.DATABASE_URL);
-  (hasDb ? it : it.skip)("envio e resultado: CPF e renda fora do banco; turnos sensíveis", async () => {
+  (hasDb ? it : it.skip).each([1, 2])("envio e resultado: CPF e renda fora do banco; turnos sensíveis (execução %i)", async () => {
+    // Deterministically exercise the timestamp collision in the persisted audit.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-20T21:59:58.000Z"));
     const ORG = "org-credito-envio-pii";
     const FONE = "5511900000779";
     process.env.MAX_CREDITO_ENVIO = "true";
-    vi.mocked(resolveIdentity).mockResolvedValue({ kind: "identified", candidate: { ...usuario, orgId: ORG } } as never);
+    vi.mocked(resolveIdentity).mockResolvedValue({ kind: "resolved", org: { orgId: ORG, orgName: usuario.orgName, apiToken: "fixture" }, candidate: { ...usuario, orgId: ORG } });
     const { query } = await import("@/lib/db");
-    const limpar = async () => {
-      await query(`DELETE FROM checkpoint_writes WHERE thread_id LIKE $1`, [`${ORG}:%`]);
-      await query(`DELETE FROM checkpoint_blobs WHERE thread_id LIKE $1`, [`${ORG}:%`]);
-      await query(`DELETE FROM checkpoints WHERE thread_id LIKE $1`, [`${ORG}:%`]);
-      await query(`DELETE FROM conversation_turn WHERE org_id = $1`, [ORG]);
-      await query(`DELETE FROM memory_facts WHERE org_id = $1`, [ORG]);
-    };
+    const limpar = () => limparCredito(ORG, FONE);
     await limpar();
     try {
       const sensiveis: (boolean | undefined)[] = [];
@@ -1225,6 +1245,7 @@ function itDbEnvio() {
       const falar = async (text: string) => {
         const r = await runTurn({ messageId: `env-${++n}-${Math.random()}`, fromPhone: FONE, groupId: null, kind: "text", text,
           mediaUrl: null, mimeType: null, timestampMs: null, senderName: "Olavo", replyToMessageId: null } as Parameters<typeof runTurn>[0]);
+        expect(r.dispatchFence?.conversationId).toBe(threadCredito(ORG, FONE));
         await r.afterReply();
         sensiveis.push(r.sensivel);
         return r.reply ?? "";
@@ -1251,18 +1272,23 @@ function itDbEnvio() {
       for (const s of sensiveis) expect(s).toBe(true);
 
       const conta = async (padrao: string) => {
+        const operador = padrao === "%8.000%" ? "~" : "LIKE";
+        const busca = padrao === "%8.000%" ? RENDA_INTEIRA : padrao;
         const [linha] = await query<{ n: string }>(
           `SELECT (
-             (SELECT count(*) FROM checkpoints WHERE thread_id LIKE $2 AND (checkpoint::text LIKE $1 OR metadata::text LIKE $1)) +
-             (SELECT count(*) FROM checkpoint_blobs WHERE thread_id LIKE $2 AND encode(blob, 'escape') LIKE $1) +
-             (SELECT count(*) FROM checkpoint_writes WHERE thread_id LIKE $2 AND encode(blob, 'escape') LIKE $1) +
-             (SELECT count(*) FROM conversation_turn t WHERE org_id = $3 AND row_to_json(t)::text LIKE $1) +
-             (SELECT count(*) FROM memory_facts m WHERE org_id = $3 AND row_to_json(m)::text LIKE $1)
+             (SELECT count(*) FROM checkpoints WHERE thread_id = $2 AND (checkpoint::text ${operador} $1 OR metadata::text ${operador} $1)) +
+             (SELECT count(*) FROM checkpoint_blobs WHERE thread_id = $2 AND encode(blob, 'escape') ${operador} $1) +
+             (SELECT count(*) FROM checkpoint_writes WHERE thread_id = $2 AND encode(blob, 'escape') ${operador} $1) +
+             (SELECT count(*) FROM conversation_turn t WHERE org_id = $3 AND row_to_json(t)::text ${operador} $1) +
+             (SELECT count(*) FROM memory_facts m WHERE org_id = $3 AND row_to_json(m)::text ${operador} $1)
            )::text AS n`,
-          [padrao, `${ORG}:%`, ORG]
+          [busca, threadCredito(ORG, FONE), ORG]
         );
         return Number(linha!.n);
       };
+      const [checkpoint] = await query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM checkpoints WHERE thread_id = $1`, [threadCredito(ORG, FONE)]);
+      expect(checkpoint!.n).toBeGreaterThan(0);
       expect(await conta("%Andrade%")).toBeGreaterThan(0);
       for (const p of [CPF_D, CPF, "8 mil", "8.000,00", "8.000", "restrição"]) {
         expect(await conta(`%${p}%`), p).toBe(0);
@@ -1278,10 +1304,11 @@ function itDbErro() {
   const hasDb = Boolean(process.env.DATABASE_URL);
   (hasDb ? it : it.skip)("turno que falha grava a fala redigida (CPF e renda)", async () => {
     const ORG = "org-credito-erro";
-    vi.mocked(resolveIdentity).mockResolvedValue({ kind: "identified", candidate: { ...usuario, orgId: ORG } } as never);
+    vi.mocked(resolveIdentity).mockResolvedValue({ kind: "resolved", org: { orgId: ORG, orgName: usuario.orgName, apiToken: "fixture" }, candidate: { ...usuario, orgId: ORG } });
     acao.mockRejectedValue(new Error("ImobPro fora"));
     const { query } = await import("@/lib/db");
     const id = `erro-${Math.random()}`;
+    await limparCredito(ORG, "5511900000778");
     try {
       await expect(runTurn({ messageId: id, fromPhone: "5511900000778", groupId: null, kind: "text",
         text: "faz a ficha de crédito da Letícia Andrade, cpf 111 444 777 35, renda 8 mil", mediaUrl: null, mimeType: null,
@@ -1292,10 +1319,7 @@ function itDbErro() {
       expect(linha!.inbound_text).toContain("Andrade");
       expect(linha!.inbound_text).not.toMatch(/111 444 777 35|8 mil/);
     } finally {
-      await query(`DELETE FROM conversation_turn WHERE org_id = $1`, [ORG]);
-      await query(`DELETE FROM checkpoint_writes WHERE thread_id LIKE $1`, [`${ORG}:%`]);
-      await query(`DELETE FROM checkpoint_blobs WHERE thread_id LIKE $1`, [`${ORG}:%`]);
-      await query(`DELETE FROM checkpoints WHERE thread_id LIKE $1`, [`${ORG}:%`]);
+      await limparCredito(ORG, "5511900000778");
     }
   }, 30_000);
 }
@@ -1317,8 +1341,16 @@ describe("auditoria de PII no banco", () => {
   const ORG = "org-credito-pii";
   const FONE = "5511900000777";
 
+  itDb("a busca de renda detecta valores vazados sem confundir timestamps com renda", async () => {
+    const { query } = await import("@/lib/db");
+    const rows = await query<{ valor: string; achou: boolean }>(
+      `SELECT valor, valor ~ $1 AS achou FROM unnest($2::text[]) AS valor`,
+      [RENDA_INTEIRA, ["8.000", "renda 8.000", "R$ 8.000,00", '"renda":"8.000"', "2026-10-20T21:59:58.000Z"]]);
+    expect(rows.map((row) => row.achou)).toEqual([true, true, true, true, false]);
+  });
+
   itDb("CPF e renda fora de checkpoints, conversation_turn e memory_facts; extractFacts não chamado", async () => {
-    vi.mocked(resolveIdentity).mockResolvedValue({ kind: "identified", candidate: { ...usuario, orgId: ORG } } as never);
+    vi.mocked(resolveIdentity).mockResolvedValue({ kind: "resolved", org: { orgId: ORG, orgName: usuario.orgName, apiToken: "fixture" }, candidate: { ...usuario, orgId: ORG } });
     const sistemas: string[] = [];
     llm.mockImplementation(async (p: { system?: string; toolChoice?: string }) => {
       sistemas.push(String(p.system ?? ""));
@@ -1326,19 +1358,14 @@ describe("auditoria de PII no banco", () => {
       return { text: "O horário é das 9h às 18h.", toolCalls: [], usage: uso };
     });
     const { query, db } = await import("@/lib/db");
-    const limpar = async () => {
-      await query(`DELETE FROM checkpoint_writes WHERE thread_id LIKE $1`, [`${ORG}:%`]);
-      await query(`DELETE FROM checkpoint_blobs WHERE thread_id LIKE $1`, [`${ORG}:%`]);
-      await query(`DELETE FROM checkpoints WHERE thread_id LIKE $1`, [`${ORG}:%`]);
-      await query(`DELETE FROM conversation_turn WHERE org_id = $1`, [ORG]);
-      await query(`DELETE FROM memory_facts WHERE org_id = $1`, [ORG]);
-    };
+    const limpar = () => limparCredito(ORG, FONE);
     await limpar();
     try {
       let n = 0;
       const falar = async (text: string) => {
         const r = await runTurn({ messageId: `pii-${++n}-${Math.random()}`, fromPhone: FONE, groupId: null, kind: "text", text,
           mediaUrl: null, mimeType: null, timestampMs: null, senderName: "Olavo", replyToMessageId: null } as Parameters<typeof runTurn>[0]);
+        expect(r.dispatchFence?.conversationId).toBe(threadCredito(ORG, FONE));
         await r.afterReply();
         sensiveis.push(r.sensivel);
         return r.reply ?? "";
@@ -1363,18 +1390,23 @@ describe("auditoria de PII no banco", () => {
       for (const s of sensiveis) expect(s).toBe(true);
 
       const conta = async (padrao: string) => {
+        const operador = padrao === "%8.000%" ? "~" : "LIKE";
+        const busca = padrao === "%8.000%" ? RENDA_INTEIRA : padrao;
         const [linha] = await query<{ n: string }>(
           `SELECT (
-             (SELECT count(*) FROM checkpoints WHERE thread_id LIKE $2 AND (checkpoint::text LIKE $1 OR metadata::text LIKE $1)) +
-             (SELECT count(*) FROM checkpoint_blobs WHERE thread_id LIKE $2 AND encode(blob, 'escape') LIKE $1) +
-             (SELECT count(*) FROM checkpoint_writes WHERE thread_id LIKE $2 AND encode(blob, 'escape') LIKE $1) +
-             (SELECT count(*) FROM conversation_turn t WHERE org_id = $3 AND row_to_json(t)::text LIKE $1) +
-             (SELECT count(*) FROM memory_facts m WHERE org_id = $3 AND row_to_json(m)::text LIKE $1)
+             (SELECT count(*) FROM checkpoints WHERE thread_id = $2 AND (checkpoint::text ${operador} $1 OR metadata::text ${operador} $1)) +
+             (SELECT count(*) FROM checkpoint_blobs WHERE thread_id = $2 AND encode(blob, 'escape') ${operador} $1) +
+             (SELECT count(*) FROM checkpoint_writes WHERE thread_id = $2 AND encode(blob, 'escape') ${operador} $1) +
+             (SELECT count(*) FROM conversation_turn t WHERE org_id = $3 AND row_to_json(t)::text ${operador} $1) +
+             (SELECT count(*) FROM memory_facts m WHERE org_id = $3 AND row_to_json(m)::text ${operador} $1)
            )::text AS n`,
-          [padrao, `${ORG}:%`, ORG]
+          [busca, threadCredito(ORG, FONE), ORG]
         );
         return Number(linha!.n);
       };
+      const [checkpoint] = await query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM checkpoints WHERE thread_id = $1`, [threadCredito(ORG, FONE)]);
+      expect(checkpoint!.n).toBeGreaterThan(0);
       expect(await conta("%Andrade%")).toBeGreaterThan(0);
       for (const p of [CPF_D, CPF, "111 444 777 35", "111.444.777.35", "8 mil", "8.000,00", "8.000"]) {
         expect(await conta(`%${p}%`), p).toBe(0);
