@@ -4,6 +4,11 @@ import { conversationKey } from '../phone';
 import { ExecutionContextSchema, contentDigest, type ExecutionContext, type RunEvent } from './contracts';
 export interface Execution { context:ExecutionContext; events:RunEvent[]; spentUsd:number; active:number }
 const storage = new AsyncLocalStorage<Execution>();
+/** Person-only scope exists before identity/org resolution and survives early returns. */
+export interface PersonPrivacy {personDigest:string;privacyEpoch:number}
+const privacyStorage=new AsyncLocalStorage<PersonPrivacy>();
+export function currentPersonPrivacy():PersonPrivacy|undefined{return privacyStorage.getStore();}
+export function withPersonPrivacy<T>(person:PersonPrivacy,fn:()=>T):T{return privacyStorage.run(person,fn);}
 export function withExistingExecution<T>(execution:Execution,fn:()=>T):T{return storage.run(execution,fn);}
 export function currentExecution():Execution|undefined { return storage.getStore(); }
 export function withExecution<T>(context:ExecutionContext, fn:()=>T):T { return storage.run({context:ExecutionContextSchema.parse(context),events:[],spentUsd:0,active:0},fn); }

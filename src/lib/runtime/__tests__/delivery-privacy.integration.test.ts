@@ -1,8 +1,8 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 import {NextRequest} from 'next/server';
 import {Client} from 'pg';
-const scheduled=vi.hoisted(()=>({pause:null as null|(()=>Promise<void>),subject:'subject-a'}));
-vi.mock('@/graph/graph',async original=>{const actual=await original<typeof import('@/graph/graph')>();return {...actual,runTurn:async(...args:Parameters<typeof actual.runTurn>)=>{const result=await actual.runTurn(...args);if(scheduled.pause)await scheduled.pause();return result;}};});
+const scheduled=vi.hoisted(()=>({pause:null as null|(()=>Promise<void>),afterReplyPause:null as null|(()=>Promise<void>),subject:'subject-a'}));
+vi.mock('@/graph/graph',async original=>{const actual=await original<typeof import('@/graph/graph')>();return {...actual,runTurn:async(...args:Parameters<typeof actual.runTurn>)=>{const result=await actual.runTurn(...args);if(scheduled.pause)await scheduled.pause();return {...result,afterReply:async()=>{if(scheduled.afterReplyPause)await scheduled.afterReplyPause();return result.afterReply();}};}};});
 vi.mock('@/lib/identity',async original=>({...await original<typeof import('@/lib/identity')>(),resolveIdentity:async()=>({kind:'resolved',org:{orgId:'delivery-privacy-fixture',orgName:'Fixture',apiToken:'fixture'},candidate:{kind:'user',orgId:'delivery-privacy-fixture',orgName:'Fixture',userId:scheduled.subject,userName:'Synthetic'}})}));
 vi.mock('@/lib/cm',async original=>({...await original<typeof import('@/lib/cm')>(),fetchProfile:async()=>({enabled:true,model:'fixture',maxPolicy:{byRole:{admin:['form.create','proposal.create']}}}),chaveDePolitica:async()=> 'admin',searchKnowledge:async()=>[],reportUsage:async()=>{},criarFormularioVenda:vi.fn(async()=>({token:'fixture-created',dealId:'fixture-deal',url:'https://fixture.test/created'})),brokerRecipientId:async()=>null}));
 vi.mock('@/lib/llm',async original=>({...await original<typeof import('@/lib/llm')>(),complete:async()=>({text:'Resposta sintética.',toolCalls:[],usage:{model:'fixture',promptTokens:1,completionTokens:1,cacheReadTokens:0,cacheWriteTokens:0,costUsd:0,latencyMs:0,success:true}})}));
@@ -23,9 +23,9 @@ const d=process.env.DATABASE_URL?describe:describe.skip;
 const phone='5511999990700',org='delivery-privacy-fixture';
 async function erase(){const raw=JSON.stringify({phone}),ts=String(Date.now());expect((await forget(new NextRequest('https://fixture.test/api/admin/forget',{method:'POST',body:raw,headers:{'x-max-timestamp':ts,'x-max-signature':sign(ts,raw,'fixture-secret')}}))).status).toBe(200);}
 async function inbound(id:string){await enqueueInbound({messageId:id,fromPhone:phone,kind:'text',text:'Como funciona o formulário?',groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()});return (await query('SELECT * FROM inbound_queue WHERE message_id=$1',[id]))[0];}
-afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();scheduled.pause=null;});
+afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();scheduled.pause=null;scheduled.afterReplyPause=null;});
 d('durable graph-to-delivery privacy boundary',()=>{
- beforeEach(async()=>{scheduled.pause=null;scheduled.subject='subject-a';vi.clearAllMocks();vi.stubEnv('MAX_RUNTIME_V1','true');vi.stubEnv('MAX_HANDOFF','true');vi.stubEnv('MAX_NOTIFY_SECRET','fixture-secret');await query('DELETE FROM runtime_privacy_epoch WHERE person_digest=$1',[contentDigest(phone)]);await query('DELETE FROM runtime_task WHERE org_id=$1',[org]);await query('DELETE FROM conversation_control WHERE org_id=$1',[org]);await query('DELETE FROM conversation_turn WHERE org_id=$1',[org]);await query('DELETE FROM inbound_queue WHERE from_phone=$1',[phone]);await query('DELETE FROM live_conversation_binding WHERE org_id=$1',[org]);});
+ beforeEach(async()=>{scheduled.pause=null;scheduled.afterReplyPause=null;scheduled.subject='subject-a';vi.clearAllMocks();vi.stubEnv('MAX_RUNTIME_V1','true');vi.stubEnv('MAX_HANDOFF','true');vi.stubEnv('MAX_NOTIFY_SECRET','fixture-secret');await query('DELETE FROM runtime_privacy_epoch WHERE person_digest=$1',[contentDigest(phone)]);await query('DELETE FROM runtime_task WHERE org_id=$1',[org]);await query('DELETE FROM conversation_control WHERE org_id=$1',[org]);await query('DELETE FROM conversation_turn WHERE org_id=$1',[org]);await query('DELETE FROM inbound_queue WHERE from_phone=$1',[phone]);await query('DELETE FROM live_conversation_binding WHERE org_id=$1',[org]);});
  it('does not persist or send a graph reply after forget commits before queue handoff',async()=>{
   const row=await inbound('delivery-forget-after-graph');let graphDone!:()=>void,release!:()=>void;const reached=new Promise<void>(r=>graphDone=r),hold=new Promise<void>(r=>release=r);scheduled.pause=async()=>{graphDone();await hold;};
   const work=runQueued(row as never);await reached;await erase();release();expect(await work).toBe('done');
@@ -93,6 +93,32 @@ d('durable graph-to-delivery privacy boundary',()=>{
   await app.updateState({configurable:{thread_id:thread}},{messages:[{role:'assistant',content:'PRIVATE_DIRECT_ONLY'}],pendingAction:{kind:'criar_documento',args:{tipo:'venda'},askedAt:Date.now(),askedForMessageId:'direct-approval'}});
   await erase();expect(await query('SELECT 1 FROM checkpoints WHERE thread_id=$1',[thread])).toHaveLength(0);
   await runTurn({...message,messageId:'direct-legacy-reload'});const state=await app.getState({configurable:{thread_id:thread}});expect(JSON.stringify(state.values)).not.toContain('PRIVATE_DIRECT_ONLY');expect(state.values.pendingAction).toBeNull();
+ });
+
+ it('does not recreate handoff or audit when forget commits after the acceptance source SELECT',async()=>{
+  await query('DELETE FROM outbox WHERE org_id=$1',[org]);
+  const source=await enqueue({orgId:org,dedupeKey:'acceptance-race-source',audience:'platform_user',phone,recipientName:'Synthetic requester',title:'Synthetic',body:'Synthetic',linkUrl:null,dealId:null,orgName:'Fixture',kind:'onboarding_pending'});await query("UPDATE outbox SET status='sent',sent_at=now() WHERE id=$1",[source.id]);
+  const row=await inbound('acceptance-select-forget');row.button_payload=`duvida:${source.id}`;
+  let reached!:()=>void,release!:()=>void;const selected=new Promise<void>(r=>reached=r),hold=new Promise<void>(r=>release=r);const original=database.query;
+  vi.spyOn(database,'query').mockImplementation(async(sql:string,args?:unknown[])=>{const result=await original(sql,args);if(sql.includes('SELECT org_id, org_name, recipient_name FROM outbox')){expect(result).toHaveLength(1);reached();await hold;}return result;});
+  const work=runQueued(row as never);await selected;await erase();release();expect(await work).toBe('done');
+  expect(await query('SELECT 1 FROM pending_handoff WHERE phone=$1',[phone])).toHaveLength(0);expect(await query('SELECT 1 FROM conversation_turn WHERE phone=$1',[phone])).toHaveLength(0);expect(sendText).not.toHaveBeenCalled();
+ });
+ it('does not recreate an early acceptance audit when its afterReply runs after a valid send and forget',async()=>{
+  await query('DELETE FROM outbox WHERE org_id=$1',[org]);
+  const source=await enqueue({orgId:org,dedupeKey:'acceptance-audit-source',audience:'platform_user',phone,recipientName:'Synthetic requester',title:'Synthetic',body:'Synthetic',linkUrl:null,dealId:null,orgName:'Fixture',kind:'onboarding_pending'});await query("UPDATE outbox SET status='sent',sent_at=now() WHERE id=$1",[source.id]);
+  const row=await inbound('acceptance-afterreply-forget');row.button_payload=`duvida:${source.id}`;
+  let reached!:()=>void,release!:()=>void;const callback=new Promise<void>(r=>reached=r),hold=new Promise<void>(r=>release=r);scheduled.afterReplyPause=async()=>{reached();await hold;};
+  const work=runQueued(row as never);await callback;expect(sendText).toHaveBeenCalledTimes(1);await erase();release();expect(await work).toBe('done');
+  expect(await query('SELECT 1 FROM pending_handoff WHERE phone=$1',[phone])).toHaveLength(0);expect(await query('SELECT 1 FROM conversation_turn WHERE phone=$1',[phone])).toHaveLength(0);
+ });
+
+ it('does not enqueue erased source data to a different team phone after the final preamble SELECT',async()=>{
+  vi.stubEnv('MAX_ESCALATION_PHONE','5511999990710');await query('DELETE FROM outbox WHERE org_id=$1',[org]);
+  await query("INSERT INTO pending_handoff(phone,org_id,org_name,requester_name,expires_at) VALUES($1,$2,'Fixture','Synthetic',now()+interval '1 hour') ON CONFLICT(phone) DO UPDATE SET consumed_by=NULL,expires_at=excluded.expires_at",[phone,org]);
+  const row=await inbound('acceptance-cross-phone-forget');let reached!:()=>void,release!:()=>void;const selected=new Promise<void>(r=>reached=r),hold=new Promise<void>(r=>release=r);const original=database.query;
+  vi.spyOn(database,'query').mockImplementation(async(sql:string,args?:unknown[])=>{const result=await original(sql,args);if(sql.includes("kind = 'support_handoff' AND params->>'de' = $1")){reached();await hold;}return result;});
+  const work=runQueued(row as never);await selected;await erase();release();expect(await work).toBe('done');expect(await query("SELECT 1 FROM outbox WHERE params->>'de'=$1",[phone])).toHaveLength(0);expect(await query('SELECT 1 FROM conversation_turn WHERE phone=$1',[phone])).toHaveLength(0);
  });
 
 });

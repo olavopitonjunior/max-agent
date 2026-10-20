@@ -1,9 +1,9 @@
 import { liveNamespaceFor } from "@/lib/runtime/context";
 import { query } from "@/lib/db";
-import { withDeliveryFence, type DispatchFence } from "@/lib/runtime/delivery-fence";
+import { withDeliveryFence, captureDispatchFence, DispatchFenceSchema, type DispatchFence } from "@/lib/runtime/delivery-fence";
 import { privacyEpoch, protectCheckpoint } from "@/lib/runtime/privacy";
 import { marketingStep, type MarketingPending } from "./marketing";
-import { withExecution, withExistingExecution, currentExecution } from "@/lib/runtime/context";
+import { withExecution, withExistingExecution, currentExecution, withPersonPrivacy } from "@/lib/runtime/context";
 import { WORKFLOW_VERSION, contentDigest, type ExecutionContext } from "@/lib/runtime/contracts";
 import { startTask, finishTask, executeIntent } from "@/lib/runtime/store";
 import { getControl, assertBotWrite } from "@/lib/runtime/handoff";
@@ -2658,9 +2658,14 @@ async function transcreverMidia(
 /** Opt-in durable execution. Existing deterministic paths stay on the same graph. */
 export async function runTurn(inbound: InboundMessage, options?:{dispatchFence?:DispatchFence}): Promise<TurnResult> {
  if (process.env.MAX_CHAT_KILL === "true") return { reply: null, dispatchFence:options?.dispatchFence, afterReply: async () => {} };
- if (currentExecution()) return runTurnCore(inbound);
- const result=await runTurnCore(inbound,undefined,identity=>runResolvedTurn(inbound,identity,options));
- return {...result,dispatchFence:result.dispatchFence??options?.dispatchFence};
+ const execution=currentExecution();
+ if(execution){const result=await runTurnCore(inbound);return {...result,afterReply:()=>withExistingExecution(execution,()=>result.afterReply())};}
+ const person=DispatchFenceSchema.parse(options?.dispatchFence??await captureDispatchFence(inbound.fromPhone));
+ if(person.personDigest!==contentDigest(conversationKey(inbound.fromPhone)))throw new Error("execution_revoked");
+ return withPersonPrivacy(person,async()=>{
+  const result=await runTurnCore(inbound,undefined,identity=>runResolvedTurn(inbound,identity,{dispatchFence:person}));
+  return {...result,dispatchFence:result.dispatchFence??person,afterReply:()=>withPersonPrivacy(person,()=>result.afterReply())};
+ });
 }
 /** Set up subject/privacy even for direct callers with durable features OFF.
  * The preamble above still handles template acceptance before identity lookup. */
