@@ -52,3 +52,5 @@ O ImobPro registra em `docs/marketing/provenance.json` as adaptações do Rankd 
 5. Promover por organização após aprovação humana; manter receptores e reconciliação ativos durante rollback.
 
 O pacote não configura ambiente remoto, não aplica migração em produção e não promove as branches automaticamente.
+
+As verificações finais e os commits de código validados estão em [validation.md](validation.md).
