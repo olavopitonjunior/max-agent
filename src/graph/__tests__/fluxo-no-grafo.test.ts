@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 /**
  * O fluxo de criação no GRAFO: o nó `conduzir` responde por template, sem o
@@ -397,5 +397,45 @@ describe("sim sequestrado por fluxo concluído (prod 13/10)", () => {
     expect(t2.reply).toContain("Pendências do negócio");
     expect(t2.reply).not.toContain("convertida em negócio");
     expect(acao).not.toHaveBeenCalled();
+  });
+});
+
+describe("fila de autorização do gerente exige a FLAG, não só a capability (achado de review 19/10)", () => {
+  const POLITICA_COM_AUTORIZACAO = {
+    byRole: { "*": ["deal.list", "deal.pending", "captacao.autorizacao.decidir"] },
+    byRecipient: {},
+    brokerDefault: ["deal.list", "deal.pending"],
+  };
+
+  beforeEach(() => {
+    delete process.env.MAX_CAPTACAO_AUTORIZACAO;
+    vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: POLITICA_COM_AUTORIZACAO } as never);
+  });
+  afterEach(() => {
+    delete process.env.MAX_CAPTACAO_AUTORIZACAO;
+  });
+
+  it("flag DESLIGADA: 'pedidos pendentes' não é engolido pela fila — segue pro roteamento normal (ex.: pendências do negócio)", async () => {
+    // Antes da correção: a condição só olhava a capability, nunca `captacaoAutorizacaoLigada()`.
+    // Com ela presente e a flag OFF, "pedidos pendentes" (que o gatilho reconhece mesmo sem a
+    // palavra "autorização") era engolido e respondia o texto de flag desligada da AUTORIZAÇÃO,
+    // sem nunca chegar ao LLM — colidindo com o gatilho de pendências do negócio (tools.ts).
+    llm.mockResolvedValue({ text: "Você não tem pendências nos seus negócios agora.", toolCalls: [], usage: uso });
+    const s = await run("pedidos pendentes");
+    expect(llm).toHaveBeenCalled();
+    expect(s.reply).not.toContain("fila de autorização");
+    expect(s.reply).not.toContain("não está ligada");
+    expect(acao).not.toHaveBeenCalledWith(expect.objectContaining({ verb: "captacao.autorizacao.listar" }));
+  });
+
+  it("flag LIGADA: a mesma frase abre a fila do gerente (sem passar pelo LLM)", async () => {
+    process.env.MAX_CAPTACAO_AUTORIZACAO = "true";
+    acao.mockImplementation(async ({ verb }: { verb: string }) => {
+      if (verb === "captacao.autorizacao.listar") return { status: 200, body: { items: [], total: 0 } };
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
+    const s = await run("pedidos pendentes");
+    expect(s.reply).toBe("Nenhum pedido aguardando você.");
+    expect(llm).not.toHaveBeenCalled();
   });
 });

@@ -17,6 +17,7 @@ vi.mock("@vercel/functions", () => ({ waitUntil: vi.fn() }));
 vi.mock("@/lib/inbound", () => ({
   enqueueInbound: vi.fn().mockResolvedValue({ status: "queued", id: "row-1" }),
   processInboundNow: vi.fn().mockResolvedValue(undefined),
+  podarTextoDaFila: vi.fn().mockResolvedValue(0),
   sweepInbound: vi.fn().mockResolvedValue({ claimed: 0, done: 0, failed: 0, retry: 0, blocked: 0 }),
 }));
 vi.mock("@/lib/outbox", () => ({

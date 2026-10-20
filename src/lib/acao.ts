@@ -2,6 +2,7 @@ import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import {
   fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS, IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS, IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS,
+  captacaoSendTimeoutMs,
 } from "./http";
 import type { ScopeSubject } from "@/graph/scope-contract";
 
@@ -42,12 +43,25 @@ export const VERBOS_DE_ACAO = [
   "lead.upsert",
   // M3: envio síncrono da análise (até 20 s no servidor).
   "credit.request",
+  // Captação (P9): `captacao.create` (capability do mesmo nome) cobre options/create/preflight;
+  // `send` e `list` têm a sua. Escritas (create, send) levam `x-idempotency-key`.
+  "captacao.options",
+  "captacao.create",
+  "captacao.preflight",
+  "captacao.send",
+  "captacao.list",
+  // Autorização de reaproveitamento (v2/PR7, par do contractmaker#1863): `pedir` e
+  // `decidir` levam `x-idempotency-key` (a `messageId` do "sim"); `listar` não.
+  "captacao.autorizacao.pedir",
+  "captacao.autorizacao.listar",
+  "captacao.autorizacao.decidir",
 ] as const;
 export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
 
-/** Envio de proposta e de análise de crédito esperam mais; o resto, o teto comum. */
+/** Envio de proposta, de análise de crédito e de captação esperam mais; o resto, o teto comum. */
 export function timeoutDoVerbo(verb: VerboDeAcao): number {
   if (verb === "proposal.send") return IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS;
+  if (verb === "captacao.send") return captacaoSendTimeoutMs();
   if (verb === "credit.request") return IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS;
   return IMOBPRO_TIMEOUT_MS;
 }
@@ -93,7 +107,11 @@ export async function executarAcao(params: {
     const body = (await res.json().catch(() => ({}))) as unknown;
     // 503 `notConfigured` do crédito (M3) é resposta de NEGÓCIO ("indisponível"), não falha de rede.
     const naoConfigurado = res.status === 503 && !!body && typeof body === "object" && (body as Record<string, unknown>).notConfigured === true;
-    if (res.status >= 500 && !naoConfigurado) {
+    // `captacao.send` 502 `falha_envio` é desfecho CANÔNICO (o envio falhou e a captação ficou
+    // em "falha no envio"), não queda de rede: o fluxo o traduz e nunca reenvia sozinho.
+    const falhaDeEnvio = params.verb === "captacao.send" && res.status === 502 && !!body && typeof body === "object" &&
+      (body as Record<string, unknown>).error === "falha_envio";
+    if (res.status >= 500 && !naoConfigurado && !falhaDeEnvio) {
       console.warn(`[acao] ${params.verb} ${res.status} na org ${params.orgId}`);
       return null;
     }

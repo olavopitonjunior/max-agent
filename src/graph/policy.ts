@@ -115,6 +115,28 @@ export const CAPABILITIES = [
    */
   "credit.read",
   "credit.request",
+  /**
+   * Captação pelo Max (P8/P9, 16/10/2026). `captacao.create`: `captacao.options`,
+   * `captacao.create` e `captacao.preflight`; `captacao.send`: o envio para
+   * assinatura; `captacao.list`: listar e conferir. FORA do `POLITICA_PADRAO`
+   * do ImobPro (a org liga em `/admin/max`), e o papel "Max (agente)" não as
+   * tem: os verbos rodam com a RBAC do sujeito. Mesma posição da lista de lá
+   * (teste de paridade).
+   */
+  "captacao.create",
+  "captacao.send",
+  "captacao.list",
+  /**
+   * Captação v2/PR7 (19/10/2026, par do contractmaker#1863): autorização de
+   * reaproveitamento pelo Max. `captacao.autorizacao.pedir`: o corretor pede
+   * (verbo `captacao.autorizacao.pedir`). `captacao.autorizacao.decidir`: o
+   * gerente lista e decide (verbos `.listar` e `.decidir`). FORA do
+   * `POLITICA_PADRAO` do ImobPro (fail-closed; a org liga em `/admin/max`), e
+   * o papel "Max (agente)" não as tem. Posições 16 e 17 FIXAS (0-based):
+   * mesma posição da lista de lá (teste de paridade).
+   */
+  "captacao.autorizacao.pedir",
+  "captacao.autorizacao.decidir",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

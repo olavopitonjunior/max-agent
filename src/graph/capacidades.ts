@@ -1,6 +1,7 @@
 import type { Capability } from "./policy";
 import { normalizar } from "./tools";
 import { envioLigado } from "./credito";
+import { captacaoEnvioLigado, captacaoLigada } from "./captacao-flags";
 
 /**
  * O que o Max faz — dito pelo SISTEMA, a partir da política deste turn, e não
@@ -28,7 +29,7 @@ export function pedeCapacidades(texto: string): boolean {
   return PEDE_CAPACIDADES.test(t.trim());
 }
 
-export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: boolean, credito = false): string {
+export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: boolean, credito = false, captacao = false, autorizacao = false): string {
   const tem = (c: Capability) => policy.includes(c);
   const linhas: string[] = [];
   const proposta: string[] = [];
@@ -49,6 +50,19 @@ export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: 
     const envio = envioLigado();
     linhas.push(`- Análise de crédito (Upestate): preencher a ficha do pretendente${envio ? ", enviar com a sua confirmação" : ""} e ver o status.`);
   }
+  // Captação só com a flag `MAX_CAPTACAO` E a política da org (capability nasce desligada).
+  if (captacao) {
+    if (podeEscrever && tem("captacao.create")) {
+      const envio = captacaoEnvioLigado() && tem("captacao.send");
+      linhas.push(`- Captação (contrato de captação): criar o rascunho, completar, conferir o que falta${envio ? ", enviar para assinatura com a sua confirmação" : ""} e ver o status.`);
+    } else if (tem("captacao.list")) {
+      linhas.push("- Captação: consultar e ver o status.");
+    }
+  }
+  // Fila de autorização (v2/PR7): só pra quem decide (gerente/admin), e só com a flag ligada.
+  if (autorizacao && tem("captacao.autorizacao.decidir")) {
+    linhas.push("- Autorização de captação: listar pedidos pendentes, aprovar e negar.");
+  }
   if (!linhas.length) return "Por aqui eu tiro dúvidas sobre o processo da imobiliária. Para o resto, fale com a imobiliária.";
   linhas.push("Contrato e cobrança são pela tela do negócio no sistema.");
   return `Pelo WhatsApp eu consigo:\n${linhas.join("\n")}`;
@@ -66,12 +80,24 @@ const VERBO_NO_CONTRATO = String.raw`(?:ger[ae]r?|emit[ae]r?|emiti|edit[ae]r?|al
  * contrato da X") e a minuta — teste 09/10: caía no modelo, que recusava mas
  * perguntava "venda ou locação?" à toa.
  */
-const ACAO_NO_CONTRATO = new RegExp(
+const ACAO_NO_CONTRATO_BASE = new RegExp(
   String.raw`\b${VERBO_NO_CONTRATO}\s+(?:o\s+|um\s+|esse\s+|este\s+|meu\s+)?contrato\b` +
   String.raw`|\b${VERBO_NO_CONTRATO}\s+(?:a\s+|as\s+|o\s+|os\s+|essa\s+|esta\s+)?(?:clausulas?|texto|prazo|redacao|vigencia|reajuste|multa|valor|data|paragrafo|item)\s+(?:do|no|desse|deste|da)\s+contrato\b` +
   String.raw`|\b${VERBO_NO_CONTRATO}\s+(?:a\s+|essa\s+|esta\s+)?minuta\b` +
   String.raw`|\bcontrato\s+(?:pra|para)\s+(?:assinatura|assinar)\b`
 );
+/**
+ * "Faz o contrato de captação da Rua X" é do fluxo de captação (P9), não do "contrato eu
+ * não gero". A exceção vale só com `MAX_CAPTACAO` ligada: sem ela, o Max segue dizendo que
+ * contrato é pela tela (comportamento de antes do P9, capability fail-closed).
+ */
+const VERBO_DA_CAPTACAO = String.raw`(?:fa[cz]\w*|fa[cç]a|cri[ae]r?|ger[ae]r?|abr\w+|mont\w+|prepar\w+|elabor\w+|envi\w+|mand\w+|inici\w+|comec\w+)`;
+const CONTRATO_DE_CAPTACAO = new RegExp(
+  String.raw`\b${VERBO_DA_CAPTACAO}\s+(?:o\s+|um\s+|uma\s+|esse\s+|este\s+|meu\s+|a\s+)?(?:contrato|minuta)\s+de\s+captacao\b`
+);
+const ACAO_NO_CONTRATO = {
+  test: (t: string) => ACAO_NO_CONTRATO_BASE.test(t) && !(captacaoLigada() && CONTRATO_DE_CAPTACAO.test(t)),
+};
 const COBRANCA = /\bcobrancas?\b|\b(?:ger[ae]r?|emit[ae]r?|mand[ae]r?|envi[ae]r?|cri[ae]r?)\s+(?:o\s+|um\s+|a\s+|uma\s+)?(?:boleto|cobranca)\b/;
 const PERGUNTA = /^(como|quando|onde|por que|porque|o que|qual|quais|quanto)\b/;
 const NEGACAO = /\b(nao|nunca|jamais)\b/;

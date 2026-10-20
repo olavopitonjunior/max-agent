@@ -29,6 +29,17 @@ export const IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS = 30_000;
 export const IMOBPRO_TRANSCRIBE_TIMEOUT_MS = 45_000;
 /** `credit.request` (M3): o servidor espera a Upestate até 20 s e responde 202 depois; +10 s de rede. */
 export const IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * `captacao.send` (P9): o servidor corre 20 s contra o envio e responde 202 se
+ * não terminou; +10 s de rede. Env `IMOBPRO_CAPTACAO_SEND_TIMEOUT_MS`, lida a
+ * cada chamada (testes e deploys mudam o valor sem recarregar o módulo); valor
+ * inválido cai no padrão. Estouro continua INCERTO, com a mesma chave, sem retry.
+ */
+export const IMOBPRO_CAPTACAO_SEND_TIMEOUT_DEFAULT_MS = 30_000;
+export function captacaoSendTimeoutMs(): number {
+  const n = Number(process.env.IMOBPRO_CAPTACAO_SEND_TIMEOUT_MS);
+  return Number.isFinite(n) && n >= 1_000 ? Math.floor(n) : IMOBPRO_CAPTACAO_SEND_TIMEOUT_DEFAULT_MS;
+}
 
 /**
  * Alerta de canal: o receptor manda o E-MAIL antes de responder, e um SMTP em
