@@ -72,6 +72,7 @@ describe("a régua do Olavo (01/10/2026)", () => {
         "manual_message",
         "manual_message_parte",
         "onboarding_pending",
+        "portal_notice_parte",
         "proposal_completed",
         "proposal_delivered",
         "proposal_expired",
@@ -163,11 +164,12 @@ describe("aviso de crédito (credit_result, M3)", () => {
 });
 
 describe("botões", () => {
-  it("parte só tem botão de URL quando o destino é público (formulário, pesquisa)", () => {
+  it("parte só tem botão de URL quando o destino é público (formulário, pesquisa, link do portal)", () => {
     expect(CATALOGO.form_completed_parte.botao).toBeNull();
     expect(CATALOGO.contract_signed_parte.botao).toBeNull();
     expect(CATALOGO.form_reminder_parte.botao?.tipo).toBe("url");
     expect(CATALOGO.survey_invite_parte.botao?.tipo).toBe("url");
+    expect(CATALOGO.portal_notice_parte.botao?.tipo).toBe("url");
   });
 
   it("os que entregam algo no aceite têm o botão OK", () => {
@@ -494,5 +496,28 @@ describe("atividades pendentes (2026-10-14)", () => {
 
   it("activity_completed fica FORA da régua (só texto livre na janela de 24h)", () => {
     expect(templateDoKind("activity_completed")).toBeNull();
+  });
+});
+
+describe("aviso do portal do negócio à parte (2026-10-20)", () => {
+  const d = CATALOGO.portal_notice_parte;
+
+  it("corpo de status: só nome e org, sem dado do negócio nem suspense", () => {
+    expect(d.name).toBe("max_portal_aviso_parte");
+    expect(d.vars).toEqual(["nome", "org"]);
+    expect(d.body).not.toMatch(/ainda|incomplet|continue|tem uma mensagem|avisa:/i);
+  });
+
+  it("só o botão de URL — a parte responde pelo link, não pelo Max", () => {
+    expect(botoesEmOrdem(d.botao)).toEqual([{ tipo: "url", texto: "Ver atualização" }]);
+    expect(KINDS_COM_ACEITE).not.toContain("portal_notice_parte");
+  });
+
+  it("não exige params: o emissor manda `negocio`, mas o template não depende dele", () => {
+    expect(templateUsavel(d, { recipient_name: "Carlos", org_name: "RE/MAX Trio", title: "x", params: null })).toBe(true);
+  });
+
+  it("não é 'um por janela': o emissor já limita a 1 aviso por hora", () => {
+    expect(d.umPorJanela).toBeUndefined();
   });
 });

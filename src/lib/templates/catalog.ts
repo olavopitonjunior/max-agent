@@ -14,7 +14,9 @@
  * proposta (assinada, recusada, expirada, entregue) e, desde 14/10/2026
  * (decisão do Olavo, atividades agendadas), um aviso NEUTRO de atividades
  * pendentes (`activity_assigned` e `activity_due`, mesmo template, um por
- * janela; `activity_completed` fica fora). Nenhum texto cita o nome
+ * janela; `activity_completed` fica fora) e, desde 20/10/2026 (pedido do
+ * Olavo), o aviso de novidade no link do cliente do portal do negócio
+ * (`portal_notice_parte`). Nenhum texto cita o nome
  * do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
  * janela de 24h e, fora dela, não sai pelo WhatsApp (`templateDoKind` devolve
  * `null` e o outbox desiste). Não existe mais template genérico — ele fazia
@@ -223,6 +225,25 @@ const ATIVIDADES_PENDENTES: TemplateDef = {
 };
 
 /**
+ * Portal do negócio (20/10/2026, pedido do Olavo): aviso à PARTE de que há
+ * novidade no link de acompanhamento dela (resposta da equipe, nova versão do
+ * contrato, tarefa, documento, recado). O contractmaker manda o FATO só no
+ * texto livre da janela aberta; o template não carrega nenhum dado do
+ * negócio — nem `negocio`, cujo fallback "seu negócio" não cabe numa frase.
+ * Texto de STATUS, no molde dos v3 que a Meta deu como UTILITY. O botão abre
+ * o `linkUrl` da linha (`/r/<id>`): o link do portal, que pede o código por
+ * e-mail, então saber o link não dá acesso. Sem botão de resposta: a parte
+ * não conversa com o Max (decisão de 13/10) e responde pelo próprio link.
+ */
+const PORTAL_AVISO_PARTE = t(
+  "max_portal_aviso_parte",
+  "Olá, {{1}}! Status do seu negócio com a {{2}}: nova atualização no acompanhamento. Os detalhes e o espaço para responder estão no botão abaixo.",
+  [NOME, ORG],
+  ["Carlos", "RE/MAX Trio"],
+  { tipo: "url", texto: "Ver atualização" }
+);
+
+/**
  * `kind` → template. O que não está aqui é FORA DA RÉGUA (ver o topo).
  *
  * Mesma convenção do contractmaker: a versão da PARTE leva `_parte`. Pesquisa
@@ -366,6 +387,7 @@ export const CATALOGO: Record<string, TemplateDef> = {
   // Atividades agendadas (14/10/2026): mesmo template para os dois avisos.
   activity_assigned: ATIVIDADES_PENDENTES,
   activity_due: ATIVIDADES_PENDENTES,
+  portal_notice_parte: PORTAL_AVISO_PARTE,
 };
 
 // Crédito Upestate (M3): o aviso `credit_result` não ganha template novo na
