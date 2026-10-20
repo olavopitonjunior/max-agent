@@ -1,4 +1,4 @@
-import {captureDispatchFence,DispatchFenceSchema,withCapturedPrivacy,withDeliveryFence,type DispatchFence} from "./runtime/delivery-fence";
+import {captureDispatchFence,DispatchFenceSchema,withCapturedPrivacy,withDeliveryFence,withTransportFence,TransportAcceptedCommitError,type DispatchFence} from "./runtime/delivery-fence";
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
@@ -725,7 +725,7 @@ export async function dispatchDue(
       );
       deliveryFence=row.dispatch_fence?DispatchFenceSchema.parse(row.dispatch_fence):await captureDispatchFence(row.phone);
       if(!row.dispatch_fence&&deliveryFence.privacyEpoch>0)throw new Error('execution_revoked');
-      const res=await withDeliveryFence({table:'outbox',id:row.id,phone:row.phone,fence:deliveryFence},()=>envioTemplate
+      const res=await withTransportFence({table:'outbox',id:row.id,phone:row.phone,fence:deliveryFence},()=>envioTemplate
         ? sendTemplate({to:row.phone,name:envioTemplate.name,lang:envioTemplate.lang,bodyParams:parametrosDoCorpo(envioTemplate,row),botoes:botoesDaLinha(envioTemplate,row.id)})
         : sendText({to:row.phone,body:renderMessage(row)}));
       log.info(envioTemplate ? "outbox.enviado_template" : "outbox.enviado", {
@@ -769,6 +769,12 @@ export async function dispatchDue(
       await semear();
       totals.sent += 1;
     } catch (err) {
+      if(err instanceof TransportAcceptedCommitError){
+        // Leave the committed send marker and sending reservation for orphan
+        // recovery; a local COMMIT error cannot turn provider acceptance into retry.
+        await query(`UPDATE outbox SET last_error=$2 WHERE id=$1`,[row.id,err.message]);
+        totals.sent+=1;continue;
+      }
       if(err instanceof Error&&err.message==='execution_revoked'){totals.blocked+=1;continue;}
       /**
        * ── Corrida rara: a Meta recusou por 131047, ou o TEMPLATE mudou de

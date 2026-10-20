@@ -41,3 +41,14 @@ export async function withDeliveryFence<T>(p:{table:'inbound_queue'|'outbox';id:
   return fn(client);
  });
 }
+
+/** The provider accepted the message but the enclosing local transaction failed.
+ * The already committed send marker must survive: replay is never authorized. */
+export class TransportAcceptedCommitError extends Error {
+ constructor(){super('transport_accepted_commit_unknown');this.name='TransportAcceptedCommitError';}
+}
+export async function withTransportFence<T>(p:Parameters<typeof withDeliveryFence>[0],send:()=>Promise<T>):Promise<T>{
+ let accepted=false;
+ try{return await withDeliveryFence(p,async()=>{const result=await send();accepted=true;return result;});}
+ catch(error){if(accepted)throw new TransportAcceptedCommitError();throw error;}
+}

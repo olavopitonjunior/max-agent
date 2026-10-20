@@ -1,4 +1,4 @@
-import { captureDispatchFence, DispatchFenceSchema, withCapturedPrivacy, withDeliveryFence, type DispatchFence } from "./runtime/delivery-fence";
+import { captureDispatchFence, DispatchFenceSchema, withCapturedPrivacy, withDeliveryFence, withTransportFence, TransportAcceptedCommitError, type DispatchFence } from "./runtime/delivery-fence";
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, type InboundMessage } from "./transport";
@@ -394,9 +394,10 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
         await withDeliveryFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},async(client)=>{
           await client.query(`UPDATE inbound_queue SET last_send_started_at=now() WHERE id=$1`,[row.id]);
         });
-        res=await withDeliveryFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},()=>
+        res=await withTransportFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},()=>
           sendText({to:row.from_phone,body:reply!,quoteMessageId:row.message_id}));
       } catch (err) {
+        if(err instanceof TransportAcceptedCommitError)throw err;
         /**
          * Envio FALHOU: limpa o marcador para que a retentativa reenvie de
          * verdade — sem isto ela concluiria "provavelmente enviado" e calaria
@@ -463,6 +464,10 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
 
     return "done";
   } catch (err) {
+    if(err instanceof TransportAcceptedCommitError){
+      await query(`UPDATE inbound_queue SET status='done',settled_at=now(),last_error=$2 WHERE id=$1`,[row.id,err.message]);
+      return "done";
+    }
     if(err instanceof Error&&['execution_revoked','control_conflict'].includes(err.message)){
       await query(`UPDATE inbound_queue SET status='done',settled_at=now(),last_error=$2 WHERE id=$1`,[row.id,err.message]);
       return "done";

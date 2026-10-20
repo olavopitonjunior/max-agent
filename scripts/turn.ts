@@ -13,8 +13,8 @@
  *   npx tsx scripts/turn.ts +5511999999999 "me manda um link de formulario"
  *   npx tsx scripts/turn.ts +5511999999999 "sim"
  *
- * O `thread_id` é `orgId:telefone`, então rodar duas vezes continua a MESMA
- * conversa — é assim que se testa propor num comando e confirmar no seguinte.
+ * O `thread_id` inclui organização, telefone e sujeito autenticado; duas
+ * execuções do mesmo sujeito continuam a mesma conversa.
  *
  * `--novo` limpa a thread antes de rodar, para começar do zero sem trocar de
  * número.
@@ -22,11 +22,12 @@
 
 import { randomUUID } from "node:crypto";
 import { runTurn } from "../src/graph/graph";
-import { threadIdFor } from "../src/graph/graph";
+import { liveNamespaceFor } from "../src/lib/runtime/context";
+import { subjectDe } from "../src/lib/scope";
 import { resolveIdentity } from "../src/lib/identity";
 import { normalizeBrPhone } from "../src/lib/phone";
 import { limparThreadDoCheckpointer } from "../src/lib/checkpointer-reset";
-import { query, db } from "../src/lib/db";
+import { db } from "../src/lib/db";
 
 function has(flag: string): boolean {
   return process.argv.includes(`--${flag}`);
@@ -53,7 +54,7 @@ async function main() {
   if (has("novo")) {
     const identity = await resolveIdentity(e164);
     if (identity.kind === "resolved") {
-      const thread = threadIdFor(identity.candidate.orgId, e164);
+      const thread = liveNamespaceFor(identity.candidate.orgId, e164, subjectDe(identity.candidate));
       // As tabelas são do checkpointer do LangGraph. Limpar a thread aqui é
       // conveniência de teste — em produção nada apaga histórico.
       await limparThreadDoCheckpointer(thread);

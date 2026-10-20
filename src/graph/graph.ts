@@ -2220,7 +2220,7 @@ export const RESET_DO_TURN = {
     piiMap: {},
 };
 
-async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity): Promise<TurnResult> {
+async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity, enterResolved?:(identity:Extract<Identity,{kind:"resolved"}>)=>Promise<TurnResult>): Promise<TurnResult> {
   // Latência do TURN, não do modelo: inclui identidade, transcrição, RAG e
   // checkpoint. É esse número que a pessoa sente, e é o que o painel mostra.
   const iniciadoEm = Date.now();
@@ -2293,12 +2293,13 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity)
    * parte do negócio é desconhecida para o Max e é quem mais recebe a
    * mensagem da imobiliária. Sem modelo. Ver `lib/aceite.ts`.
    */
-  const aceite = await comRastro(() => interceptar(inbound));
-  if (aceite) {
-    return sair(aceite.reply, { orgId: aceite.orgId ?? undefined, error: aceite.marca });
+  if(!preparedIdentity){
+    const aceite = await comRastro(() => interceptar(inbound));
+    if (aceite) return sair(aceite.reply, { orgId: aceite.orgId ?? undefined, error: aceite.marca });
   }
 
   const identity = preparedIdentity ?? await comRastro(() => resolveIdentity(inbound.fromPhone));
+  if(identity.kind==="resolved"&&enterResolved)return enterResolved(identity);
 
   // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
   // respondeu a um aviso, engano ou spam.
@@ -2657,10 +2658,14 @@ async function transcreverMidia(
 /** Opt-in durable execution. Existing deterministic paths stay on the same graph. */
 export async function runTurn(inbound: InboundMessage, options?:{dispatchFence?:DispatchFence}): Promise<TurnResult> {
  if (process.env.MAX_CHAT_KILL === "true") return { reply: null, dispatchFence:options?.dispatchFence, afterReply: async () => {} };
+ if (currentExecution()) return runTurnCore(inbound);
+ const result=await runTurnCore(inbound,undefined,identity=>runResolvedTurn(inbound,identity,options));
+ return {...result,dispatchFence:result.dispatchFence??options?.dispatchFence};
+}
+/** Set up subject/privacy even for direct callers with durable features OFF.
+ * The preamble above still handles template acceptance before identity lookup. */
+async function runResolvedTurn(inbound:InboundMessage,identity:Extract<Identity,{kind:"resolved"}>,options?:{dispatchFence?:DispatchFence}):Promise<TurnResult>{
  const durable=process.env.MAX_RUNTIME_V1 === "true"||process.env.MAX_HANDOFF === "true"||process.env.MAX_MARKETING === "true";
- if (currentExecution() || (!durable&&!options?.dispatchFence)) return runTurnCore(inbound);
- const identity = await resolveIdentity(inbound.fromPhone);
- if (identity.kind !== "resolved") {const result=await runTurnCore(inbound,identity);return {...result,dispatchFence:options?.dispatchFence};}
  const orgId = identity.candidate.orgId,subject=subjectDe(identity.candidate);
  const control = await getControl(orgId, inbound.fromPhone);
  const fence = { orgId, controlVersion: control.controlVersion };

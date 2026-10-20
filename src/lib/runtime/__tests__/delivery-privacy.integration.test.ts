@@ -1,5 +1,6 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 import {NextRequest} from 'next/server';
+import {Client} from 'pg';
 const scheduled=vi.hoisted(()=>({pause:null as null|(()=>Promise<void>),subject:'subject-a'}));
 vi.mock('@/graph/graph',async original=>{const actual=await original<typeof import('@/graph/graph')>();return {...actual,runTurn:async(...args:Parameters<typeof actual.runTurn>)=>{const result=await actual.runTurn(...args);if(scheduled.pause)await scheduled.pause();return result;}};});
 vi.mock('@/lib/identity',async original=>({...await original<typeof import('@/lib/identity')>(),resolveIdentity:async()=>({kind:'resolved',org:{orgId:'delivery-privacy-fixture',orgName:'Fixture',apiToken:'fixture'},candidate:{kind:'user',orgId:'delivery-privacy-fixture',orgName:'Fixture',userId:scheduled.subject,userName:'Synthetic'}})}));
@@ -66,6 +67,32 @@ d('durable graph-to-delivery privacy boundary',()=>{
   let reached!:()=>void,release!:()=>void;const marker=new Promise<void>(r=>reached=r),hold=new Promise<void>(r=>release=r);const original=database.query;
   vi.spyOn(database,'query').mockImplementation(async(sql:string,args?:unknown[])=>{const result=await original(sql,args);if(sql.includes('UPDATE outbox SET send_started_at')){reached();await hold;}return result;});
   const work=dispatchDue(1,{connected:true} as never);await marker;await erase();release();await work;expect(sendText).not.toHaveBeenCalled();expect(await query('SELECT 1 FROM outbox WHERE id=$1',[queued.id])).toHaveLength(0);
+ });
+
+ it('does not resend inbound after provider ACK followed by a fence COMMIT failure',async()=>{
+  const row=await inbound('inbound-ack-commit-failure');let failCommit=false;
+  const original=Client.prototype.query;
+  vi.spyOn(Client.prototype,'query').mockImplementation(function(this:Client,...args:unknown[]){if(args[0]==='COMMIT'&&failCommit){failCommit=false;throw new Error('fixture COMMIT connection loss');}return Reflect.apply(original,this,args);} as typeof original);
+  vi.mocked(sendText).mockImplementationOnce(async()=>{failCommit=true;return {messageId:'provider-accepted-inbound'};});
+  await runQueued(row as never);const [saved]=await query('SELECT * FROM inbound_queue WHERE id=$1',[row.id]);
+  expect(saved.last_send_started_at).not.toBeNull();await runQueued(saved as never);expect(sendText).toHaveBeenCalledTimes(1);
+ });
+ it('does not resend outbox after provider ACK followed by a fence COMMIT failure',async()=>{
+  await inbound('outbox-ack-window');await query('DELETE FROM outbox WHERE org_id=$1',[org]);
+  const queued=await enqueue({orgId:org,dedupeKey:'outbox-ack-commit',audience:'platform_user',phone,recipientName:'Synthetic',title:'Synthetic',body:'Synthetic',linkUrl:null,dealId:null,orgName:'Fixture',kind:'welcome'});await query("UPDATE outbox SET deliver_after='2000-01-01' WHERE id=$1",[queued.id]);
+  let failCommit=false;const original=Client.prototype.query;
+  vi.spyOn(Client.prototype,'query').mockImplementation(function(this:Client,...args:unknown[]){if(args[0]==='COMMIT'&&failCommit){failCommit=false;throw new Error('fixture COMMIT connection loss');}return Reflect.apply(original,this,args);} as typeof original);
+  vi.mocked(sendText).mockImplementationOnce(async()=>{failCommit=true;return {messageId:'provider-accepted-outbox'};});
+  await dispatchDue(1,{connected:true} as never);const [saved]=await query('SELECT * FROM outbox WHERE id=$1',[queued.id]);expect(saved.send_started_at).not.toBeNull();
+  await query("UPDATE outbox SET last_attempt_at='2000-01-01',deliver_after='2000-01-01' WHERE id=$1",[queued.id]);await dispatchDue(1,{connected:true} as never);expect(sendText).toHaveBeenCalledTimes(1);
+ });
+ it('forgets a directly invoked default-OFF live namespace before the same subject reloads',async()=>{
+  vi.stubEnv('MAX_RUNTIME_V1','false');vi.stubEnv('MAX_HANDOFF','false');vi.stubEnv('MAX_MARKETING','false');
+  const message={messageId:'direct-legacy-first',fromPhone:phone,kind:'text' as const,text:'oi',groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()};
+  await runTurn(message);const app=await getApp(),thread=liveNamespaceFor(org,phone,{kind:'user',userId:'subject-a'});
+  await app.updateState({configurable:{thread_id:thread}},{messages:[{role:'assistant',content:'PRIVATE_DIRECT_ONLY'}],pendingAction:{kind:'criar_documento',args:{tipo:'venda'},askedAt:Date.now(),askedForMessageId:'direct-approval'}});
+  await erase();expect(await query('SELECT 1 FROM checkpoints WHERE thread_id=$1',[thread])).toHaveLength(0);
+  await runTurn({...message,messageId:'direct-legacy-reload'});const state=await app.getState({configurable:{thread_id:thread}});expect(JSON.stringify(state.values)).not.toContain('PRIVATE_DIRECT_ONLY');expect(state.values.pendingAction).toBeNull();
  });
 
 });
