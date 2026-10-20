@@ -29,6 +29,7 @@ export function recordCost(costUsd:number|null):void {
 export function namespaceFor(mode:'simulation'|'staging',orgId:string,phone:string,sessionId:string,subjectDigest?:string):string {
   return `playground:${mode}:${contentDigest({orgId,phone:conversationKey(phone),sessionId,...(subjectDigest?{subjectDigest}:{})})}`;
 }
+export function liveNamespaceFor(orgId:string,phone:string,subject:unknown):string {return `live:${contentDigest({orgId,phone:conversationKey(phone),subjectDigest:contentDigest(subject)})}`;}
 export function scopedThreadId(orgId:string,phone:string):string {
-  const e=currentExecution(); return e && e.context.mode!=='live' ? e.context.conversationId : `${orgId}:${conversationKey(phone)}`;
+  const e=currentExecution();return e&&e.context.orgId===orgId?e.context.conversationId:`${orgId}:${conversationKey(phone)}`;
 }

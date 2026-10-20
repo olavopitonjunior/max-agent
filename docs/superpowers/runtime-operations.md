@@ -10,10 +10,10 @@ O catálogo executável é `GET /api/admin/catalog`, apresentado em `/admin/max/
 
 ## Ordem de implantação
 
-1. Aplicar migração aditiva ImobPro de marketing e Max022–025 no ambiente de staging, com backup e teste de restauração prévios. Executar o migrador versionado; não “adotar” schema incompleto.
+1. Aplicar migração aditiva ImobPro de marketing e Max022–026 no ambiente de staging, com backup e teste de restauração prévios. Executar o migrador versionado; não “adotar” schema incompleto.
 2. Implantar receptores ImobPro e Max com comportamentos novos OFF. O contrato HMAC deve passar com `docs/contracts/max-runtime-v1.json` idêntico nos dois repos.
 3. Ligar playground simulado nos dois serviços. Ele usa o mesmo grafo com adaptadores sintéticos, sem rede/modelo pago/banco de negócio. Uma sessão nunca é uma conversa WhatsApp.
-4. Para staging real: habilitar `MAX_PLAYGROUND_STAGING_ENABLED` em ambos e permitir explicitamente o par organização/telefone sintético em `MAX_PLAYGROUND_STAGING_IDENTITIES` no Max. Nunca cadastrar um contato de cliente real como fixture. Separar credenciais e dados de staging.
+4. Para staging real: habilitar `MAX_PLAYGROUND_STAGING_ENABLED` no ImobPro; no Max, habilitar `MAX_PLAYGROUND` e permitir explicitamente o par organização/telefone sintético em `MAX_PLAYGROUND_STAGING_IDENTITIES`. Nunca cadastrar um contato de cliente real como fixture. Separar credenciais e dados de staging.
 5. Canary de uma organização: habilitar `MAX_RUNTIME_V1`; depois `MAX_EXTENDED_QUERIES` e somente as capabilities aprovadas no `maxPolicy`. Validar fluxo atual de proposta/formulário, consultas e negações por papel.
 6. Handoff exige `MAX_HANDOFF=true` no Max, `MAX_HANDOFF_ENABLED=true` no ImobPro, módulo Max e permissões `max.conversations.view` + `max.conversations.manage`. Testar dois operadores, takeover durante resposta e handback explícito.
 7. Marketing exige `MAX_MARKETING=true`, permissões e política `marketing.read/generate`, marca/templates/cota do tenant. Escolha de imóveis no WhatsApp também precisa `MAX_EXTENDED_QUERIES` e `property.list`. Vídeo depende do contrato de template Creatomate e armazenamento privado descritos na documentação de marketing. Sem configuração/cota, não gerar pago.
@@ -60,3 +60,11 @@ Preferências novas do runtime carregam `source_task_id`, `workflow_version` e `
 O catálogo usa os nomes reais dos workers remotos ImobPro: `marketing.brief`, `marketing.copy-script`, `marketing.template-layout`, `marketing.qa` e `marketing.video`. O gateway importa `snapshot.events` e `job.events` por allowlist de worker/versão/skill/outcome/revisão e códigos conhecidos de QA. Fonte, argumentos, URLs e metadados de texto livre não entram no trace local. Workers continuam determinísticos ou de provedor, com `model:null`, e permanecem desligados até habilitação explícita.
 
 O rollback compatível mantém o leitor de preferências consciente de sujeito da025. Se for necessário voltar a código anterior a essa fronteira, o procedimento humano deve primeiro bloquear chat/memória e remover ou isolar as preferências com `subject_digest IS NOT NULL`; um leitor antigo não reconhece esse isolamento. Nenhuma migração atribui linhas NULL históricas ao usuário atual de um telefone.
+
+## Revogação e conversa ao vivo após a migração026
+
+A fila inbound e a outbox persistem o digest da pessoa e o epoch de privacidade capturados no recebimento. A resposta derivada preserva também sujeito e versão de controle. Persistência da resposta e envio final verificam o epoch e a existência da linha, sob bloqueios na ordem privacidade → controle → fila/checkpoint. Apagamento que conclui antes do envio invalida inclusive respostas já calculadas ou persistidas e callbacks de uma linha capturada anteriormente. Transporte que já iniciou sob o bloqueio conclui antes do apagamento; isso não representa cancelamento de mensagem já entregue ao provedor.
+
+Checkpoints ao vivo usam namespace por organização, telefone canônico e sujeito; a migração não transfere histórico nem aprovações legadas ao novo sujeito. `live_conversation_binding` permite que handback remova pendências dos namespaces vinculados e que forget remova todos eles. Linhas de fila antigas sem epoch só são aceitas se a pessoa nunca tiver sido apagada; após apagamento, são suprimidas de forma conservadora. Os kill switches de chat e escrita valem também com as flags novas desligadas. O alerta de atendimento sem dono conta `waiting_human` sem operador e cessa após claim.
+
+O contrato público de marketing usa `snapshot.quotaUnits` na confirmação e `job.state` no acompanhamento, conforme `docs/contracts/max-marketing-v1.json`. A confirmação informa unidades da cota da modalidade; não inventa preço em dólar quando o serviço não fornece um custo técnico.

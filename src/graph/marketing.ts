@@ -8,7 +8,11 @@ const isRequest=(text:string)=>/\b(marketing|arte|an[uú]ncio|campanha|v[ií]deo
 const statusRequest=(text:string)=>/\b(pront[oa]|termin|ficou|status|andamento|como est)/i.test(text);
 function propertyLabel(p:Property):string{return [p.tipo,p.bairro,p.cidade,p.dormitorios?`${p.dormitorios} dormitórios`:null].filter(Boolean).join(' • ')||'Imóvel cadastrado';}
 function optionsReply(items:Property[],more:boolean):string{return `Qual imóvel você quer divulgar?\n${items.map((p,i)=>`${i+1}. ${propertyLabel(p)}`).join('\n')}\nResponda com o número${more?' ou diga mais imóveis':''}.`;}
-function jobReply(job:{status?:string}):string {return job.status==='succeeded'?'Sua peça está pronta. Confira e baixe os arquivos no estúdio de marketing do ImobPro.':job.status==='unknown'?'O resultado ainda é incerto. Estou preservando a mesma geração para evitar nova cobrança.':`Sua peça está ${job.status==='running'?'sendo preparada':job.status??'aguardando processamento'}. Você pode perguntar se ficou pronta.`;}
+function jobReply(job:{state?:string;stale?:boolean}):string {
+ if(job.stale)return 'Os dados do imóvel mudaram desde a geração. Confira a peça no estúdio e prepare uma nova versão com os dados atuais.';
+ const replies:Record<string,string>={succeeded:'Sua peça está pronta. Confira e baixe os arquivos no estúdio de marketing do ImobPro.',unknown:'O resultado ainda é incerto. Estou preservando a mesma geração para evitar nova cobrança.',running:'Sua peça está sendo preparada. Você pode perguntar se ficou pronta.',queued:'Sua peça está aguardando processamento. Você pode perguntar se ficou pronta.',failed:'A geração da sua peça falhou. Confira os detalhes no estúdio ImobPro.',cancelled:'A geração da sua peça foi cancelada.'};
+ return replies[job.state??'']??'Não consegui confirmar o estado da peça. Confira o estúdio ImobPro.';
+}
 /** No ids need to be typed: visible properties/templates are selected by number. */
 export async function marketingStep(p:{text:string;messageId:string;now:number;canWrite:boolean;policy:readonly string[];pending:MarketingPending|null},action:Action):Promise<Step|null>{
  if(process.env.MAX_MARKETING!=='true')return p.pending?{reply:'Marketing indisponível agora. A confirmação foi descartada.',pending:null,event:'marketing_disabled'}:null;
@@ -17,13 +21,13 @@ export async function marketingStep(p:{text:string;messageId:string;now:number;c
   if(!p.canWrite||!p.policy.includes('marketing.generate'))return {reply:'A geração de marketing não está liberada para você.',pending:null,event:'marketing_denied'};
   const result=await action('marketing.prepare',{propertyId,templateId:template.id,modality},p.messageId);
   if(!result||result.status>=400)return {reply:'Não consegui preparar a peça. Confira imóvel, marca e cota no estúdio ImobPro.',pending:null,event:'marketing_prepare_failed'};
-  const b=result.body,s=b.snapshot as {copy?:string;template?:string;estimatedCostUsd?:number}|undefined,expiresAt=Date.parse(String(b.expiresAt));
-  if(typeof b.briefId!=='string'||typeof b.confirmationDigest!=='string'||!/^[a-f0-9]{64}$/i.test(b.confirmationDigest)||!Number.isFinite(expiresAt)||expiresAt<=p.now)return {reply:'Não consegui validar a preparação da peça.',pending:null,event:'marketing_prepare_invalid'};
-  const summary=`${s?.copy??''}\nModelo: ${s?.template??template.name}. Custo estimado: US$ ${s?.estimatedCostUsd??0}.`;
+  const b=result.body,s=b.snapshot as {copy?:string;template?:string;quotaUnits?:number}|undefined,expiresAt=Date.parse(String(b.expiresAt));
+  if(typeof b.briefId!=='string'||typeof b.confirmationDigest!=='string'||!/^[a-f0-9]{64}$/i.test(b.confirmationDigest)||!Number.isFinite(expiresAt)||expiresAt<=p.now||!Number.isSafeInteger(s?.quotaUnits)||Number(s?.quotaUnits)<1||Number(s?.quotaUnits)>100)return {reply:'Não consegui validar a preparação da peça.',pending:null,event:'marketing_prepare_invalid'};
+  const summary=`${s?.copy??''}\nModelo: ${s?.template??template.name}. Usa ${s!.quotaUnits} ${s!.quotaUnits===1?'unidade':'unidades'} da sua cota de ${{copy:'texto',artwork:'arte',video:'vídeo'}[modality]}.`;
   return {reply:`${summary}\nConfirma a geração desta peça? Responda sim.`,pending:{briefId:b.briefId,confirmationDigest:b.confirmationDigest,expiresAt,summary,phase:'approval',modality},event:'marketing_waiting_approval'};
  }
  if(previous?.phase==='tracking'&&previous.jobId&&statusRequest(text)){
-  const r=await action('marketing.status',{jobId:previous.jobId});const job=r?.body.job as {status?:string}|undefined;
+  const r=await action('marketing.status',{jobId:previous.jobId});const job=r?.body.job as {state?:string;stale?:boolean}|undefined;
   return {reply:job?jobReply(job):'Não consegui consultar sua peça agora. Tente novamente em instantes.',pending:previous,event:'marketing_status'};
  }
  if(previous&&previous.phase!=='tracking'){
@@ -52,7 +56,7 @@ export async function marketingStep(p:{text:string;messageId:string;now:number;c
   runEvent('skill.completed','confirmation');
   if(!result||result.status>=500||result.body.error==='execution_unknown')return {reply:'O resultado da geração está incerto. Não vou iniciar outra cobrança; consulte a biblioteca no estúdio ImobPro.',pending:null,event:'marketing_unknown'};
   if(result.status>=400)return {reply:'Não consegui gerar: confira a permissão, a cota e os dados atuais no estúdio ImobPro.',pending:null,event:'marketing_rejected'};
-  const job=result.body.job as {id?:string;status?:string}|undefined;
+  const job=result.body.job as {id?:string;state?:string;stale?:boolean}|undefined;
   return {reply:job?jobReply(job):'A geração foi aceita. Consulte o status no estúdio ImobPro.',pending:job?.id?{...previous,phase:'tracking',jobId:job.id,expiresAt:p.now+24*3600000}:null,event:'marketing_generated'};
  }
  if(!isRequest(text))return null;

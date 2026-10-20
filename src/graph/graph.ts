@@ -1,3 +1,6 @@
+import { liveNamespaceFor } from "@/lib/runtime/context";
+import { query } from "@/lib/db";
+import { withDeliveryFence, type DispatchFence } from "@/lib/runtime/delivery-fence";
 import { privacyEpoch, protectCheckpoint } from "@/lib/runtime/privacy";
 import { marketingStep, type MarketingPending } from "./marketing";
 import { withExecution, withExistingExecution, currentExecution } from "@/lib/runtime/context";
@@ -74,6 +77,7 @@ import {
   displayName,
   markGreeted,
   avisouPrimeiroAcessoHoje,
+  type Identity,
   type Candidate,
 } from "@/lib/identity";
 import { complete, DEFAULT_MODEL, type LlmUsage,
@@ -583,13 +587,16 @@ export function threadIdFor(orgId: string, phone: string): string {
 export async function seedNotification(
   orgId: string,
   phone: string,
-  texto: string
+  texto: string,
+  delivery?:{id:string;fence:DispatchFence;subject:unknown}
 ): Promise<void> {
-  const app = await getApp();
-  await app.updateState(
-    { configurable: { thread_id: threadIdFor(orgId, phone) } },
-    { messages: [{ role: "assistant", content: texto }] }
-  );
+  const app=await getApp();
+  const threadId=delivery?liveNamespaceFor(orgId,phone,delivery.subject):threadIdFor(orgId,phone);
+  const write=()=>app.updateState({configurable:{thread_id:threadId}},{messages:[{role:"assistant",content:texto}]});
+  if(delivery)await withDeliveryFence({table:'outbox',id:delivery.id,phone,fence:delivery.fence},async(client)=>{
+    await client.query(`INSERT INTO live_conversation_binding(org_id,phone,subject_digest,thread_id) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,phone,subject_digest) DO UPDATE SET bound_at=now()`,[orgId,conversationKey(phone),contentDigest(delivery.subject),threadId]);
+    await write();
+  });else await write();
 }
 
 /**
@@ -1277,8 +1284,8 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
  */
 async function executar(state:MaxStateType,args:PendingAction["args"],idempotencyKey:string):Promise<string>{
   const execution=currentExecution();
-  if(!execution)return executarCriacaoDireta(state,args,idempotencyKey);
   if(process.env.MAX_WRITES_KILL==="true")throw new Error("writes_disabled");
+  if(!execution)return executarCriacaoDireta(state,args,idempotencyKey);
   await assertBotWrite(execution.context,state.inbound.fromPhone);
   const result=await executeIntent({verb:args.tipo==="proposta"?"proposal.create":"form.create",key:idempotencyKey,args},async()=>({status:200,body:{url:await executarCriacaoDireta(state,args,idempotencyKey)}}));
   if(!result||result.status!==200||typeof result.body.url!=="string")throw new Error("execution_unknown");
@@ -2135,6 +2142,7 @@ export async function invokeIsolatedGraph(inbound: InboundMessage, identity: Can
  * conversa em duas memórias.
  */
 export interface TurnResult {
+  dispatchFence?: DispatchFence;
   control?: { orgId: string; controlVersion: number };
   reply: string | null;
   /**
@@ -2212,7 +2220,7 @@ export const RESET_DO_TURN = {
     piiMap: {},
 };
 
-async function runTurnCore(inbound: InboundMessage): Promise<TurnResult> {
+async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity): Promise<TurnResult> {
   // Latência do TURN, não do modelo: inclui identidade, transcrição, RAG e
   // checkpoint. É esse número que a pessoa sente, e é o que o painel mostra.
   const iniciadoEm = Date.now();
@@ -2290,7 +2298,7 @@ async function runTurnCore(inbound: InboundMessage): Promise<TurnResult> {
     return sair(aceite.reply, { orgId: aceite.orgId ?? undefined, error: aceite.marca });
   }
 
-  const identity = await comRastro(() => resolveIdentity(inbound.fromPhone));
+  const identity = preparedIdentity ?? await comRastro(() => resolveIdentity(inbound.fromPhone));
 
   // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
   // respondeu a um aviso, engano ou spam.
@@ -2472,7 +2480,7 @@ async function runTurnCore(inbound: InboundMessage): Promise<TurnResult> {
     },
     {
       configurable: {
-        thread_id: threadIdFor(orgId, phone),
+        thread_id: currentExecution()?.context.conversationId ?? liveNamespaceFor(orgId, phone, subjectDe(identity.candidate)),
       },
     }
   ).then((r) => {
@@ -2647,30 +2655,32 @@ async function transcreverMidia(
 }
 
 /** Opt-in durable execution. Existing deterministic paths stay on the same graph. */
-export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
- if (currentExecution() || (process.env.MAX_RUNTIME_V1 !== "true" && process.env.MAX_HANDOFF !== "true" && process.env.MAX_MARKETING !== "true")) return runTurnCore(inbound);
- if (process.env.MAX_CHAT_KILL === "true") return { reply: null, afterReply: async () => {} };
+export async function runTurn(inbound: InboundMessage, options?:{dispatchFence?:DispatchFence}): Promise<TurnResult> {
+ if (process.env.MAX_CHAT_KILL === "true") return { reply: null, dispatchFence:options?.dispatchFence, afterReply: async () => {} };
+ const durable=process.env.MAX_RUNTIME_V1 === "true"||process.env.MAX_HANDOFF === "true"||process.env.MAX_MARKETING === "true";
+ if (currentExecution() || (!durable&&!options?.dispatchFence)) return runTurnCore(inbound);
  const identity = await resolveIdentity(inbound.fromPhone);
- if (identity.kind !== "resolved") return runTurnCore(inbound);
- const orgId = identity.candidate.orgId;
+ if (identity.kind !== "resolved") {const result=await runTurnCore(inbound,identity);return {...result,dispatchFence:options?.dispatchFence};}
+ const orgId = identity.candidate.orgId,subject=subjectDe(identity.candidate);
  const control = await getControl(orgId, inbound.fromPhone);
  const fence = { orgId, controlVersion: control.controlVersion };
- // No automatic return to the bot and no public draft while a human owns this conversation.
  const hash = contentDigest({ orgId, messageId: inbound.messageId });
  const taskId = `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-8${hash.slice(17,20)}-${hash.slice(20,32)}`;
  const personDigest = contentDigest(conversationKey(inbound.fromPhone));
- const epoch = await privacyEpoch(personDigest);
- const context: ExecutionContext = { personDigest, privacyEpoch: epoch, orgId, subject: subjectDe(identity.candidate), conversationId: threadIdFor(orgId, inbound.fromPhone), taskId, mode: "live", workflowVersion: WORKFLOW_VERSION, controlVersion: control.controlVersion, deadline: Date.now() + 110000, budgetUsd: 0.25, maxConcurrency: 3 };
- if (control.state !== "bot") return { reply: null, control: fence, afterReply: () => withExecution(context, async () => { await registrarTurn({orgId,phone:inbound.fromPhone,messageId:inbound.messageId,kind:inbound.kind,inboundText:inbound.text ? redigirCredito(inbound.text) : null,replyText:null,route:"human",error:"human_control"}); }) };
- if (!await startTask(context)) throw new Error("execution_already_started");
- return withExecution(context, async () => {
-  const execution = currentExecution()!;
-  runEvent("run.started", "max");
-  try {
-   const result = await runTurnCore(inbound);
-   runEvent("run.completed", "max");
-   await finishTask(context, "succeeded", execution.events);
-   return { ...result, control: fence, afterReply: () => withExistingExecution(execution, async () => { await result.afterReply(); await finishTask(context, "succeeded", execution.events); }) };
-  } catch (error) { runEvent("run.unknown", "max"); await finishTask(context, "unknown", execution.events); throw error; }
+ const epoch = options?.dispatchFence?.privacyEpoch ?? await privacyEpoch(personDigest);
+ const conversationId=liveNamespaceFor(orgId,inbound.fromPhone,subject);
+ const dispatchFence:DispatchFence={personDigest,privacyEpoch:epoch,orgId,subjectDigest:contentDigest(subject),controlVersion:control.controlVersion,conversationId};
+ const context: ExecutionContext = { personDigest, privacyEpoch: epoch, orgId, subject, conversationId, controlKey:`${orgId}:${conversationKey(inbound.fromPhone)}`,legacyExecution:!durable,taskId,mode:"live",workflowVersion:WORKFLOW_VERSION,controlVersion:control.controlVersion,deadline:Date.now()+110000,budgetUsd:0.25,maxConcurrency:3 };
+ if (control.state !== "bot") return { reply:null,control:fence,dispatchFence,afterReply:()=>withExecution(context,async()=>{await registrarTurn({orgId,phone:inbound.fromPhone,messageId:inbound.messageId,kind:inbound.kind,inboundText:inbound.text?redigirCredito(inbound.text):null,replyText:null,route:"human",error:"human_control"});}) };
+ if (durable&&!await startTask(context)) throw new Error("execution_already_started");
+ return withExecution(context,async()=>{
+  const execution=currentExecution()!;
+  await query(`INSERT INTO live_conversation_binding(org_id,phone,subject_digest,thread_id) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,phone,subject_digest) DO UPDATE SET bound_at=now()`,[orgId,conversationKey(inbound.fromPhone),contentDigest(subject),conversationId]);
+  runEvent("run.started","max");
+  try{
+   const result=await runTurnCore(inbound,identity);runEvent("run.completed","max");
+   if(durable)await finishTask(context,"succeeded",execution.events);
+   return {...result,control:fence,dispatchFence,afterReply:()=>withExistingExecution(execution,async()=>{await result.afterReply();if(durable)await finishTask(context,"succeeded",execution.events);})};
+  }catch(error){runEvent("run.unknown","max");if(durable)await finishTask(context,"unknown",execution.events);throw error;}
  });
 }

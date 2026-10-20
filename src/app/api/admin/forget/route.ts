@@ -51,11 +51,10 @@ function phoneVariants(raw: string): { bare: string[]; plus: string[] } | null {
  * merece atenção: ou o número nunca falou com o Max, ou a forma digitada não
  * é nenhuma das gravadas.
  *
- * **Limite conhecido (registrado, não resolvido):** o apagamento é um retrato
- * do instante. Um turn em voo, um retry do `/notify` ou uma reentrega da
- * Z-API podem recriar linhas segundos depois — o dedupe é as próprias linhas
- * apagadas. Para o caso LGPD real, rode duas vezes com um minuto de
- * intervalo e confirme `deleted` zerado na segunda.
+ * Epochs invalidam turns, filas e callbacks capturados antes do apagamento.
+ * Um novo recebimento autenticado após o apagamento pode iniciar outra
+ * conversa com o epoch atual; isto não é uma lista de bloqueio do contato
+ * nem apaga dados oficiais mantidos pelo ImobPro/provedor.
  */
 export async function POST(req: NextRequest) {
   const auth = await requireHmac(req);
@@ -88,7 +87,7 @@ export async function POST(req: NextRequest) {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`privacy:${digest}`]);
       await client.query(`INSERT INTO runtime_privacy_epoch(person_digest,epoch) VALUES($1,1) ON CONFLICT(person_digest) DO UPDATE SET epoch=runtime_privacy_epoch.epoch+1,updated_at=now()`, [digest]);
     }
-    const harnessThreads = await client.query(`SELECT conversation_id FROM runtime_task WHERE person_digest=ANY($1)`, [personDigests]);
+    const harnessThreads = await client.query(`SELECT conversation_id FROM runtime_task WHERE person_digest=ANY($1) UNION SELECT thread_id AS conversation_id FROM live_conversation_binding WHERE phone=ANY($2)`, [personDigests,bare]);
     const harnessThreadIds = harnessThreads.rows.map((r) => r.conversation_id);
 
 
@@ -97,6 +96,7 @@ export async function POST(req: NextRequest) {
       deleted[table] = r.rowCount ?? 0;
     };
 
+    await del("live_conversation_binding",`DELETE FROM live_conversation_binding WHERE phone=ANY($1)`,[bare]);
     await del("runtime_task", `DELETE FROM runtime_task WHERE person_digest=ANY($1)`, [personDigests]);
     await del("playground_session", `DELETE FROM playground_session WHERE phone_digest=ANY($1)`, [personDigests]);
     await del("conversation_control", `DELETE FROM conversation_control WHERE phone=ANY($1)`, [bare]);

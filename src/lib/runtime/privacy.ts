@@ -10,16 +10,17 @@ export async function withPrivacyFence<T>(context:ExecutionContext,fn:(client:Po
  const client=await db().connect();
  try{
   await client.query('BEGIN');
-  if(controlFence&&context.mode==='live'){
-   await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[context.conversationId]);
-   const phone=context.conversationId.slice(context.conversationId.lastIndexOf(':')+1);
-   const {rows}=await client.query('SELECT state,control_version FROM conversation_control WHERE org_id=$1 AND phone=$2',[context.orgId,phone]);
-   if((rows[0]?.state??'bot')!=='bot'||Number(rows[0]?.control_version??0)!==context.controlVersion)throw new Error('control_conflict');
-  }
   if(context.personDigest){
    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`privacy:${context.personDigest}`]);
    const {rows}=await client.query('SELECT epoch FROM runtime_privacy_epoch WHERE person_digest=$1',[context.personDigest]);
    if(Number(rows[0]?.epoch??0)!==(context.privacyEpoch??0))throw new Error('execution_revoked');
+  }
+  if(controlFence&&context.mode==='live'){
+   const key=context.controlKey??context.conversationId;
+   await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[key]);
+   const phone=key.slice(key.lastIndexOf(':')+1);
+   const {rows}=await client.query('SELECT state,control_version FROM conversation_control WHERE org_id=$1 AND phone=$2',[context.orgId,phone]);
+   if((rows[0]?.state??'bot')!=='bot'||Number(rows[0]?.control_version??0)!==context.controlVersion)throw new Error('control_conflict');
   }
   const result=await fn(client);await client.query('COMMIT');return result;
  }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}

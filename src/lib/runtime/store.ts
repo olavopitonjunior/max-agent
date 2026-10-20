@@ -22,6 +22,7 @@ interface ActionResult {status:number;body:Record<string,unknown>}
 export async function executeIntent(params:{verb:string;key:string;args:unknown},effect:()=>Promise<ActionResult|null>):Promise<ActionResult|null> {
  const execution=currentExecution(); if(!execution) return effect();
  const ctx=execution.context;
+ if(ctx.legacyExecution)return effect();
  if(ctx.mode==='simulation') {runEvent('tool.simulated',params.verb);return {status:409,body:{error:'simulation_effect_denied',simulated:true}};}
  const digest=contentDigest(params.args),subjectDigest=contentDigest(ctx.subject);
  const rows=await query(`WITH task AS (SELECT id FROM runtime_task WHERE id=$2 AND org_id=$3 AND state IN ('queued','running','waiting_input','waiting_approval') FOR UPDATE)

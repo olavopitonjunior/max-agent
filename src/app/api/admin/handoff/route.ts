@@ -1,3 +1,4 @@
+import { liveNamespaceFor } from "@/lib/runtime/context";
 import type { PoolClient } from "pg";
 import { getApp } from "@/graph/graph";
 import { withExecution } from "@/lib/runtime/context";
@@ -32,7 +33,7 @@ export async function POST(req:NextRequest){
  if(!thread.length)return NextResponse.json({error:'thread_not_found'},{status:404});
  const p={...data,phone};
  const personDigest=contentDigest(conversationKey(phone));
- const context:ExecutionContext={orgId:p.orgId,subject:identity.candidate.kind==='user'?{kind:'user',userId:identity.candidate.userId}:{kind:'broker',splitRecipientId:identity.candidate.splitRecipientId},conversationId:`${p.orgId}:${conversationKey(phone)}`,taskId:p.requestId,mode:'live',workflowVersion:WORKFLOW_VERSION,controlVersion:p.controlVersion??0,deadline:Date.now()+60000,budgetUsd:1,maxConcurrency:3,personDigest,privacyEpoch:await privacyEpoch(personDigest)};
+ const context:ExecutionContext={orgId:p.orgId,subject:identity.candidate.kind==='user'?{kind:'user',userId:identity.candidate.userId}:{kind:'broker',splitRecipientId:identity.candidate.splitRecipientId},conversationId:liveNamespaceFor(p.orgId,phone,identity.candidate.kind==='user'?{kind:'user',userId:identity.candidate.userId}:{kind:'broker',splitRecipientId:identity.candidate.splitRecipientId}),controlKey:`${p.orgId}:${conversationKey(phone)}`,taskId:p.requestId,mode:'live',workflowVersion:WORKFLOW_VERSION,controlVersion:p.controlVersion??0,deadline:Date.now()+60000,budgetUsd:1,maxConcurrency:3,personDigest,privacyEpoch:await privacyEpoch(personDigest)};
  const privacyCheck=async(client:PoolClient)=>{
    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`privacy:${personDigest}`]);
    const privacy=await client.query('SELECT epoch FROM runtime_privacy_epoch WHERE person_digest=$1',[personDigest]);
@@ -50,7 +51,9 @@ export async function POST(req:NextRequest){
   return NextResponse.json({control:await transitionControl({...p,operation:p.operation,beforeTransition:async(client)=>{
     await privacyCheck(client);
     if(p.operation==='handback'){
-      const app=await getApp();await app.updateState({configurable:{thread_id:context.conversationId}},{pendingAction:null,marketingPending:null,fluxo:null,restoDaResposta:null});
+      const bindings=await client.query('SELECT thread_id FROM live_conversation_binding WHERE org_id=$1 AND phone=$2',[p.orgId,conversationKey(phone)]);
+      const threads=new Set([context.conversationId,`${p.orgId}:${conversationKey(phone)}`,...bindings.rows.map(r=>r.thread_id)]);
+      const app=await getApp();for(const thread_id of threads)await app.updateState({configurable:{thread_id}},{pendingAction:null,marketingPending:null,fluxo:null,restoDaResposta:null});
     }
   }})});
  }catch(error){return NextResponse.json({error:error instanceof Error&&['control_conflict','send_unknown'].includes(error.message)?error.message:'send_unknown'},{status:409});}

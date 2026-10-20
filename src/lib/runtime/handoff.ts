@@ -9,6 +9,7 @@ async function locked<T>(orgId:string,phone:string,fn:(client:PoolClient,control
  const client=await db().connect();
  try{
   await client.query('BEGIN');
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`privacy:${contentDigest(conversationKey(phone))}`]);
   await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`${orgId}:${conversationKey(phone)}`]);
   await client.query(`INSERT INTO conversation_control(org_id,phone) VALUES($1,$2) ON CONFLICT DO NOTHING`,[orgId,conversationKey(phone)]);
   const {rows}=await client.query('SELECT * FROM conversation_control WHERE org_id=$1 AND phone=$2 FOR UPDATE',[orgId,conversationKey(phone)]);
