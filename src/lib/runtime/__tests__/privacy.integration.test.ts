@@ -1,3 +1,4 @@
+import {saveFacts} from "../../memory";
 import {describe,it,expect,beforeEach,vi,afterEach} from 'vitest';
 import {query} from '../../db';
 import {contentDigest} from '../contracts';
@@ -29,6 +30,7 @@ d('privacy epoch fencing',()=>{
   await query('DELETE FROM runtime_task WHERE id=$1',[taskId]);await query('DELETE FROM playground_session WHERE id=$1',[sessionId]);
   const ctx={orgId:'privacy-fixture',subject:{kind:'user' as const,userId:'fixture'},conversationId:namespaceFor('simulation','privacy-fixture',phone,sessionId),taskId,mode:'simulation' as const,workflowVersion:'max-v1',controlVersion:0,deadline:Date.now()+10000,budgetUsd:0,maxConcurrency:3,personDigest,privacyEpoch:0};
   await startTask(ctx);await bindPlaygroundSession(sessionId,ctx.orgId,phone,ctx.mode,ctx);
+  await withExecution({...ctx,mode:'live'},()=>saveFacts(ctx.orgId,phone,{foco:'Locação'}));
   const identity={kind:'user' as const,userId:'fixture',userName:'Synthetic',orgId:ctx.orgId,orgName:'Synthetic'};
   const inbound={messageId:'privacy-fixture-message',fromPhone:phone,kind:'text' as const,text:'como funciona o formulário?',groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()};
   await withExecution(ctx,()=>invokeIsolatedGraph(inbound,identity,ctx.conversationId));
@@ -36,6 +38,8 @@ d('privacy epoch fencing',()=>{
   vi.stubEnv('MAX_NOTIFY_SECRET','privacy-fixture');const raw=JSON.stringify({phone}),ts=String(Date.now());
   const result=await forget(new NextRequest('https://fixture.test/api/admin/forget',{method:'POST',body:raw,headers:{'x-max-timestamp':ts,'x-max-signature':sign(ts,raw,'privacy-fixture')}}));expect(result.status).toBe(200);
   expect(await query('SELECT id FROM runtime_task WHERE id=$1',[taskId])).toHaveLength(0);
+  expect(await withExecution({...ctx,mode:'live'},()=>saveFacts(ctx.orgId,phone,{foco:'Vendas'}))).toBe(0);
+  expect(await query('SELECT 1 FROM memory_facts WHERE org_id=$1 AND phone=$2',[ctx.orgId,phone])).toHaveLength(0);
   expect(await query('SELECT 1 FROM checkpoints WHERE thread_id=$1',[ctx.conversationId])).toHaveLength(0);
   await expect(withExecution(ctx,()=>invokeIsolatedGraph({...inbound,messageId:'late-callback'},identity,ctx.conversationId))).rejects.toThrow('execution_revoked');
   expect(await query('SELECT 1 FROM checkpoints WHERE thread_id=$1',[ctx.conversationId])).toHaveLength(0);

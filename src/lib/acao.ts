@@ -1,3 +1,4 @@
+import { importMarketingEvents } from "./runtime/marketing-events";
 import { currentExecution, runEvent } from "./runtime/context";
 import { executeIntent } from "./runtime/store";
 import { executableTool, isWriteVerb } from "./runtime/catalog";
@@ -130,6 +131,7 @@ async function executarAcaoDireta(params: {
       // fluxo traduz. Log em nível de aviso para correlacionar com a auditoria.
       console.warn(`[acao] ${params.verb} ${res.status} na org ${params.orgId}`);
     }
+    if (params.verb.startsWith("marketing.")) importMarketingEvents(body);
     return {
       status: res.status,
       body: body && typeof body === "object" ? (body as Record<string, unknown>) : {},

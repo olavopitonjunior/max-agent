@@ -10,7 +10,7 @@ O catálogo executável é `GET /api/admin/catalog`, apresentado em `/admin/max/
 
 ## Ordem de implantação
 
-1. Aplicar migração aditiva ImobPro de marketing e Max022–024 no ambiente de staging, com backup e teste de restauração prévios. Executar o migrador versionado; não “adotar” schema incompleto.
+1. Aplicar migração aditiva ImobPro de marketing e Max022–025 no ambiente de staging, com backup e teste de restauração prévios. Executar o migrador versionado; não “adotar” schema incompleto.
 2. Implantar receptores ImobPro e Max com comportamentos novos OFF. O contrato HMAC deve passar com `docs/contracts/max-runtime-v1.json` idêntico nos dois repos.
 3. Ligar playground simulado nos dois serviços. Ele usa o mesmo grafo com adaptadores sintéticos, sem rede/modelo pago/banco de negócio. Uma sessão nunca é uma conversa WhatsApp.
 4. Para staging real: habilitar `MAX_PLAYGROUND_STAGING_ENABLED` em ambos e permitir explicitamente o par organização/telefone sintético em `MAX_PLAYGROUND_STAGING_IDENTITIES` no Max. Nunca cadastrar um contato de cliente real como fixture. Separar credenciais e dados de staging.
@@ -52,3 +52,11 @@ O modelo da simulação é sintético: o replay valida roteamento, tools, estado
 ## Rollback
 
 Desligar capabilities e flags novas; manter receptores, migrações aditivas e cron de reconciliação para efeitos já aceitos. Não apagar intents, reservas, tombstones ou checkpoints para recuperar fila. Comparar workflowVersion antes de retomar. Restaurar backup apenas em procedimento coordenado com pausa de transporte: restaurar uma fila antiga sem dedupe pode repetir mensagens. Nenhum rollback executa automaticamente uma operação com resultado incerto.
+
+## Memória e trace remoto após a migração025
+
+Preferências novas do runtime carregam `source_task_id`, `workflow_version` e `subject_digest`, derivados somente do ExecutionContext confiável. A chave física recebe namespace por sujeito para que duas identidades no mesmo telefone possam manter a mesma preferência sem sobrescrever uma à outra; o prompt recebe apenas a chave lógica. Leitura no runtime exige o sujeito exato e não consome preferências legadas com proveniência NULL. Chamadores antigos sem contexto preservam suas linhas legadas. TTL, teto por pessoa/sujeito, filtros de dado sensível e esquecimento continuam aplicáveis; callback com epoch antigo não recria preferências.
+
+O catálogo usa os nomes reais dos workers remotos ImobPro: `marketing.brief`, `marketing.copy-script`, `marketing.template-layout`, `marketing.qa` e `marketing.video`. O gateway importa `snapshot.events` e `job.events` por allowlist de worker/versão/skill/outcome/revisão e códigos conhecidos de QA. Fonte, argumentos, URLs e metadados de texto livre não entram no trace local. Workers continuam determinísticos ou de provedor, com `model:null`, e permanecem desligados até habilitação explícita.
+
+O rollback compatível mantém o leitor de preferências consciente de sujeito da025. Se for necessário voltar a código anterior a essa fronteira, o procedimento humano deve primeiro bloquear chat/memória e remover ou isolar as preferências com `subject_digest IS NOT NULL`; um leitor antigo não reconhece esse isolamento. Nenhuma migração atribui linhas NULL históricas ao usuário atual de um telefone.
