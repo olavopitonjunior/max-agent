@@ -4,6 +4,7 @@ import {
   TOOLS_DE_LEITURA,
   TETO_DE_TOOLS,
   LISTAR_NEGOCIOS,
+  ferramentasDoTurno,
   TOOL_PROPOR_FORM,
   type ToolDef,
 } from "../tools";
@@ -20,6 +21,36 @@ import type { Capability } from "../policy";
 
 const TEXTO_PEDE = "como estão meus negócios?";
 const TEXTO_NAO_PEDE = "bom dia, tudo bem?";
+
+describe("vendas oferece consulta de negócios com a mesma política", () => {
+  const identity = { kind: "user" as const, orgId: "org1", orgName: "Test", userId: "u1", userName: "QA" };
+  const nomes = (texto: string, policy: Capability[]) => ferramentasDoTurno({ policy, texto, identity }).entradas.map((t) => t.nome);
+  const criacao: Capability[] = ["form.create", "proposal.create"];
+
+  it.each([
+    "Me dá um resumo das vendas do meu time.",
+    "Me dá um resumo das vendas da imobiliária.",
+    "como estão minhas vendas",
+    "status das vendas do time",
+    "vendas da imobiliária",
+  ])("%s exige deal.list e não oferece escrita", (texto) => {
+    expect(nomes(texto, ["deal.list", ...criacao])).toEqual(["listar_negocios"]);
+    expect(nomes(texto, criacao)).toEqual([]);
+    expect(nomes(texto, [])).toEqual([]);
+  });
+
+  it.each([
+    "crie uma proposta para as vendas do time",
+    "crie um formulário para as vendas da imobiliária",
+    "envie uma proposta para as vendas do time",
+  ])("criação mantém precedência: %s", (texto) => {
+    expect(nomes(texto, ["deal.list", ...criacao])).toEqual(["propor_criacao"]);
+  });
+
+  it.each(["revendas", "vendasOnline", "vendedores", "venda"])("sinônimo exige a palavra vendas: %s", (texto) => {
+    expect(nomes(texto, ["deal.list"])).toEqual([]);
+  });
+});
 
 // ── 1. O NEGADO ANTES DO PERMITIDO (regra 3) ───────────────────────────────
 
