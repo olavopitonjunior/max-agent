@@ -10,6 +10,8 @@ O catálogo executável é `GET /api/admin/catalog`, apresentado em `/admin/max/
 
 ## Ordem de implantação
 
+O playground isolado é exposto em `POST/GET /api/admin/playground/v1`. O ImobPro usa somente essa versão, sem fallback: em backend legado, 404 bloqueia turno e reset antes de qualquer efeito. A rota sem versão não serve como prova de compatibilidade durante deploy parcial ou rollback.
+
 1. Aplicar migração aditiva ImobPro de marketing e Max022–026 no ambiente de staging, com backup e teste de restauração prévios. Executar o migrador versionado; não “adotar” schema incompleto.
 2. Implantar receptores ImobPro e Max com comportamentos novos OFF. O contrato HMAC deve passar com `docs/contracts/max-runtime-v1.json` idêntico nos dois repos.
 3. Ligar playground simulado nos dois serviços. Ele usa o mesmo grafo com adaptadores sintéticos, sem rede/modelo pago/banco de negócio. Uma sessão nunca é uma conversa WhatsApp.

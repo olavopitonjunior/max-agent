@@ -7,12 +7,12 @@ vi.mock('@/lib/identity',()=>({resolveIdentity:vi.fn()}));
 vi.mock('@/lib/runtime/store',()=>({bindPlaygroundSession:vi.fn(async()=>true),startTask:vi.fn(async()=>true),finishTask:vi.fn(async()=>{})}));
 vi.mock('@/lib/runtime/playground',async original=>({...await original<typeof import('@/lib/runtime/playground')>(),savePlaygroundMessage:vi.fn(async()=>{}),playgroundHistory:vi.fn(async()=>({messages:[],tasks:[]}))}));
 vi.mock('@/lib/checkpointer-reset',()=>({limparThreadDoCheckpointer:vi.fn(async()=>{})}));
-const {POST}=await import('@/app/api/admin/playground/route');
+const {POST}=await import('@/app/api/admin/playground/v1/route');
 const {resolveIdentity}=await import('@/lib/identity');
 const {limparThreadDoCheckpointer}=await import('@/lib/checkpointer-reset');
 const {bindPlaygroundSession,startTask}=await import('@/lib/runtime/store');
 const body={orgId:'org-1',phone:'+5511999990000',sessionId:'11111111-1111-4111-8111-111111111111',requestId:'22222222-2222-4222-8222-222222222222',text:'oi'};
-function req(data:unknown,signed=true){const raw=JSON.stringify(data),ts=String(Date.now());return new NextRequest('https://max.test/api/admin/playground',{method:'POST',body:raw,headers:signed?{'x-max-timestamp':ts,'x-max-signature':sign(ts,raw,'fixture-secret')}:{}});}
+function req(data:unknown,signed=true){const raw=JSON.stringify(data),ts=String(Date.now());return new NextRequest('https://max.test/api/admin/playground/v1',{method:'POST',body:raw,headers:signed?{'x-max-timestamp':ts,'x-max-signature':sign(ts,raw,'fixture-secret')}:{}});}
 beforeEach(()=>{vi.clearAllMocks();vi.stubEnv('MAX_NOTIFY_SECRET','fixture-secret');vi.stubEnv('MAX_PLAYGROUND','true');vi.mocked(bindPlaygroundSession).mockResolvedValue(true);vi.mocked(startTask).mockResolvedValue(true);});afterEach(()=>vi.unstubAllEnvs());
 describe('isolated playground route',()=>{
  it('keeps environment gate before HMAC',async()=>{vi.stubEnv('MAX_PLAYGROUND','false');expect((await POST(req(body,false))).status).toBe(404);});
