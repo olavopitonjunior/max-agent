@@ -23,7 +23,7 @@ vi.mock("@/lib/identity", async (orig) => ({
   resolveIdentity: vi.fn(),
 }));
 
-const { buildGraph, RESET_DO_TURN, runTurn, respostaDoTurno, encerrarTurno } = await import("../graph");
+const { buildGraph, RESET_DO_TURN, runTurn, respostaDoTurno, encerrarTurno, getCheckpointer } = await import("../graph");
 const { redigir, redigirCredito } = await import("@/lib/pii");
 const { resolveIdentity } = await import("@/lib/identity");
 const { liveNamespaceFor } = await import("@/lib/runtime/context");
@@ -1222,6 +1222,9 @@ function threadCredito(orgId: string, phone: string) {
 }
 async function limparCredito(orgId: string, phone: string) {
   const { query } = await import("@/lib/db");
+  // As migrações da aplicação não criam as tabelas do saver. Num banco novo,
+  // inicialize o checkpointer antes da primeira limpeza, sem depender de outra suíte.
+  await getCheckpointer();
   for (const table of ["checkpoint_writes", "checkpoint_blobs", "checkpoints"]) {
     await query(`DELETE FROM ${table} WHERE thread_id = $1`, [threadCredito(orgId, phone)]);
     const [remaining] = await query<{ n: number }>(

@@ -19,6 +19,12 @@ Esta é uma entrega de código em PRs coordenados, com recursos novos desligados
 
 Os testes usam fixtures sintéticas. A suíte geral ImobPro mantém os skips explícitos; a bateria de isolamento PostgreSQL exige opt-in e foi executada separadamente. Os avisos preexistentes do Vite/Next não foram descritos como ausência de warnings.
 
+## Verificação adicional em banco vazio
+
+O primeiro CI do PR #93 revelou que a limpeza da auditoria de crédito dependia de tabelas do checkpointer já existentes. As 26 migrações da aplicação não criam essas tabelas, que pertencem ao saver do LangGraph. O helper de teste agora inicializa o checkpointer antes da limpeza, mantendo todas as verificações de dados sensíveis.
+
+As quatro falhas foram reproduzidas em uma base local nova; os cinco casos da auditoria passaram após a correção. Em outra base nova, migrada do zero, os 2.363 testes passaram, assim como typecheck e lint. A correção altera apenas a preparação dos testes, sem mudar runtime, migrações ou workflow do CI.
+
 ## Contratos compartilhados
 
 - `max-runtime-v1.json`: SHA256 `8a90b17d41f8d30e6413002af4a333442ba58f4a93ac17db622886ab073002f7`.
