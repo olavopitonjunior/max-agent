@@ -207,15 +207,16 @@ const CONVERSAS: Conversa[] = [
     {fala:'1',ideal:'Coleta dados da proposta de venda.',contem:[/proposta de venda/i],verbos:['proposal.preflight'],proibidos:ESCRITAS},
     {fala:'Comprador: Pessoa QA Sintética; telefone do comprador: 11900000101; imóvel Rua de Teste QA, 100, apartamento 1, São Paulo/SP; valor R$ 500.000,00 à vista.',
       ideal:'Retém valor, telefone e complemento em resumo sem pedir dados já informados.',
-      contem:[/500\.000,00/,/apartamento 1/,/SIM/],naoContem:[/ainda falta/i],proibidos:ESCRITAS,
+      contem:[/500\.000,00/,/apartamento 1/,/SIM/],naoContem:[/ainda falta/i,/Imóvel:[^\n]*\b100\b[^\n]*\b100\b/],proibidos:ESCRITAS,
       memory:{required:[/500\.000,00/,/apartamento 1/]}},
     {fala:'Corrija o complemento para apartamento 2.',ideal:'Atualiza apenas complemento mantendo rua, comprador, telefone e valor. Nova confirmação.',
-      contem:[/apartamento 2/,/Rua de Teste QA/,/500\.000,00/,/SIM/],naoContem:[/apartamento 1/],proibidos:ESCRITAS,
+      contem:[/apartamento 2/,/Rua de Teste QA/,/500\.000,00/,/SIM/],naoContem:[/apartamento 1/,/Imóvel:[^\n]*\b100\b[^\n]*\b100\b/],proibidos:ESCRITAS,
       memory:{required:[/apartamento 2/,/Rua de Teste QA/,/500\.000,00/],forbidden:[/apartamento 1/]}},
     {fala:'sim',ideal:'Cria exatamente um rascunho com dados corrigidos, sem enviar assinatura.',verbos:['proposal.create'],proibidos:['proposal.send'],
       args:{verbo:'proposal.create',confere:a=>{
-        const im=a.imovel as {endereco?:string}|undefined,p=a.proponente as {telefone?:string}|undefined;
-        return a.valor===500000&&im?.endereco?.includes('apartamento 2')&&!im.endereco.includes('apartamento 1')&&im.endereco.includes('Rua de Teste QA')&&p?.telefone?.replace(/\D/g,'')==='11900000101'?null:'lost or changed proposal data';
+        const im=a.imovel as {endereco?:string;numero?:string}|undefined,p=a.proponente as {telefone?:string}|undefined;
+        const numeroUnico = [im?.endereco,im?.numero].filter(Boolean).join(', ').match(/\b100\b/g)?.length===1;
+        return numeroUnico&&a.valor===500000&&im?.endereco?.includes('apartamento 2')&&!im.endereco.includes('apartamento 1')&&im.endereco.includes('Rua de Teste QA')&&p?.telefone?.replace(/\D/g,'')==='11900000101'?null:'lost, duplicated or changed proposal data';
       }}},
   ]},
   ...[

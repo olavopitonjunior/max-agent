@@ -27,6 +27,32 @@ describe("proposta — valores monetários destokenizados", () => {
 });
 
 describe("proposta — complemento do imóvel", () => {
+  it("não repete número já informado no endereço após corrigir apartamento", async () => {
+    const dados = sanearDados({ proponente: { nome: "TESTE QA", telefone: "11999063228" }, valor: 500000,
+      imovel: { endereco: "Rua de Teste QA, 100", numero: "100", complemento: "apartamento 1", cidade: "São Paulo", uf: "SP" } });
+    const { conduzirFluxo } = await import("../fluxos");
+    const resultado = await conduzirFluxo({ kind: "proposta", etapa: "revisao", natureza: "venda", dados, atualizadoEm: 1 }, {
+      texto: "Corrija o complemento para apartamento 2.", messageId: "qa-numero-repetido", agora: 2, policy: ["proposal.create"],
+    }, {
+      acao: async () => { throw new Error("Correção aguarda confirmação"); },
+      extrairProposta: async () => ({ imovel: { complemento: "apartamento 2" } }),
+      extrairCampos: async () => null,
+    });
+    expect(resultado.reply).toContain("Imóvel: Rua de Teste QA, 100, apartamento 2, São Paulo, SP");
+    const corrigido = mesclarDados(dados, sanearDados({ imovel: { complemento: "apartamento 2" } }));
+    expect(argsDaProposta({ dados: corrigido }).imovel).toMatchObject({ endereco: "Rua de Teste QA, apartamento 2", numero: "100" });
+    expect(argsDoAjuste(corrigido).imovel).toMatchObject({ endereco: "Rua de Teste QA, apartamento 2", numero: "100" });
+  });
+
+  it.each(["Rua 100", "Rua Teste, 1000", "Rua Teste, apartamento 100"])("preserva número distinto do logradouro ou unidade: %s", (endereco) => {
+    expect(argsDaProposta({ dados: sanearDados({ imovel: { endereco, numero: "100" } }) }).imovel).toMatchObject({ numero: "100" });
+  });
+
+  it("correção de número não deixa o valor antigo no endereço do checkpoint", () => {
+    const dados = mesclarDados({ imovel: { endereco: "Rua de Teste QA, 100", numero: "100", complemento: "apartamento 2" } }, sanearDados({ imovel: { numero: "200" } }));
+    expect(argsDoAjuste(dados).imovel).toMatchObject({ endereco: "Rua de Teste QA, apartamento 2", numero: "200" });
+  });
+
   it("leva apartamento no endereço suportado pelo backend", () => {
     const dados = sanearDados({ imovel: { endereco: "Rua de Teste QA, 100", complemento: "apartamento 1", cidade: "São Paulo", uf: "SP" } });
     expect(argsDaProposta({ dados }).imovel).toEqual({ endereco: "Rua de Teste QA, 100, apartamento 1", numero: undefined, bairro: undefined, cidade: "São Paulo", uf: "SP", matricula: undefined });

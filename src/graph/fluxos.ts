@@ -313,18 +313,33 @@ function imovelEstruturado(im: NonNullable<DadosDaProposta["imovel"]>, extracao 
   return { ...im, endereco: legado[1], complemento: im.complemento ?? legado[2] };
 }
 
+function imovelSemNumeroDuplicado(im: NonNullable<DadosDaProposta["imovel"]>) {
+  const base = imovelEstruturado(im);
+  if (!base.numero || !base.endereco) return base;
+  // Só segmento inteiro após vírgula: Rua 100, 1000 e apartamento 100
+  // permanecem. Preservar numero também permite PATCH de rascunho existente.
+  const partes = base.endereco.split(",");
+  const endereco = partes.filter((parte, i) => i === 0 || parte.trim() !== base.numero?.trim()).join(",");
+  return { ...base, endereco };
+}
+
 /** O backend conhece um endereço único; o estado conserva unidade separada. */
 function imovelParaPayload(im: DadosDaProposta["imovel"]): DadosDaProposta["imovel"] {
   if (!im) return undefined;
-  const { complemento, ...base } = imovelEstruturado(im);
+  const { complemento, ...base } = imovelSemNumeroDuplicado(im);
   return { ...base, endereco: base.endereco && complemento ? `${base.endereco}, ${complemento}` : base.endereco };
+}
+
+function enderecoNoResumo(im?: DadosDaProposta["imovel"]): string {
+  const base = im ? imovelSemNumeroDuplicado(im) : {};
+  return [base.endereco, base.numero, base.complemento, base.bairro, base.cidade, base.uf].filter(Boolean).join(", ");
 }
 
 /** O corpo do resumo — montado do estado, nunca pelo modelo. */
 function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string }): string {
   const d = f.dados;
   const im = imovelParaPayload(d.imovel) ?? {};
-  const endereco = [im.endereco, im.numero, im.bairro, im.cidade, im.uf].filter(Boolean).join(", ");
+  const endereco = enderecoNoResumo(d.imovel);
   const quem = f.natureza === "locacao" ? "Inquilino" : "Comprador";
   // Ligada ao lead: nome/CPF/aluguel vêm do `proposal.create`, não do estado (M1/pii) — o resumo diz isso em vez de repetir o que o Max não guarda.
   const linhaQuem = f.leaseClientId
@@ -369,7 +384,7 @@ function linhasDoAjuste(d: DadosDaProposta): string[] {
   if (p.email) linhas.push(`E-mail do proponente: ${p.email}`);
   if (p.telefone) linhas.push(`Telefone do proponente: ${p.telefone}`);
   const im = imovelParaPayload(d.imovel) ?? {};
-  const endereco = [im.endereco, im.numero, im.bairro, im.cidade, im.uf].filter(Boolean).join(", ");
+  const endereco = enderecoNoResumo(d.imovel);
   if (endereco) linhas.push(`Imóvel: ${endereco}`);
   if (im.matricula) linhas.push(`Matrícula: ${im.matricula}`);
   if (d.valor) linhas.push(`Valor: ${real(d.valor)}`);
@@ -577,8 +592,8 @@ export function mesclar<T extends object>(atual: T | undefined, novo: T | undefi
  */
 export function mesclarDados(atual: DadosDaProposta, novo: DadosDaProposta): DadosDaProposta {
   const out = mesclar(
-    { ...atual, ...(atual.imovel ? { imovel: imovelEstruturado(atual.imovel) } : {}) },
-    { ...novo, ...(novo.imovel ? { imovel: imovelEstruturado(novo.imovel) } : {}) },
+    { ...atual, ...(atual.imovel ? { imovel: imovelSemNumeroDuplicado(atual.imovel) } : {}) },
+    { ...novo, ...(novo.imovel ? { imovel: imovelSemNumeroDuplicado(novo.imovel) } : {}) },
   ) ?? {};
   for (const papel of ["proponente", "vendedor"] as const) {
     const nomeNovo = novo[papel]?.nome;
