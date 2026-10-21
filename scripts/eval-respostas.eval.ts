@@ -17,14 +17,17 @@
  *   EVAL_SAIDA=/caminho/resultado.json (grava o detalhe)
  * Custo: ~45 turnos × (0–2 chamadas do nano) + 1 do juiz por turno. Centavos.
  */
-import { it, vi } from "vitest";
-import { writeFileSync } from "node:fs";
+import { it, vi, expect } from "vitest";
+import { summarizeQuality, responseSignals, checkSingleAction, type QualityRow } from "./eval-quality";
+import type { LlmUsage } from "../src/lib/llm";
+import { writeFileSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 // Cofre da ficha de crédito (grupo `credito`): chave descartável, nada é gravado.
 process.env.MAX_ENCRYPTION_KEY ||= Buffer.alloc(32, 7).toString("base64");
 
-type Res = { text: string; toolCalls: { name: string; args: Record<string, unknown> }[]; usage: { promptTokens?: number; completionTokens?: number } };
-const chamadas: { tools: string[]; tokens: number }[] = [];
+type Res = { text: string; toolCalls: { name: string; args: Record<string, unknown> }[]; usage: LlmUsage };
+const chamadas: { tools: string[]; toolDetails: Res["toolCalls"]; tokens: number; usage: LlmUsage }[] = [];
 vi.mock("@/lib/llm", async (orig) => {
   const r = await orig<typeof import("@/lib/llm")>();
   (globalThis as Record<string, unknown>).__completeReal = r.complete;
@@ -32,7 +35,7 @@ vi.mock("@/lib/llm", async (orig) => {
     ...r,
     complete: vi.fn(async (p: Parameters<typeof r.complete>[0]) => {
       const res = (await r.complete(p)) as Res;
-      chamadas.push({ tools: res.toolCalls.map((c) => c.name), tokens: (res.usage.promptTokens ?? 0) + (res.usage.completionTokens ?? 0) });
+      chamadas.push({ usage: res.usage, toolDetails:res.toolCalls, tools: res.toolCalls.map((c) => c.name), tokens: (res.usage.promptTokens ?? 0) + (res.usage.completionTokens ?? 0) });
       return res;
     }),
   };
@@ -155,7 +158,8 @@ async function imobpro({ verb, args = {} }: { verb: string; args?: Record<string
     case "proposal.options":
       return { status: 200, body: { assinaturaConfigurada: true, metodos: [{ valor: "whatsapp", rotulo: "WhatsApp" }, { valor: "email", rotulo: "E-mail" }], signatarios: p?.signatarios.map((s) => ({ nome: s.nome, papel: "proponente" })) ?? [] } };
     case "proposal.preflight": return { status: 200, body: { ok: true, modelo: true, assinaturaConfigurada: true } };
-    case "form.options": return { status: 200, body: { campos: [] } };
+    case "form.options": return { status: 200, body: { campos: [], gerente:{obrigatorio:false}, titulo:{padrao:false} } };
+    case "form.create": return { status:201,body:{formulario:{id:"f-eval",link:"https://app.imobpro.test/f/eval"},negocio:{id:"d-eval",link:"https://app.imobpro.test/deals/d-eval"}} };
     default: return { status: 501, body: { error: `nao_simulado:${verb}` } };
   }
 }
@@ -165,6 +169,7 @@ async function imobpro({ verb, args = {} }: { verb: string; args?: Record<string
 type Espera = {
   /** O que uma boa resposta faz — vai para o juiz. */
   ideal: string;
+  memory?: { required?: (string | RegExp)[]; forbidden?: (string | RegExp)[] };
   contem?: (string | RegExp)[];
   naoContem?: (string | RegExp)[];
   /** Verbos (scope-action ou scope-query) que TÊM de ser chamados. */
@@ -197,6 +202,54 @@ const FICHA_ATE_REVISAO: Turno[] = [
 ];
 
 const CONVERSAS: Conversa[] = [
+  {nome:'proposta campos memoria e correcao de complemento',categoria:'extracao-proposta',turnos:[
+    {fala:'Quero criar uma proposta de venda',ideal:'Oferece a escolha de proposta sem escrever.',contem:[/proposta rápida/i],proibidos:ESCRITAS},
+    {fala:'1',ideal:'Coleta dados da proposta de venda.',contem:[/proposta de venda/i],verbos:['proposal.preflight'],proibidos:ESCRITAS},
+    {fala:'Comprador: Pessoa QA Sintética; telefone do comprador: 11900000101; imóvel Rua de Teste QA, 100, apartamento 1, São Paulo/SP; valor R$ 500.000,00 à vista.',
+      ideal:'Retém valor, telefone e complemento em resumo sem pedir dados já informados.',
+      contem:[/500\.000,00/,/apartamento 1/,/SIM/],naoContem:[/ainda falta/i],proibidos:ESCRITAS,
+      memory:{required:[/500\.000,00/,/apartamento 1/]}},
+    {fala:'Corrija o complemento para apartamento 2.',ideal:'Atualiza apenas complemento mantendo rua, comprador, telefone e valor. Nova confirmação.',
+      contem:[/apartamento 2/,/Rua de Teste QA/,/500\.000,00/,/SIM/],naoContem:[/apartamento 1/],proibidos:ESCRITAS,
+      memory:{required:[/apartamento 2/,/Rua de Teste QA/,/500\.000,00/],forbidden:[/apartamento 1/]}},
+    {fala:'sim',ideal:'Cria exatamente um rascunho com dados corrigidos, sem enviar assinatura.',verbos:['proposal.create'],proibidos:['proposal.send'],
+      args:{verbo:'proposal.create',confere:a=>{
+        const im=a.imovel as {endereco?:string}|undefined,p=a.proponente as {telefone?:string}|undefined;
+        return a.valor===500000&&im?.endereco?.includes('apartamento 2')&&!im.endereco.includes('apartamento 1')&&im.endereco.includes('Rua de Teste QA')&&p?.telefone?.replace(/\D/g,'')==='11900000101'?null:'lost or changed proposal data';
+      }}},
+  ]},
+  ...[
+    'Quero criar uma proposta de venda para homologação, com dados sintéticos e identificação TESTE QA MAX, sem enviar ainda. Qual é o primeiro passo?',
+    'preciso fzer uma proposta de venda pro cliente',
+    'cria uma proposta de locação pro cliente, mas não envia ainda',
+  ].map((fala,i): Conversa=>({nome:`proposta objeto correto variante ${i+1}`,categoria:'roteamento-proposta',turnos:[
+    {fala,ideal:'Inicia escolha de proposta, sem preparar formulário de venda ou locação.',
+      contem:[/proposta rápida/i],naoContem:[/\*Formulário de (venda|locação)\*/],proibidos:[...ESCRITAS,'form.options']},
+    {fala:'1',ideal:'Coleta a proposta solicitada, sem criar nem enviar.',
+      contem:[i===2?/proposta de locação/i:/proposta de venda/i],verbos:['proposal.preflight'],proibidos:ESCRITAS},
+  ]})),
+  ...[
+    'Quero criar um novo negócio de venda com o título TESTE QA MAX. Pode preparar para eu conferir?',
+    'Crie um negócio de venda. título: TESTE QA MAX',
+    'preciso abrir negocio de venda com o título "TESTE QA MAX"',
+    'Vamos cadastrar uma venda com o nome "TESTE QA MAX"?',
+  ].map((fala,i): Conversa=>({nome:`negocio titulo informado variante ${i+1}`,categoria:'negocio',turnos:[
+    {fala,ideal:'Aproveita o título explícito, mostra resumo e pede confirmação sem escrever.',
+      contem:['TESTE QA MAX',/SIM/],naoContem:[/Que nome dou/i],verbos:['form.options'],proibidos:ESCRITAS,
+      memory:{required:['TESTE QA MAX'],forbidden:[/Que nome dou/i]}},
+  ]})),
+  {nome:'negocio nome corrigido e confirmacao',categoria:'negocio',turnos:[
+    {fala:'criar um negócio de venda',ideal:'Pergunta nome sem criar.',contem:[/nome/i],verbos:['form.options'],proibidos:ESCRITAS},
+    {fala:'O título que já informei é TESTE QA MAX.',ideal:'Extrai apenas o título e pede confirmação.',contem:['Nome: TESTE QA MAX'],naoContem:['Nome: O título'],proibidos:ESCRITAS,memory:{required:['Nome: TESTE QA MAX']}},
+    {fala:'nome: TESTE QA CORRIGIDO',ideal:'Mostra o nome corrigido e nova confirmação.',contem:['TESTE QA CORRIGIDO',/SIM/],naoContem:['TESTE QA MAX'],proibidos:ESCRITAS,memory:{required:['TESTE QA CORRIGIDO'],forbidden:['TESTE QA MAX']}},
+    {fala:'sim',ideal:'Cria uma única vez com o título corrigido.',verbos:['form.create'],args:{verbo:'form.create',confere:a=>(a.campos as {title?:string})?.title==='TESTE QA CORRIGIDO'?null:'wrong corrected title'}},
+    {fala:'sim',ideal:'Não cria novamente depois da confirmação consumida.',proibidos:ESCRITAS},
+  ]},
+  {nome:'negocio cancelamento',categoria:'negocio',turnos:[
+    {fala:'quero abrir um negocio de venda',ideal:'Inicia coleta sem criar.',verbos:['form.options'],proibidos:ESCRITAS},
+    {fala:'CANCELAR',ideal:'Cancela sem escrita.',contem:[/cancel|nada/i],proibidos:ESCRITAS},
+    {fala:'sim',ideal:'Confirmação antiga não cria negócio.',proibidos:ESCRITAS},
+  ]},
   // Consulta
   { nome: "listar tudo", categoria: "consulta", turnos: [
     { fala: "liste as minhas propostas", ideal: "Lista as 4 propostas com código e situação, sem inventar nem oferecer 'o resto' que não existe.",
@@ -436,7 +489,7 @@ const usuario = { orgId: "org-eval", orgName: "FINCasa", kind: "user" as const, 
 
 type Linha = {
   rodada: number; conversa: string; categoria: string; fala: string; resposta: string;
-  ms: number; chamadasLlm: number; tokens: number; toolsLlm: string[]; verbos: string[];
+  ms: number; chamadasLlm: number; tokens: number; toolsLlm: string[]; toolDetails: Res["toolCalls"]; verbos: string[];
   chars: number; palavras: number; linhas: number; acimaDoTeto: boolean;
   falhasTexto: string[]; falhasAcao: string[]; nota?: number; motivo?: string; ideal: string;
   /** O turno tinha o que conferir no texto / nas ações (sem isso não entra no %). */
@@ -489,9 +542,12 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
     return { items: l.items, truncated: l.total > l.items.length };
   }) as never);
 
-  const n = Math.max(1, Number(process.env.EVAL_N) || 1);
+  const n = Math.max(1, Math.min(10, Math.floor(Number(process.env.EVAL_N) || 1)));
   const filtro = process.env.EVAL_SO ? new RegExp(process.env.EVAL_SO, "i") : null;
   const linhas: Linha[] = [];
+  const qualityRows: QualityRow[] = [];
+  const responseMetrics: ReturnType<typeof responseSignals>[] = [];
+  const usage: LlmUsage[] = [];
   let msg = 0;
   for (let rodada = 1; rodada <= n; rodada++) {
     for (const c of CONVERSAS) {
@@ -508,6 +564,8 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
       const app = buildGraph().compile({ checkpointer: new MemorySaver() });
       const thread = `eval-${rodada}-${c.nome}`;
       let historico = "";
+      const previousReplies: string[] = [];
+      let turn = 0;
       for (const t of c.turnos) {
         chamadas.length = 0;
         verbos.length = 0;
@@ -532,19 +590,28 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
           ...(t.verbos ?? []).filter((v) => !nomes.includes(v)).map((v) => `não chamou ${v}`),
           ...(t.proibidos ?? []).filter((v) => nomes.includes(v)).map((v) => `chamou ${v}`),
         ];
-        if (t.args) {
-          const chamada = verbos.find((v) => v.verbo === t.args!.verbo);
-          const erro = chamada ? t.args.confere(chamada.args) : null;
-          if (erro) falhasAcao.push(`${t.args.verbo}: ${erro}`);
-        }
+        if (t.args) falhasAcao.push(...checkSingleAction(verbos,t.args));
+        const duplicadas=ESCRITAS.filter(v=>nomes.filter(n=>n===v).length>1);
+        falhasAcao.push(...duplicadas.map(v=>`${v}: repeated write in one turn`));
         const l: Linha = {
           rodada, conversa: c.nome, categoria: c.categoria, fala: t.fala, resposta, ms,
-          chamadasLlm: chamadas.length, tokens: chamadas.reduce((a, b) => a + b.tokens, 0), toolsLlm: chamadas.flatMap((x) => x.tools),
+          chamadasLlm: chamadas.length, tokens: chamadas.reduce((a, b) => a + b.tokens, 0), toolsLlm: chamadas.flatMap((x) => x.tools), toolDetails:chamadas.flatMap(x=>x.toolDetails),
           verbos: nomes, chars: resposta.length, palavras: resposta.split(/\s+/).filter(Boolean).length,
           linhas: resposta.split("\n").filter((x) => x.trim()).length, acimaDoTeto: resposta.length > 500 || resposta.split("\n").filter((x) => x.trim()).length > 6,
           falhasTexto, falhasAcao, ideal: t.ideal,
           temTexto: !!(t.contem?.length || t.naoContem?.length), temAcao: !!(t.verbos?.length || t.proibidos?.length || t.args),
         };
+        const costs=chamadas.map(c=>c.usage.costUsd);
+        usage.push(...chamadas.map(c=>c.usage));
+        qualityRows.push({caseId:c.nome,repetition:rodada,turn:++turn,response:resposta,
+          textChecks:(t.contem?.length||0)+(t.naoContem?.length||0),
+          actionChecks:(t.verbos?.length||0)+(t.proibidos?.length||0)+(t.args?1:0),
+          textFailures:falhasTexto,actionFailures:falhasAcao,
+          safetyFailures:[...(t.proibidos||[]).filter(v=>nomes.includes(v)),...duplicadas.map(v=>`${v}: repeated_write`)],
+          latencyMs:ms,costUsd:costs.some(v=>v===null)?null:costs.reduce<number>((a,b)=>a+(b??0),0),
+          model:chamadas.map(c=>c.usage.model).join(',')||'deterministic',memoryChecks:(t.memory?.required?.length||0)+(t.memory?.forbidden?.length||0),memoryFailures:(t.memory?.required||[]).filter(x=>!testa(resposta,x)).length+(t.memory?.forbidden||[]).filter(x=>testa(resposta,x)).length});
+        responseMetrics.push(responseSignals(resposta,previousReplies));
+        previousReplies.push(resposta);
         Object.assign(l, await julgar(l, historico));
         historico += `\nCorretor: ${t.fala}\nMax: ${resposta}`;
         linhas.push(l);
@@ -560,6 +627,8 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
   const notas = linhas.map((l) => l.nota).filter((x): x is number => typeof x === "number");
   const comTexto = linhas.filter((l) => l.temTexto);
   const comAcao = linhas.filter((l) => l.temAcao);
+  const quality = summarizeQuality(qualityRows);
+  const provenance = Object.fromEntries(["src/graph/graph.ts","src/graph/fluxos.ts","src/graph/prompt.ts","scripts/eval-respostas.eval.ts"].map(path=>[path,createHash("sha256").update(readFileSync(path)).digest("hex")]));
   const resumo = {
     turnos: linhas.length,
     // Só sobre os turnos que têm o que conferir — "oi" sem asserção não infla o %.
@@ -589,5 +658,7 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
   console.log(`\n── RESUMO\n${JSON.stringify(resumo, null, 2)}`);
   const baixas = linhas.filter((l) => (l.nota ?? 5) <= 3);
   if (baixas.length) console.log(`\n── NOTAS ≤ 3\n${baixas.map((l) => `${l.nota} ${l.conversa} › "${l.fala}": ${l.motivo}`).join("\n")}`);
-  if (process.env.EVAL_SAIDA) writeFileSync(process.env.EVAL_SAIDA, JSON.stringify({ resumo, linhas }, null, 2));
+  if (process.env.EVAL_SAIDA) writeFileSync(process.env.EVAL_SAIDA, JSON.stringify({ schemaVersion:2, provenance, repetitions:n, complete:true, evaluatedAt:new Date().toISOString(), effectMode:"mock-tools-real-llm", memoryMode:"in-process-checkpoint; persistent memory not exercised", skillMode:"production deterministic rules; no prompt skill injection", quality, responseMetrics, usage, resumo, linhas }, null, 2));
+  expect(linhas.length, 'eval selection must not be empty').toBeGreaterThan(0);
+  if(process.env.EVAL_REPORT_ONLY !== 'true') expect(quality.gatePassed, 'quality gate; inspect saved evidence').toBe(true);
 });

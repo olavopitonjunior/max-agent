@@ -25,6 +25,11 @@ async function erase(){const raw=JSON.stringify({phone}),ts=String(Date.now());e
 async function inbound(id:string){await enqueueInbound({messageId:id,fromPhone:phone,kind:'text',text:'Como funciona o formulário?',groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()});return (await query('SELECT * FROM inbound_queue WHERE message_id=$1',[id]))[0];}
 afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();scheduled.pause=null;scheduled.afterReplyPause=null;});
 d('durable graph-to-delivery privacy boundary',()=>{
+ afterEach(async()=>{
+  // Os sweepers são globais: fixtures pendentes não podem alcançar outra suíte.
+  await query('DELETE FROM inbound_queue WHERE from_phone=$1',[phone]);
+  await query('DELETE FROM outbox WHERE org_id=$1',[org]);
+ });
  beforeEach(async()=>{vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({[org]:['runtime','handoff','marketing','queries']}));scheduled.pause=null;scheduled.afterReplyPause=null;scheduled.subject='subject-a';scheduled.identityActive=true;vi.clearAllMocks();vi.stubEnv('MAX_RUNTIME_V1','true');vi.stubEnv('MAX_HANDOFF','true');vi.stubEnv('MAX_NOTIFY_SECRET','fixture-secret');await query('DELETE FROM runtime_privacy_epoch WHERE person_digest=$1',[contentDigest(phone)]);await query('DELETE FROM runtime_task WHERE org_id=$1',[org]);await query('DELETE FROM conversation_control WHERE org_id=$1',[org]);await query('DELETE FROM conversation_turn WHERE org_id=$1',[org]);await query('DELETE FROM inbound_queue WHERE from_phone=$1',[phone]);await query('DELETE FROM live_conversation_binding WHERE org_id=$1',[org]);});
  it('does not persist or send a graph reply after forget commits before queue handoff',async()=>{
   const row=await inbound('delivery-forget-after-graph');let graphDone!:()=>void,release!:()=>void;const reached=new Promise<void>(r=>graphDone=r),hold=new Promise<void>(r=>release=r);scheduled.pause=async()=>{graphDone();await hold;};

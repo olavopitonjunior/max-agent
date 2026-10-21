@@ -68,6 +68,8 @@ export interface DadosDaProposta {
   vendedor?: Pessoa;
   imovel?: {
     endereco?: string;
+    /** Interno: achatado em endereco apenas ao enviar ao backend. */
+    complemento?: string;
     numero?: string;
     bairro?: string;
     cidade?: string;
@@ -297,10 +299,31 @@ function linhaPessoa(p: Pessoa): string {
     .join(" · ");
 }
 
+/** Compatibilidade: só separa uma unidade final explicitamente rotulada após vírgula. */
+function imovelEstruturado(im: NonNullable<DadosDaProposta["imovel"]>, extracao = false) {
+  // Estado já estruturado é canônico: não consumir bloco/sala do endereço
+  // numa segunda passagem ao montar payload ou mesclar o próximo turno.
+  if (im.complemento && !extracao) return im;
+  const legado = /^(.*),\s*((?:apartamento|apto\.?|unidade|bloco|sala|casa)\s+[^,]+)$/iu.exec(im.endereco ?? "");
+  if (!legado) return im;
+  // Na extração, um complemento explícito só substitui a unidade do mesmo
+  // tipo já presente no final. Bloco A continua no endereço ao trocar apto.
+  const tipo = (v: string) => normalizar(v).replace(/^apto\.?\b/, "apartamento").split(/\s/)[0];
+  if (im.complemento && tipo(im.complemento) !== tipo(legado[2])) return im;
+  return { ...im, endereco: legado[1], complemento: im.complemento ?? legado[2] };
+}
+
+/** O backend conhece um endereço único; o estado conserva unidade separada. */
+function imovelParaPayload(im: DadosDaProposta["imovel"]): DadosDaProposta["imovel"] {
+  if (!im) return undefined;
+  const { complemento, ...base } = imovelEstruturado(im);
+  return { ...base, endereco: base.endereco && complemento ? `${base.endereco}, ${complemento}` : base.endereco };
+}
+
 /** O corpo do resumo — montado do estado, nunca pelo modelo. */
 function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string }): string {
   const d = f.dados;
-  const im = d.imovel ?? {};
+  const im = imovelParaPayload(d.imovel) ?? {};
   const endereco = [im.endereco, im.numero, im.bairro, im.cidade, im.uf].filter(Boolean).join(", ");
   const quem = f.natureza === "locacao" ? "Inquilino" : "Comprador";
   // Ligada ao lead: nome/CPF/aluguel vêm do `proposal.create`, não do estado (M1/pii) — o resumo diz isso em vez de repetir o que o Max não guarda.
@@ -345,7 +368,7 @@ function linhasDoAjuste(d: DadosDaProposta): string[] {
   if (p.cpf) linhas.push(`CPF do proponente: ${p.cpf}`);
   if (p.email) linhas.push(`E-mail do proponente: ${p.email}`);
   if (p.telefone) linhas.push(`Telefone do proponente: ${p.telefone}`);
-  const im = d.imovel ?? {};
+  const im = imovelParaPayload(d.imovel) ?? {};
   const endereco = [im.endereco, im.numero, im.bairro, im.cidade, im.uf].filter(Boolean).join(", ");
   if (endereco) linhas.push(`Imóvel: ${endereco}`);
   if (im.matricula) linhas.push(`Matrícula: ${im.matricula}`);
@@ -433,7 +456,10 @@ function conferirCampo(
 }
 export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaProposta {
   const telefones = (texto.match(/(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}(?!\d)/g) ?? []).map((t) => t.trim());
-  const cpfs = (texto.match(/(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/g) ?? []);
+  // Onze dígitos sem máscara também cabem no regex de CPF. O rótulo escrito
+  // pela pessoa resolve a ambiguidade; o extrator sozinho não pode resolvê-la.
+  const telefonesRotulados = new Set([...texto.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)(?:\s+(?:do|da)\s+(?:comprador|compradora|cliente|proponente|vendedor|vendedora|inquilino|inquilina|locatário|locatária))?\s*(?::|=|é|para)?\s*((?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4})(?!\d)/giu)].map(m=>semDdi(so(m[1]))));
+  const cpfs = (texto.match(/(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/g) ?? []).filter(c=>!telefonesRotulados.has(semDdi(so(c))));
   const emails = (texto.match(/[^\s@:;,<>()]+@[^\s@:;,<>()]+\.[a-z]{2,}/gi) ?? []).map((e) => e.replace(/[.]+$/, ""));
   const out: DadosDaProposta = { ...d };
   for (const k of ["proponente", "vendedor"] as const) {
@@ -550,7 +576,10 @@ export function mesclar<T extends object>(atual: T | undefined, novo: T | undefi
  * (achado B1). Os demais campos seguem `mesclar`.
  */
 export function mesclarDados(atual: DadosDaProposta, novo: DadosDaProposta): DadosDaProposta {
-  const out = mesclar(atual, novo) ?? {};
+  const out = mesclar(
+    { ...atual, ...(atual.imovel ? { imovel: imovelEstruturado(atual.imovel) } : {}) },
+    { ...novo, ...(novo.imovel ? { imovel: imovelEstruturado(novo.imovel) } : {}) },
+  ) ?? {};
   for (const papel of ["proponente", "vendedor"] as const) {
     const nomeNovo = novo[papel]?.nome;
     const nomeAtual = atual[papel]?.nome;
@@ -588,6 +617,16 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
       ? v.replace(/[*_~`]/g, "").replace(/\s+/g, " ").trim().slice(0, 200) || undefined
       : undefined;
   const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
+  // Valores protegidos chegam como texto após destokenizarArgs; só aceitamos
+  // a expressão monetária inteira, nunca um prefixo de texto livre.
+  const dinheiro = (v: unknown): number | undefined => {
+    if (typeof v === "number") return n(v);
+    if (typeof v !== "string") return undefined;
+    const m = /^(?:R\$\s*)?(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{1,2}))?(?:\s*(mil|milhão|milhões))?(?:\s+reais)?$/i.exec(v.trim());
+    if (!m) return undefined;
+    const base = Number(m[1].replace(/\./g, "") + (m[2] ? `.${m[2]}` : ""));
+    return n(base * (m[3] ? (m[3].toLowerCase() === "mil" ? 1000 : 1000000) : 1));
+  };
   const pessoa = (v: unknown): Pessoa | undefined => {
     if (!v || typeof v !== "object") return undefined;
     const p = v as Record<string, unknown>;
@@ -601,17 +640,18 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
   return {
     proponente: pessoa(o.proponente),
     vendedor: pessoa(o.vendedor),
-    imovel: {
+    imovel: imovelEstruturado({
       endereco: s(im.endereco),
+      complemento: s(im.complemento),
       numero: s(im.numero),
       bairro: s(im.bairro),
       cidade: s(im.cidade),
       uf: s(im.uf),
       matricula: s(im.matricula),
-    },
-    valor: n(o.valor),
-    pagamento: { sinal: n(pg.sinal), forma: s(pg.forma) },
-    comissao: { percentual: percentual && percentual <= 100 ? percentual : undefined, valor: n(cm.valor) },
+    }, true),
+    valor: dinheiro(o.valor),
+    pagamento: { sinal: dinheiro(pg.sinal), forma: s(pg.forma) },
+    comissao: { percentual: percentual && percentual <= 100 ? percentual : undefined, valor: dinheiro(cm.valor) },
     canal: o.canal === "email" || o.canal === "whatsapp" ? o.canal : undefined,
     finalidade: o.finalidade === "comercial" || o.finalidade === "residencial" ? o.finalidade : undefined,
   };
@@ -640,7 +680,7 @@ export function argsDaProposta(
     // endereço), verbatim e sem prefixo.
     title: d.proponente?.nome || d.imovel?.endereco || undefined,
     proponente: d.proponente,
-    imovel: d.imovel,
+    imovel: imovelParaPayload(d.imovel),
     valor: d.valor,
     canal: opcoes.atualizacao ? d.canal : (d.canal ?? canalPadrao(d)),
     ...(d.vendedor?.nome ? { vendedor: d.vendedor } : {}),
@@ -655,7 +695,7 @@ export function argsDaProposta(
 export function argsDoAjuste(d: DadosDaProposta): Record<string, unknown> {
   const args: Record<string, unknown> = {};
   if (d.proponente && Object.values(d.proponente).some(Boolean)) args.proponente = d.proponente;
-  if (d.imovel && Object.values(d.imovel).some(Boolean)) args.imovel = d.imovel;
+  if (d.imovel && Object.values(d.imovel).some(Boolean)) args.imovel = imovelParaPayload(d.imovel);
   if (typeof d.valor === "number") args.valor = d.valor;
   if (d.vendedor && Object.values(d.vendedor).some(Boolean)) args.vendedor = d.vendedor;
   if (d.pagamento?.sinal || d.pagamento?.forma) args.pagamento = d.pagamento;
@@ -1027,6 +1067,19 @@ function prepararCpfDaRetomada(retomado: FluxoProposta, texto: string, ctx: Cont
 
 // ─── Entrada ──────────────────────────────────────────────────────────────
 
+/** Only explicit labels: an address or a person's name is not inferred as a title. */
+function tituloDeclarado(texto: string | undefined): string | undefined {
+  if (!texto) return undefined;
+  const marcadores=[...texto.matchAll(/\b(?:t[ií]tulo|nome)(?:\s+que\s+j[aá]\s+informei)?\s*(?::|é(?=\s)|(?=["“]))\s*|\bcom\s+o\s+(?:t[ií]tulo|nome)\s+/giu)];
+  if(marcadores.length!==1) return undefined;
+  const m=marcadores[0];
+  const resto=texto.slice(m.index!+m[0].length).trim();
+  const citado=/^["“]([^"”]+)["”](?:[.!?]|\s|$)/u.exec(resto);
+  const valor=citado?.[1]??resto.split(/\.\s+(?:pode|posso|vamos|por favor|prepare)\b/i)[0].replace(/[.!]\s*$/,'');
+  if(!valor||(!citado&&/[?\n]|\s+ou\s+/i.test(valor))) return undefined;
+  return valor.replace(/\s+/g,' ').trim().slice(0,200)||undefined;
+}
+
 /**
  * Pedido de criação reconhecido (a `propor_criacao` do turn). Pedido explícito
  * de formulário/ficha (`tipo` venda/locação) já é o fluxo de negócio; pedido de
@@ -1059,22 +1112,23 @@ export async function iniciarFluxo(
   }
   const podeProposta = params.policy.includes("proposal.create");
   const podeNegocio = params.policy.includes("form.create");
+  const tituloDoPedido = tituloDeclarado(params.pedido) ?? params.nomeCliente;
   if (params.tipo !== "proposta" && podeNegocio) {
-    return carregarCamposDoNegocio(params.tipo, params.agora, deps, params.nomeCliente);
+    return carregarCamposDoNegocio(params.tipo, params.agora, deps, tituloDoPedido);
   }
   if (podeProposta && podeNegocio) {
     return {
       reply: TEXTO_ESCOLHA,
-      fluxo: { kind: "escolha", natureza: params.natureza, pedido: params.pedido, nomeCliente: params.nomeCliente, atualizadoEm: params.agora },
+      fluxo: { kind: "escolha", natureza: params.natureza, pedido: params.pedido, nomeCliente: tituloDoPedido, atualizadoEm: params.agora },
       evento: "fluxo_escolha",
     };
   }
   if (podeProposta) return iniciarProposta(params.natureza, params.pedido, params.agora, deps);
   if (podeNegocio) {
-    if (params.natureza) return carregarCamposDoNegocio(params.natureza, params.agora, deps, params.nomeCliente);
+    if (params.natureza) return carregarCamposDoNegocio(params.natureza, params.agora, deps, tituloDoPedido);
     return {
       reply: TEXTO_VENDA_OU_LOCACAO,
-      fluxo: { kind: "negocio", etapa: "tipo", valores: {}, titulo: params.nomeCliente, atualizadoEm: params.agora },
+      fluxo: { kind: "negocio", etapa: "tipo", valores: {}, titulo: tituloDoPedido, atualizadoEm: params.agora },
       evento: "fluxo_negocio",
     };
   }
@@ -1310,13 +1364,14 @@ async function conduzirNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: Deps
   if (f.etapa === "nome") {
     // A resposta É o título, como a pessoa escreveu. "sim"/"não" não é nome, e
     // pergunta ("pode ser o endereço?") também não: pergunta de novo.
-    const nome = ctx.texto.replace(/\s+/g, " ").trim().slice(0, 200);
+    const nome = tituloDeclarado(ctx.texto) ?? ctx.texto.replace(/\s+/g, " ").trim().slice(0, 200);
     if (!nome || resposta !== "nenhum" || nome.endsWith("?")) return { reply: TEXTO_NOME_DO_NEGOCIO, fluxo: f, evento: "negocio_nome" };
     return { reply: resumoDoNegocio({ ...f, titulo: nome }), fluxo: { ...f, titulo: nome, etapa: "revisao", chave: undefined, atualizadoEm: agora }, evento: "negocio_revisao" };
   }
   if (f.etapa === "revisao" && resposta === "sim") return criarNegocio(f, ctx, deps);
   // Correção do nome no resumo: "nome: Casa da Praia" (o extrator só conhece as chaves do popup).
-  const novoNome = f.etapa === "revisao" || f.etapa === "campos" ? /^\s*nome\s*[:\-]\s*(.+)$/i.exec(ctx.texto)?.[1]?.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
+  const usaPadrao=(f.campos??[]).some(c=>c.chave.startsWith('titleParts.'));
+  const novoNome = !usaPadrao && (f.etapa === "revisao" || f.etapa === "campos") ? tituloDeclarado(ctx.texto) ?? /^\s*nome\s*[:\-]\s*(.+)$/i.exec(ctx.texto)?.[1]?.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
   if (novoNome) {
     const g: FluxoNegocio = { ...f, titulo: novoNome, forcar: undefined, chave: undefined, atualizadoEm: agora };
     const faltam = (f.campos ?? []).filter((c) => !f.valores[c.chave]);
@@ -1565,6 +1620,13 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // e o PATCH trocaria o canal sem ninguém pedir.
   if (parcial && novos.canal && !/\b(whats\w*|zap|e-?mail|canal|sms)\b/.test(normalizar(ctx.texto))) delete novos.canal;
   const dados = mesclarDados(f.dados, novos);
+  if (novos.imovel?.complemento && !dados.imovel?.endereco) {
+    return {
+      reply: "Me informe o endereço completo do imóvel, incluindo o novo complemento, para eu atualizar sem perder a rua e o número.",
+      fluxo: f,
+      evento: "proposta_complemento_sem_endereco",
+    };
+  }
   // Nada novo nesta mensagem: não é do fluxo (pergunta, conversa) — libera, e
   // nunca diz "Anotado" sem ter anotado (achado B5). Nenhuma escrita (B1).
   if (igual(dados, f.dados)) {
@@ -2006,12 +2068,17 @@ const PESSOA_SCHEMA = {
   additionalProperties: false,
 };
 
+const VALOR_DA_PROPOSTA_SCHEMA = {
+  anyOf: [{ type: "number" }, { type: "string", pattern: "^⟨VALOR_[0-9]+⟩$" }],
+  description: "Se houver token ⟨VALOR_N⟩, copie o token literalmente como string, sem estimar seu valor. Caso contrário, informe número.",
+} as const;
+
 export const TOOL_EXTRAIR_PROPOSTA = {
   name: "preencher_proposta",
   description:
     "Registra os dados de proposta que a pessoa informou NESTA mensagem. Preencha só o " +
     "que ela disse; omita o resto. Nunca invente. Números como número (1.500.000 → 1500000; " +
-    "'1,5 milhão' → 1500000; '200 mil' → 200000).",
+    "'1,5 milhão' → 1500000; '200 mil' → 200000). Valores protegidos por ⟨VALOR_N⟩ devem ser copiados literalmente como string.",
   parameters: {
     type: "object",
     properties: {
@@ -2020,7 +2087,8 @@ export const TOOL_EXTRAIR_PROPOSTA = {
       imovel: {
         type: "object",
         properties: {
-          endereco: { type: "string", description: "Rua/avenida e número." },
+          endereco: { type: "string", description: "Rua/avenida e número. Preserve o complemento informado em complemento." },
+          complemento: { type: "string", description: "Apartamento, unidade, bloco, casa ou sala, exatamente como informado. Preencha também em correção isolada (ex.: Corrija o complemento para apartamento 2 → apartamento 2); omita endereco se a rua não foi dita; não copie o complemento anterior." },
           numero: { type: "string" },
           bairro: { type: "string" },
           cidade: { type: "string" },
@@ -2029,18 +2097,18 @@ export const TOOL_EXTRAIR_PROPOSTA = {
         },
         additionalProperties: false,
       },
-      valor: { type: "number", description: "Venda: valor total. Locação: aluguel mensal." },
+      valor: { ...VALOR_DA_PROPOSTA_SCHEMA, description: "Venda: valor total. Locação: aluguel mensal. " + VALOR_DA_PROPOSTA_SCHEMA.description },
       pagamento: {
         type: "object",
         properties: {
-          sinal: { type: "number" },
+          sinal: VALOR_DA_PROPOSTA_SCHEMA,
           forma: { type: "string", description: "Ex.: 'R$ 200 mil financiado, restante à vista'." },
         },
         additionalProperties: false,
       },
       comissao: {
         type: "object",
-        properties: { percentual: { type: "number" }, valor: { type: "number" } },
+        properties: { percentual: { type: "number" }, valor: VALOR_DA_PROPOSTA_SCHEMA },
         additionalProperties: false,
       },
       canal: {
