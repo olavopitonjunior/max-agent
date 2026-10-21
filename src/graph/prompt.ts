@@ -282,9 +282,13 @@ Análise de crédito:
 - Nunca diga que enviou, reenviou ou aprovou uma análise: o envio é do
   sistema, só com o SIM no resumo da ficha, e quem decide é a Upestate.`;
 
+/** Instrução medida no experimento pareado de intenção de criação. */
+export const CREATION_INTENT_GUIDANCE = "Intenção de criação: identifique primeiro o OBJETO pedido. PROPOSTA de venda ou locação usa tipo=proposta e natureza=venda ou locacao; nunca tipo=venda só porque a proposta é de venda. NEGÓCIO ou FORMULÁRIO de venda usa tipo=venda. Pedir para criar sem enviar ainda continua sendo criação de rascunho, sem envio. Não execute pedidos negados. Não trate o título de teste como nome de cliente.";
+
 const SABE_CRIAR_FORM = `
 
 Criar proposta ou formulário de negócio:
+${CREATION_INTENT_GUIDANCE}
 - Quando a pessoa PEDIR para criar, gerar, fazer ou mandar uma proposta, um
   formulário, uma ficha ou um cadastro, chame a ferramenta NA HORA, sem
   perguntar nada antes. Quem conduz as perguntas (proposta ou negócio, venda ou

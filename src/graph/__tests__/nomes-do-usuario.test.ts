@@ -37,6 +37,39 @@ const acaoCom = (opcoes: unknown) =>
   vi.fn().mockImplementation(async (verbo: string) => (verbo === "form.options" ? opcoes : CRIADO));
 
 describe("nome do negócio", () => {
+  it.each([
+    'Quero criar um novo negócio de venda com o título TESTE QA MAX. Pode preparar para eu conferir?',
+    'Crie um negócio de venda. título: TESTE QA MAX',
+    'Abrir venda com o título "TESTE QA MAX"',
+    'Vamos cadastrar uma venda com o nome "TESTE QA MAX"?',
+  ])('retém o título explícito do pedido sem perguntar novamente: %s', async (pedido) => {
+    const acao=acaoCom(SEM_CAMPOS),d=deps({acao});
+    const p=await F.iniciarFluxo({tipo:'venda',pedido,policy:[...TUDO],agora},d);
+    expect(p.reply).toContain('Nome: TESTE QA MAX');
+    expect(p.reply).not.toContain('Que nome');
+    await F.conduzirFluxo(p.fluxo!,ctx('sim',{messageId:'explicit-title'}),d);
+    expect(acao).toHaveBeenLastCalledWith('form.create',{tipo:'venda',campos:{title:'TESTE QA MAX'}},'explicit-title');
+  });
+
+  it('extrai a declaração do título sem incluir a frase explicativa',async()=>{
+    const acao=acaoCom(SEM_CAMPOS),d=deps({acao});
+    let p: Passo=await F.iniciarFluxo({tipo:'venda',policy:[...TUDO],agora},d);
+    p=await F.conduzirFluxo(p.fluxo!,ctx('O título que já informei é TESTE QA MAX.'),d);
+    expect(p.reply).toContain('Nome: TESTE QA MAX');
+    expect(p.reply).not.toContain('Nome: O título');
+  });
+
+  it('não escolhe entre dois títulos explícitos nem usa título livre sobre titleParts',async()=>{
+    const d=deps({acao:acaoCom(SEM_CAMPOS)});
+    const p=await F.iniciarFluxo({tipo:'venda',pedido:'Criar venda com o título "Casa A" ou título "Casa B"',policy:[...TUDO],agora},d);
+    expect(p.reply).toContain('Que nome');
+    const acao=acaoCom(COM_PADRAO),d2=deps({acao,extrairCampos:vi.fn().mockResolvedValue({'titleParts.endereco':'Rua A, 10'})});
+    let q: Passo=await F.iniciarFluxo({tipo:'venda',pedido:'Criar venda com o título "Livre"',policy:[...TUDO],agora},d2);
+    q=await F.conduzirFluxo(q.fluxo!,ctx('nome: Outro'),d2);
+    expect(q.reply).not.toContain('Nome: Outro');
+    await F.conduzirFluxo(q.fluxo!,ctx('sim',{messageId:'pattern'}),d2);
+    expect(acao).toHaveBeenLastCalledWith('form.create',{tipo:'venda',campos:{titleParts:{endereco:'Rua A, 10'}}},'pattern');
+  });
   it("nome do cliente do pedido vai como `title`, verbatim, e aparece no resumo", async () => {
     const acao = acaoCom(SEM_CAMPOS);
     const d = deps({ acao });
