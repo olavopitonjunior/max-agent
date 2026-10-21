@@ -517,7 +517,7 @@ export const PROPOR_CRIACAO: EntradaDeEscrita = {
 export const TETO_DE_TOOLS = 5;
 
 const PEDE_NEGOCIO =
-  /\b(neg[oó]cio|neg[oó]cios|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid\w*|documentos?)\b/i;
+  /\b(neg[oó]cio|neg[oó]cios|vendas|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid\w*|documentos?)\b/i;
 
 export const LISTAR_NEGOCIOS: ToolDef = {
   nome: "listar_negocios",

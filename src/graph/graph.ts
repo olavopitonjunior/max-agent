@@ -1068,9 +1068,16 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // recentes de cabeça (teste 09/10). Envio vem antes: "envia a da X" é envio.
   // O fluxo aberto fica, rebaixado: um "sim" depois da lista não executa nada.
   const emSelecao = (atual?.kind === "continuidade" || atual?.kind === "gestao") && atual.etapa === "selecao";
-  if (livre && !emSelecao && podeEscrever(state.identity) && state.policy.includes("proposal.list") &&
+  if (livre && !emSelecao && podeEscrever(state.identity) &&
       !pedeEnvio(userText) && pedeConsulta(userText)) {
-    const r = await responderConsulta(depsDoFluxo(state, usage), userText);
+    // Reconhecer a consulta independe da permissão: sem leitura, recusa aqui.
+    // Deixar passar ao modelo oferece criação e pode converter o código citado
+    // em continuidade de proposta, mesmo quando a pessoa pediu só o status.
+    const r = state.politicaIndisponivel
+      ? { reply: "Não consegui validar sua permissão para consultar propostas agora. Tente de novo em instantes.", evento: "consulta_politica_indisponivel" }
+      : !state.policy.includes("proposal.list")
+        ? { reply: "Você não tem permissão para consultar propostas pelo Max nesta imobiliária.", evento: "consulta_sem_politica" }
+        : await responderConsulta(depsDoFluxo(state, usage), userText);
     return {
       ...(atual ? { fluxo: rebaixarFluxo(atual) } : vencido ? { fluxo: null } : {}),
       reply: r.reply,
