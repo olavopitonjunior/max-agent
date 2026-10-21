@@ -22,3 +22,10 @@ describe('runtime HMAC normative wire vectors',()=>{
   const result=await requireHmac(new NextRequest(url,{headers:{'x-max-timestamp':vector.timestamp,'x-max-signature':vector.get.signature}}),{signQuery:true});expect(result.ok).toBe(false);
  });
 });
+
+it('accepts scoped catalog fixed vector and rejects changed org',async()=>{
+ vi.stubEnv('MAX_NOTIFY_SECRET',vector.secret);vi.spyOn(Date,'now').mockReturnValue(Number(vector.timestamp));
+ const headers={'x-max-timestamp':vector.timestamp,'x-max-signature':vector.catalogGet.signature};
+ expect((await requireHmac(new NextRequest(`https://max.test${vector.catalogGet.pathWithQuery}`,{headers}),{signQuery:true})).ok).toBe(true);
+ expect((await requireHmac(new NextRequest(`https://max.test${vector.catalogGet.pathWithQuery.replace('org-test','foreign')}`,{headers}),{signQuery:true})).ok).toBe(false);
+});

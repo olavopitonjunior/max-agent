@@ -16,10 +16,12 @@ O playground isolado é exposto em `POST/GET /api/admin/playground/v1`. O ImobPr
 2. Implantar receptores ImobPro e Max com comportamentos novos OFF. O contrato HMAC deve passar com `docs/contracts/max-runtime-v1.json` idêntico nos dois repos.
 3. Ligar playground simulado nos dois serviços. Ele usa o mesmo grafo com adaptadores sintéticos, sem rede/modelo pago/banco de negócio. Uma sessão nunca é uma conversa WhatsApp.
 4. Para staging real: habilitar `MAX_PLAYGROUND_STAGING_ENABLED` no ImobPro; no Max, habilitar `MAX_PLAYGROUND` e permitir explicitamente o par organização/telefone sintético em `MAX_PLAYGROUND_STAGING_IDENTITIES`. Nunca cadastrar um contato de cliente real como fixture. Separar credenciais e dados de staging.
-5. Canary de uma organização: habilitar `MAX_RUNTIME_V1`; depois `MAX_EXTENDED_QUERIES` e somente as capabilities aprovadas no `maxPolicy`. Validar fluxo atual de proposta/formulário, consultas e negações por papel.
-6. Handoff exige `MAX_HANDOFF=true` no Max, `MAX_HANDOFF_ENABLED=true` no ImobPro, módulo Max e permissões `max.conversations.view` + `max.conversations.manage`. Testar dois operadores, takeover durante resposta e handback explícito.
-7. Marketing exige `MAX_MARKETING=true`, permissões e política `marketing.read/generate`, marca/templates/cota do tenant. Escolha de imóveis no WhatsApp também precisa `MAX_EXTENDED_QUERIES` e `property.list`. Vídeo depende do contrato de template Creatomate e armazenamento privado descritos na documentação de marketing. Sem configuração/cota, não gerar pago.
+5. Canary de uma organização: configurar `MAX_ROLLOUT_ORGS` com o ID canônico e a lista de recursos permitidos, por exemplo `{"org-id":["runtime","queries"]}`. Habilitar `MAX_RUNTIME_V1`; depois `MAX_EXTENDED_QUERIES` e somente as capabilities aprovadas no `maxPolicy`. Flag global e seleção da organização são obrigatórias em conjunto; JSON ausente/inválido, chave curinga ou organização fora da seleção não habilitam recursos novos. Validar fluxo atual de proposta/formulário, consultas e negações por papel.
+6. Handoff exige `handoff` na seleção da organização e `MAX_HANDOFF=true` no Max, `MAX_HANDOFF_ENABLED=true` no ImobPro, módulo Max e permissões `max.conversations.view` + `max.conversations.manage`. Testar dois operadores, takeover durante resposta e handback explícito.
+7. Marketing exige `marketing` na seleção da organização e `MAX_MARKETING=true`, permissões e política `marketing.read/generate`, marca/templates/cota do tenant. Escolha de imóveis no WhatsApp também precisa `MAX_EXTENDED_QUERIES` e `property.list`. Vídeo depende do contrato de template Creatomate e armazenamento privado descritos na documentação de marketing. Sem configuração/cota, não gerar pago.
 8. Só ampliar canary depois dos smokes e da revisão humana. Não combinar upgrade de LangGraph com estas mudanças. Tasks gravam `workflowVersion`; código antigo não deve reassumir tarefas de uma versão que não conhece.
+
+O catálogo aceita `GET /api/admin/catalog?orgId=…`, com a query inteira coberta pelo HMAC. Sem organização selecionada, recursos novos não aparecem como habilitados. Catálogo, runtime e inbox retornam o estado efetivo das flags e da seleção para essa organização; isso não substitui permissões de sujeito, cotas ou configuração dos provedores. Playground usa a mesma seleção, inclusive na simulação, e continua sem transporte WhatsApp.
 
 ## Superfícies de operação
 
@@ -53,7 +55,7 @@ O modelo da simulação é sintético: o replay valida roteamento, tools, estado
 
 ## Rollback
 
-Desligar capabilities e flags novas; manter receptores, migrações aditivas e cron de reconciliação para efeitos já aceitos. Não apagar intents, reservas, tombstones ou checkpoints para recuperar fila. Comparar workflowVersion antes de retomar. Restaurar backup apenas em procedimento coordenado com pausa de transporte: restaurar uma fila antiga sem dedupe pode repetir mensagens. Nenhum rollback executa automaticamente uma operação com resultado incerto.
+Remover o recurso da seleção da organização ou desligar sua flag global; manter receptores, migrações aditivas e cron de reconciliação para efeitos já aceitos. Consultas de inbox e devolução explícita ao bot permanecem disponíveis após desligar handoff; novos pedidos, claims e envios são bloqueados. Um pedido ainda sem dono também pode ser devolvido ao bot por operador autorizado com a versão de controle correta. Não apagar intents, reservas, tombstones ou checkpoints para recuperar fila. Comparar workflowVersion antes de retomar. Restaurar backup apenas em procedimento coordenado com pausa de transporte: restaurar uma fila antiga sem dedupe pode repetir mensagens. Nenhum rollback executa automaticamente uma operação com resultado incerto.
 
 ## Memória e trace remoto após a migração025
 
@@ -76,3 +78,15 @@ Após aceite do provedor, falha de COMMIT local é registrada como `transport_ac
 Chamadas diretas de `runTurn`, inclusive o harness com flags novas OFF, registram o namespace por sujeito sob o mesmo epoch, sem criar task durável. O aceite de templates continua antes da consulta de identidade. `scripts/turn.ts --novo` limpa o namespace do sujeito resolvido que o próximo turno usará.
 
 O preâmbulo de aceite mantém um escopo de pessoa/epoch antes de resolver identidade ou organização. Cada consulta/gravação compara o epoch sob o lock compartilhado com forget, e `afterReply` conserva esse mesmo escopo. Repasses ao telefone da equipe verificam origem e destino em ordem de digest, pois a linha do time contém dados da pessoa de origem. Apagar a origem entre a leitura do lembrete e a gravação seguinte impede a recriação desses derivados.
+
+## Preservação das notificações no rollout
+
+`MAX_ROLLOUT_ORGS` não participa de `/api/notify`, outbox, templates ou reconciliação. `MAX_CHAT_KILL` e `MAX_WRITES_KILL` não interrompem entrega proativa; `MAX_OUTBOUND_KILL` interrompe. As migrações022–026 continuam obrigatórias ANTES do novo código, mesmo com recursos novos OFF: a proteção de privacidade altera a fila compartilhada. Medir aceites/erros, backlog vencido/idade, falhas e confirmação de entrega, templates represados, report pendente e locks/conexões do banco. O piloto de produção exige pelo menos24h de observação efetiva e baseline comparável, não apenas24h transcorridas.
+
+### Recovery after admission disable (2026-10-21 review)
+
+- `marketing.status` is a read-only recovery tool for an existing job, independent of new-generation rollout. A selected organization and live ImobPro subject/RBAC are still required; no prepare/generate bypass. Accepted tracking survives disable; unconfirmed approvals are discarded.
+- Handoff read/handback remains available after module deprovision. Recovery uses the org-scoped existing thread/control/bindings, HMAC, owner/version and privacy fence rather than requiring the bot's now-disabled identity. ImobPro navigation remains visible to authorized operators. Operator permission revocation is still enforced; it does not grant another operator takeover.
+- Runtime lease expiry runs regardless of admission flags, including handoff-only and all-off deployments. No cron schedule was added or changed. Reconciliation never retries an uncertain effect automatically.
+- Use a direct Neon connection for the normal migration runner because it holds a session advisory lock; derive the direct endpoint from the existing authorized pooled connection without exposing credentials. [Neon connection pooling limitations](https://neon.com/docs/connect/connection-pooling).
+- Staging backup was restored to an isolated local database and all17 table digests matched. Template database already contains public schema: restore excludes only the TOC CREATE SCHEMA public entry, without dropping or ignoring table errors. The ordinary migrator then applied exactly022–026 and preserved all old-column values of the16 existing data tables; the ledger is expected to gain five rows. Remote staging received the same migration sequence on2026-10-21, preserving the same data digests. Evidence is recorded outside source control; never commit database dumps or backup keys.

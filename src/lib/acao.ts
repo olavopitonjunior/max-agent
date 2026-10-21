@@ -147,7 +147,7 @@ async function executarAcaoDireta(params: {
 
 /** Shared gateway used by deterministic flows, marketing and future adapters. */
 export async function executarAcao(params: Parameters<typeof executarAcaoDireta>[0]): Promise<RespostaDeAcao | null> {
-  if (!executableTool(params.verb)) return { status: 403, body: { error: "capability_disabled" } };
+  if (!executableTool(params.verb,undefined,params.orgId)) return { status: 403, body: { error: "capability_disabled" } };
   const e = currentExecution();
   if (e && (e.context.orgId !== params.orgId || contentDigest(e.context.subject) !== contentDigest(params.subject))) throw new Error("execution_tenant_mismatch");
   runEvent("tool.started", params.verb);

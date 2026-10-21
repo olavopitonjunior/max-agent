@@ -26,7 +26,7 @@ export async function transitionControl(p:{orgId:string;phone:string;operation:'
   if(p.operation==='handback'){const unresolved=await client.query(`SELECT 1 FROM handoff_send WHERE org_id=$1 AND phone=$2 AND state IN ('running','unknown') LIMIT 1`,[p.orgId,conversationKey(p.phone)]);if(unresolved.rows.length)throw new Error('send_unknown');}
   if(p.operation==='request'&&c.state==='bot')c={state:'waiting_human',ownerId:null,controlVersion:c.controlVersion+1};
   else if(p.operation==='claim'&&c.state==='waiting_human'&&p.controlVersion!==undefined)c={state:'human',ownerId:p.actorId,controlVersion:c.controlVersion+1};
-  else if(p.operation==='handback'&&c.state==='human'&&c.ownerId===p.actorId&&p.controlVersion!==undefined)c={state:'bot',ownerId:null,controlVersion:c.controlVersion+1};
+  else if(p.operation==='handback'&&p.controlVersion!==undefined&&((c.state==='human'&&c.ownerId===p.actorId)||(c.state==='waiting_human'&&c.ownerId===null)))c={state:'bot',ownerId:null,controlVersion:c.controlVersion+1};
   else throw new Error('control_conflict');
   if(p.beforeTransition)await p.beforeTransition(client);
   await client.query(`UPDATE conversation_control SET state=$3,owner_id=$4,control_version=$5,updated_at=now() WHERE org_id=$1 AND phone=$2`,[p.orgId,conversationKey(p.phone),c.state,c.ownerId,c.controlVersion]);return c;

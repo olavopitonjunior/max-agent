@@ -16,7 +16,7 @@ const usage = { model:'fixture',promptTokens:0,completionTokens:0,latencyMs:0,su
 async function dispatch(name:string,args:Record<string,unknown>,referencias:MapaDeReferencias|null=null,agora=1000) {
  return despacharLeituras({ chamadas:[{name,args}],oferecidas:[name],policy,identity,fromPhone:'5511999990001',referencias,turno:`turn-${agora}`,agora });
 }
-beforeEach(()=>{ vi.clearAllMocks(); vi.stubEnv('MAX_EXTENDED_QUERIES','true'); vi.mocked(fetchProfile).mockResolvedValue({enabled:true,model:'fixture',maxPolicy:{byRole:{'*':[...policy]}}} as never); vi.mocked(complete).mockResolvedValue({text:'Resposta sintética',toolCalls:[],usage} as never); });
+beforeEach(()=>{ vi.clearAllMocks(); vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({'fixture-org':['queries']}));vi.stubEnv('MAX_EXTENDED_QUERIES','true'); vi.mocked(fetchProfile).mockResolvedValue({enabled:true,model:'fixture',maxPolicy:{byRole:{'*':[...policy]}}} as never); vi.mocked(complete).mockResolvedValue({text:'Resposta sintética',toolCalls:[],usage} as never); });
 afterEach(()=>vi.unstubAllEnvs());
 describe('conversational extended reads',()=>{
  it.each(['listar_imoveis','listar_atividades','listar_notificacoes'])('%s displays every result once using only the trusted continuation',async(name)=>{

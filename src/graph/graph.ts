@@ -1,3 +1,4 @@
+import { featureEnabled, durableRuntimeEnabled } from '@/lib/runtime/rollout';
 import { liveNamespaceFor } from "@/lib/runtime/context";
 import { query } from "@/lib/db";
 import { withDeliveryFence, captureDispatchFence, DispatchFenceSchema, type DispatchFence } from "@/lib/runtime/delivery-fence";
@@ -920,7 +921,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const livre = !coletando || rascunhoAberto;
 
   if (livre && !escritaEmAberto) {
-    const marketing = await marketingStep({ text: userText, messageId: state.inbound.messageId, now: agora, canWrite: podeEscrever(state.identity), policy: state.policy, pending: state.marketingPending }, async (verb,args,key) => {
+    const marketing = await marketingStep({ orgId: state.identity.orgId, text: userText, messageId: state.inbound.messageId, now: agora, canWrite: podeEscrever(state.identity), policy: state.policy, pending: state.marketingPending }, async (verb,args,key) => {
       if (verb === "property.list") {
         if (!state.policy.includes("property.list")) return null;
         const result = await consultarEscopo({orgId:state.identity.orgId,rawPhone:state.inbound.fromPhone,subject:subjectDe(state.identity),verb:"property.list",args});
@@ -1026,7 +1027,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // sistema (eval 09/10 — o modelo confundia o contrato com o envio da
   // proposta e dizia "não consigo excluir"). A negação só sem fluxo aberto:
   // dentro de um, o "não" é a resposta ao resumo e o fluxo a trata.
-  const contratoLeitura = process.env.MAX_EXTENDED_QUERIES === "true" && state.policy.includes("contract.status") &&
+  const contratoLeitura = featureEnabled("queries",state.identity.orgId) && state.policy.includes("contract.status") &&
     !/\b(quem|signat[aá]ri|falta(?:m)? assinar)/i.test(userText);
   const contratoPergunta = coletando || gestao || continuidade || contratoLeitura ? false : perguntaDoContrato(userText);
   if (!coletando && !gestao && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
@@ -2685,8 +2686,8 @@ export async function runTurn(inbound: InboundMessage, options?:{dispatchFence?:
 /** Set up subject/privacy even for direct callers with durable features OFF.
  * The preamble above still handles template acceptance before identity lookup. */
 async function runResolvedTurn(inbound:InboundMessage,identity:Extract<Identity,{kind:"resolved"}>,options?:{dispatchFence?:DispatchFence}):Promise<TurnResult>{
- const durable=process.env.MAX_RUNTIME_V1 === "true"||process.env.MAX_HANDOFF === "true"||process.env.MAX_MARKETING === "true";
  const orgId = identity.candidate.orgId,subject=subjectDe(identity.candidate);
+ const durable=durableRuntimeEnabled(orgId);
  const control = await getControl(orgId, inbound.fromPhone);
  const fence = { orgId, controlVersion: control.controlVersion };
  const hash = contentDigest({ orgId, messageId: inbound.messageId });

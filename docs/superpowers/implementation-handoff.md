@@ -26,7 +26,7 @@ Exportar um eval não copia a conversa: gera estrutura de teste sem texto livre,
 
 ## Dependências de ativação
 
-Aplicar as migrações e seguir a ordem do [runbook](runtime-operations.md). Os dois serviços precisam compartilhar os contratos `max-runtime-v1.json` e `max-marketing-v1.json`. Flags de runtime, handoff, marketing e consultas novas permanecem OFF até habilitação.
+Aplicar as migrações e seguir a ordem do [runbook](runtime-operations.md). Os dois serviços precisam compartilhar os contratos `max-runtime-v1.json` e `max-marketing-v1.json`. Flags de runtime, handoff, marketing e consultas novas permanecem OFF até habilitação. Cada recurso exige também seleção explícita da organização em `MAX_ROLLOUT_ORGS`; o catálogo aceita `orgId` e informa a disponibilidade efetiva desse tenant.
 
 Vídeo exige credenciais próprias, template Creatomate auditado e fixado por hash, estimativa de custo que inclua narração, armazenamento privado e cota explícita. O custo técnico fica na administração; o corretor confirma uma unidade de sua cota. A conclusão proativa inicial usa o sino do ImobPro. Não foi habilitado envio proativo de conclusão de marketing pelo WhatsApp.
 
@@ -36,7 +36,7 @@ Artes são SVG com fotos reais referenciadas. Exportar uma imagem raster autocon
 
 | Repositório | Base da implementação | Destino da revisão |
 | --- | --- | --- |
-| Max | `26b4a4fbd140db249188af1ff6ceee5dd56dffc3` | `master` |
+| Max | `26b4a4fbd140db249188af1ff6ceee5dd56dffc3` | `staging` |
 | ImobPro | `5f072bfb821f355393ab7af91f46acb00fb68c68` | `staging` |
 
 As mudanças preexistentes nas duas cópias de trabalho originais foram preservadas; o trabalho acontece em worktrees `feat/max-superpowers`. Não há upgrade de LangGraph neste pacote.

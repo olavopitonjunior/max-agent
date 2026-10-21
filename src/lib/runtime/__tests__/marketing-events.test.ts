@@ -8,7 +8,7 @@ const ctx={orgId:'fixture-org',subject:{kind:'user' as const,userId:'fixture'},c
 afterEach(()=>vi.unstubAllEnvs());
 describe('remote marketing pipeline trace boundary',()=>{
  it('imports real-format worker results through the action gateway with only reviewed metadata',async()=>{
-  vi.stubEnv('MAX_MARKETING','true');
+  vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({'fixture-org':['marketing']}));vi.stubEnv('MAX_MARKETING','true');
   await withExecution(ctx,async()=>{
    await executarAcao({orgId:ctx.orgId,rawPhone:'+5511999990000',subject:ctx.subject,verb:'marketing.options',args:{}});
    const events=currentExecution()!.events;

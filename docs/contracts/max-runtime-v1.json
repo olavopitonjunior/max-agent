@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-21.1",
+  "version": "2026-10-21.2",
   "timestamp": "1792526400000",
   "secret": "max-runtime-parity-test-only",
   "post": {
@@ -10,5 +10,9 @@
   "get": {
     "pathWithQuery": "/api/admin/playground/v1?orgId=org-test&phone=%2B5511999990000&sessionId=10111111-1111-4111-8111-111111111111&mode=simulation",
     "signature": "7c228740b498ef7a7a859b1b78b8f72cf579ad85ca9a436744a6f7e79c2260fd"
+  },
+  "catalogGet": {
+    "pathWithQuery": "/api/admin/catalog?orgId=org-test",
+    "signature": "03656316b3b9a90e0e4d7c686373f6d6b5663041eee02b3d571bc08bce31816c"
   }
 }

@@ -1,3 +1,4 @@
+import { featureEnabled } from '@/lib/runtime/rollout';
 import type { LlmTool } from "@/lib/llm";
 import type { Capability } from "./policy";
 import type { ScopeQueryVerb } from "./scope-contract";
@@ -731,6 +732,7 @@ export function selecionarTools(params: {
   policy: Capability[];
   texto: string;
   catalogo?: ToolDef[];
+  orgId?: string;
 }): { tools: ToolDef[]; cortadas: number } {
   const catalogo = params.catalogo ?? TOOLS_DE_LEITURA;
   const texto = params.texto;
@@ -743,6 +745,7 @@ export function selecionarTools(params: {
   if (ehPedidoDeCriacao(texto)) return { tools: [], cortadas: 0 };
 
   const elegiveis = catalogo
+    .filter(t => !TOOLS_EXTENDIDAS.includes(t) || featureEnabled("queries",params.orgId))
     .filter((t) => params.policy.includes(t.capability))
     .filter((t) => t.combina(texto))
     .sort((a, b) => a.prioridade - b.prioridade);
@@ -794,7 +797,7 @@ export function ferramentasDoTurno(params: {
       escritaPermitida(e, params.identity, params.policy) &&
       (e.combina(params.texto) || (!!params.textoAnterior && e.combina(params.textoAnterior)))
   );
-  const leitura = selecionarTools({ policy: params.policy, texto: params.texto });
+  const leitura = selecionarTools({ policy: params.policy, texto: params.texto, orgId: params.identity.orgId });
   return { entradas: [...escrita, ...leitura.tools], cortadas: leitura.cortadas };
 }
 

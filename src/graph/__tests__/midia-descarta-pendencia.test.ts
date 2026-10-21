@@ -106,7 +106,7 @@ describe("D3 — saída antecipada descarta a pendência", () => {
 
 describe('marketing approval interrupted through runTurn',()=>{
  itDb.each(['image','document','audio'] as const)('%s invalidates prepared approval before a later sim',async kind=>{
-  vi.stubEnv('MAX_MARKETING','true');
+  vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({[CANDIDATO.orgId]:['marketing']}));vi.stubEnv('MAX_MARKETING','true');
   try {
    const { fetchProfile }=await import('@/lib/cm');const { executarAcao }=await import('@/lib/acao');const { complete }=await import('@/lib/llm');
    vi.mocked(fetchProfile).mockResolvedValue({enabled:true,model:'fixture',maxPolicy:{byRole:{'*':['marketing.read','marketing.generate']}}} as never);

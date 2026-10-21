@@ -54,7 +54,7 @@ export async function consultarEscopo(params: {
   verb: ScopeQueryVerb;
   args?: Record<string, unknown>;
 }): Promise<ResultadoDeLeitura | null> {
-  if (!executableTool(params.verb)) return null;
+  if (!executableTool(params.verb,undefined,params.orgId)) return null;
   const execution = currentExecution();
   if (execution && (execution.context.orgId !== params.orgId || contentDigest(execution.context.subject) !== contentDigest(params.subject))) throw new Error("execution_tenant_mismatch");
   runEvent("tool.started", params.verb);

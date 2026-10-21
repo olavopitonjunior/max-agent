@@ -1,9 +1,9 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 import {NextRequest} from 'next/server';
 import {Client} from 'pg';
-const scheduled=vi.hoisted(()=>({pause:null as null|(()=>Promise<void>),afterReplyPause:null as null|(()=>Promise<void>),subject:'subject-a'}));
+const scheduled=vi.hoisted(()=>({pause:null as null|(()=>Promise<void>),afterReplyPause:null as null|(()=>Promise<void>),subject:'subject-a',identityActive:true}));
 vi.mock('@/graph/graph',async original=>{const actual=await original<typeof import('@/graph/graph')>();return {...actual,runTurn:async(...args:Parameters<typeof actual.runTurn>)=>{const result=await actual.runTurn(...args);if(scheduled.pause)await scheduled.pause();return {...result,afterReply:async()=>{if(scheduled.afterReplyPause)await scheduled.afterReplyPause();return result.afterReply();}};}};});
-vi.mock('@/lib/identity',async original=>({...await original<typeof import('@/lib/identity')>(),resolveIdentity:async()=>({kind:'resolved',org:{orgId:'delivery-privacy-fixture',orgName:'Fixture',apiToken:'fixture'},candidate:{kind:'user',orgId:'delivery-privacy-fixture',orgName:'Fixture',userId:scheduled.subject,userName:'Synthetic'}})}));
+vi.mock('@/lib/identity',async original=>({...await original<typeof import('@/lib/identity')>(),resolveIdentity:async()=>scheduled.identityActive?({kind:'resolved',org:{orgId:'delivery-privacy-fixture',orgName:'Fixture',apiToken:'fixture'},candidate:{kind:'user',orgId:'delivery-privacy-fixture',orgName:'Fixture',userId:scheduled.subject,userName:'Synthetic'}}):({kind:'unknown'})}));
 vi.mock('@/lib/cm',async original=>({...await original<typeof import('@/lib/cm')>(),fetchProfile:async()=>({enabled:true,model:'fixture',maxPolicy:{byRole:{admin:['form.create','proposal.create']}}}),chaveDePolitica:async()=> 'admin',searchKnowledge:async()=>[],reportUsage:async()=>{},criarFormularioVenda:vi.fn(async()=>({token:'fixture-created',dealId:'fixture-deal',url:'https://fixture.test/created'})),brokerRecipientId:async()=>null}));
 vi.mock('@/lib/llm',async original=>({...await original<typeof import('@/lib/llm')>(),complete:async()=>({text:'Resposta sintética.',toolCalls:[],usage:{model:'fixture',promptTokens:1,completionTokens:1,cacheReadTokens:0,cacheWriteTokens:0,costUsd:0,latencyMs:0,success:true}})}));
 vi.mock('@/lib/transport',()=>({sendText:vi.fn(async()=>({messageId:'fixture-reply'})),connectionStatus:async()=>({connected:true}),provider:()=> 'meta',sendTemplate:vi.fn(async()=>({messageId:'fixture-template'}))}));
@@ -14,7 +14,7 @@ const {runQueued,enqueueInbound}=await import('../../inbound');
 const {runTurn,getApp,buildGraph}=await import('@/graph/graph');
 const {liveNamespaceFor}=await import('../context');
 const {transitionControl}=await import('../handoff');
-const {POST:handoff}=await import('@/app/api/admin/handoff/route');
+const {POST:handoff,GET:handoffStatus}=await import('@/app/api/admin/handoff/route');
 const {sendText}=await import('../../transport');
 const {POST:forget}=await import('@/app/api/admin/forget/route');
 const {sign}=await import('../../hmac');
@@ -25,7 +25,7 @@ async function erase(){const raw=JSON.stringify({phone}),ts=String(Date.now());e
 async function inbound(id:string){await enqueueInbound({messageId:id,fromPhone:phone,kind:'text',text:'Como funciona o formulário?',groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()});return (await query('SELECT * FROM inbound_queue WHERE message_id=$1',[id]))[0];}
 afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();scheduled.pause=null;scheduled.afterReplyPause=null;});
 d('durable graph-to-delivery privacy boundary',()=>{
- beforeEach(async()=>{scheduled.pause=null;scheduled.afterReplyPause=null;scheduled.subject='subject-a';vi.clearAllMocks();vi.stubEnv('MAX_RUNTIME_V1','true');vi.stubEnv('MAX_HANDOFF','true');vi.stubEnv('MAX_NOTIFY_SECRET','fixture-secret');await query('DELETE FROM runtime_privacy_epoch WHERE person_digest=$1',[contentDigest(phone)]);await query('DELETE FROM runtime_task WHERE org_id=$1',[org]);await query('DELETE FROM conversation_control WHERE org_id=$1',[org]);await query('DELETE FROM conversation_turn WHERE org_id=$1',[org]);await query('DELETE FROM inbound_queue WHERE from_phone=$1',[phone]);await query('DELETE FROM live_conversation_binding WHERE org_id=$1',[org]);});
+ beforeEach(async()=>{vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({[org]:['runtime','handoff','marketing','queries']}));scheduled.pause=null;scheduled.afterReplyPause=null;scheduled.subject='subject-a';scheduled.identityActive=true;vi.clearAllMocks();vi.stubEnv('MAX_RUNTIME_V1','true');vi.stubEnv('MAX_HANDOFF','true');vi.stubEnv('MAX_NOTIFY_SECRET','fixture-secret');await query('DELETE FROM runtime_privacy_epoch WHERE person_digest=$1',[contentDigest(phone)]);await query('DELETE FROM runtime_task WHERE org_id=$1',[org]);await query('DELETE FROM conversation_control WHERE org_id=$1',[org]);await query('DELETE FROM conversation_turn WHERE org_id=$1',[org]);await query('DELETE FROM inbound_queue WHERE from_phone=$1',[phone]);await query('DELETE FROM live_conversation_binding WHERE org_id=$1',[org]);});
  it('does not persist or send a graph reply after forget commits before queue handoff',async()=>{
   const row=await inbound('delivery-forget-after-graph');let graphDone!:()=>void,release!:()=>void;const reached=new Promise<void>(r=>graphDone=r),hold=new Promise<void>(r=>release=r);scheduled.pause=async()=>{graphDone();await hold;};
   const work=runQueued(row as never);await reached;await erase();release();expect(await work).toBe('done');
@@ -119,6 +119,51 @@ d('durable graph-to-delivery privacy boundary',()=>{
   const row=await inbound('acceptance-cross-phone-forget');let reached!:()=>void,release!:()=>void;const selected=new Promise<void>(r=>reached=r),hold=new Promise<void>(r=>release=r);const original=database.query;
   vi.spyOn(database,'query').mockImplementation(async(sql:string,args?:unknown[])=>{const result=await original(sql,args);if(sql.includes("kind = 'support_handoff' AND params->>'de' = $1")){reached();await hold;}return result;});
   const work=runQueued(row as never);await selected;await erase();release();expect(await work).toBe('done');expect(await query("SELECT 1 FROM outbox WHERE params->>'de'=$1",[phone])).toHaveLength(0);expect(await query('SELECT 1 FROM conversation_turn WHERE phone=$1',[phone])).toHaveLength(0);
+ });
+
+ it('rollout limits durable tasks to the selected tenant while preserving ordinary conversation',async()=>{
+  vi.stubEnv('MAX_ROLLOUT_ORGS','{}');
+  const message={messageId:'rollout-legacy',fromPhone:phone,kind:'text' as const,text:'oi',groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()};
+  const legacy=await runTurn(message);await legacy.afterReply();expect(legacy.reply).toBeTruthy();
+  expect(await query('SELECT id FROM runtime_task WHERE org_id=$1',[org])).toHaveLength(0);
+  vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({[org]:['runtime']}));
+  const pilot=await runTurn({...message,messageId:'rollout-pilot'});await pilot.afterReply();expect(pilot.reply).toBeTruthy();
+  expect(await query('SELECT id FROM runtime_task WHERE org_id=$1',[org])).toHaveLength(1);
+ });
+ it('rollout rejects new handoff outside the pilot but permits recovery after disable',async()=>{
+  const message={messageId:'rollout-handoff',fromPhone:phone,kind:'text' as const,text:'oi',groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()};
+  await (await runTurn(message)).afterReply();
+  const request=(operation:string,controlVersion?:number)=>{const raw=JSON.stringify({orgId:org,phone:`+${phone}`,operation,controlVersion,actorId:'operator',requestId:'61111111-1111-4111-8111-111111111111'}),ts=String(Date.now());return new NextRequest('https://fixture.test/api/admin/handoff',{method:'POST',body:raw,headers:{'x-max-timestamp':ts,'x-max-signature':sign(ts,raw,'fixture-secret')}});};
+  vi.stubEnv('MAX_ROLLOUT_ORGS','{}');
+  expect((await handoff(request('request'))).status).toBe(404);
+  expect(await query("SELECT 1 FROM conversation_control WHERE org_id=$1 AND state!='bot'",[org])).toHaveLength(0);
+  await transitionControl({orgId:org,phone,operation:'request',actorId:'operator'});
+  await transitionControl({orgId:org,phone,operation:'claim',actorId:'operator',controlVersion:1});
+  vi.stubEnv('MAX_HANDOFF','false');
+  const path=`/api/admin/handoff?orgId=${org}`,ts=String(Date.now());
+  const status=await handoffStatus(new NextRequest(`https://fixture.test${path}`,{headers:{'x-max-timestamp':ts,'x-max-signature':sign(ts,`GET.${path}`,'fixture-secret')}}));
+  expect(status.status).toBe(200);expect((await status.json()).cases[0].state).toBe('human');
+  scheduled.identityActive=false; // Module deprovision removes the bot identity, not the accepted human control.
+  expect((await handoff(request('handback',99))).status).toBe(409);
+  expect((await handoff(request('handback',2))).status).toBe(200);
+  expect((await query('SELECT state FROM conversation_control WHERE org_id=$1',[org]))[0].state).toBe('bot');
+ });
+ it('rollout permits cancelling an unclaimed handoff after disable',async()=>{
+  const message={messageId:'rollout-unclaimed',fromPhone:phone,kind:'text' as const,text:'oi',groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()};
+  await (await runTurn(message)).afterReply();await transitionControl({orgId:org,phone,operation:'request',actorId:'operator'});
+  vi.stubEnv('MAX_HANDOFF','false');vi.stubEnv('MAX_ROLLOUT_ORGS','{}');
+  const raw=JSON.stringify({orgId:org,phone:`+${phone}`,operation:'handback',controlVersion:1,actorId:'operator',requestId:'71111111-1111-4111-8111-111111111111'}),ts=String(Date.now());
+  const response=await handoff(new NextRequest('https://fixture.test/api/admin/handoff',{method:'POST',body:raw,headers:{'x-max-timestamp':ts,'x-max-signature':sign(ts,raw,'fixture-secret')}}));
+  expect(response.status).toBe(200);expect((await response.json()).control.state).toBe('bot');
+ });
+ it('rollout and chat/write switches do not stop proactive notification delivery',async()=>{
+  vi.stubEnv('MAX_ROLLOUT_ORGS','{}');vi.stubEnv('MAX_CHAT_KILL','true');vi.stubEnv('MAX_WRITES_KILL','true');
+  await inbound('rollout-notify-window');await query('DELETE FROM outbox WHERE org_id=$1',[org]);
+  const queued=await enqueue({orgId:org,dedupeKey:'rollout-notify',audience:'platform_user',phone,recipientName:'Synthetic',title:'Synthetic',body:'Synthetic',linkUrl:null,dealId:null,orgName:'Fixture'});
+  await query("UPDATE outbox SET deliver_after=now()-interval '1 minute' WHERE id=$1",[queued.id]);
+  await dispatchDue(1,{connected:true} as never);
+  expect((await query('SELECT status,provider_message_id FROM outbox WHERE id=$1',[queued.id]))[0]).toMatchObject({status:'sent',provider_message_id:'fixture-reply'});
+  expect(sendText).toHaveBeenCalledTimes(1);
  });
 
 });

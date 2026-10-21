@@ -452,7 +452,7 @@ describe("coleta completa até a revisão (SIM no M2 não envia)", () => {
 
 describe("caminhos da coleta", () => {
   it("marketing enabled preserves active profession collection without marketing policy", async () => {
-    vi.stubEnv('MAX_MARKETING', 'true');
+    vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({[usuario.orgId]:['marketing']}));vi.stubEnv('MAX_MARKETING', 'true');
     try {
       const turno = conversa();
       await turno('faz a ficha de crédito da Letícia Andrade'); await turno('sim'); await turno(CPF); await turno('CLT');

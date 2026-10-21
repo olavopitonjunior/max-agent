@@ -1,3 +1,4 @@
+import { featureEnabled } from '@/lib/runtime/rollout';
 import {runEvent} from '@/lib/runtime/context';
 interface Property {id:string;tipo?:string;bairro?:string;cidade?:string;dormitorios?:number}
 interface Template {id:string;name:string}
@@ -14,9 +15,18 @@ function jobReply(job:{state?:string;stale?:boolean}):string {
  return replies[job.state??'']??'Não consegui confirmar o estado da peça. Confira o estúdio ImobPro.';
 }
 /** No ids need to be typed: visible properties/templates are selected by number. */
-export async function marketingStep(p:{text:string;messageId:string;now:number;canWrite:boolean;policy:readonly string[];pending:MarketingPending|null},action:Action):Promise<Step|null>{
- if(process.env.MAX_MARKETING!=='true')return p.pending?{reply:'Marketing indisponível agora. A confirmação foi descartada.',pending:null,event:'marketing_disabled'}:null;
+export async function marketingStep(p:{orgId:string;text:string;messageId:string;now:number;canWrite:boolean;policy:readonly string[];pending:MarketingPending|null},action:Action):Promise<Step|null>{
  const text=p.text.trim(),previous=p.pending;
+ const enabled=featureEnabled('marketing',p.orgId);
+ if(previous?.phase==='tracking'&&previous.jobId){
+  if(statusRequest(text)){
+   if(!p.policy.includes('marketing.read'))return {reply:'Você não tem permissão para consultar esta peça agora.',pending:previous,event:'marketing_status_denied'};
+   const r=await action('marketing.status',{jobId:previous.jobId});const job=r&&r.status<400?r.body.job as {state?:string;stale?:boolean}|undefined:undefined;
+   return {reply:job?jobReply(job):'Não consegui consultar sua peça agora. Tente novamente em instantes.',pending:previous,event:'marketing_status'};
+  }
+  if(!enabled)return isRequest(text)?{reply:'Novas gerações estão desligadas. A peça já aceita continua sendo processada; você pode consultar o status.',pending:previous,event:'marketing_tracking_preserved'}:null;
+ }
+ if(!enabled)return previous?{reply:'Marketing indisponível agora. A confirmação foi descartada.',pending:null,event:'marketing_disabled'}:null;
  async function prepare(propertyId:string,template:Template,modality:'copy'|'artwork'|'video'):Promise<Step>{
   if(!p.canWrite||!p.policy.includes('marketing.generate'))return {reply:'A geração de marketing não está liberada para você.',pending:null,event:'marketing_denied'};
   const result=await action('marketing.prepare',{propertyId,templateId:template.id,modality},p.messageId);
@@ -25,10 +35,6 @@ export async function marketingStep(p:{text:string;messageId:string;now:number;c
   if(typeof b.briefId!=='string'||typeof b.confirmationDigest!=='string'||!/^[a-f0-9]{64}$/i.test(b.confirmationDigest)||!Number.isFinite(expiresAt)||expiresAt<=p.now||!Number.isSafeInteger(s?.quotaUnits)||Number(s?.quotaUnits)<1||Number(s?.quotaUnits)>100)return {reply:'Não consegui validar a preparação da peça.',pending:null,event:'marketing_prepare_invalid'};
   const summary=`${s?.copy??''}\nModelo: ${s?.template??template.name}. Usa ${s!.quotaUnits} ${s!.quotaUnits===1?'unidade':'unidades'} da sua cota de ${{copy:'texto',artwork:'arte',video:'vídeo'}[modality]}.`;
   return {reply:`${summary}\nConfirma a geração desta peça? Responda sim.`,pending:{briefId:b.briefId,confirmationDigest:b.confirmationDigest,expiresAt,summary,phase:'approval',modality},event:'marketing_waiting_approval'};
- }
- if(previous?.phase==='tracking'&&previous.jobId&&statusRequest(text)){
-  const r=await action('marketing.status',{jobId:previous.jobId});const job=r?.body.job as {state?:string;stale?:boolean}|undefined;
-  return {reply:job?jobReply(job):'Não consegui consultar sua peça agora. Tente novamente em instantes.',pending:previous,event:'marketing_status'};
  }
  if(previous&&previous.phase!=='tracking'){
   if(previous.expiresAt<=p.now)return {reply:'A preparação de marketing expirou. Peça novamente com os dados atuais do imóvel.',pending:null,event:'marketing_expired'};
