@@ -1,3 +1,14 @@
+import { featureEnabled, durableRuntimeEnabled } from '@/lib/runtime/rollout';
+import { liveNamespaceFor } from "@/lib/runtime/context";
+import { query } from "@/lib/db";
+import { withDeliveryFence, captureDispatchFence, DispatchFenceSchema, type DispatchFence } from "@/lib/runtime/delivery-fence";
+import { privacyEpoch, protectCheckpoint } from "@/lib/runtime/privacy";
+import { marketingStep, type MarketingPending } from "./marketing";
+import { withExecution, withExistingExecution, currentExecution, withPersonPrivacy } from "@/lib/runtime/context";
+import { WORKFLOW_VERSION, contentDigest, type ExecutionContext } from "@/lib/runtime/contracts";
+import { startTask, finishTask, executeIntent } from "@/lib/runtime/store";
+import { getControl, assertBotWrite } from "@/lib/runtime/handoff";
+import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
@@ -67,6 +78,7 @@ import {
   displayName,
   markGreeted,
   avisouPrimeiroAcessoHoje,
+  type Identity,
   type Candidate,
 } from "@/lib/identity";
 import { complete, DEFAULT_MODEL, type LlmUsage,
@@ -115,7 +127,7 @@ import {
 } from "./fluxos";
 import { executarAcao, type VerboDeAcao } from "@/lib/acao";
 import { OrgSuspensaError, TEXTO_ORG_SUSPENSA } from "@/lib/org-suspensa";
-import { subjectDe } from "@/lib/scope";
+import { subjectDe, consultarEscopo } from "@/lib/scope";
 import { chaveDePolitica } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
 import { SEM_ORG } from "@/lib/sem-org";
@@ -233,6 +245,7 @@ function blindarCredito(state: MaxStateType, update: MaxUpdate): MaxUpdate {
 }
 
 export const MaxState = Annotation.Root({
+  marketingPending: Annotation<MarketingPending | null>({ reducer: (_p,n) => n, default: () => null }),
   inbound: Annotation<InboundMessage>,
   /** Resolvida ANTES do grafo — é ela que determina o `thread_id`. */
   identity: Annotation<Candidate>,
@@ -555,7 +568,7 @@ export type MaxUpdate = typeof MaxState.Update;
  * cada call-site, é o que impede o próximo caminho de entrada de reabrir o bug.
  */
 export function threadIdFor(orgId: string, phone: string): string {
-  return `${orgId}:${conversationKey(phone)}`;
+  return scopedThreadId(orgId, phone);
 }
 
 /**
@@ -575,13 +588,16 @@ export function threadIdFor(orgId: string, phone: string): string {
 export async function seedNotification(
   orgId: string,
   phone: string,
-  texto: string
+  texto: string,
+  delivery?:{id:string;fence:DispatchFence;subject:unknown}
 ): Promise<void> {
-  const app = await getApp();
-  await app.updateState(
-    { configurable: { thread_id: threadIdFor(orgId, phone) } },
-    { messages: [{ role: "assistant", content: texto }] }
-  );
+  const app=await getApp();
+  const threadId=delivery?liveNamespaceFor(orgId,phone,delivery.subject):threadIdFor(orgId,phone);
+  const write=()=>app.updateState({configurable:{thread_id:threadId}},{messages:[{role:"assistant",content:texto}]});
+  if(delivery)await withDeliveryFence({table:'outbox',id:delivery.id,phone,fence:delivery.fence},async(client)=>{
+    await client.query(`INSERT INTO live_conversation_binding(org_id,phone,subject_digest,thread_id) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,phone,subject_digest) DO UPDATE SET bound_at=now()`,[orgId,conversationKey(phone),contentDigest(delivery.subject),threadId]);
+    await write();
+  });else await write();
 }
 
 /**
@@ -643,6 +659,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
   if (orgSuspensa) {
     console.warn(`[gate] org suspensa no ImobPro: ${state.identity.orgId}`);
     return {
+      marketingPending: null,
       halt: "org_suspensa",
       pendingAction: null,
       restoDaResposta: null,
@@ -653,6 +670,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
 
   if (profile && !profile.enabled) {
     return {
+      marketingPending: null,
       halt: "desligado",
       pendingAction: null,
       restoDaResposta: null,
@@ -686,6 +704,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       `[gate] assunto bloqueado (${bloqueado}) em ${state.identity.orgId}`
     );
     return {
+      marketingPending: null,
       halt: `assunto_bloqueado:${bloqueado}`,
       // Ver o descarte no kill switch acima: `halt` desvia do `confirm`, e uma
       // pendência que atravessa o turn vira escrita confirmada por engano.
@@ -901,6 +920,18 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     ["ajustes", "revisao_ajuste", "metodo"].includes(atual.etapa);
   const livre = !coletando || rascunhoAberto;
 
+  if (livre && !escritaEmAberto) {
+    const marketing = await marketingStep({ orgId: state.identity.orgId, text: userText, messageId: state.inbound.messageId, now: agora, canWrite: podeEscrever(state.identity), policy: state.policy, pending: state.marketingPending }, async (verb,args,key) => {
+      if (verb === "property.list") {
+        if (!state.policy.includes("property.list")) return null;
+        const result = await consultarEscopo({orgId:state.identity.orgId,rawPhone:state.inbound.fromPhone,subject:subjectDe(state.identity),verb:"property.list",args});
+        return result ? {status:200,body:{...result}} : null;
+      }
+      return depsDoFluxo(state,usage).acao(verb,args,key);
+    });
+    if (marketing) return { reply: marketing.reply, marketingPending: marketing.pending, pendingAction: null, fluxo: rebaixarFluxo(state.fluxo), messages: [{role:"user",content:userText},{role:"assistant",content:marketing.reply}], toolLog: [{name:"marketing",args:{},outcome:marketing.event}] };
+  }
+
   // Crédito (M2): antes da consulta e da criação ("ficha de crédito" não é
   // formulário). Flag desligada = o Max segue como antes, sem citar crédito.
   const ctxDoTurno = { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
@@ -996,7 +1027,9 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // sistema (eval 09/10 — o modelo confundia o contrato com o envio da
   // proposta e dizia "não consigo excluir"). A negação só sem fluxo aberto:
   // dentro de um, o "não" é a resposta ao resumo e o fluxo a trata.
-  const contratoPergunta = coletando || gestao || continuidade ? false : perguntaDoContrato(userText);
+  const contratoLeitura = featureEnabled("queries",state.identity.orgId) && state.policy.includes("contract.status") &&
+    !/\b(quem|signat[aá]ri|falta(?:m)? assinar)/i.test(userText);
+  const contratoPergunta = coletando || gestao || continuidade || contratoLeitura ? false : perguntaDoContrato(userText);
   if (!coletando && !gestao && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
     const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
     const linkDoNegocio = resultado?.match(/Negócio: (\S+)/)?.[1] ?? null;
@@ -1255,7 +1288,17 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
  * Fora do `confirm` para que aquele nó continue legível como máquina de estado:
  * lá se decide SE executa, aqui O QUE se executa.
  */
-async function executar(
+async function executar(state:MaxStateType,args:PendingAction["args"],idempotencyKey:string):Promise<string>{
+  const execution=currentExecution();
+  if(process.env.MAX_WRITES_KILL==="true")throw new Error("writes_disabled");
+  if(!execution)return executarCriacaoDireta(state,args,idempotencyKey);
+  await assertBotWrite(execution.context,state.inbound.fromPhone);
+  const result=await executeIntent({verb:args.tipo==="proposta"?"proposal.create":"form.create",key:idempotencyKey,args},async()=>({status:200,body:{url:await executarCriacaoDireta(state,args,idempotencyKey)}}));
+  if(!result||result.status!==200||typeof result.body.url!=="string")throw new Error("execution_unknown");
+  return result.body.url;
+}
+
+async function executarCriacaoDireta(
   state: MaxStateType,
   args: PendingAction["args"],
   idempotencyKey: string
@@ -1379,6 +1422,14 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
 
   const userText = textoDoTurno(state).trim() || "(mensagem sem texto)";
   const history = state.messages.slice(-MAX_HISTORY);
+  // Short follow-ups inherit only read intent; authorization is still checked
+  // by the offering registry and the dispatcher on every turn.
+  const ultimaConsulta = [...history].reverse().find(m => m.role === "user" && /contrat|im[oó]ve[il]/i.test(m.content))?.content ?? "";
+  const continuacao = /^(mais|continue|pr[oó]xima(?: p[aá]gina)?)[.!?\s]*$/i.test(userText)
+    ? state.referencias?.continuacao?.tool ?? "" : "";
+  const selecao = /^\d+[.!?\s]*$/.test(userText) && state.referencias && ultimaConsulta
+    ? /contrat/i.test(ultimaConsulta) ? "contrato" : "imóvel" : "";
+  const contextoLeitura = `${continuacao} ${selecao} ${perguntaDoContrato(userText) ? "negócios" : ""}`;
 
   /**
    * O que entra no prompt deste turn — escrita E leitura pelo MESMO crivo
@@ -1398,7 +1449,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     state.toolRounds === 0
       ? ferramentasDoTurno({
           policy: state.policy,
-          texto: userText,
+          texto: `${userText} ${contextoLeitura}`,
           identity: state.identity,
           textoAnterior: pedidoEmAberto(history),
         })
@@ -1981,7 +2032,11 @@ function cronometrar(
 ): (state: MaxStateType) => Promise<MaxUpdate> {
   return async (state) => {
     const iniciadoEm = Date.now();
+    runEvent("agent.started", no);
     const update = blindarCredito(state, await fn(state));
+    const specialized = (update.fluxo as {kind?:string}|null|undefined)?.kind ?? (no === "conduzir" ? state.fluxo?.kind : undefined);
+    if (specialized) { runEvent("specialist.completed", specialized, { implementation: "deterministic-flow", model: null }); }
+    runEvent("agent.completed", no, { durationMs: Date.now() - iniciadoEm });
     return { ...update, timings: [{ no, ms: Date.now() - iniciadoEm }] };
   };
 }
@@ -2047,6 +2102,10 @@ export async function getCheckpointer(): Promise<PostgresSaver> {
     // Só vira singleton DEPOIS do setup: um saver cujo DDL falhou não pode
     // ficar cacheado, senão a instância inteira fica presa a ele até o próximo
     // cold start (é o que o `getApp` promete ao não cachear falha).
+    const put = saver.put.bind(saver);
+    const putWrites = saver.putWrites.bind(saver);
+    saver.put = ((...args: Parameters<typeof put>) => protectCheckpoint(() => put(...args))) as typeof saver.put;
+    saver.putWrites = ((...args: Parameters<typeof putWrites>) => protectCheckpoint(() => putWrites(...args))) as typeof saver.putWrites;
     checkpointer = saver;
   }
   return checkpointer;
@@ -2078,6 +2137,16 @@ export function getApp(): Promise<AppCompilado> {
   return appCompilado;
 }
 
+/** Playground uses this exact compiled graph while raw text stays out of checkpoints. */
+export async function invokeIsolatedGraph(inbound: InboundMessage, identity: Candidate, threadId: string) {
+  const app = await getApp();
+  TURNO_CRU.set(inbound.messageId, { texto: inbound.text ?? "" });
+  try {
+    const result = await app.invoke({ ...RESET_DO_TURN, identity, facts: {}, inbound: { ...inbound, text: null } }, { configurable: { thread_id: threadId } });
+    return { ...result, reply: TURNO_CRU.get(inbound.messageId)?.reply ?? result.reply };
+  } finally { TURNO_CRU.delete(inbound.messageId); }
+}
+
 /**
  * Um turn completo.
  *
@@ -2087,6 +2156,8 @@ export function getApp(): Promise<AppCompilado> {
  * conversa em duas memórias.
  */
 export interface TurnResult {
+  dispatchFence?: DispatchFence;
+  control?: { orgId: string; controlVersion: number };
   reply: string | null;
   /**
    * Trabalho que só pode acontecer DEPOIS de a resposta sair: o registro de
@@ -2163,7 +2234,7 @@ export const RESET_DO_TURN = {
     piiMap: {},
 };
 
-export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
+async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity, enterResolved?:(identity:Extract<Identity,{kind:"resolved"}>)=>Promise<TurnResult>): Promise<TurnResult> {
   // Latência do TURN, não do modelo: inclui identidade, transcrição, RAG e
   // checkpoint. É esse número que a pessoa sente, e é o que o painel mostra.
   const iniciadoEm = Date.now();
@@ -2236,12 +2307,13 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
    * parte do negócio é desconhecida para o Max e é quem mais recebe a
    * mensagem da imobiliária. Sem modelo. Ver `lib/aceite.ts`.
    */
-  const aceite = await comRastro(() => interceptar(inbound));
-  if (aceite) {
-    return sair(aceite.reply, { orgId: aceite.orgId ?? undefined, error: aceite.marca });
+  if(!preparedIdentity){
+    const aceite = await comRastro(() => interceptar(inbound));
+    if (aceite) return sair(aceite.reply, { orgId: aceite.orgId ?? undefined, error: aceite.marca });
   }
 
-  const identity = await comRastro(() => resolveIdentity(inbound.fromPhone));
+  const identity = preparedIdentity ?? await comRastro(() => resolveIdentity(inbound.fromPhone));
+  if(identity.kind==="resolved"&&enterResolved)return enterResolved(identity);
 
   // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
   // respondeu a um aviso, engano ou spam.
@@ -2352,7 +2424,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
    * não lida, e o prompt diz ao modelo que ele não lê anexo.
    */
   if (!turnText && (inbound.kind === "image" || inbound.kind === "document")) {
-    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
     return sair(textoSemLeituraDeMidia(null), {
       orgId: identity.candidate.orgId,
       error: `sem_texto_${inbound.kind}`,
@@ -2362,7 +2434,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   // O que o parse não reconheceu: silêncio é pior, e passar pelo modelo com
   // "(mensagem sem texto)" pagava um turn por uma resposta genérica.
   if (!turnText && inbound.kind === "unknown") {
-    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
     return sair(
       "Não consegui entender esse tipo de mensagem. Pode mandar por escrito?",
       { orgId: identity.candidate.orgId, error: `sem_texto_${inbound.kind}` }
@@ -2378,7 +2450,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     if (!transcrito) {
       // A pessoa pode ter dito "sim" NESTE áudio — e não ouvimos. A pendência
       // não pode sobreviver a um turn que não a confirmou (D3).
-      await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+      await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
       // Dizer que não deu, sempre. Silêncio faria a pessoa esperar resposta de
       // uma coisa que o agente nunca recebeu — e no WhatsApp ela não tem como
       // saber a diferença entre "ignorou" e "não chegou".
@@ -2423,7 +2495,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     },
     {
       configurable: {
-        thread_id: threadIdFor(orgId, phone),
+        thread_id: currentExecution()?.context.conversationId ?? liveNamespaceFor(orgId, phone, subjectDe(identity.candidate)),
       },
     }
   ).then((r) => {
@@ -2549,19 +2621,21 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
  * não aviso: a pendência sobreviveu, e quem lê o log precisa saber disso. O
  * TTL de 30 min continua sendo o teto.
  */
-async function descartarPendencias(orgId: string, phone: string): Promise<void> {
+async function descartarPendencias(orgId: string, phone: string, identity: Candidate): Promise<void> {
   try {
     const app = await getApp();
-    const config = { configurable: { thread_id: threadIdFor(orgId, phone) } };
+    const config = { configurable: { thread_id: currentExecution()?.context.conversationId ?? liveNamespaceFor(orgId, phone, subjectDe(identity)) } };
     const atual = await app.getState(config);
     const v = atual.values as Partial<MaxStateType> | undefined;
     // Thread sem nada a descartar não ganha checkpoint novo à toa.
     const fluxoRebaixado = rebaixarFluxo(v?.fluxo);
     const fluxoMudou = JSON.stringify(fluxoRebaixado ?? null) !== JSON.stringify(v?.fluxo ?? null);
-    if (!v?.pendingAction && !v?.restoDaResposta && !fluxoMudou) return;
+    const marketingAcionavel = !!v?.marketingPending && v.marketingPending.phase !== "tracking";
+    if (!v?.pendingAction && !v?.restoDaResposta && !fluxoMudou && !marketingAcionavel) return;
     await app.updateState(config, {
       pendingAction: null,
       restoDaResposta: null,
+      ...(marketingAcionavel ? { marketingPending: null } : {}),
       // O fluxo fica, mas fora de qualquer etapa em que o próximo "sim" escreve.
       ...(fluxoMudou ? { fluxo: fluxoRebaixado } : {}),
     });
@@ -2595,4 +2669,44 @@ async function transcreverMidia(
     mimeType,
     data: baixado.data,
   });
+}
+
+/** Opt-in durable execution. Existing deterministic paths stay on the same graph. */
+export async function runTurn(inbound: InboundMessage, options?:{dispatchFence?:DispatchFence}): Promise<TurnResult> {
+ if (process.env.MAX_CHAT_KILL === "true") return { reply: null, dispatchFence:options?.dispatchFence, afterReply: async () => {} };
+ const execution=currentExecution();
+ if(execution){const result=await runTurnCore(inbound);return {...result,afterReply:()=>withExistingExecution(execution,()=>result.afterReply())};}
+ const person=DispatchFenceSchema.parse(options?.dispatchFence??await captureDispatchFence(inbound.fromPhone));
+ if(person.personDigest!==contentDigest(conversationKey(inbound.fromPhone)))throw new Error("execution_revoked");
+ return withPersonPrivacy(person,async()=>{
+  const result=await runTurnCore(inbound,undefined,identity=>runResolvedTurn(inbound,identity,{dispatchFence:person}));
+  return {...result,dispatchFence:result.dispatchFence??person,afterReply:()=>withPersonPrivacy(person,()=>result.afterReply())};
+ });
+}
+/** Set up subject/privacy even for direct callers with durable features OFF.
+ * The preamble above still handles template acceptance before identity lookup. */
+async function runResolvedTurn(inbound:InboundMessage,identity:Extract<Identity,{kind:"resolved"}>,options?:{dispatchFence?:DispatchFence}):Promise<TurnResult>{
+ const orgId = identity.candidate.orgId,subject=subjectDe(identity.candidate);
+ const durable=durableRuntimeEnabled(orgId);
+ const control = await getControl(orgId, inbound.fromPhone);
+ const fence = { orgId, controlVersion: control.controlVersion };
+ const hash = contentDigest({ orgId, messageId: inbound.messageId });
+ const taskId = `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-8${hash.slice(17,20)}-${hash.slice(20,32)}`;
+ const personDigest = contentDigest(conversationKey(inbound.fromPhone));
+ const epoch = options?.dispatchFence?.privacyEpoch ?? await privacyEpoch(personDigest);
+ const conversationId=liveNamespaceFor(orgId,inbound.fromPhone,subject);
+ const dispatchFence:DispatchFence={personDigest,privacyEpoch:epoch,orgId,subjectDigest:contentDigest(subject),controlVersion:control.controlVersion,conversationId};
+ const context: ExecutionContext = { personDigest, privacyEpoch: epoch, orgId, subject, conversationId, controlKey:`${orgId}:${conversationKey(inbound.fromPhone)}`,legacyExecution:!durable,taskId,mode:"live",workflowVersion:WORKFLOW_VERSION,controlVersion:control.controlVersion,deadline:Date.now()+110000,budgetUsd:0.25,maxConcurrency:3 };
+ if (control.state !== "bot") return { reply:null,control:fence,dispatchFence,afterReply:()=>withExecution(context,async()=>{await registrarTurn({orgId,phone:inbound.fromPhone,messageId:inbound.messageId,kind:inbound.kind,inboundText:inbound.text?redigirCredito(inbound.text):null,replyText:null,route:"human",error:"human_control"});}) };
+ if (durable&&!await startTask(context)) throw new Error("execution_already_started");
+ return withExecution(context,async()=>{
+  const execution=currentExecution()!;
+  await query(`INSERT INTO live_conversation_binding(org_id,phone,subject_digest,thread_id) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,phone,subject_digest) DO UPDATE SET bound_at=now()`,[orgId,conversationKey(inbound.fromPhone),contentDigest(subject),conversationId]);
+  runEvent("run.started","max");
+  try{
+   const result=await runTurnCore(inbound,identity);runEvent("run.completed","max");
+   if(durable)await finishTask(context,"succeeded",execution.events);
+   return {...result,control:fence,dispatchFence,afterReply:()=>withExistingExecution(execution,async()=>{await result.afterReply();if(durable)await finishTask(context,"succeeded",execution.events);})};
+  }catch(error){runEvent("run.unknown","max");if(durable)await finishTask(context,"unknown",execution.events);throw error;}
+ });
 }

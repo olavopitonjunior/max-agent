@@ -1,3 +1,4 @@
+import { featureEnabled } from '@/lib/runtime/rollout';
 import type { LlmTool } from "@/lib/llm";
 import type { Capability } from "./policy";
 import type { ScopeQueryVerb } from "./scope-contract";
@@ -422,7 +423,7 @@ interface EntradaBase {
  * O que a lista de uma leitura PRODUZ, para as referências numeradas (G2):
  * o código numera os itens e guarda número → id; o modelo só vê o número.
  */
-export type TipoDeReferencia = "negocio" | "proposta";
+export type TipoDeReferencia = "negocio" | "proposta" | "imovel" | "atividade" | "notificacao" | "contrato";
 
 export interface EntradaDeLeitura extends EntradaBase {
   tipo: "leitura";
@@ -681,7 +682,16 @@ export const LISTAR_PROPOSTAS: ToolDef = {
  * o nano confundir — a medição que fez `propor_criacao` ser uma tool só.
  * Entram quando o servidor tiver projeção de detalhe mais rica.
  */
-export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS];
+const EXTENDED_READS: Array<{nome:string;verb:ScopeQueryVerb;pattern:RegExp;description:string;required?:string[]}> = [
+ {nome:"listar_notificacoes",verb:"notification.list",pattern:/notific|avisos?/i,description:"Lista metadados das notificações desta pessoa, sem corpo nem título privado."},
+ {nome:"listar_atividades",verb:"activity.list",pattern:/atividades?|tarefas?|agenda|atrasad/i,description:"Lista atividades autorizadas. estado: abertas, atrasadas, hoje, 7d ou concluidas."},
+ {nome:"resumo_carteira",verb:"metrics.get",pattern:/resumo|quantos|quantas|metric|m[eé]trica|carteira/i,description:"Conta negócios, propostas e contratos visíveis desta pessoa, sem dados financeiros."},
+ {nome:"listar_imoveis",verb:"property.list",pattern:/im[oó]ve[il]|apartament|casas?|propriedad/i,description:"Lista imóveis autorizados com características públicas. Nunca revela proprietário, endereço completo ou preço de terceiro."},
+ {nome:"detalhar_imovel",verb:"property.detail",pattern:/im[oó]vel|apartament|propriedad/i,description:"Consulta características atuais de imóvel autorizado selecionado pelo número da lista de imóveis anterior.",required:["numero"]},
+ {nome:"situacao_contrato",verb:"contract.status",pattern:/contrat|assinatur/i,description:"Consulta estado e versão do contrato de negócio autorizado. Use numero da lista de negócios; se não houver lista, consulte listar_negocios primeiro. Não retorna corpo nem signatários do contrato.",required:["numero"]},
+];
+export const TOOLS_EXTENDIDAS: ToolDef[] = EXTENDED_READS.map((e,index)=>({nome:e.nome,tipo:"leitura",capability:e.verb as Capability,verb:e.verb,risco:"nenhum",confirmacao:false,...(e.verb!=="metrics.get"?{refs:{produz:(e.verb.startsWith("property.")?"imovel":e.verb.startsWith("activity.")?"atividade":e.verb.startsWith("notification.")?"notificacao":"contrato") as TipoDeReferencia}}:{}),prioridade:40+index,combina:(text)=>process.env.MAX_EXTENDED_QUERIES==="true"&&e.pattern.test(text),def:{name:e.nome,description:e.description,parameters:{type:"object",properties:{mais:{type:"boolean",description:"Continua a última página desta lista; o servidor controla o cursor. Use quando a pessoa pedir mais resultados."},estado:{type:"string"},numero:{type:"integer",minimum:1,description:"Número exibido na lista anterior, nunca um ID interno."}},required:e.required??[],additionalProperties:false}}}));
+export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS, ...TOOLS_EXTENDIDAS];
 
 /**
  * O registro inteiro: a escrita e as leituras. É a ÚNICA lista que o
@@ -722,6 +732,7 @@ export function selecionarTools(params: {
   policy: Capability[];
   texto: string;
   catalogo?: ToolDef[];
+  orgId?: string;
 }): { tools: ToolDef[]; cortadas: number } {
   const catalogo = params.catalogo ?? TOOLS_DE_LEITURA;
   const texto = params.texto;
@@ -734,6 +745,7 @@ export function selecionarTools(params: {
   if (ehPedidoDeCriacao(texto)) return { tools: [], cortadas: 0 };
 
   const elegiveis = catalogo
+    .filter(t => !TOOLS_EXTENDIDAS.includes(t) || featureEnabled("queries",params.orgId))
     .filter((t) => params.policy.includes(t.capability))
     .filter((t) => t.combina(texto))
     .sort((a, b) => a.prioridade - b.prioridade);
@@ -785,7 +797,7 @@ export function ferramentasDoTurno(params: {
       escritaPermitida(e, params.identity, params.policy) &&
       (e.combina(params.texto) || (!!params.textoAnterior && e.combina(params.textoAnterior)))
   );
-  const leitura = selecionarTools({ policy: params.policy, texto: params.texto });
+  const leitura = selecionarTools({ policy: params.policy, texto: params.texto, orgId: params.identity.orgId });
   return { entradas: [...escrita, ...leitura.tools], cortadas: leitura.cortadas };
 }
 

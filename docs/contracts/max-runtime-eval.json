@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "effectMode": "mock-only",
+  "workflowVersion": "max-v1",
+  "catalogVersion": "2026-10-20.1",
+  "reviewRequired": false,
+  "scenarios": [
+    { "id": "form-help", "input": "como funciona o formulário?", "expectedTools": [], "expectedState": "succeeded", "expectedReplyIncludes": ["Simulação"], "expectedNodes": ["answer", "compose"] },
+    { "id": "greeting", "input": "olá", "expectedTools": [], "expectedState": "succeeded", "expectedReplyIncludes": ["Simulação"], "expectedNodes": ["answer"] }
+  ]
+}

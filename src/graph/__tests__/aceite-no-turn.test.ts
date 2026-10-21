@@ -6,6 +6,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
  * review): os testes do aceite provam `interceptar`, não que ele é chamado.
  */
 
+// The pre-identity privacy adapter is synthetic here; actual epoch/erasure
+// races are exercised against Postgres in delivery-privacy.integration.test.ts.
+vi.mock("@/lib/runtime/privacy",async original=>({...await original<typeof import("@/lib/runtime/privacy")>(),privacyEpoch:async()=>0}));
+
 vi.mock("@/lib/aceite", () => ({ interceptar: vi.fn(), repassarDesconhecido: vi.fn() }));
 vi.mock("@/lib/identity", async (orig) => ({
   ...(await orig<typeof import("@/lib/identity")>()),

@@ -1,3 +1,5 @@
+import { withPrivacyFence } from "./runtime/privacy";
+import { currentExecution, bounded, assertExternalAllowed } from "./runtime/context";
 import { semCredencial } from "./redigir";
 
 /**
@@ -79,12 +81,15 @@ export async function fetchWithTimeout(
   init: RequestInit,
   timeoutMs: number
 ): Promise<Response> {
+  assertExternalAllowed();
   try {
     // `no-store` por padrão: no Next 14, GET de rota só-GET (os crons) vai
     // para o Data Cache da Vercel e fica lá entre deploys — um template
     // consultado antes de existir na Meta ficou "ausente" por dias (05/10).
     // Nada deste serviço quer resposta de API em cache.
-    return await fetch(url, { cache: "no-store", ...init, signal: AbortSignal.timeout(timeoutMs) });
+    const send = () => fetch(url, { cache: "no-store", ...init, signal: AbortSignal.timeout(timeoutMs) });
+    const context = currentExecution()?.context;
+    return await bounded(() => context?.personDigest ? withPrivacyFence(context, () => send()) : send());
   } catch (err) {
     if (err instanceof Error && err.name === "TimeoutError") {
       // Sem credencial: a mensagem vai para `last_error` e para o painel, e a

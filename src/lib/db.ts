@@ -1,3 +1,6 @@
+import { withPrivacyFence } from "./runtime/privacy";
+import { currentExecution, currentPersonPrivacy } from "./runtime/context";
+import { withCapturedPrivacy } from "./runtime/delivery-fence";
 import { Pool } from "pg";
 
 /**
@@ -60,6 +63,8 @@ export async function query<T extends Record<string, unknown>>(
   sql: string,
   params: unknown[] = []
 ): Promise<T[]> {
-  const res = await db().query(sql, params);
+  if (currentExecution()?.context.mode === "simulation") throw new Error("simulation_database_denied");
+  const context = currentExecution()?.context, person=currentPersonPrivacy();
+  const res = context?.personDigest ? await withPrivacyFence(context, (client) => client.query(sql, params)) : person ? await withCapturedPrivacy(person,(client)=>client.query(sql,params)) : await db().query(sql, params);
   return res.rows as T[];
 }

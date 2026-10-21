@@ -302,6 +302,14 @@ const CATALOGO_DO_IMOBPRO = [
   // fora do padrão. Posições 16 e 17 (0-based), FIXAS.
   "captacao.autorizacao.pedir",
   "captacao.autorizacao.decidir",
+      "notification.list",
+      "activity.list",
+      "metrics.get",
+      "property.list",
+      "property.detail",
+      "contract.status",
+      "marketing.read",
+      "marketing.generate",
 ];
 
 describe("paridade do catálogo de capabilities", () => {

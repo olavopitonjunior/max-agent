@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 /**
  * Janela de atendimento de 24h da Cloud API da Meta.
  *
@@ -21,10 +22,11 @@ import type { InboundMessage } from "./transport";
  * Melhor-esforço: a linha da fila já foi gravada e a conversa segue sem isto;
  * o pior efeito de uma falha aqui é uma notificação esperar por template.
  */
-export async function abrirJanela(msg: InboundMessage): Promise<void> {
+export async function abrirJanela(msg: InboundMessage, client?:PoolClient): Promise<void> {
   const at = msg.timestampMs ? new Date(msg.timestampMs) : new Date();
   try {
-    await query(
+    const runQuery=(sql:string,params:unknown[])=>client?client.query(sql,params):query(sql,params);
+    await runQuery(
       `INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, $2)
        ON CONFLICT (phone) DO UPDATE
           SET last_inbound_at = GREATEST(conversation_window.last_inbound_at, EXCLUDED.last_inbound_at)`,

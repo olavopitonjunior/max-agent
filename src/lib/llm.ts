@@ -1,3 +1,4 @@
+import { currentExecution, runEvent, recordCost, assertExternalAllowed } from "./runtime/context";
 /**
  * Chamada ao modelo, via OpenRouter, com a contabilidade de custo junto.
  *
@@ -275,6 +276,13 @@ function parseToolCalls(raw: OpenRouterToolCall[] | undefined): LlmToolCall[] {
 }
 
 export async function complete(p: CompleteParams): Promise<LlmResult> {
+  runEvent("prompt.used", "max.system", { version: "max-v1" });
+  if (currentExecution()?.context.mode === "simulation") {
+    runEvent("model.simulated", p.model ?? DEFAULT_MODEL, { costUsd: 0 });
+    return { text: "Simulação: este é um resultado sintético do Max. Nenhuma ação externa foi executada.", toolCalls: p.toolChoice ? [{ name: p.toolChoice, args: {} }] : [], usage: { model: p.model ?? DEFAULT_MODEL, promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, generationId: null, latencyMs: 0, success: true } };
+  }
+  assertExternalAllowed();
+  runEvent("model.started", p.model ?? DEFAULT_MODEL);
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error("OPENROUTER_API_KEY não configurada");
 
@@ -284,6 +292,7 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
   const fail = (message: string): never => {
     // O turn que falhou também custou tempo: sem registrar a tentativa, um
     // agente que só erra aparece no painel como um agente que não gasta nada.
+    runEvent("model.failed", model, { costUsd: null });
     throw Object.assign(new Error(message), {
       usage: {
         model,
@@ -374,6 +383,9 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
     return fail("OpenRouter devolveu resposta vazia");
   }
 
+  const costUsd = custoDoProvedor(data.usage?.cost);
+  recordCost(costUsd);
+  runEvent("model.completed", data.model ?? model, { costUsd, promptTokens: data.usage?.prompt_tokens ?? 0, completionTokens: data.usage?.completion_tokens ?? 0 });
   return {
     text,
     toolCalls,

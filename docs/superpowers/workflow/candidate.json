@@ -1,0 +1,538 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Max · superpoderes",
+    "output": "max-superpoderes.html",
+    "quality_profile": "showcase",
+    "translations": {
+      "toolbar.theme": "Tema",
+      "toolbar.export": "Exportar"
+    },
+    "viewBox": [
+      1220,
+      786
+    ]
+  },
+  "lanes": [
+    {
+      "id": "max",
+      "label": "01 · MAX / ENTRADA E EXECUÇÃO"
+    },
+    {
+      "id": "agents",
+      "label": "02 · ESPECIALISTAS E IMOBPRO"
+    },
+    {
+      "id": "marketing",
+      "label": "03 · SUBFLUXO MARKETING"
+    },
+    {
+      "id": "exceptions",
+      "label": "04 · ESPERAS / HUMANO / RECUPERAÇÃO",
+      "variant": "exception"
+    },
+    {
+      "id": "operations",
+      "label": "05 · HARNESS / OPERAÇÃO / ENTREGA"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "entry",
+      "lane": "max",
+      "col": 0,
+      "type": "frontend",
+      "label": "WhatsApp / Studio",
+      "sublabel": "Playground isolado",
+      "tag": "ADAPTAR",
+      "width": 132
+    },
+    {
+      "id": "identity",
+      "lane": "max",
+      "col": 1,
+      "type": "security",
+      "label": "Identidade + escopo",
+      "sublabel": "org + sujeito + controle",
+      "tag": "ADAPTAR",
+      "width": 132
+    },
+    {
+      "id": "route",
+      "lane": "max",
+      "col": 2,
+      "type": "backend",
+      "label": "Coordenador Max",
+      "sublabel": "tarefa + especialista",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "policy",
+      "lane": "max",
+      "col": 3,
+      "type": "security",
+      "label": "Policy + aprovação",
+      "sublabel": "conteúdo, permissão, cota",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "executor",
+      "lane": "max",
+      "col": 4,
+      "type": "backend",
+      "label": "Executor único",
+      "sublabel": "intent → API / MCP",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "reply",
+      "lane": "max",
+      "col": 5,
+      "type": "messagebus",
+      "label": "Resposta + entrega",
+      "sublabel": "evidência + controlVersion",
+      "tag": "ADAPTAR",
+      "width": 132
+    },
+    {
+      "id": "specialists",
+      "lane": "agents",
+      "col": 2,
+      "type": "backend",
+      "label": "Especialistas",
+      "sublabel": "domínios especializados",
+      "tag": "ADAPTAR",
+      "width": 132
+    },
+    {
+      "id": "capabilities",
+      "lane": "agents",
+      "col": 3,
+      "type": "database",
+      "label": "Registro versionado",
+      "sublabel": "tools + skills + prompts",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "imob",
+      "lane": "agents",
+      "col": 4,
+      "type": "cloud",
+      "label": "ImobPro",
+      "sublabel": "dados + RBAC oficiais",
+      "tag": "EXISTENTE",
+      "width": 132
+    },
+    {
+      "id": "notifications",
+      "lane": "agents",
+      "col": 5,
+      "type": "messagebus",
+      "label": "Notificações",
+      "sublabel": "eventos + preferências",
+      "tag": "ADAPTAR",
+      "width": 132
+    },
+    {
+      "id": "brief",
+      "lane": "marketing",
+      "col": 0,
+      "type": "backend",
+      "label": "Brief + fontes",
+      "sublabel": "imóvel + brand + template",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "copy",
+      "lane": "marketing",
+      "col": 1,
+      "type": "backend",
+      "label": "Copy / roteiro",
+      "sublabel": "fatos + PT-BR",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "layout",
+      "lane": "marketing",
+      "col": 2,
+      "type": "backend",
+      "label": "Arte / vídeo",
+      "sublabel": "fotos reais + narração",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "qa",
+      "lane": "marketing",
+      "col": 3,
+      "type": "backend",
+      "label": "QA de marketing",
+      "sublabel": "máx. 2 revisões",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "assets",
+      "lane": "marketing",
+      "col": 4,
+      "type": "frontend",
+      "label": "Biblioteca + Studio",
+      "sublabel": "editar → aprovar → baixar",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "provider",
+      "lane": "marketing",
+      "col": 5,
+      "type": "external",
+      "label": "Creatomate",
+      "sublabel": "job → succeeded",
+      "tag": "INTEGRAR",
+      "width": 132
+    },
+    {
+      "id": "wait",
+      "lane": "exceptions",
+      "col": 3,
+      "type": "security",
+      "label": "Aguardar / negar",
+      "sublabel": "dado ou aprovação",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "handoff",
+      "lane": "exceptions",
+      "col": 4,
+      "type": "frontend",
+      "label": "Atendente humano",
+      "sublabel": "claim único + handback",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "reconcile",
+      "lane": "exceptions",
+      "col": 5,
+      "type": "messagebus",
+      "label": "Reconciliação",
+      "sublabel": "unknown ≠ retry pago",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "memory",
+      "lane": "operations",
+      "col": 0,
+      "type": "database",
+      "label": "Memória isolada",
+      "sublabel": "TTL + fonte + revogação",
+      "tag": "ADAPTAR",
+      "width": 132
+    },
+    {
+      "id": "tasks",
+      "lane": "operations",
+      "col": 1,
+      "type": "database",
+      "label": "Tarefas duráveis",
+      "sublabel": "versão + orçamento",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "events",
+      "lane": "operations",
+      "col": 2,
+      "type": "database",
+      "label": "Eventos de execução",
+      "sublabel": "nós, tools, custos",
+      "tag": "NOVO",
+      "width": 132
+    },
+    {
+      "id": "admin",
+      "lane": "operations",
+      "col": 3,
+      "type": "frontend",
+      "label": "Admin + controles",
+      "sublabel": "filas, cotas, killswitches",
+      "tag": "ADAPTAR",
+      "width": 132
+    },
+    {
+      "id": "playground",
+      "lane": "operations",
+      "col": 4,
+      "type": "frontend",
+      "label": "Playground + evals",
+      "sublabel": "simulação / staging",
+      "tag": "ADAPTAR",
+      "width": 132
+    },
+    {
+      "id": "release",
+      "lane": "operations",
+      "col": 5,
+      "type": "security",
+      "label": "Release por tenant",
+      "sublabel": "canary + rollback",
+      "tag": "NOVO",
+      "width": 132
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "identity",
+      "role": "main"
+    },
+    {
+      "from": "identity",
+      "to": "route",
+      "role": "main"
+    },
+    {
+      "from": "route",
+      "to": "policy",
+      "role": "main"
+    },
+    {
+      "from": "policy",
+      "to": "executor",
+      "label": "permitido",
+      "role": "main"
+    },
+    {
+      "from": "executor",
+      "to": "reply",
+      "role": "main"
+    },
+    {
+      "from": "route",
+      "to": "specialists",
+      "label": "selecionar",
+      "role": "branch"
+    },
+    {
+      "from": "specialists",
+      "to": "capabilities",
+      "label": "allowlist",
+      "role": "branch"
+    },
+    {
+      "from": "capabilities",
+      "to": "imob",
+      "label": "tools autorizadas",
+      "role": "branch"
+    },
+    {
+      "from": "imob",
+      "to": "notifications",
+      "label": "evento",
+      "role": "async"
+    },
+    {
+      "from": "policy",
+      "to": "wait",
+      "label": "pendente",
+      "role": "branch"
+    },
+    {
+      "from": "wait",
+      "to": "handoff",
+      "label": "escalar",
+      "role": "branch"
+    },
+    {
+      "from": "handoff",
+      "to": "reconcile",
+      "label": "efeito em voo",
+      "role": "async"
+    },
+    {
+      "from": "brief",
+      "to": "copy",
+      "role": "main"
+    },
+    {
+      "from": "copy",
+      "to": "layout",
+      "role": "main"
+    },
+    {
+      "from": "layout",
+      "to": "qa",
+      "role": "main"
+    },
+    {
+      "from": "qa",
+      "to": "assets",
+      "label": "aprovado",
+      "role": "main"
+    },
+    {
+      "from": "assets",
+      "to": "provider",
+      "label": "render autorizado",
+      "role": "async"
+    },
+    {
+      "from": "provider",
+      "to": "reconcile",
+      "label": "incerto",
+      "role": "error"
+    },
+    {
+      "from": "memory",
+      "to": "tasks",
+      "role": "main"
+    },
+    {
+      "from": "tasks",
+      "to": "events",
+      "role": "main"
+    },
+    {
+      "from": "events",
+      "to": "admin",
+      "role": "main"
+    },
+    {
+      "from": "admin",
+      "to": "playground",
+      "role": "main"
+    },
+    {
+      "from": "playground",
+      "to": "release",
+      "role": "main"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Como ler · arquitetura alvo",
+      "items": [
+        "Mapa do pacote de execução e da expansão futura. NOVO / ADAPTAR identificam mudanças desta entrega; não comprovam deploy. Disponibilidade real vem do catálogo do runtime. Novas capacidades exigem habilitação e política por tenant.",
+        "Entrada → identidade → tarefa → especialista → policy → executor → resposta. Marketing e atendimento usam o mesmo contexto e as mesmas guardas. As raias mostram responsabilidades; os cartões detalham todos os agentes."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Coordenador Max",
+      "items": [
+        "Instrução: reconhecer intenção, resolver organização e tarefa, selecionar só o especialista necessário. Leituras simples diretas. Não inventar status nem afirmar assinatura / envio antes de evidência.",
+        "Runtime LangGraph e fluxos de domínio; skills confirmation, tenant-projection e effect-idempotency. Catálogo em GET /api/admin/catalog; tarefas em /api/admin/runtime; controle humano em /api/admin/handoff. Contexto org / subject / conversation / task / mode / controlVersion / workflowVersion; até 3 chamadas concorrentes por execução.",
+        "Modelo baseline: MAX_MODEL, default openai / gpt-5.4-nano via OpenRouter; versão / custo registrados. Fallback preserva restrições; mudança decidida por eval, sem upgrade LangGraph neste pacote."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Consultas e conhecimento",
+      "items": [
+        "Instrução: dado oficial ao vivo, data / fonte, paginação completa ou parcial explicitamente; nenhuma mistura entre tenants. Skills max.query e max.knowledge.",
+        "Tools atuais: deal.list / detail / pending; proposal.list / detail. Ampliar notification.list, activity.list, metrics.get, property.list / detail, contract.status após projeções e permissões. API scope-query ImobPro; MCP opcional usa mesmo executor.",
+        "Preferências / knowledge com proveniência e TTL; status não vira memória. SplitRecipient recebe projeção própria no servidor. Evals de ausência de campos proibidos, freshness e isolamento."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Proposta e formulário",
+      "items": [
+        "Instrução: coletar mínimos, resolver ambiguidades, mostrar resumo e confirmar conteúdo / versão. O signatário assina; Max prepara e envia. Skills max.proposal / form.",
+        "Tools: proposal.list / status / create / update / options / preflight / send / cancel / recreate / convert / complete / delete / duplicate; form.options / create. Extração preencher_proposta / preencher_campos / preencher_campo.",
+        "scope-action ImobPro → ClickSign. Aprovação expirada / alterada invalida. Revalidar acesso antes do efeito; intent + idempotency; unknown aguarda reconciliação."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Captação e crédito",
+      "items": [
+        "Captação: skill max.acquisition; tools captacao.options / create / preflight / send / list, captacao.autorizacao.pedir / listar / decidir. Pedido não equivale a autorização concedida; respeitar hierarquia.",
+        "Crédito: tools credit.preflight / status / request e lead.upsert. Provedor Upestate pelo adaptador ImobPro; consentimento e propósito no servidor. Dados de crédito não alimentam memória geral nem marketing.",
+        "Modelo extrai, não inventa resultado nem decide concessão. Contratos: serviços ImobPro analyst / legal / editor / curator através de chamadas limitadas futuras, sem duplicar lógica."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Marketing coordenador",
+      "items": [
+        "Entrada Max: property.list e marketing.options / prepare / generate / status / library. API scope-action encaminha ao mesmo executeMarketingAction do estúdio. Marca, templates, aprovações e reserva de cota são serviços internos ImobPro; não são tools extras fictícias.",
+        "Instrução: exigir imóvel / fotos autorizados, marca / template e brief com snapshot de preço / disponibilidade; prévia e confirmação antes de efeito. Sem fonte ou cota definida: bloquear pago.",
+        "Cota mensal por corretor / modalidade; gerente autoriza exceção. Reserve → settle; unknown preserva reserva. Unidades comerciais separadas de custo técnico. Máximo 2 revisões; sem publicação social."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Copy e roteiro",
+      "items": [
+        "Workers marketing.brief e marketing.copy-script; skills marketing-brief-v1 e marketing-factual-copy-v1. Reuso Rankd e marketingskills documentado; recebem snapshot autorizado de imóvel e marca.",
+        "Instrução: fundamentar título, CTA, legenda e roteiro no brief. Não inventar preço, área, financiamento, vista ou retorno; campos obrigatórios e tom da marca.",
+        "Primeira entrega determinística: model=null, sem chamada LLM de criação e sem custo de tokens fictício. Variação com modelo será uma evolução avaliada separadamente; revisão humana da qualidade permanece no rollout."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Layout, vídeo e QA",
+      "items": [
+        "Worker marketing.template-layout: renderArtwork em SVG; skill marketing-template-layout-v1. Gerente governa logo, fontes, cores e avisos; corretor revisa título e CTA permitidos. Sem editor gráfico livre.",
+        "Worker marketing.video: skill marketing-creatomate-v1, submit / inspect do adaptador Creatomate. Fotos reais e narração em template auditado; succeeded e identidade confirmados antes do arquivo privado. Remotion / OpenMontage são candidatos futuros.",
+        "Worker marketing.qa: evaluateCampaign, skill marketing-factual-qa-v1. Fatos, foto e marca verificados; no máximo 2 reparos. Snapshots e versões vinculam aprovação; mudanças tornam derivados indisponíveis. Eventos sanitizados entram no trace."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Integrações / APIs / MCPs",
+      "items": [
+        "WhatsApp Meta / Z-API conforme configuração; OpenRouter e ImobPro scope-query / scope-action com credencial por tenant. HMAC protege os endpoints internos de admin / notify. ClickSign, Upestate, Drive / Docs e storage pertencem ao ImobPro; ter integração não libera uma tool do Max automaticamente.",
+        "MCP ImobPro: selecionar capacidades, não expor catálogo inteiro. mark_deal_signed legado não equivale a assinatura. MCP é fachada, não segunda política.",
+        "Engine marketing independente com proveniência Rankd; nenhuma auth / DB / billing compartilhada. Creatomate / voz adaptadores assíncronos. Futuro: agenda, CRM, finanças leitura, estudos com Deep Agents restrito; sem shell / SQL / MCP livre."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Harness e memória",
+      "items": [
+        "Registry: id / version / domain / owner / status, schemas, executor, permission / projection, effects / confirmation / idempotency, timeout / retry / reconcile, cost / dataClass / evals. enabled / disabled / experimental / planned distintos.",
+        "ExecutionContext, ConversationControl, Task, ExecutionIntent, Approval, HandoffCase, RunEvent, ResponseEnvelope, ReleaseManifest. Task queued / running / waiting_input / waiting_approval / succeeded / failed / cancelled / unknown.",
+        "Persistir intent antes do efeito, leases / dedupe / inbox / outbox; serializar por recurso. Memória conversa / tarefa / pessoa / org separada com TTL / fonte; crédito isolado; revogação e apagamento propagam."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Atendente humano e notificações",
+      "items": [
+        "bot → waiting_human → human → bot. Claim atômico, owner único, controlVersion no dispatch. Sem retorno por inatividade. Inbox ImobPro no mesmo WhatsApp; rascunho privado, envio identificado, handback explícito.",
+        "Assumir não concede permissões de negócio. Jobs autorizados terminam silenciosamente no caso; efeito em voo não vira cancelado por promessa.",
+        "Notificações determinísticas separadas reutilizam event-registry, dono do envio, destinatários / preferências / dedupe. accepted / queued / sent / delivered / read / failed distintos."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Admin e avaliações",
+      "items": [
+        "Admin super-admin: /admin/max, /admin/max/runtime, /admin/max/catalog, /admin/max/custos e /admin/max/playground. Tenant: /settings/max/atendimento e /marketing. Marca e cotas exigem gestão; assumir conversa não concede acesso a domínio.",
+        "Killswitches separados chat / escritas / pagos / outbound; callbacks / reconcile seguem. Alertas: inbound>2min, erro>5% / 15min com min20, deadline / heartbeat, unknown / sem owner, orçamento80% / 100%, violação tenant.",
+        "Playground: sessão isolada e simulação com modelo sintético, ou staging com identidade permitida. Histórico e traces reais; export sem texto livre exige entrada sintética revisada. Replay valida controle, não qualidade do modelo real; holdout e avaliação humana são gate de canary."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Execução e rollout",
+      "items": [
+        "E0 mapa → E1 baseline → E2 contratos / harness → E3 atual / consultas → E4 handoff → E5 marketing / studio → E6 admin / playground → E7 piloto. E8 expansão posterior permanece planned.",
+        "PRs Max / ImobPro coordenados e mesmos vetores HMAC. Receptor inerte primeiro, flags OFF, framework separado, tarefas fixam workflowVersion. Promoção após smoke humano; rollback conserva intent / reconcile.",
+        "Validar cross-tenant / revogação, aprovação alterada, duplicate / out-of-order / lost ack, takeover / dois atendentes, cota concorrente, fonte velha / foto errada, apagamento e rollback sem repetir efeito."
+      ]
+    }
+  ]
+}
