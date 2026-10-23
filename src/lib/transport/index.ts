@@ -44,13 +44,13 @@ let avisouProvedorInvalido = false;
 /**
  * O adapter valendo. Vem do perfil de deploy (`AGENT_DEPLOY_PROFILE`; ausente
  * é o Max, na Meta). `AGENT_TRANSPORT=log` desvia para o transporte sem rede
- * do playground e de staging, e é recusado em produção. Qualquer outro valor
+ * de staging e da homologação, e é recusado em produção. Qualquer outro valor
  * lança: cair na Meta por engano mandaria mensagem pelo número errado.
  */
 export function adapter(): TransportAdapter {
   const desvio = (process.env.AGENT_TRANSPORT ?? "").trim().toLowerCase();
   if (desvio === "log") {
-    if (process.env.VERCEL_ENV === "production") throw new Error("transport_log_em_producao");
+    if (!logPermitido()) throw new Error("transport_log_em_producao");
     return logAdapter;
   }
   if (desvio !== "") throw new Error(`transport_invalido: ${desvio}`);
@@ -62,6 +62,20 @@ export function adapter(): TransportAdapter {
   }
   if (nome === "log") return logAdapter;
   throw new Error(`transport_nao_implementado: ${nome}`);
+}
+
+/**
+ * O transporte sem rede marca a linha como `sent` sem entregar nada: em
+ * produção isso é perda silenciosa. Por isso a lista é de onde PODE, e não de
+ * onde não pode. Preview da Vercel roda com `NODE_ENV=production`, e por isso
+ * vale pelo `VERCEL_ENV`. Fora da Vercel (sem `VERCEL_ENV`), só vale num
+ * processo que não é de produção.
+ */
+function logPermitido(): boolean {
+  const vercel = (process.env.VERCEL_ENV ?? "").trim();
+  if (vercel === "preview" || vercel === "development") return true;
+  if (vercel !== "") return false;
+  return process.env.NODE_ENV !== "production";
 }
 
 /**

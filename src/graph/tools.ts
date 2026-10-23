@@ -801,7 +801,17 @@ export const REGISTRO_DE_TOOLS: EntradaDeTool[] = [PROPOR_CRIACAO, ...TOOLS_DE_A
 
 /** O registro deste deploy: o núcleo mais as entradas dos packs do perfil (`src/packs`). */
 export function entradasDoDeploy(packs: readonly ToolPack[] = packsDoPerfil()): EntradaDeTool[] {
-  return [...REGISTRO_DE_TOOLS, ...packs.flatMap((p) => p.entradas)];
+  const todas = [...REGISTRO_DE_TOOLS, ...packs.flatMap((p) => p.entradas)];
+  // Nome repetido faria o `find` do despachante escolher uma das duas em
+  // silêncio; o pack que colide com o núcleo não pode subir.
+  if (packs.length) {
+    const vistos = new Set<string>();
+    for (const e of todas) {
+      if (vistos.has(e.nome)) throw new Error(`tool_nome_duplicado: ${e.nome}`);
+      vistos.add(e.nome);
+    }
+  }
+  return todas;
 }
 
 export function buscarNoRegistro(nome: string, packs?: readonly ToolPack[]): EntradaDeTool | undefined {

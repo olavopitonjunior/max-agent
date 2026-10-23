@@ -136,6 +136,23 @@ describe("adapter pelo perfil", () => {
     await expect(sendText({ to: "1", body: "x" })).rejects.toThrow("transport_log_em_producao");
   });
 
+  it("log sem VERCEL_ENV num processo de produção também é recusado (fail-closed)", () => {
+    vi.stubEnv("AGENT_TRANSPORT", "log");
+    vi.stubEnv("VERCEL_ENV", "");
+    vi.stubEnv("NODE_ENV", "production");
+    expect(() => provider()).toThrow("transport_log_em_producao");
+  });
+
+  it("log vale em preview e em desenvolvimento local", () => {
+    vi.stubEnv("AGENT_TRANSPORT", "log");
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("NODE_ENV", "production");
+    expect(provider()).toBe("log");
+    vi.stubEnv("VERCEL_ENV", "");
+    vi.stubEnv("NODE_ENV", "development");
+    expect(provider()).toBe("log");
+  });
+
   it("AGENT_TRANSPORT desconhecido lança transport_invalido", () => {
     vi.stubEnv("AGENT_TRANSPORT", "zapi");
     expect(() => provider()).toThrow("transport_invalido");

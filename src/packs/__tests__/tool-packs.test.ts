@@ -69,6 +69,12 @@ describe("tool packs", () => {
     expect(r.entradas.map((e) => e.nome)).not.toContain("pack_teste_ler");
   });
 
+  it("pack com nome de tool do núcleo não sobe", () => {
+    const nucleo = REGISTRO_DE_TOOLS[0];
+    const colide: ToolPack = { id: "c", capabilities: [], entradas: [{ ...LEITURA_DO_PACK, nome: nucleo.nome }] };
+    expect(() => entradasDoDeploy([colide])).toThrow(`tool_nome_duplicado: ${nucleo.nome}`);
+  });
+
   it("capabilities de pack somam ao núcleo sem duplicar", () => {
     const comCap: ToolPack = { id: "x", capabilities: ["pack.x", "deal.list"], entradas: [] };
     expect(capabilitiesDoDeploy([comCap])).toEqual([...CAPABILITIES, "pack.x"]);

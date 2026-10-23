@@ -3,7 +3,8 @@ import { log } from "../../log";
 import type { TransportAdapter } from "../types";
 
 /**
- * Transporte sem rede, para playground e staging: a linha da outbox vira
+ * Transporte sem rede, para staging e homologação de um deploy sem número
+ * real (o playground nem chega aqui: `sendText` o barra antes). A linha da outbox vira
  * `sent` e o log guarda só destino e tamanho, nunca o texto. Recusado em
  * produção por `adapter()`.
  */

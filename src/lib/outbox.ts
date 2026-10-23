@@ -360,6 +360,9 @@ export async function dispatchDue(
 ): Promise<DispatchTotals> {
   const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0, held: 0, expired: 0, coalesced: 0 };
   if (process.env.MAX_OUTBOUND_KILL === "true") return totals;
+  // Transporte mal configurado lança AQUI, antes do claim: depois dele, cada
+  // linha reivindicada queimaria uma tentativa e ficaria presa em `sending`.
+  const caps = capabilities();
 
   /**
    * ── A checagem que faltava ─────────────────────────────────────────────
@@ -573,7 +576,7 @@ export async function dispatchDue(
      * janela, sai texto livre sempre.
      */
     let envioTemplate: TemplateDef | null = null;
-    if (capabilities().window24h && !(await janelaAberta(row.phone))) {
+    if (caps.window24h && !(await janelaAberta(row.phone))) {
       const candidatosDoKind = templatesDoKind(row.kind);
       if (candidatosDoKind.length === 0) {
         await query(

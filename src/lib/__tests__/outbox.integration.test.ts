@@ -153,6 +153,27 @@ d("outbox (Postgres real)", () => {
     }
   });
 
+  /** Transporte mal configurado lança ANTES do claim: nenhuma linha queima tentativa. */
+  it("AGENT_TRANSPORT inválido não reivindica nada", async () => {
+    vi.stubEnv("AGENT_TRANSPORT", "zapi");
+    try {
+      await enqueue(args({ dedupeKey: "k-transporte-ruim" }));
+      await query(
+        `UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = 'k-transporte-ruim'`
+      );
+
+      await expect(dispatchDue()).rejects.toThrow("transport_invalido");
+
+      const row = await query<{ status: string; attempts: number }>(
+        `SELECT status, attempts FROM outbox WHERE dedupe_key = 'k-transporte-ruim'`
+      );
+      expect(row[0].status).toBe("pending");
+      expect(row[0].attempts).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   /** O que ainda não venceu não pode sair — é a janela 7h–22h em ação. */
   it("não toca no que está agendado pro futuro", async () => {
     await enqueue(args({ dedupeKey: "k-future" }));
