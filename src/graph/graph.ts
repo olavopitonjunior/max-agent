@@ -1,4 +1,4 @@
-import { nomeDoAgente } from "@/lib/deploy-profile";
+import { deployProfile, nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled, durableRuntimeEnabled } from '@/lib/runtime/rollout';
 import { liveNamespaceFor } from "@/lib/runtime/context";
 import { query } from "@/lib/db";
@@ -2527,6 +2527,11 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
           "boas-vindas. Depois disso é só me chamar de novo.",
         { orgId, error: "primeiro_acesso_pendente" }
       );
+    }
+    // O Newton só fala com usuário interno da Newcore: número desconhecido não
+    // recebe apresentação nem vai para a equipe. Silêncio, sem marcar.
+    if (deployProfile().agentKey === "newton") {
+      return sair(null, { error: "desconhecido_silenciado" });
     }
     // Uma apresentação por ciclo do cache negativo, e depois silêncio:
     // responder cada mensagem de um número estranho consome cota da Z-API e

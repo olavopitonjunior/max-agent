@@ -100,6 +100,21 @@ const NOTIFY_BODY = JSON.stringify({
 });
 
 describe("POST /api/notify", () => {
+  it("perfil newton recusa aviso a parte do negócio (403) e não enfileira; no Max passa", async () => {
+    const corpo = JSON.stringify({ ...JSON.parse(NOTIFY_BODY), audience: "deal_party" });
+    const assinado = () => {
+      const ts = String(Date.now());
+      return notifyReq(corpo, { "x-max-timestamp": ts, "x-max-signature": sign(ts, corpo, SECRET) });
+    };
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    const res = await notifyPost(assinado());
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "audience_not_allowed" });
+    expect(enfileiraOut).not.toHaveBeenCalled();
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "");
+    expect((await notifyPost(assinado())).status).toBe(202);
+  });
+
   it("sem assinatura é 401", async () => {
     expect((await notifyPost(notifyReq(NOTIFY_BODY, {}))).status).toBe(401);
   });

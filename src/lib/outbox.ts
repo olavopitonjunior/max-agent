@@ -8,6 +8,7 @@ import { reservarAvisoNeutro } from "./atividades-pendentes";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
+import { deployProfile } from "./deploy-profile";
 import {
   inoperanciaDoErro,
   falhaDaMensagemMeta,
@@ -155,6 +156,11 @@ export type EnqueueResult =
   | { status: "duplicate"; id: string };
 
 export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
+  // O Newton só fala com usuário interno, e o transporte dele não tem
+  // template nem janela: aviso para parte do negócio sairia como texto livre.
+  if (p.audience === "deal_party" && deployProfile().agentKey === "newton") {
+    throw new Error("audience_nao_permitida_no_perfil");
+  }
   const id = randomUUID();
   const deliverAfter = nextDeliveryTime();
   const dispatchFence=await captureDispatchFence(p.phone);
