@@ -26,7 +26,7 @@ export function explicitStage(text: string, options: string[]): string | null {
   if (/\b(nao|exceto|menos|sem)\b/.test(input)) return null;
   const matches = options.filter(option => {
     const label = normalize(option).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(?:^|\\s)(?:em|na etapa|na fase|etapa|fase)\\s+["“]?${label}(?=$|[\\s.,!?"”])`).test(input);
+    return new RegExp(`(?:^|\\s)(?:em\\s+|(?:na|pela)\\s+(?:etapa|fase)\\s+|(?:etapa|fase)(?:\\s*:\\s*|\\s+))["“]?${label}(?=$|[\\s.,!?"”])`).test(input);
   });
   return matches.length === 1 ? matches[0] : null;
 }

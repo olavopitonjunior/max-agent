@@ -217,7 +217,7 @@ export async function despacharLeituras(params: {
 
     if (r.clarification) {
       resultados.push({ tool: chamada.name, items: null, truncated: false, clarification: r.clarification });
-      trilha.push({ name: chamada.name, args: chamada.args, outcome: "filtro_invalido" });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: chamada.args.opcoes_etapas === true ? "opcoes_consulta" : "filtro_invalido" });
       continue;
     }
 
