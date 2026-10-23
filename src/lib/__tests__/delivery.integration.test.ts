@@ -180,6 +180,7 @@ d("entrega", () => {
   });
 
   it("SENT sem RECEIVED também vira unconfirmed — número bloqueado não escapa", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "");
     // O achado do review: callback SENT marcava delivery_status='sent' e a
     // linha ficava isenta da varredura para sempre.
     const id = await outboxRow({ sent_at: new Date(Date.now() - 20 * 60_000) });
@@ -238,6 +239,7 @@ d("entrega", () => {
   });
 
   it("sent antigo sem callback vira unconfirmed; callback atrasado corrige", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "");
     const id = await outboxRow({
       sent_at: new Date(Date.now() - 20 * 60_000),
     });
@@ -250,6 +252,17 @@ d("entrega", () => {
     // A notícia atrasada tem razão sobre o "sem notícia".
     await applyStatusCallback({ status: "RECEIVED", messageIds: [MID], phone: null, momment: null });
     expect((await outboxDe(id)).delivery_status).toBe("delivered");
+  });
+
+  it("Newton (bridge sem callback de status): sent antigo continua sent e não é reportado", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    const id = await outboxRow({ sent_at: new Date(Date.now() - 20 * 60_000) });
+
+    await reconcile();
+    const linha = await outboxDe(id);
+    expect(linha.status).toBe("sent");
+    expect(linha.delivery_status).toBeNull();
+    expect(linha.reported_at).toBeNull();
   });
 
   it("reporta desfecho ao Contractmaker e carimba reported_at só no sucesso", async () => {

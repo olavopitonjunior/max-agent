@@ -1,7 +1,7 @@
 import { query } from "./db";
 import { reportDeliveryOutcome } from "./cm";
 import { nextDeliveryTime } from "./window";
-import type { StatusCallback } from "./transport";
+import { capabilities, type StatusCallback } from "./transport";
 
 /**
  * Reconciliação de entrega (Fase 4A).
@@ -260,7 +260,9 @@ export interface ReconcileTotals {
 export async function reconcile(): Promise<ReconcileTotals> {
   const totals: ReconcileTotals = { unconfirmed: 0, reported: 0, reportFailed: 0, reportUnavailable: 0 };
 
-  const viraramUnconfirmed = await query<{ id: string }>(
+  // Transporte sem callback de status (bridge do Newton): `sent` é o último
+  // degrau que existe. Marcar `unconfirmed` reportaria TODO envio como suspeito.
+  const viraramUnconfirmed = !capabilities().status ? [] : await query<{ id: string }>(
     `UPDATE outbox
         SET delivery_status = 'unconfirmed'
       WHERE status = 'sent'
