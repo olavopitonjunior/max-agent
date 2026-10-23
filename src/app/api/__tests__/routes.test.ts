@@ -213,6 +213,33 @@ describe("POST /api/notify", () => {
     );
   });
 
+  it("perfil newton: cada família de aviso interno entra na fila com kind e params", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    const base = JSON.parse(CORPO_DO_CM);
+    const familias = [
+      { audience: "platform_user", kind: "activity_assigned", params: { atividade: "Ligar para o comprador", negocio: "Venda Apto 302" } },
+      { audience: "platform_user", kind: "activity_due", params: { atividade: "Vistoria", prazo: "24/10 10:00" } },
+      { audience: "platform_user", kind: "form_reminder", params: { negocio: "Venda Apto 302" } },
+      { audience: "deal_broker", kind: "proposal_completed", params: { negocio: "Venda Apto 302" } },
+      { audience: "deal_broker", kind: "stage_change", params: { negocio: "Venda Apto 302", etapa: "Assinatura" } },
+      { audience: "deal_broker", kind: undefined, params: undefined },
+    ];
+    for (const [i, f] of familias.entries()) {
+      enfileiraOut.mockClear();
+      const corpo = JSON.stringify({ ...base, ...f, dedupeKey: `newton-${i}` });
+      const res = await postar(corpo);
+      expect(res.status, f.kind ?? "sem kind").toBe(202);
+      expect(enfileiraOut).toHaveBeenCalledWith(expect.objectContaining({
+        audience: f.audience,
+        kind: f.kind ?? null,
+        params: f.params ?? null,
+        title: base.title,
+        body: base.body,
+        linkUrl: base.linkUrl,
+      }));
+    }
+  });
+
   it("credit_result (M3): o corpo vira o texto fixo do aviso, com o link", async () => {
     const base = JSON.parse(CORPO_DO_CM);
     await postar(JSON.stringify({ ...base, kind: "credit_result", linkUrl: "https://fincasa.imobpro.ia.br/locacao/pessoas/clientes/lc1",

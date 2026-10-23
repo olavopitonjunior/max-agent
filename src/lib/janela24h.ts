@@ -12,7 +12,7 @@ import type { PoolClient } from "pg";
  */
 
 import { query } from "./db";
-import type { InboundMessage } from "./transport";
+import { capabilities, type InboundMessage } from "./transport";
 
 /**
  * Marca a janela como aberta para quem acabou de escrever. Instante da
@@ -48,4 +48,12 @@ export async function janelaAberta(phone: string): Promise<boolean> {
     [phone]
   );
   return rows[0]?.aberta === true;
+}
+
+/**
+ * Texto livre pode sair agora? Transporte sem janela de 24h (bridge do
+ * Newton) sempre pode; na Meta, só com a janela aberta.
+ */
+export async function envioLivrePermitido(phone: string): Promise<boolean> {
+  return !capabilities().window24h || janelaAberta(phone);
 }

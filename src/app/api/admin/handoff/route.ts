@@ -12,7 +12,7 @@ import {z} from 'zod';
 import {requireHmac} from '@/lib/auth';
 import {getControl,sendHuman,transitionControl} from '@/lib/runtime/handoff';
 import {sendText,connectionStatus} from '@/lib/transport';
-import {janelaAberta} from '@/lib/janela24h';
+import {envioLivrePermitido} from '@/lib/janela24h';
 import {resolveIdentity} from '@/lib/identity';
 import {query} from '@/lib/db';
 import {resolverTelefone} from '@/lib/threads';
@@ -46,7 +46,7 @@ export async function POST(req:NextRequest){
   if(p.operation==='send'){
    if(!context)return NextResponse.json({error:'thread_not_found'},{status:404});
    if(!p.text||p.controlVersion===undefined)return NextResponse.json({error:'bad_request'},{status:400});
-   if(!await janelaAberta(p.phone))return NextResponse.json({error:'window_closed'},{status:409});
+   if(!await envioLivrePermitido(p.phone))return NextResponse.json({error:'window_closed'},{status:409});
    if(!((await connectionStatus()).connected))return NextResponse.json({error:'channel_unavailable'},{status:409});
    const result=await sendHuman({...p,text:p.text,controlVersion:p.controlVersion,beforeReserve:privacyCheck},()=>sendText({to:p.phone,body:p.text!}));
    await withExecution(context,()=>registrarTurn({orgId:p.orgId,phone:p.phone,messageId:`human-${p.requestId}`,kind:'human',inboundText:null,replyText:redigirCredito(p.text!),route:'human',tools:[{name:'human.send',args:{},outcome:'sent'}]}));
