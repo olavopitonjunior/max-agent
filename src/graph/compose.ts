@@ -1,3 +1,4 @@
+import { deployProfile } from "@/lib/deploy-profile";
 import { NOMES_DE_TOOL } from "./tools";
 
 /**
@@ -245,6 +246,16 @@ export function sanitizar(bruto: string): Saida {
 export const TETO_CARACTERES = 500;
 export const TETO_LINHAS = 6;
 export const SUFIXO_RESTO = "Quer ver o resto?";
+/**
+ * Newton: cabeçalho + os 10 itens que a consulta devolve. Com 6 linhas, uma
+ * lista de 5 negócios já saía cortada no 4º com "Quer ver o resto?" (evals de
+ * 23/10). O teto de caracteres continua o mesmo; o Max fica em 6 linhas.
+ */
+export const TETO_LINHAS_NEWTON = 12;
+
+export function tetoDeLinhas(): number {
+  return deployProfile().agentKey === "newton" ? TETO_LINHAS_NEWTON : TETO_LINHAS;
+}
 
 /**
  * Corta no último limite NATURAL que cabe: fim de linha ou fim de frase; na
@@ -256,21 +267,22 @@ export const SUFIXO_RESTO = "Quer ver o resto?";
  * = coube inteiro, e aí o texto volta INTACTO (nem o espaço das pontas muda).
  */
 export function limitarTamanho(texto: string): { texto: string; resto: string | null } {
+  const tetoLinhas = tetoDeLinhas();
   let t = texto.trim();
-  if (t.length <= TETO_CARACTERES && t.split("\n").length <= TETO_LINHAS) {
+  if (t.length <= TETO_CARACTERES && t.split("\n").length <= tetoLinhas) {
     return { texto, resto: null };
   }
 
   // Separadores vazios não justificam esconder palavras ou pedir continuação.
   // Só compacta após exceder o teto; preserva todas as linhas com conteúdo.
   t = t.split("\n").filter((linha) => linha.trim().length > 0).join("\n");
-  if (t.length <= TETO_CARACTERES && t.split("\n").length <= TETO_LINHAS) {
+  if (t.length <= TETO_CARACTERES && t.split("\n").length <= tetoLinhas) {
     return { texto: t, resto: null };
   }
 
   // O sufixo ocupa uma linha e seus caracteres: o orçamento do corpo desconta.
   const orcamentoChars = TETO_CARACTERES - SUFIXO_RESTO.length - 1;
-  const orcamentoLinhas = TETO_LINHAS - 1;
+  const orcamentoLinhas = tetoLinhas - 1;
 
   // Primeiro por linhas — o prefixo de linhas inteiras é prefixo do texto.
   let candidato = t.split("\n").slice(0, orcamentoLinhas).join("\n");
