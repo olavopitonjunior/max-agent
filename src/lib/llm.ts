@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "./deploy-profile";
 import { currentExecution, runEvent, recordCost, assertExternalAllowed } from "./runtime/context";
 /**
  * Chamada ao modelo, via OpenRouter, com a contabilidade de custo junto.
@@ -279,7 +280,7 @@ export async function complete(p: CompleteParams): Promise<LlmResult> {
   runEvent("prompt.used", "max.system", { version: "max-v1" });
   if (currentExecution()?.context.mode === "simulation") {
     runEvent("model.simulated", p.model ?? DEFAULT_MODEL, { costUsd: 0 });
-    return { text: "Simulação: este é um resultado sintético do Max. Nenhuma ação externa foi executada.", toolCalls: p.toolChoice ? [{ name: p.toolChoice, args: {} }] : [], usage: { model: p.model ?? DEFAULT_MODEL, promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, generationId: null, latencyMs: 0, success: true } };
+    return { text: `Simulação: este é um resultado sintético do ${nomeDoAgente()}. Nenhuma ação externa foi executada.`, toolCalls: p.toolChoice ? [{ name: p.toolChoice, args: {} }] : [], usage: { model: p.model ?? DEFAULT_MODEL, promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, generationId: null, latencyMs: 0, success: true } };
   }
   assertExternalAllowed();
   runEvent("model.started", p.model ?? DEFAULT_MODEL);

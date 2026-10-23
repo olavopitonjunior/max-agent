@@ -5,7 +5,7 @@ import {
   atividadePermitida,
   iniciarAtividade,
   TEXTO_ATIVIDADE_INDISPONIVEL,
-  TEXTO_ATIVIDADE_NAO_LIBERADA,
+  textoAtividadeNaoLiberada,
   TEXTO_ATIVIDADE_SEM_VERIFICAR,
   type OperacaoDeAtividade,
 } from "@/graph/atividades";
@@ -85,13 +85,13 @@ export async function rotearBotaoDeAtividade(params: {
 
   // Identidade e política ANTES de qualquer leitura: quem não pode escrever não consulta nada por aqui.
   if (!podeEscrever(params.identity)) {
-    return { reply: TEXTO_ATIVIDADE_NAO_LIBERADA, fluxo: null, evento: "atividade_botao_sem_login" };
+    return { reply: textoAtividadeNaoLiberada(), fluxo: null, evento: "atividade_botao_sem_login" };
   }
   if (params.ctx.politicaIndisponivel) {
     return { reply: TEXTO_ATIVIDADE_SEM_VERIFICAR, fluxo: null, evento: "atividade_politica_indisponivel" };
   }
   if (!atividadePermitida(params.ctx) || !params.ctx.policy.includes("activity.list")) {
-    return { reply: TEXTO_ATIVIDADE_NAO_LIBERADA, fluxo: null, evento: "atividade_sem_politica" };
+    return { reply: textoAtividadeNaoLiberada(), fluxo: null, evento: "atividade_sem_politica" };
   }
 
   const lida = await params.ler(parsed.atividadeId);

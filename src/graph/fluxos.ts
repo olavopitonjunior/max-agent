@@ -35,6 +35,7 @@
  * Este módulo é PURO salvo as dependências injetadas (`DepsDoFluxo`).
  */
 
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
@@ -245,8 +246,8 @@ const TEXTO_SEM_RESPOSTA = "Não consegui falar com o sistema agora. Tenta de no
 export const TEXTO_ESCRITA_INCERTA =
   "O sistema não respondeu e não sei se deu certo. Responda *SIM* de novo para conferir — não duplica.";
 
-const TEXTO_SEM_PERMISSAO =
-  "Sua conta não tem permissão para isso pelo Max. Fale com o administrador da imobiliária.";
+const textoSemPermissao = (): string =>
+  `Sua conta não tem permissão para isso pelo ${nomeDoAgente()}. Fale com o administrador da imobiliária.`;
 
 /**
  * A imobiliária não tem modelo de proposta ATIVO daquele tipo: sem modelo não
@@ -980,7 +981,7 @@ export async function retomarEnvio(
     return {
       reply: ctx.politicaIndisponivel
         ? TEXTO_POLITICA_INDISPONIVEL
-        : "O envio para assinatura pelo Max não está liberado para você — envie pelo sistema.",
+        : `O envio para assinatura pelo ${nomeDoAgente()} não está liberado para você — envie pelo sistema.`,
       fluxo: null,
       evento: "envio_sem_politica",
     };
@@ -1066,7 +1067,7 @@ function prepararCpfDaRetomada(retomado: FluxoProposta, texto: string, ctx: Cont
   );
   if (cpfInformado && (normalizado.match(/\bcpf\b/g) ?? []).length === 1) {
     if (!ctx.policy.includes("proposal.create")) {
-      return { reply: TEXTO_SEM_PERMISSAO, fluxo: retomado, evento: "envio_pendencia_cpf_sem_edicao" };
+      return { reply: textoSemPermissao(), fluxo: retomado, evento: "envio_pendencia_cpf_sem_edicao" };
     }
     const cpf = cpfInformado[1].replace(/\D/g, "");
     if (!cpfValido(cpf)) {
@@ -1151,7 +1152,7 @@ export async function iniciarFluxo(
       evento: "fluxo_negocio",
     };
   }
-  return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
 }
 
 /**
@@ -1297,7 +1298,7 @@ async function carregarCamposDoNegocio(
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
   const r = await deps.acao("form.options", { tipo });
   if (!r) return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: "falha_form_options" };
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   if (r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: `form_options_${r.status}` };
 
   const gerente = r.body.gerente as { obrigatorio?: boolean } | undefined;
@@ -1443,7 +1444,7 @@ async function criarNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: DepsDoF
       evento: "negocio_duplicado",
     };
   }
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   const recusa = recusaDoServidor(r);
   if (recusa || r.status === 422 || r.status === 400) {
     return {
@@ -1754,7 +1755,7 @@ async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsD
   }
   // 403 é RBAC/política (`POLITICA_NAO_CONCEDE`/`can`), nunca posse — mesmo
   // com leaseClientId, cai aqui e nunca na oferta sem vínculo.
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   const recusa = recusaDoServidor(r);
   if (recusa || r.status === 422 || r.status === 400) {
     // Com leaseClientId, a recusa pode ser porque o lead está sem nome/aluguel
@@ -1808,7 +1809,7 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
   if (!r || (r.status === 409 && r.body.error === "em_andamento")) {
     return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_proposal_update" };
   }
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
   if (r.status === 409 && r.body.error === "edicao_pela_tela") {
     return {
@@ -1896,14 +1897,14 @@ async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: Dep
   if (!ctx.policy.includes("proposal.send")) {
     if (ctx.politicaIndisponivel) return { reply: TEXTO_POLITICA_INDISPONIVEL, fluxo: f, evento: "politica_indisponivel" };
     return {
-      reply: `Rascunho${f.codigo ? ` ${f.codigo}` : ""} pronto. O envio para assinatura pelo Max não está liberado para você — envie pelo sistema.`,
+      reply: `Rascunho${f.codigo ? ` ${f.codigo}` : ""} pronto. O envio para assinatura pelo ${nomeDoAgente()} não está liberado para você — envie pelo sistema.`,
       fluxo: null,
       evento: "envio_sem_politica",
     };
   }
   const r = await deps.acao("proposal.options", { proposta_id: f.propostaId });
   if (!r) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: "falha_proposal_options" };
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
   if (r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: `proposal_options_${r.status}` };
   if (r.body.assinaturaConfigurada === false) {
@@ -1985,7 +1986,7 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
       evento: "proposta_enviada",
     };
   }
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
   if (r.status === 402) {
     return { reply: "O plano de assinaturas da imobiliária esgotou. Fale com o administrador.", fluxo: null, evento: "plano_esgotado" };

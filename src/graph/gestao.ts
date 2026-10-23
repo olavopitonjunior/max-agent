@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import { conduzirFluxo, type ContextoDoTurno, type DepsDoFluxo, type Fluxo, type PassoDoFluxo } from "./fluxos";
 import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type PropostaListada } from "./localizar";
 import type { Capability } from "./policy";
@@ -168,7 +169,7 @@ export async function iniciarGestao(
   if (!permitido(op, ctx)) {
     return resposta(null, ctx.politicaIndisponivel
       ? "Não consegui validar sua permissão agora. Nada foi alterado; tente de novo em instantes."
-      : `${op === "excluir" ? "Excluir" : op === "duplicar" ? "Duplicar" : "Ajustar"} proposta pelo Max não está liberado para você. Faça pela tela de propostas do sistema.`,
+      : `${op === "excluir" ? "Excluir" : op === "duplicar" ? "Duplicar" : "Ajustar"} proposta pelo ${nomeDoAgente()} não está liberado para você. Faça pela tela de propostas do sistema.`,
     "gestao_sem_politica");
   }
   const termo = termoDado !== undefined ? termoDado : op === "editar" && !pedido ? termoDaEdicao(ctx.texto) : undefined;
@@ -214,13 +215,13 @@ function textoDaRecusa(f: FluxoGestao, status: number, body: Record<string, unkn
   const erro = String(body.error ?? "");
   if (status === 403) return `Sua permissão no sistema não permite ${acaoNome(f.operacao)} a proposta ${c}. Nada foi alterado.`;
   if (status === 404) return `Não encontrei a proposta ${c} entre as suas. Nada foi alterado.`;
-  if (erro === "ja_convertida") return `A proposta ${c} já virou negócio e não pode ser excluída pelo Max.`;
+  if (erro === "ja_convertida") return `A proposta ${c} já virou negócio e não pode ser excluída pelo ${nomeDoAgente()}.`;
   if (erro === "ja_enviada") return `A proposta ${c} já foi enviada ao cliente: ela não pode ser excluída, só cancelada pela tela de propostas.`;
   if (erro === "estado_mudou") return `A proposta ${c} mudou de situação agora há pouco; nada foi excluído. Confira o status e peça de novo se ainda quiser.`;
   if (erro === "assinatura_ativa") return `A assinatura da proposta ${c} ainda está ativa na ClickSign e não deu para cancelar agora. Tente de novo em alguns minutos.`;
   if (erro === "nao_excluivel") return `A proposta ${c} está ${typeof body.estado === "string" ? body.estado.toLowerCase() : "num estado"} que não permite exclusão. Cancele a assinatura pela tela antes.`;
   if (erro === "MODULE_DISABLED") return "Propostas estão desligadas para a sua imobiliária. Nada foi alterado.";
-  return `O sistema não confirmou ${f.operacao === "excluir" ? "a exclusão" : "a duplicação"} da proposta ${c}. Nada foi alterado pelo Max.`;
+  return `O sistema não confirmou ${f.operacao === "excluir" ? "a exclusão" : "a duplicação"} da proposta ${c}. Nada foi alterado pelo ${nomeDoAgente()}.`;
 }
 
 export async function conduzirGestao(f: FluxoGestao, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {

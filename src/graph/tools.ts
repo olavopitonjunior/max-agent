@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled } from '@/lib/runtime/rollout';
 import type { LlmTool } from "@/lib/llm";
 import type { Capability } from "./policy";
@@ -361,7 +362,7 @@ export const TEXTO_CANCELADO = "Beleza, não criei nada.";
  */
 export function textoSemPermissao(args: Pick<PendingAction["args"], "tipo" | "natureza" | "finalidade">): string {
   return (
-    `Criar ${descreverPendencia(args)} pelo Max não está liberado para você. ` +
+    `Criar ${descreverPendencia(args)} pelo ${nomeDoAgente()} não está liberado para você. ` +
     "Nada foi criado. Dá pra fazer pelo sistema, ou fala com quem administra a conta."
   );
 }
@@ -756,7 +757,7 @@ export const CRIAR_ATIVIDADE = escritaDeAtividade(
 export const COMENTAR_ATIVIDADE = escritaDeAtividade(
   "comentar_atividade",
   "Propõe comentar numa atividade. Só registra o pedido; a pessoa confirma com 'sim'. " +
-    "Se ela não disse o texto, deixe texto vazio: o Max pergunta.",
+    `Se ela não disse o texto, deixe texto vazio: o ${nomeDoAgente()} pergunta.`,
   { numero: NUMERO_DA_ATIVIDADE, texto: { type: "string", description: "O comentário, como a pessoa disse. Opcional." } },
   ["numero"],
   2,
@@ -775,7 +776,7 @@ export const CONCLUIR_ATIVIDADE = escritaDeAtividade(
 export const RECUSAR_ATIVIDADE = escritaDeAtividade(
   "recusar_atividade",
   "Propõe recusar uma atividade atribuída à pessoa, devolvendo-a a quem a passou. Precisa de motivo (mín. 3 caracteres). " +
-    "Só registra o pedido; a pessoa confirma com 'sim'. Se ela não disse o motivo, deixe motivo vazio: o Max pergunta.",
+    `Só registra o pedido; a pessoa confirma com 'sim'. Se ela não disse o motivo, deixe motivo vazio: o ${nomeDoAgente()} pergunta.`,
   { numero: NUMERO_DA_ATIVIDADE, motivo: { type: "string", description: "Por que recusa, como a pessoa disse. Opcional." } },
   ["numero"],
   4,
@@ -992,7 +993,7 @@ export function textoCriacaoIndisponivel(modo: Exclude<ModoDeCriacao, "disponive
   }
   if (falhaTransitoria) return TEXTO_INDISPONIVEL_AGORA;
   return (
-    "Criar formulário ou proposta pelo Max não está disponível para você " +
+    `Criar formulário ou proposta pelo ${nomeDoAgente()} não está disponível para você ` +
     "agora. Nada foi criado — dá pra criar pelo sistema."
   );
 }

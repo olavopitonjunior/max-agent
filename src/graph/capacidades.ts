@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { Capability } from "./policy";
 import { normalizar } from "./tools";
 import { envioLigado } from "./credito";
@@ -120,7 +121,7 @@ export function pedeAcaoForaDoMax(texto: string): "contrato" | "cobranca" | null
 /** `linkDoNegocio`: o negócio de que a conversa acabou de tratar, quando há. */
 export function textoForaDoMax(tipo: "contrato" | "cobranca", linkDoNegocio?: string | null): string {
   const tela = linkDoNegocio ? `pela tela do negócio: ${linkDoNegocio}` : "pela tela do negócio, no sistema.";
-  if (tipo === "cobranca") return `Cobrança não é feita pelo Max. Se você tiver permissão, faça ${tela}`;
+  if (tipo === "cobranca") return `Cobrança não é feita pelo ${nomeDoAgente()}. Se você tiver permissão, faça ${tela}`;
   return `Contrato eu não gero, não edito nem envio para assinatura. Se você tiver permissão, faça ${tela}\n` +
     "Quando o contrato for assinado por todos, eu te aviso por aqui (se o aviso estiver ligado na sua imobiliária).";
 }

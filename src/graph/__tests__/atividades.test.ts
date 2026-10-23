@@ -7,7 +7,7 @@ import {
   iniciarAtividade,
   lerVencimento,
   TEXTO_ATIVIDADE_INDISPONIVEL,
-  TEXTO_ATIVIDADE_NAO_LIBERADA,
+  textoAtividadeNaoLiberada,
   textoDoErro,
   type FluxoAtividade,
 } from "../atividades";
@@ -76,7 +76,7 @@ describe("sem activity.write nada escreve", () => {
     for (const operacao of ["criar", "comentar", "concluir", "recusar"] as const) {
       const r = iniciarAtividade({ operacao, alvo: ALVO, tipo: "ligacao", titulo: "x", vencimento: "2026-11-01", texto: "oi", motivo: "não posso" }, ctx("", { policy: SEM }));
       expect(r.fluxo).toBeNull();
-      expect(r.reply).toBe(TEXTO_ATIVIDADE_NAO_LIBERADA);
+      expect(r.reply).toBe(textoAtividadeNaoLiberada());
     }
   });
 
@@ -85,7 +85,7 @@ describe("sem activity.write nada escreve", () => {
     const d = deps({ status: 200, body: {} });
     const r = await conduzirAtividade(f, ctx("sim", { policy: SEM }), d);
     expect(d.acao).not.toHaveBeenCalled();
-    expect("reply" in r && r.reply).toBe(TEXTO_ATIVIDADE_NAO_LIBERADA);
+    expect("reply" in r && r.reply).toBe(textoAtividadeNaoLiberada());
   });
 
   it("nenhuma tool de atividade cita ou contata parte/cliente", () => {
@@ -291,7 +291,7 @@ describe("payload de botão atv:", () => {
     const ler = lerCom([{ id: "atv_1", titulo: "X" }]);
     const r = await rotearBotaoDeAtividade({ payload: "atv:atv_1:concluir", ctx: ctx("Concluir", { policy: SEM }), identity: usuario, ler });
     expect(ler).not.toHaveBeenCalled();
-    expect(r).toMatchObject({ reply: TEXTO_ATIVIDADE_NAO_LIBERADA, fluxo: null });
+    expect(r).toMatchObject({ reply: textoAtividadeNaoLiberada(), fluxo: null });
   });
 
   it("NEGADO: corretor sem login não lê nem escreve", async () => {

@@ -21,6 +21,7 @@
  * Fora disso a mensagem segue para a conversa normal.
  */
 
+import { nomeDoAgente } from "./deploy-profile";
 import { query } from "./db";
 import { enqueue } from "./outbox";
 import { log } from "./log";
@@ -244,9 +245,9 @@ export async function repassarDesconhecido(
     recipientName: process.env.MAX_ESCALATION_NAME || "equipe",
     title: "Mensagem de número sem cadastro",
     body: org
-      ? `${quem} (+${inbound.fromPhone}), que recebeu aviso da ${org.org_name}, escreveu ao Max ` +
+      ? `${quem} (+${inbound.fromPhone}), que recebeu aviso da ${org.org_name}, escreveu ao ${nomeDoAgente()} ` +
         `de um número sem cadastro:\n\n${texto}`
-      : `${quem} (+${inbound.fromPhone}) escreveu ao Max de um número que nenhuma ` +
+      : `${quem} (+${inbound.fromPhone}) escreveu ao ${nomeDoAgente()} de um número que nenhuma ` +
         `imobiliária reconhece:\n\n${texto}`,
     linkUrl: null,
     dealId: null,

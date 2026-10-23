@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { ContextoDoTurno, DepsDoFluxo, Fluxo, PassoDoFluxo } from "./fluxos";
 import { lerConfirmacao } from "./tools";
 
@@ -75,8 +76,8 @@ function resposta(f: Fluxo | null, reply: string, evento: string): Resposta {
 
 // ─── Textos fixos ─────────────────────────────────────────────────────────
 
-export const TEXTO_ATIVIDADE_NAO_LIBERADA =
-  "Gerenciar atividades pelo Max não está liberado para você. Nada foi alterado; faça pela tela de atividades do sistema.";
+export const textoAtividadeNaoLiberada = (): string =>
+  `Gerenciar atividades pelo ${nomeDoAgente()} não está liberado para você. Nada foi alterado; faça pela tela de atividades do sistema.`;
 export const TEXTO_ATIVIDADE_SEM_VERIFICAR =
   "Não consegui validar sua permissão agora. Nada foi alterado; tente de novo em instantes.";
 /** A resposta neutra: a mesma para id malformado, outra org e inexistente. Não revela existência. */
@@ -144,7 +145,7 @@ export function atividadePermitida(ctx: Pick<ContextoDoTurno, "policy" | "politi
 function recusaDePermissao(ctx: Pick<ContextoDoTurno, "politicaIndisponivel">): Resposta {
   return resposta(
     null,
-    ctx.politicaIndisponivel ? TEXTO_ATIVIDADE_SEM_VERIFICAR : TEXTO_ATIVIDADE_NAO_LIBERADA,
+    ctx.politicaIndisponivel ? TEXTO_ATIVIDADE_SEM_VERIFICAR : textoAtividadeNaoLiberada(),
     ctx.politicaIndisponivel ? "atividade_politica_indisponivel" : "atividade_sem_politica"
   );
 }
@@ -287,7 +288,7 @@ export function textoDoErro(op: OperacaoDeAtividade, status: number, body: Recor
   const razao = String(body.reason ?? "");
   const alvo = op === "criar" ? "o negócio" : "a atividade";
   if (status === 403) {
-    if (razao === "politica_nao_concede" || erro === "Forbidden") return TEXTO_ATIVIDADE_NAO_LIBERADA;
+    if (razao === "politica_nao_concede" || erro === "Forbidden") return textoAtividadeNaoLiberada();
     return op === "criar"
       ? "Seu perfil no sistema não permite criar atividade nesse negócio. Nada foi criado."
       : `Seu perfil no sistema não permite essa ação na atividade. Nada foi alterado.`;
@@ -316,7 +317,7 @@ export function textoDoErro(op: OperacaoDeAtividade, status: number, body: Recor
       : "O sistema não aceitou os dados do pedido. Confira e tente de novo; nada foi alterado.";
   }
   // 5xx/timeout nunca chegam aqui: `acao.ts` os devolve como null (escrita incerta, tratada em `conduzirAtividade`).
-  return `O sistema não confirmou ${op === "criar" ? "a criação" : "a alteração"}. Nada foi alterado pelo Max.`;
+  return `O sistema não confirmou ${op === "criar" ? "a criação" : "a alteração"}. Nada foi alterado pelo ${nomeDoAgente()}.`;
 }
 
 function textoDeSucesso(f: FluxoAtividade): string {
@@ -352,7 +353,7 @@ export async function conduzirAtividade(f: FluxoAtividade, ctx: ContextoDoTurno,
     if (ctx.politicaIndisponivel) {
       return resposta({ ...f, etapa: f.etapa === "texto" ? "texto" : "resumo" }, TEXTO_ATIVIDADE_SEM_VERIFICAR, "atividade_politica_indisponivel");
     }
-    return resposta(null, TEXTO_ATIVIDADE_NAO_LIBERADA, "atividade_sem_politica");
+    return resposta(null, textoAtividadeNaoLiberada(), "atividade_sem_politica");
   }
 
   if (f.etapa === "texto") {
