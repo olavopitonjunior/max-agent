@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Capability } from "../policy";
 import { autorizarChamada } from "../despachante";
-import { ferramentasDoTurno, REGISTRO_DE_TOOLS } from "../tools";
+import { ferramentasDoTurno, pedeAtividade, REGISTRO_DE_TOOLS } from "../tools";
 import {
   conduzirAtividade,
   iniciarAtividade,
@@ -340,5 +340,43 @@ describe("payload de botão atv:", () => {
     expect(a.reply).toContain("já está concluída");
     const b = await rotearBotaoDeAtividade({ payload: "atv:atv_1:comentar", ctx: ctx("x"), identity: usuario, ler: lerCom(encerrada) });
     expect(b.fluxo).toMatchObject({ operacao: "comentar" });
+  });
+});
+
+describe("fix round 1", () => {
+  it("escrita incerta: NÃO mantém a chave e guia para o SIM; o SIM reconcilia com a MESMA chave e fecha o fluxo", async () => {
+    const f = iniciarAtividade({ operacao: "concluir", alvo: ALVO }, ctx("")).fluxo as FluxoAtividade;
+    const r1 = await conduzirAtividade(f, ctx("sim", { messageId: "m-a" }), deps(null));
+    const preso = (r1 as { fluxo: FluxoAtividade }).fluxo;
+    const nao = await conduzirAtividade(preso, ctx("não"), deps(null));
+    const aposNao = (nao as { fluxo: FluxoAtividade }).fluxo;
+    expect(aposNao.chave?.valor).toBe("m-a");
+    expect((nao as { reply: string }).reply).toContain("Responda SIM para eu conferir");
+    const d = deps({ status: 200, body: { ok: true } });
+    const fim = await conduzirAtividade(aposNao, ctx("sim", { messageId: "m-z" }), d);
+    expect(d.acao).toHaveBeenCalledWith("activity.complete", { atividade_id: "atv_1" }, "m-a");
+    expect((fim as { fluxo: unknown }).fluxo).toBeNull();
+  });
+
+  it("vencimento: a descrição da tool traz a data de hoje em America/Sao_Paulo (por turno)", () => {
+    // 2026-10-24T01:00Z ainda é 23/10 em São Paulo.
+    const agora = Date.parse("2026-10-24T01:00:00Z");
+    const { entradas } = ferramentasDoTurno({ policy: COM, texto: "cria uma atividade", identity: usuario, agora });
+    const criar = entradas.find((e) => e.nome === "criar_atividade")!;
+    const venc = (criar.def.parameters as { properties: Record<string, { description: string }> }).properties.vencimento!.description;
+    expect(venc).toContain("Hoje é 2026-10-23");
+    expect(venc).toContain("-03:00");
+  });
+
+  it("409 NO_RETURN_TARGET e NEWTON_CLOSED têm texto próprio", () => {
+    expect(textoDoErro("recusar", 409, { error: "NO_RETURN_TARGET" })).toMatch(/para quem devolver/);
+    expect(textoDoErro("concluir", 409, { error: "NEWTON_CLOSED" })).toMatch(/Newton/);
+  });
+
+  it("'a proposta foi recusada' não oferece escrita de atividade; 'conclui a 2' e 'recusa a atividade' sim", () => {
+    expect(pedeAtividade("a proposta foi recusada")).toBe(false);
+    expect(pedeAtividade("o cliente comentou sobre o contrato")).toBe(false);
+    expect(pedeAtividade("conclui a 2")).toBe(true);
+    expect(pedeAtividade("recusa a atividade 3")).toBe(true);
   });
 });

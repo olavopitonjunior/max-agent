@@ -700,7 +700,14 @@ export const TOOLS_EXTENDIDAS: ToolDef[] = EXTENDED_READS.map((e,index)=>({nome:
  * da lista anterior (atividades; negócios, no `criar_atividade`). Ninguém é cobrado nem contatado:
  * é atividade INTERNA da imobiliária.
  */
-const PEDE_ATIVIDADE = /\b(atividades?|tarefas?|lembretes?|agenda|compromissos?)\b|\b(conclu\w*|finaliz\w*|recus\w*|coment\w*)\b/i;
+const PALAVRA_DE_ATIVIDADE = /\b(atividades?|tarefas?|pendencias?|lembretes?|agenda|compromissos?)\b/;
+// Verbo solto ("conclui a 2", depois de uma lista) só vale sem OUTRO objeto na frase: "a proposta foi recusada" não é atividade.
+const OUTRO_OBJETO = /\b(propostas?|contratos?|formularios?|fichas?|cobrancas?|captacoes?|captacao|assinaturas?|credito|certidoes?|certidao)\b/;
+const VERBO_DE_ATIVIDADE_SOLTO = /\b(conclu\w*|finaliz\w*|recus\w*|coment\w*)\b/;
+export function pedeAtividade(texto: string): boolean {
+  const t = normalizar(texto);
+  return PALAVRA_DE_ATIVIDADE.test(t) || (VERBO_DE_ATIVIDADE_SOLTO.test(t) && !OUTRO_OBJETO.test(t));
+}
 const NUMERO_DA_ATIVIDADE = {
   type: "integer",
   minimum: 1,
@@ -724,7 +731,7 @@ function escritaDeAtividade(
     confirmacao: true,
     refs: { consome },
     prioridade,
-    combina: (t) => PEDE_ATIVIDADE.test(normalizar(t)),
+    combina: (t) => pedeAtividade(t),
     def: { name: nome, description, parameters: { type: "object", properties, required, additionalProperties: false } },
   };
 }
@@ -875,12 +882,35 @@ export function selecionarTools(params: {
  * de desambiguação no meio. Continua exigindo política e identidade, e a
  * criação continua exigindo o "sim".
  */
+/** Data de hoje (America/Sao_Paulo, AAAA-MM-DD) e o fuso: o modelo não tem relógio. */
+export function dataDeHojeEmSaoPaulo(agora: number = Date.now()): string {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(agora));
+}
+
+/** Só `criar_atividade` muda por turno: a descrição do `vencimento` ganha a data de hoje e o fuso. */
+function comDataDeHoje(e: EntradaDeEscrita, agora?: number): EntradaDeEscrita {
+  if (e.nome !== "criar_atividade") return e;
+  const params = e.def.parameters as { properties: Record<string, { description?: string }> };
+  const venc = params.properties.vencimento;
+  if (!venc) return e;
+  const hoje = dataDeHojeEmSaoPaulo(agora);
+  return {
+    ...e,
+    def: { ...e.def, parameters: { ...params, properties: { ...params.properties, vencimento: {
+      ...venc,
+      description: `${venc.description ?? ""} Hoje é ${hoje} (America/Sao_Paulo, fuso -03:00). Converta "amanhã", "sexta" etc. a partir dessa data; com hora, use o fuso -03:00 (ex.: ${hoje}T14:00:00-03:00).`.trim(),
+    } } } },
+  };
+}
+
 export function ferramentasDoTurno(params: {
   policy: Capability[];
   texto: string;
   identity: Candidate;
   /** O pedido que o Max deixou em aberto com uma pergunta (`pedidoEmAberto`). */
   textoAnterior?: string | null;
+  /** Relógio do turno (testes); o padrão é agora. Alimenta a data na descrição do `vencimento`. */
+  agora?: number;
 }): { entradas: EntradaDeTool[]; cortadas: number } {
   const escrita = REGISTRO_DE_TOOLS.filter(
     (e): e is EntradaDeEscrita =>
@@ -889,7 +919,7 @@ export function ferramentasDoTurno(params: {
       (e.combina(params.texto) || (!!params.textoAnterior && e.combina(params.textoAnterior)))
   );
   const leitura = selecionarTools({ policy: params.policy, texto: params.texto, orgId: params.identity.orgId });
-  return { entradas: [...escrita, ...leitura.tools], cortadas: leitura.cortadas };
+  return { entradas: [...escrita.map((e) => comDataDeHoje(e, params.agora)), ...leitura.tools], cortadas: leitura.cortadas };
 }
 
 /**

@@ -11,7 +11,7 @@ import { getControl, assertBotWrite } from "@/lib/runtime/handoff";
 import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { rotearBotaoDeAtividade } from "@/lib/atividade-botao";
-import { iniciarAtividade, TEXTO_ATIVIDADE_NAO_LIBERADA, type OperacaoDeAtividade } from "./atividades";
+import { iniciarAtividade, textoDeOcupado, TEXTO_ATIVIDADE_NAO_LIBERADA, type OperacaoDeAtividade } from "./atividades";
 import { resolverReferencia } from "./referencias";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
@@ -936,7 +936,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   if (payloadDeAtividade?.startsWith("atv:")) {
     const ocupado = escritaEmAberto || (coletando && atual?.kind !== "atividade");
     const reply = ocupado
-      ? "Antes, vamos terminar o pedido em andamento (responda ou diga \"cancelar\"). Depois toque no botão de novo."
+      ? (atual?.kind === "atividade" && atual.chave ? textoDeOcupado(atual) : "Antes, vamos terminar o pedido em andamento (responda ou diga \"cancelar\"). Depois toque no botão de novo.")
       : null;
     const toque = reply === null
       ? await rotearBotaoDeAtividade({
@@ -1640,7 +1640,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       });
       if (!auth.ok) return responder(TEXTO_ATIVIDADE_NAO_LIBERADA, auth.motivo);
       if (state.fluxo) {
-        return responder("Você já tem um pedido em andamento comigo. Continue por aqui, ou diga CANCELAR para começar outro.", "fluxo_em_andamento");
+        return responder(textoDeOcupado(state.fluxo), "fluxo_em_andamento");
       }
       const alvo = resolverReferencia(state.referencias, chamada.args.numero, {
         agora: Date.now(), tipo: operacaoDeAtividade === "criar" ? "negocio" : "atividade",

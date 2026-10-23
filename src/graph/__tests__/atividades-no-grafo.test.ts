@@ -118,3 +118,26 @@ describe("tool concluir_atividade no grafo", () => {
     expect(s.reply).toContain("Não achei essa atividade");
   });
 });
+
+describe("escrita incerta no grafo", () => {
+  it("incerta -> novo toque guia para o SIM -> SIM fecha com a mesma chave -> novo toque funciona", async () => {
+    leitura.mockResolvedValue({ items: [{ id: "atv_1", titulo: "Ligar" }], truncated: false });
+    const toque = await run("Concluir", {}, "m1", "atv:atv_1:concluir");
+    acao.mockResolvedValueOnce(null);
+    const incerto = await run("sim", { fluxo: toque.fluxo }, "m-a");
+    expect(incerto.fluxo).toMatchObject({ chave: { valor: "m-a" } });
+
+    const outro = await run("Concluir", { fluxo: incerto.fluxo }, "m2", "atv:atv_2:concluir");
+    expect(outro.reply).toContain("Responda SIM para eu conferir");
+    expect(outro.fluxo).toMatchObject({ chave: { valor: "m-a" } });
+
+    acao.mockResolvedValueOnce({ status: 200, body: { ok: true } });
+    const fim = await run("sim", { fluxo: outro.fluxo }, "m3");
+    expect(acao).toHaveBeenLastCalledWith(expect.objectContaining({ verb: "activity.complete", idempotencyKey: "m-a" }));
+    expect(fim.fluxo ?? null).toBeNull();
+
+    leitura.mockResolvedValue({ items: [{ id: "atv_2", titulo: "Visitar" }], truncated: false });
+    const novo = await run("Concluir", { fluxo: null }, "m4", "atv:atv_2:concluir");
+    expect(novo.fluxo).toMatchObject({ alvo: { id: "atv_2" } });
+  });
+});

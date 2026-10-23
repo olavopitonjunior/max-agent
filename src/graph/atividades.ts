@@ -82,6 +82,10 @@ export const TEXTO_ATIVIDADE_SEM_VERIFICAR =
 /** A resposta neutra: a mesma para id malformado, outra org e inexistente. Não revela existência. */
 export const TEXTO_ATIVIDADE_INDISPONIVEL = "Essa atividade não está mais disponível.";
 
+/** Escrita incerta pendente: a chave fica, e só um SIM (ou a conferência na tela) fecha o assunto. */
+export const TEXTO_ATIVIDADE_CONFERIR =
+  "Responda SIM para eu conferir o pedido anterior antes de começar outro. Ele pode já ter sido registrado; não vou repetir a escrita.";
+
 const SIM_OU_NAO = "\n\nResponda SIM para confirmar ou NÃO para parar.";
 
 /** Cita um texto da pessoa/servidor sem deixar quebra de linha ou aspas soltas bagunçarem o resumo. */
@@ -294,6 +298,8 @@ export function textoDoErro(op: OperacaoDeAtividade, status: number, body: Recor
   if (status === 409) {
     if (erro === "ALREADY_DONE") return "Essa atividade já estava concluída. Nada foi alterado.";
     if (erro === "CANCELED") return "Essa atividade foi cancelada. Nada foi alterado.";
+    if (erro === "NO_RETURN_TARGET") return "Não há para quem devolver essa atividade, então não dá para recusá-la. Nada foi alterado.";
+    if (erro === "NEWTON_CLOSED") return "O pedido ao Newton dessa atividade já foi encerrado. Nada foi alterado.";
     return `O estado d${alvo} mudou agora há pouco. Confira no sistema e peça de novo se ainda quiser. Nada foi alterado.`;
   }
   if (status === 422) {
@@ -309,7 +315,7 @@ export function textoDoErro(op: OperacaoDeAtividade, status: number, body: Recor
       ? "O sistema não aceitou o vencimento. Diga a data de novo; nada foi criado."
       : "O sistema não aceitou os dados do pedido. Confira e tente de novo; nada foi alterado.";
   }
-  if (status === 503) return "As alterações pelo Max estão pausadas no momento. Nada foi alterado.";
+  // 5xx/timeout nunca chegam aqui: `acao.ts` os devolve como null (escrita incerta, tratada em `conduzirAtividade`).
   return `O sistema não confirmou ${op === "criar" ? "a criação" : "a alteração"}. Nada foi alterado pelo Max.`;
 }
 
@@ -337,7 +343,7 @@ export async function conduzirAtividade(f: FluxoAtividade, ctx: ContextoDoTurno,
   if (confirmacao === "nao" || CANCELAR.test(ctx.texto.trim())) {
     // Com escrita incerta, a chave fica: o pedido pode já ter passado.
     return f.chave
-      ? resposta({ ...f, etapa: "resumo", atualizadoEm: ctx.agora }, "Parei por aqui. O pedido anterior pode já ter sido registrado: confira na tela de atividades.", "atividade_cancelada")
+      ? resposta({ ...f, etapa: "confirmacao", atualizadoEm: ctx.agora }, TEXTO_ATIVIDADE_CONFERIR, "atividade_cancelada")
       : resposta(null, "Parei por aqui. Nada foi alterado.", "atividade_cancelada");
   }
 
@@ -362,7 +368,8 @@ export async function conduzirAtividade(f: FluxoAtividade, ctx: ContextoDoTurno,
   // Outro assunto libera o turno; a chave (se houver) fica no fluxo para o próximo SIM.
   if (confirmacao === "nenhum") return { liberar: true, fluxo: f, evento: "atividade_outro_assunto" };
   // `resumo` (rebaixado por interrupção): o SIM só reapresenta, nunca escreve.
-  if (f.etapa === "resumo" || confirmacao !== "sim") return resumo({ ...f, atualizadoEm: ctx.agora });
+  // Com a chave em mãos (escrita incerta) o SIM SEMPRE reconcilia: mesma chave, o servidor devolve a resposta guardada.
+  if ((f.etapa === "resumo" && !f.chave) || confirmacao !== "sim") return resumo({ ...f, atualizadoEm: ctx.agora });
 
   const chave = f.chave ?? { verbo: VERBO_DE_ATIVIDADE[f.operacao], valor: ctx.messageId };
   const emCurso: FluxoAtividade = { ...f, chave, atualizadoEm: ctx.agora };
@@ -379,4 +386,11 @@ export async function conduzirAtividade(f: FluxoAtividade, ctx: ContextoDoTurno,
 /** Interrupção do turn: o SIM seguinte não pode escrever sem o resumo ser mostrado de novo. */
 export function rebaixarAtividade(f: FluxoAtividade): FluxoAtividade {
   return f.chave ? f : { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
+}
+
+/** Texto de "já há um pedido em andamento": com escrita incerta guia para o SIM (cancelar não destrava). */
+export function textoDeOcupado(fluxo: { kind: string; chave?: unknown } | null | undefined): string {
+  return fluxo?.kind === "atividade" && fluxo.chave
+    ? TEXTO_ATIVIDADE_CONFERIR
+    : "Você já tem um pedido em andamento comigo. Continue por aqui, ou diga CANCELAR para começar outro.";
 }
