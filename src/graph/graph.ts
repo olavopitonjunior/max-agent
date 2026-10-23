@@ -112,7 +112,7 @@ import {
   despacharLeituras,
   type ResultadoDeTool,
 } from "./despachante";
-import type { MapaDeReferencias } from "./referencias";
+import { renderizarNegociosSelecionados, type MapaDeReferencias } from "./referencias";
 import {
   conduzirFluxo,
   fluxoExpirou,
@@ -250,6 +250,7 @@ function blindarCredito(state: MaxStateType, update: MaxUpdate): MaxUpdate {
 
 export const MaxState = Annotation.Root({
   queryOptions: Annotation<QueryOptions | null>({ reducer: (_p,n) => n, default: () => null }),
+  selectedDealQuery: Annotation<string | null>({ reducer: (_p,n) => n, default: () => null }),
   marketingPending: Annotation<MarketingPending | null>({ reducer: (_p,n) => n, default: () => null }),
   inbound: Annotation<InboundMessage>,
   /** Resolvida ANTES do grafo — é ela que determina o `thread_id`. */
@@ -1436,8 +1437,20 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   if (state.toolRounds > 0 && clarification && state.toolResults.length === 1) {
     const pending: QueryOptions = { subjectKey: stageSubject, createdAt: Date.now(), options: clarification.options, offset: 0 };
     const reply = pending.options.length ? renderQueryOptions(pending) : "Não consegui obter as etapas disponíveis para esta consulta. Tente novamente mais tarde.";
-    return { queryOptions: pending.options.length ? pending : null, referencias: null, restoDaResposta: null,
+    return { queryOptions: pending.options.length ? pending : null, selectedDealQuery: null, referencias: null, restoDaResposta: null,
       reply, messages: [{ role: "assistant", content: reply }] };
+  }
+  const singleDeal = state.toolResults.length === 1 && state.toolResults[0].tool === "listar_negocios" ? state.toolResults[0] : null;
+  const selectedDeal = state.selectedDealQuery === stageSubject;
+  if (state.toolRounds > 0 && singleDeal && !singleDeal.clarification && (selectedDeal || singleDeal.items?.length === 0)) {
+    const completed = [...state.toolLog].reverse().find(entry => entry.name === "listar_negocios" && entry.outcome === "ok");
+    const stage = typeof completed?.args.estado === "string" ? completed.args.estado.trim() : "";
+    const draft = singleDeal.items === null || !completed
+      ? "Não consegui consultar seus negócios agora. Tente novamente mais tarde."
+      : singleDeal.items.length === 0
+        ? `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`
+        : renderizarNegociosSelecionados(singleDeal.items, state.referencias, singleDeal.truncated);
+    return { selectedDealQuery: null, queryOptions: null, restoDaResposta: null, draft };
   }
   if (state.toolRounds === 0 && state.queryOptions) {
     const pending = state.queryOptions;
@@ -1449,7 +1462,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
         return respond("Essa lista de etapas expirou. Peça uma nova consulta de negócios.", null);
       if (choice.kind === "cancel") return respond("Consulta cancelada.", null);
       if (!state.policy.includes("deal.list")) return respond("Você não tem permissão para consultar negócios pelo Max nesta imobiliária.", null);
-      if (choice.kind === "select") return { queryOptions: null, toolsOferecidas: ["listar_negocios"],
+      if (choice.kind === "select") return { queryOptions: null, selectedDealQuery: stageSubject, toolsOferecidas: ["listar_negocios"],
         pendingToolCalls: [{ name: "listar_negocios", args: choice.stage ? { estado: choice.stage } : {} }],
         messages: [{ role: "user", content: text }] };
       // Scope may change while the capability remains. Never reveal another cached page.
@@ -2371,6 +2384,7 @@ export interface TurnResult {
  * Qualquer outro campo de `MaxState` pertence aqui.
  */
 export const RESET_DO_TURN = {
+    selectedDealQuery: null,
     reply: null,
     halt: null,
     propostaDescartada: false,
