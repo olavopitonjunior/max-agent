@@ -686,8 +686,8 @@ export const LISTAR_PROPOSTAS: ToolDef = {
  */
 const EXTENDED_READS: Array<{nome:string;verb:ScopeQueryVerb;pattern:RegExp;description:string;required?:string[];capability?:Capability;props?:Record<string,unknown>}> = [
  {nome:"listar_notificacoes",verb:"notification.list",pattern:/notific|avisos?/i,description:"Lista metadados das notificações desta pessoa, sem corpo nem título privado."},
- {nome:"listar_atividades",verb:"activity.list",pattern:/atividades?|tarefas?|agenda|atrasad/i,description:"Lista atividades autorizadas. estado: abertas, atrasadas, hoje, 7d ou concluidas. filtro: minhas, atrasadas ou hoje (recorte do servidor).",props:{filtro:{type:"string",enum:["minhas","atrasadas","hoje"],description:"Recorte pedido: só as minhas, só as atrasadas ou só as de hoje. Opcional."}}},
- {nome:"ver_atividade",verb:"activity.get",capability:"activity.list",pattern:/atividades?|tarefas?|agenda|atrasad/i,description:"Mostra uma atividade com notas, responsáveis e comentários, escolhida pelo número da lista de atividades anterior. Se não houver lista, use listar_atividades primeiro.",required:["numero"]},
+ {nome:"listar_atividades",verb:"activity.list",pattern:/atividades?|tarefas?|agenda|atrasad|\bhoje\b|amanh[ãa]|venc[ei]|prazos?/i,description:"Lista atividades autorizadas. estado: abertas, atrasadas, hoje, 7d ou concluidas. filtro: minhas, atrasadas ou hoje (recorte do servidor).",props:{filtro:{type:"string",enum:["minhas","atrasadas","hoje"],description:"Recorte pedido: só as minhas, só as atrasadas ou só as de hoje (\"o que eu tenho pra hoje?\" = hoje). Opcional."}}},
+ {nome:"ver_atividade",verb:"activity.get",capability:"activity.list",pattern:/atividades?|tarefas?|agenda|atrasad|\bhoje\b|amanh[ãa]|venc[ei]|prazos?/i,description:"Mostra uma atividade com notas, responsáveis e comentários, escolhida pelo número da lista de atividades anterior. Se não houver lista, use listar_atividades primeiro.",required:["numero"]},
  {nome:"resumo_carteira",verb:"metrics.get",pattern:/resumo|quantos|quantas|metric|m[eé]trica|carteira/i,description:"Conta negócios, propostas e contratos visíveis desta pessoa, sem dados financeiros."},
  {nome:"listar_imoveis",verb:"property.list",pattern:/im[oó]ve[il]|apartament|casas?|propriedad/i,description:"Lista imóveis autorizados com características públicas. Nunca revela proprietário, endereço completo ou preço de terceiro."},
  {nome:"detalhar_imovel",verb:"property.detail",pattern:/im[oó]vel|apartament|propriedad/i,description:"Consulta características atuais de imóvel autorizado selecionado pelo número da lista de imóveis anterior.",required:["numero"]},
@@ -926,6 +926,8 @@ export function ferramentasDoTurno(params: {
   identity: Candidate;
   /** O pedido que o Max deixou em aberto com uma pergunta (`pedidoEmAberto`). */
   textoAnterior?: string | null;
+  /** O pedido que este refino curto continua (`pedidoDeRefino`). Só a LEITURA herda. */
+  textoDeRefino?: string | null;
   /** Relógio do turno (testes); o padrão é agora. Alimenta a data na descrição do `vencimento`. */
   agora?: number;
   /** Packs do perfil (testes); o padrão é `packsDoPerfil()`. */
@@ -941,13 +943,59 @@ export function ferramentasDoTurno(params: {
   const leiturasDosPacks = registro.filter(
     (e): e is EntradaDeLeitura => e.tipo === "leitura" && !TOOLS_DE_LEITURA.includes(e)
   );
-  const leitura = selecionarTools({
+  const selecionar = (texto: string) => selecionarTools({
     policy: params.policy,
-    texto: params.texto,
+    texto,
     orgId: params.identity.orgId,
     catalogo: leiturasDosPacks.length ? [...TOOLS_DE_LEITURA, ...leiturasDosPacks] : undefined,
   });
+  const leitura = params.textoDeRefino && !ehPedidoDeCriacao(params.texto)
+    ? unirLeituras(selecionar(params.texto), selecionar(params.textoDeRefino))
+    : selecionar(params.texto);
   return { entradas: [...escrita.map((e) => comDataDeHoje(e, params.agora)), ...leitura.tools], cortadas: leitura.cortadas };
+}
+
+/** Leituras do turno ∪ leituras herdadas do pedido anterior, na ordem de prioridade e sob o mesmo teto. */
+function unirLeituras(
+  a: { tools: ToolDef[]; cortadas: number },
+  b: { tools: ToolDef[]; cortadas: number }
+): { tools: ToolDef[]; cortadas: number } {
+  const vistas = new Set<string>();
+  const todas = [...a.tools, ...b.tools]
+    .filter((t) => !vistas.has(t.nome) && !!vistas.add(t.nome))
+    .sort((x, y) => x.prioridade - y.prioridade);
+  return {
+    tools: todas.slice(0, TETO_DE_TOOLS),
+    cortadas: Math.max(a.cortadas, b.cortadas) + Math.max(0, todas.length - TETO_DE_TOOLS),
+  };
+}
+
+const COMECO_DE_REFINO = /^(e|mas|s[oó]|somente|apenas|agora|tamb[eé]m|mostra|quais eram|qual era|[oa]s (de|do|da|que|em))(?=[\s,?!.]|$)/i;
+const FIM_DE_REFINO = /\b(mesmo|de novo|novamente)\s*[?!.]*$/i;
+const TETO_DO_REFINO = 60;
+
+/**
+ * O pedido que um refino curto continua: "e em contrato?", "só os de venda",
+ * "quais eram mesmo?" depois de "meus negócios".
+ *
+ * Evals do Newton de 23/10: sem isso o prefiltro olhava só o refino, nenhuma
+ * leitura entrava, e o modelo ou perguntava de novo ou repetia a lista velha
+ * sem consultar. Devolve a última fala da pessoa ANTES desta (o `history` não
+ * inclui a mensagem do turno). Só a leitura usa: escrita herda apenas pelo
+ * `pedidoEmAberto`, que exige uma pergunta do agente no meio.
+ */
+export function pedidoDeRefino(
+  texto: string,
+  history: readonly { role: string; content: unknown }[]
+): string | null {
+  const t = texto.trim();
+  if (!t || t.length > TETO_DO_REFINO) return null;
+  if (!COMECO_DE_REFINO.test(t) && !FIM_DE_REFINO.test(t)) return null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (m.role === "user" && typeof m.content === "string" && m.content.trim()) return m.content;
+  }
+  return null;
 }
 
 /**

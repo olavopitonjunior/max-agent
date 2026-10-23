@@ -60,6 +60,9 @@ import {
   textoSemPermissao,
   modoDeCriacao,
   ehPedidoDeCriacao,
+  escritaPermitida,
+  pedidoDeRefino,
+  TOOLS_DE_ATIVIDADE_ESCRITA,
   textoCriacaoIndisponivel,
   TEXTO_INDISPONIVEL_AGORA,
   TEXTO_CANCELADO,
@@ -1519,6 +1522,13 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     // Vazio na primeira volta; preenchido quando o `tools` já rodou.
     toolResults: state.toolResults,
     credito: creditoLigado(),
+    // Lista atividades sem poder alterá-las: o prompt diz isso, para o modelo
+    // não prometer "vou recusar a 2)" sem tool nenhuma para cumprir.
+    atividades:
+      state.policy.includes("activity.list") &&
+      !TOOLS_DE_ATIVIDADE_ESCRITA.some((e) => escritaPermitida(e, state.identity, state.policy))
+        ? "so_leitura"
+        : undefined,
   });
 
   const userText = textoDoTurno(state).trim() || "(mensagem sem texto)";
@@ -1553,6 +1563,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
           texto: `${userText} ${contextoLeitura}`,
           identity: state.identity,
           textoAnterior: pedidoEmAberto(history),
+          textoDeRefino: pedidoDeRefino(userText, history),
         })
       : { entradas: [], cortadas: 0 };
 

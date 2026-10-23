@@ -286,6 +286,21 @@ Análise de crédito:
 - Nunca diga que enviou, reenviou ou aprovou uma análise: o envio é do
   sistema, só com o SIM no resumo da ficha, e quem decide é a Upestate.`;
 
+/**
+ * Política com `activity.list` e sem `activity.write`: o agente lista
+ * atividades, mas não tem como alterá-las. Evals do Newton de 23/10: sem esta
+ * regra o modelo respondia "vou recusar a 2)" e "consigo comentar" e pedia
+ * motivo e texto, sem tool nenhuma para fazer isso.
+ */
+const ATIVIDADES_SO_LEITURA = `
+
+Atividades:
+- Por aqui você só consulta atividades. Criar, comentar, concluir ou recusar
+  atividade não está liberado nesta conversa.
+- Se pedirem, diga numa frase que por aqui ainda não dá e que isso se faz pela
+  tela de atividades do sistema. Nunca diga que vai fazer, e nunca peça número,
+  motivo ou texto para isso.`;
+
 /** Instrução medida no experimento pareado de intenção de criação. */
 export const CREATION_INTENT_GUIDANCE = "Intenção de criação: identifique primeiro o OBJETO pedido. PROPOSTA de venda ou locação usa tipo=proposta e natureza=venda ou locacao; nunca tipo=venda só porque a proposta é de venda. NEGÓCIO ou FORMULÁRIO de venda usa tipo=venda. Pedir para criar sem enviar ainda continua sendo criação de rascunho, sem envio. Não execute pedidos negados. Não trate o título de teste como nome de cliente.";
 
@@ -493,6 +508,8 @@ export function buildSystemPrompt(params: {
   toolResults?: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] } }[];
   /** Flag `MAX_CREDITO` ligada: entra a regra de crédito. */
   credito?: boolean;
+  /** `so_leitura`: a política lista atividades mas não concede escrita nelas. */
+  atividades?: "so_leitura";
 }): string {
   // ─── BLOCO ESTÁVEL ──────────────────────────────────────────────────────
   // Idêntico para toda pessoa da mesma org, turno após turno. É o que o cache
@@ -515,6 +532,7 @@ export function buildSystemPrompt(params: {
       sem_politica: criacaoIndisponivel(nome),
     }[params.criacao ?? (params.podeEscrever ? "disponivel" : "sem_login")],
   ];
+  if (params.atividades === "so_leitura") parts.push(ATIVIDADES_SO_LEITURA);
   if (params.credito) parts.push(REGRA_CREDITO);
 
   parts.push(`\n\nVocê atende a ${params.orgName}.`);
