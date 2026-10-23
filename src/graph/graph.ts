@@ -1895,6 +1895,13 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
 async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
   const chamadas = state.pendingToolCalls;
   if (chamadas.length === 0) return { pendingToolCalls: [] };
+  const text = textoDoTurno(state);
+  const filterText = text.replace(/\bem\s+(?:(?:um|uma)\s+)?(?:tabela|lista|listagem|formato|detalhes|ordem|texto|resumo|t[oó]picos|json)\b/gi, "");
+  // Affirmative filter phrases exclude projections such as "a etapa atual".
+  const stageHint = /\b(?:na|pela)\s+(?:etapa|fase)\b|\b(?:etapa|fase)\s*:/i.test(text) ||
+    /\bem\s+\S/i.test(filterText);
+  const missing = chamadas.filter(call => stageHint && call.name === "listar_negocios" &&
+    (typeof call.args.estado !== "string" || !call.args.estado.trim()));
 
   /**
    * ⚠️ **A capability é reconferida na EXECUÇÃO, não só na oferta** — agora
@@ -1907,8 +1914,8 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
    * superfície). Mesma classe do `descartarSeVazou`, uma camada acima: lá o
    * campo, aqui o verbo.
    */
-  let { resultados, trilha, referencias } = await despacharLeituras({
-    chamadas,
+  const dispatch = (calls: typeof chamadas) => despacharLeituras({
+    chamadas: calls,
     oferecidas: state.toolsOferecidas,
     policy: state.policy,
     identity: state.identity,
@@ -1916,12 +1923,31 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
     referencias: state.referencias,
     turno: state.inbound.messageId,
   });
+  let prepared = chamadas;
+  const preflightLog: ToolLogEntry[] = [];
+  const blocked: ResultadoDeTool[] = [];
+  if (missing.length) {
+    // One scoped lookup serves all omitted deal filters; sibling reads retain
+    // their original arguments and still pass the dispatcher independently.
+    const refresh = state.toolRounds === 0
+      ? await dispatch([{ name: "listar_negocios", args: { opcoes_etapas: true } }]) : null;
+    const options = refresh?.resultados[0]?.clarification?.options ?? [];
+    const stage = refresh && explicitStage(text, options);
+    preflightLog.push(...(refresh?.trilha ?? missing.map(call => ({ name: call.name, args: call.args, outcome: "aguardando_etapa" }))));
+    prepared = chamadas.flatMap(call => !missing.includes(call) ? [call] : stage
+      ? [{ ...call, args: { ...call.args, estado: stage } }] : []);
+    if (!stage) blocked.push(...missing.map(call => ({ tool: call.name, items: null, truncated: false,
+      clarification: { field: "estado" as const, options } })));
+  }
+  let { resultados, trilha, referencias } = await dispatch(prepared);
+  resultados = [...resultados, ...blocked];
+  trilha = [...preflightLog, ...trilha];
 
   // One bounded repair using only a stage explicitly present in the request AND
   // returned by the scoped server. Every retry goes through all dispatcher gates.
   const clarification = resultados.length === 1 ? resultados[0].clarification : undefined;
   const namedStage = clarification && explicitStage(textoDoTurno(state), clarification.options);
-  if (state.toolRounds === 0 && chamadas.length === 1 && chamadas[0].name === "listar_negocios" &&
+  if (!missing.length && state.toolRounds === 0 && chamadas.length === 1 && chamadas[0].name === "listar_negocios" &&
       namedStage && namedStage !== chamadas[0].args.estado) {
     const corrected = await despacharLeituras({ chamadas: [{ ...chamadas[0], args: { ...chamadas[0].args, estado: namedStage } }],
       oferecidas: state.toolsOferecidas, policy: state.policy, identity: state.identity,
