@@ -54,7 +54,7 @@ describe("etapa pedida com filtro omitido pelo modelo",()=>{
     .mockResolvedValueOnce({text:"Negócio QA. Para a outra consulta informe a etapa.",toolCalls:[],usage});
   scope.mockResolvedValueOnce(invalid).mockResolvedValueOnce({items:[{id:"D1",titulo:"Negócio QA"}],truncated:false});
   const state=await buildGraph().compile().invoke(turn("Liste os negócios de venda e os em Formulário"));
-  expect(state.reply).toContain("Negócio QA");expect(state.referencias?.itens[0].id).toBe("D1");expect(state.queryOptions?.numbered).toBe(false);
+  expect(state.reply).toContain("Negócio QA");expect(state.referencias?.itens[0].id).toBe("D1");expect(state.queryOptions?.numbered).toBeFalsy();
  });
  it.each([{}, {estado:""}, {estado:"   "}])("consulta a etapa canônica antes de buscar negócios: %j",async args=>{
   llm.mockResolvedValueOnce({text:"",toolCalls:[{name:"listar_negocios",args:{...args,limite:10}}],usage});
@@ -117,8 +117,24 @@ describe("etapas reais nas consultas",()=>{
   const state=await buildGraph().compile().invoke(turn("Liste meus negócios de venda em Formulário e informe a etapa de cada um."));
   expect(scope).toHaveBeenCalledTimes(2);
   expect(scope.mock.calls[1][0]).toMatchObject({orgId:"qa-org",subject:{kind:"user",userId:"broker"},args:{estado:"Formulário",limite:10}});
-  expect(state.toolLog.map(x=>x.outcome)).toEqual(["filtro_invalido","ok"]);
+  expect(state.toolLog.map(x=>x.outcome)).toEqual(["opcoes_consulta","ok"]);
   expect(state.usage).toHaveLength(2);
+ });
+});
+
+describe("natureza não é etapa",()=>{
+ it.each(["venda","Vendas","locação","Locações","aluguel","negócios de venda"])("estado=%s vira listagem sem filtro e sem menu",async estado=>{
+  llm.mockResolvedValueOnce({text:"",toolCalls:[{name:"listar_negocios",args:{estado,limite:10}}],usage});
+  scope.mockResolvedValue({items:[{id:"D1",titulo:"Apto 302",etapa:"Contrato"}],truncated:false});
+  const state=await buildGraph().compile().invoke(turn("me mostra os negócios de venda"));
+  expect(scope.mock.calls.map(call=>call[0].args)).toEqual([{limite:10}]);
+  expect(state.toolLog.map(x=>x.outcome)).toEqual(["ok"]);expect(state.reply).not.toContain("Qual etapa");
+ });
+ it("etapa de verdade continua indo como filtro",async()=>{
+  llm.mockResolvedValueOnce({text:"",toolCalls:[{name:"listar_negocios",args:{estado:"Contrato"}}],usage});
+  scope.mockResolvedValue({items:[],truncated:false});
+  await buildGraph().compile().invoke(turn("meus negócios em contrato"));
+  expect(scope.mock.calls.at(-1)?.[0].args).toEqual({estado:"Contrato"});
  });
 });
 

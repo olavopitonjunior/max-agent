@@ -548,7 +548,7 @@ export const LISTAR_NEGOCIOS: ToolDef = {
       properties: {
         estado: {
           type: "string",
-          description: "Filtra por etapa, quando a pessoa nomear uma. Opcional.",
+          description: "Filtra por etapa do processo, quando a pessoa nomear uma. Venda, locação e aluguel NÃO são etapa: nesses casos não preencha. Opcional.",
         },
         limite: {
           type: "integer",
@@ -559,6 +559,42 @@ export const LISTAR_NEGOCIOS: ToolDef = {
     },
   },
 };
+
+const NATUREZA = /^(?:negocios? de )?(?:vendas?|locac(?:ao|oes)|alugue(?:l|is)|aluguel)$/;
+
+/**
+ * `listar_negocios` com a NATUREZA no filtro de etapa (`estado: "venda"`) vira
+ * listagem sem filtro. O servidor não filtra por natureza: com "venda" no
+ * `estado` ele só devolvia o menu de etapas, e "me mostra os de venda" virava
+ * "Qual etapa deseja consultar?" (smoke de 22/10, evals do Newton de 23/10).
+ * Sem o filtro, a lista volta inteira e o modelo separa pela natureza de cada item.
+ */
+export function semNaturezaNaEtapa<T extends { name: string; args: Record<string, unknown> }>(call: T): T {
+  if (call.name !== "listar_negocios" || typeof call.args.estado !== "string") return call;
+  if (!NATUREZA.test(normalizar(call.args.estado))) return call;
+  const { estado: _natureza, ...args } = call.args;
+  return { ...call, args };
+}
+
+const RECORTE_PEDIDO: Record<string, RegExp> = {
+  minhas: /\b(minhas?|meus?|eu|tenho|comigo|pra mim|para mim)\b/,
+  atrasadas: /\b(atrasad\w*|vencid\w*)/,
+  hoje: /\bhoje\b/,
+};
+
+/**
+ * `listar_atividades` só leva o `filtro` que a pessoa pediu com palavras: o
+ * modelo completava "e as atrasadas?" com `filtro: "minhas"` (evals do Newton
+ * de 23/10), e para gerente isso corta a equipe. Recorte não dito sai; o
+ * servidor aplica o próprio padrão.
+ */
+export function semRecorteNaoPedido<T extends { name: string; args: Record<string, unknown> }>(call: T, texto: string): T {
+  if (call.name !== "listar_atividades" || typeof call.args.filtro !== "string") return call;
+  const pedido = RECORTE_PEDIDO[call.args.filtro];
+  if (pedido?.test(normalizar(texto))) return call;
+  const { filtro: _recorte, ...args } = call.args;
+  return { ...call, args };
+}
 
 const PEDE_PENDENCIA =
   /\b(pend[eê]ncia|pendencias|pendente|pendentes|falta|faltando|faltam|travad[oa]|parad[oa]|certid\w*|documentos?)\b/i;
