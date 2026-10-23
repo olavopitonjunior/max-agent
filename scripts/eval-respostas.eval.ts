@@ -684,6 +684,7 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
           ...(t.verbos ?? []).filter((v) => !nomes.includes(v)).map((v) => `não chamou ${v}`),
           ...(t.proibidos ?? []).filter((v) => nomes.includes(v)).map((v) => `chamou ${v}`),
         ];
+        // Sem a chamada, o turno já perde no recall; `args` só pontua quando a tool foi chamada.
         const falhasArgs = t.args ? checkSingleAction(verbos, t.args) : [];
         falhasAcao.push(...falhasArgs);
         const duplicadas=ESCRITAS.filter(v=>nomes.filter(n=>n===v).length>1);
@@ -728,7 +729,7 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
         if (NEWTON) {
           medidasNewton.push({
             caseId: c.nome, fala: t.fala, resposta, esperados: esperadosDoTurno(t), leituras, escritas,
-            argsOk: t.args ? !falhasArgs.length : null, filtrosNaoPedidos: sobraFiltro,
+            argsOk: t.args && verbos.some((v) => v.verbo === t.args!.verbo) ? !falhasArgs.length : null, filtrosNaoPedidos: sobraFiltro,
           });
         }
         const ok = !falhasTexto.length && !falhasAcao.length;

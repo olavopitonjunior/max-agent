@@ -146,7 +146,9 @@ const TOKEN_NUMERICO = /\d[\d.,/:]*\d|\d/g;
 export function numerosSemTool(resposta: string, fala: string, chamadasDeTool: number): string[] {
   if (chamadasDeTool > 0) return [];
   const eco = new Set(fala.match(TOKEN_NUMERICO) ?? []);
-  return (resposta.match(TOKEN_NUMERICO) ?? []).filter((t) => !eco.has(t));
+  // "1) Apto Flores": o índice da lista é numeração da resposta, não dado.
+  const semIndice = resposta.replace(/^(\s*)\d{1,2}\s*[).\-–—]\s/gm, "$1");
+  return (semIndice.match(TOKEN_NUMERICO) ?? []).filter((t) => !eco.has(t));
 }
 
 export function percentil(valores: number[], q: number): number | null {

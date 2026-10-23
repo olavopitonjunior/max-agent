@@ -54,6 +54,10 @@ describe("numerosSemTool", () => {
   it("número que a pessoa escreveu e voltou no texto não conta", () => {
     expect(numerosSemTool("Não achei o negócio 3.", "e o negócio 3?", 0)).toEqual([]);
   });
+  it("índice de lista no começo da linha não é número de negócio", () => {
+    expect(numerosSemTool("1) Apto Flores\n2. Casa Europa\n  3 - Sala", "e os de venda?", 0)).toEqual([]);
+    expect(numerosSemTool("1) Apto Flores — R$ 450.000", "e os de venda?", 0)).toEqual(["450.000"]);
+  });
 });
 
 describe("percentil", () => {

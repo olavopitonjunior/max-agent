@@ -91,6 +91,15 @@ describe("esperadosDoTurno e filtrosNaoPedidos", () => {
     expect(filtrosNaoPedidos([{ verbo: "deal.list", args: { estado: "  " } }, { verbo: "property.list", args: { estado: "venda" } }], t())).toEqual([]);
     expect(filtrosNaoPedidos([{ verbo: "deal.list", args: { estado: "Contrato" } }], turno)).toEqual(["deal.list: estado=Contrato"]);
   });
+  it("activity.list: estado=abertas é o padrão da tool, não filtro", () => {
+    expect(filtrosNaoPedidos([{ verbo: "activity.list", args: { estado: "abertas", filtro: "minhas" } }], t({ filtros: { filtro: ["minhas"] } }))).toEqual([]);
+    expect(filtrosNaoPedidos([{ verbo: "deal.list", args: { estado: "abertas" } }], t())).toEqual(["deal.list: estado=abertas"]);
+  });
+  it("activity.list: atrasadas/hoje pedidos valem em estado ou em filtro", () => {
+    const turno = t({ filtros: { filtro: ["atrasadas"] } });
+    expect(filtrosNaoPedidos([{ verbo: "activity.list", args: { estado: "atrasadas", filtro: "atrasadas" } }], turno)).toEqual([]);
+    expect(filtrosNaoPedidos([{ verbo: "activity.list", args: { estado: "hoje" } }], turno)).toEqual(["activity.list: estado=hoje"]);
+  });
 });
 
 describe("simulador do ImobPro (org sintética)", () => {

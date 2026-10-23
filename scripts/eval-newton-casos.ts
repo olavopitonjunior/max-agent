@@ -242,9 +242,14 @@ export function filtrosNaoPedidos(chamadas: Array<{ verbo: string; args: Record<
   for (const c of chamadas) {
     if (!VERBOS_COM_FILTRO.has(c.verbo)) continue;
     const estado = typeof c.args.estado === "string" ? c.args.estado.trim() : "";
-    if (estado && !t.filtros?.estado?.test(estado)) achados.push(`${c.verbo}: estado=${estado}`);
     const filtro = typeof c.args.filtro === "string" ? c.args.filtro.trim() : "";
-    if (filtro && !t.filtros?.filtro?.includes(filtro)) achados.push(`${c.verbo}: filtro=${filtro}`);
+    // listar_atividades aceita `estado` e `filtro` com valores repetidos
+    // (atrasadas, hoje): o que a pessoa pediu vale em qualquer dos dois, e
+    // `abertas` é o padrão da tool, não um recorte.
+    const atividade = c.verbo === "activity.list";
+    const pedido = (v: string) => !!t.filtros?.estado?.test(v) || (atividade && !!t.filtros?.filtro?.includes(v));
+    if (estado && !(atividade && estado === "abertas") && !pedido(estado)) achados.push(`${c.verbo}: estado=${estado}`);
+    if (filtro && !t.filtros?.filtro?.includes(filtro) && !(atividade && t.filtros?.estado?.test(filtro))) achados.push(`${c.verbo}: filtro=${filtro}`);
   }
   return achados;
 }
