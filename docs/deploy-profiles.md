@@ -22,7 +22,8 @@ O Max nunca atende a Newcore e o Newton nunca atende RE/MAX. A garantia vem de t
   - Só responde no perfil `newton`; no Max devolve 404. Exige `Bearer NEWTON_INBOUND_TOKEN` (exclusivo; o `NEWTON_GATEWAY_TOKEN` do sidecar não abre) e, sem ele configurado, devolve 503.
   - Enfileira com o `messageId` da Z-API quando o corpo trouxer; senão, id sintético de (telefone, grupo, texto bruto, anexos, minuto). Roda o turn em `waitUntil` e responde `{text:"", blocked:false}`. O bridge não envia texto vazio; a resposta sai pelo adapter. Falha na fila é logada (`newton.fila_falhou`) e responde 200, porque o bridge não reenvia.
   - O `orgId` do corpo é ignorado, porque a org sai da identidade do telefone. Grupos são ignorados até o PR 2.2.
-  - Marcador do bridge sozinho (`[imagem enviada]`, `[documento: …]`, áudio sem transcrição) não é texto e vira `unknown`; áudio transcrito entra só com a transcrição.
+  - Marcador do bridge sozinho (`[imagem enviada]`, `[documento: …]`, áudio sem transcrição) não é texto e vira `unknown`; áudio transcrito entra só com a transcrição. Antes disso saem o aviso do `annotate` (`[suspicious instruction-like content detected · …]`) e a marca de citação (`[respondendo a msg id=…]`), para que "SIM" continue "SIM" nas interceptações determinísticas.
+- `src/app/api/notify/route.ts` e `src/lib/outbox.ts`: no perfil `newton`, aviso com `audience: "deal_party"` é recusado (403 `audience_not_allowed` no `/notify`; `enqueue` lança `audience_nao_permitida_no_perfil`). O Newton só fala com usuário interno, e sem template nem janela o aviso sairia como texto livre.
 - `src/graph/graph.ts`: no perfil `newton`, número desconhecido fica em silêncio (sem apresentação e sem repasse à equipe), porque o Newton só fala com usuário interno. O convidado sem primeiro acesso continua recebendo o aviso. O `interceptar` do aceite roda antes da identidade, mas só responde a pendência criada por template, que o Newton não tem.
 - Limites conhecidos do PR 2.1, para o PR 4.2 do bridge:
   - o bridge precisa mandar `messageId` (o id sintético deixa passar reentrega que cruza o minuto e junta a mesma frase repetida no minuto);
@@ -49,7 +50,7 @@ Só `AGENT_DEPLOY_PROFILE` é nova, mais `AGENT_TRANSPORT` para homologação. O
 Só no deploy do Newton, todas vindas do 1Password via `op inject`:
 - `NEWTON_BRIDGE_URL`
 - `NEWTON_BRIDGE_TOKEN`
-- `NEWTON_INBOUND_TOKEN`: o token que o bridge manda na entrada. Novo, diferente do `NEWTON_GATEWAY_TOKEN` do sidecar.
+- `NEWTON_INBOUND_TOKEN`: o token que o bridge manda na entrada. Novo, diferente do `NEWTON_GATEWAY_TOKEN` do sidecar. No corte (PR 4.2), o upstream v2 do bridge tem de apontar para o deploy Newton com este valor; com o token do sidecar, toda entrada volta 401.
 
 ## Ainda não feito (fases seguintes)
 

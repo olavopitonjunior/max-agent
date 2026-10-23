@@ -30,8 +30,18 @@ const MARCADOR_SEM_CONTEUDO =
   /^\[(imagem enviada|documento: [^\]\n]*|áudio enviado — transcrição indisponível[^\]\n]*)\]$/;
 const MARCADOR_AUDIO = /^\[áudio transcrito · [\d.]+KB\]\n/;
 
+/**
+ * Prefixos que o bridge põe antes do conteúdo, nesta ordem: o aviso do
+ * `annotate` (sanitize.ts) e a marca de citação (`replyToMessageId` da Z-API,
+ * id que o motor não conhece). Saem os dois: sobrando, "SIM" deixaria de ser
+ * "SIM" para as interceptações determinísticas, e o marcador de mídia não
+ * seria reconhecido.
+ */
+const PREFIXO_AVISO = /^\[suspicious instruction-like content detected · [^\]\n]*\]\n/;
+const PREFIXO_CITACAO = /^\[respondendo a msg id=[^\]\n]*\] ?/;
+
 export function textoDoBridge(bruto: string): string {
-  const t = bruto.trim();
+  const t = bruto.trim().replace(PREFIXO_AVISO, "").replace(PREFIXO_CITACAO, "").trim();
   if (MARCADOR_SEM_CONTEUDO.test(t)) return "";
   return t.replace(MARCADOR_AUDIO, "").trim();
 }

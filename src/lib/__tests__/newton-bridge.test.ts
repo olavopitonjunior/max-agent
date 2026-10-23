@@ -131,6 +131,15 @@ describe("textoDoBridge", () => {
   it("áudio transcrito vira só a transcrição", () => {
     expect(textoDoBridge("[áudio transcrito · 8.0KB]\nme liga amanhã")).toBe("me liga amanhã");
   });
+
+  it("marca de citação e aviso do sanitize saem antes do resto", () => {
+    expect(textoDoBridge("[respondendo a msg id=3EB0ABC] SIM")).toBe("SIM");
+    expect(textoDoBridge("[respondendo a msg id=3EB0ABC] [imagem enviada]")).toBe("");
+    const aviso = "[suspicious instruction-like content detected · patterns: ignore_previous]\n";
+    expect(textoDoBridge(`${aviso}[respondendo a msg id=3EB0ABC] SIM`)).toBe("SIM");
+    expect(textoDoBridge(`${aviso}[documento: x.pdf]`)).toBe("");
+    expect(textoDoBridge(`${aviso}[áudio transcrito · 2.1KB]\nconfirmo`)).toBe("confirmo");
+  });
 });
 
 describe("idDoBridge", () => {
