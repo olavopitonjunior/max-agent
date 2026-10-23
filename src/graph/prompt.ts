@@ -1,5 +1,6 @@
 import type { KnowledgeHit } from "@/lib/cm";
-import { nomeDoAgente } from "@/lib/deploy-profile";
+import { deployProfile, nomeDoAgente } from "@/lib/deploy-profile";
+import { PERSONA_NEWTON } from "@/profiles/newton/persona";
 
 /**
  * Prompt do Max.
@@ -506,6 +507,8 @@ export function buildSystemPrompt(params: {
   const nome = nomeDoAgente();
   const parts = [
     base(nome),
+    // Persona por perfil: o Max segue só com a base (snapshot byte a byte).
+    ...(deployProfile().agentKey === "newton" ? [PERSONA_NEWTON] : []),
     {
       disponivel: SABE_CRIAR_FORM,
       sem_login: NAO_SABE_CRIAR_FORM,
@@ -856,4 +859,15 @@ const PEDE_LEITURA = new RegExp(`\\b${LER}\\b[^?!.]{0,60}\\b${ENVIADO}`);
 export function pedeLeituraDeAnexo(texto: string): boolean {
   const t = normalizarAssunto(texto);
   return t.length > 0 && PEDE_LEITURA.test(t);
+}
+
+/**
+ * Resposta quando o modelo falha. O Newton só fala com a equipe interna, então
+ * "fala com seu corretor" não cabe nele; o Max mantém o texto de sempre.
+ */
+export function respostaDeFalha(): string {
+  return deployProfile().agentKey === "newton"
+    ? "Tive um problema pra responder agora. Tenta de novo em instantes."
+    : "Tive um problema pra responder agora. Tenta de novo em instantes, " +
+        "ou fala com seu corretor se for urgente.";
 }

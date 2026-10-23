@@ -100,6 +100,7 @@ import {
   buildSystemPrompt,
   comoMensagemDoUsuario,
   pedeLeituraDeAnexo,
+  respostaDeFalha,
   shouldSearch,
   textoSemLeituraDeMidia,
   TEXTO_ASSUNTO_BLOQUEADO,
@@ -1641,9 +1642,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       // perder: a volta seguinte do laço reaproveita `state.piiMap`, e sem
       // propagar aqui ela tokenizaria de novo com numeração reiniciada.
       piiMap: mapaTurno,
-      reply:
-        "Tive um problema pra responder agora. Tenta de novo em instantes, " +
-        "ou fala com seu corretor se for urgente.",
+      reply: respostaDeFalha(),
     };
   }
 

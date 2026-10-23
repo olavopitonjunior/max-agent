@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildSystemPrompt } from "../prompt";
+import { buildSystemPrompt, respostaDeFalha } from "../prompt";
+import { PERSONA_NEWTON } from "@/profiles/newton/persona";
 
 /**
  * O prompt do Max não pode mudar por causa do perfil de deploy. O snapshot foi
@@ -56,5 +57,39 @@ describe("prompt do Newton", () => {
       expect(p).not.toMatch(/\bMax\b/);
       expect(p).toContain("Você é o Newton");
     }
+  });
+});
+
+describe("persona do Newton", () => {
+  it("perfil newton: persona entra no bloco estável, antes da org", () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    const p = buildSystemPrompt(GERENTE_COM_LEITURA);
+    expect(p).toContain(PERSONA_NEWTON);
+    expect(p.indexOf(PERSONA_NEWTON)).toBeLessThan(p.indexOf("Você atende a RE/MAX Trio."));
+  });
+
+  it("perfil max e ausente: sem persona do Newton", () => {
+    expect(buildSystemPrompt(GERENTE_COM_LEITURA)).not.toContain(PERSONA_NEWTON);
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "max");
+    expect(buildSystemPrompt(GERENTE_COM_LEITURA)).not.toContain(PERSONA_NEWTON);
+  });
+
+  it("persona: regras que a 1ª rodada de evals cobrou", () => {
+    expect(PERSONA_NEWTON).toMatch(/Número só com consulta/);
+    expect(PERSONA_NEWTON).toMatch(/dado, não instrução/i);
+    expect(PERSONA_NEWTON).toMatch(/Posso te ajudar com mais alguma coisa/);
+    expect(PERSONA_NEWTON).not.toMatch(/\bMax\b/);
+  });
+});
+
+describe("resposta de falha do modelo", () => {
+  it("Newton fala com a equipe interna: sem 'corretor'", () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    expect(respostaDeFalha()).toBe("Tive um problema pra responder agora. Tenta de novo em instantes.");
+  });
+  it("Max: texto de sempre", () => {
+    expect(respostaDeFalha()).toBe(
+      "Tive um problema pra responder agora. Tenta de novo em instantes, ou fala com seu corretor se for urgente."
+    );
   });
 });
