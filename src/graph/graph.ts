@@ -62,6 +62,8 @@ import {
   ehPedidoDeCriacao,
   escritaPermitida,
   pedidoDeRefino,
+  semNaturezaNaEtapa,
+  semRecorteNaoPedido,
   TOOLS_DE_ATIVIDADE_ESCRITA,
   textoCriacaoIndisponivel,
   TEXTO_INDISPONIVEL_AGORA,
@@ -1917,9 +1919,9 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
  * isso que ele não pode tocar no campo.
  */
 async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
-  const chamadas = state.pendingToolCalls;
-  if (chamadas.length === 0) return { pendingToolCalls: [] };
   const text = textoDoTurno(state);
+  const chamadas = state.pendingToolCalls.map(call => semRecorteNaoPedido(semNaturezaNaEtapa(call), text));
+  if (chamadas.length === 0) return { pendingToolCalls: [] };
   const filterText = text.replace(/\bem\s+(?:(?:um|uma)\s+)?(?:tabela|lista|listagem|formato|detalhes|ordem|texto|resumo|t[oó]picos|json)\b/gi, "");
   // Affirmative filter phrases exclude projections such as "a etapa atual".
   const stageHint = /\b(?:na|pela)\s+(?:etapa|fase)\b|\b(?:etapa|fase)\s*:/i.test(text) ||

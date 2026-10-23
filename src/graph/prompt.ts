@@ -462,7 +462,11 @@ e ofereça tentar de novo. NÃO afirme que não há nada.
         r.truncated || cortadoAqui
           ? '\ntruncado="true" — há mais itens além destes; diga isso se listar.'
           : "";
-      return `<dados_do_sistema origem="${r.tool}">${aviso}
+      // Newton: a contagem vai pronta. O nano contava a lista e errava (6
+      // itens com um "Concluído" viravam "5 negócios", evals de 23/10). O
+      // Max fica byte a byte como o baseline enquanto homologa.
+      const itens = deployProfile().agentKey === "newton" ? ` itens="${r.items.length}"` : "";
+      return `<dados_do_sistema origem="${r.tool}"${itens}>${aviso}
 ${corpo}
 </dados_do_sistema>`;
     })

@@ -82,6 +82,19 @@ describe("persona do Newton", () => {
   });
 });
 
+describe("contagem do resultado de consulta", () => {
+  const resultado = [{ tool: "listar_negocios", items: [{ codigo: "A" }, { codigo: "B" }, { codigo: "C" }], truncated: false }];
+  it("Newton recebe itens=N pronto", () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    expect(buildSystemPrompt({ ...CORRETOR_SEM_TOOLS, toolResults: resultado }))
+      .toContain('<dados_do_sistema origem="listar_negocios" itens="3">');
+  });
+  it("Max: sem atributo novo", () => {
+    expect(buildSystemPrompt({ ...CORRETOR_SEM_TOOLS, toolResults: resultado }))
+      .toContain('<dados_do_sistema origem="listar_negocios">');
+  });
+});
+
 describe("resposta de falha do modelo", () => {
   it("Newton fala com a equipe interna: sem 'corretor'", () => {
     vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
