@@ -7,7 +7,7 @@ import { DEFAULT_MODEL } from '../llm';
 import { CATALOG_VERSION, WORKFLOW_VERSION } from './contracts';
 export const READ_ACTIONS = new Set<string>(['proposal.list','proposal.status','proposal.options','proposal.preflight','form.options','credit.preflight','credit.status','captacao.options','captacao.preflight','captacao.list','captacao.autorizacao.listar','marketing.options','marketing.library','marketing.status']);
 export function isWriteVerb(verb:string):boolean {return !READ_ACTIONS.has(verb);}
-export const NEW_QUERIES=['notification.list','activity.list','metrics.get','property.list','property.detail','contract.status'];
+export const NEW_QUERIES=['notification.list','activity.list','activity.get','metrics.get','property.list','property.detail','contract.status'];
 export interface CatalogTool {
  id:string;version:string;status:'current'|'disabled'|'planned';installed:boolean;enabled:boolean;executor:'scope-action'|'scope-query'|'graph'|null;effect:'read'|'write'|'paid';flag?:string;recoveryOnly?:boolean;
  schema:Record<string,unknown>;permission:Capability|null;policyCapability:Capability|null;domainScope:string;projection:string;dataClass:string;timeoutMs:number;retry:string;reconciliation:string;confirmation:boolean;evaluationCases:string[];provenance:string;
@@ -18,6 +18,8 @@ const POLICY_MAPPING: Record<string, Capability | null> = {
  'proposal.complete': 'proposal.send', 'proposal.recreate': 'proposal.create',
  'proposal.convert': 'proposal.create', 'proposal.duplicate': 'proposal.create',
  'form.options': 'form.create',
+ 'activity.get': 'activity.list',
+ 'activity.create': 'activity.write', 'activity.comment': 'activity.write', 'activity.complete': 'activity.write', 'activity.refuse': 'activity.write',
 };
 const DOMAIN_SCOPE: Record<string, string> = {
  'proposal.list': 'Authenticated user; tenant + proposalScopeWhere visibility (scope-action); scope-query also applies Max policy.',

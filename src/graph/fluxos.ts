@@ -39,6 +39,7 @@ import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
+import { conduzirAtividade, rebaixarAtividade, type FluxoAtividade } from "./atividades";
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
@@ -117,6 +118,7 @@ export type Fluxo =
   | FluxoGestao
   | FluxoCredito
   | FluxoCaptacao
+  | FluxoAtividade
   | {
       kind: "escolha";
       natureza?: "venda" | "locacao";
@@ -784,6 +786,8 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (!f) return null;
   if (f.kind === "continuidade") return { ...f, etapa: ["concluida", "selecao"].includes(f.etapa) ? f.etapa : "resumo" };
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
+  // Atividade (M1): a confirmação volta ao resumo; com `chave` (escrita incerta) a etapa fica.
+  if (f.kind === "atividade") return rebaixarAtividade(f);
   // Crédito: a revisão (o SIM que envia, no M3) volta para a coleta; o servidor diz o que falta.
   if (f.kind === "credito") return f.etapa === "revisao" ? { ...f, etapa: "coleta", campoAtual: undefined } : f;
   // Captação: o resumo (o "enviar" que escreve) volta para a conferência; o servidor refaz o resumo.
@@ -1234,6 +1238,7 @@ export async function conduzirFluxo(
 ): Promise<PassoDoFluxo> {
   if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (fluxo.kind === "gestao") return conduzirGestao(fluxo, ctx, deps);
+  if (fluxo.kind === "atividade") return conduzirAtividade(fluxo, ctx, deps);
   if (fluxo.kind === "credito") return conduzirCredito(fluxo, ctx, deps);
   // Achado 20: este caminho nunca é alcançado em produção (graph.ts despacha
   // `captacao` direto pra `conduzirCaptacao`, com `podeEscrever(identity)` — não

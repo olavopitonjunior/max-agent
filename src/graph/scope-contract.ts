@@ -40,6 +40,7 @@ export const VERBOS_DE_LEITURA = [
   "proposal.detail",
   "notification.list",
   "activity.list",
+  "activity.get",
   "metrics.get",
   "property.list",
   "property.detail",
@@ -89,6 +90,10 @@ export interface ScopeQueryRequest {
     proposta_id?: string;
     imovel_id?: string;
     cursor?: string;
+    /** `activity.list`: recorte pedido (par do contractmaker PR11). */
+    filtro?: "minhas" | "atrasadas" | "hoje";
+    /** `activity.get`. */
+    atividade_id?: string;
   };
 }
 

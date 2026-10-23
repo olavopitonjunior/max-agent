@@ -170,6 +170,16 @@ export async function despacharLeituras(params: {
       }
       args = { [property ? "imovel_id" : "negocio_id"]: selected.item.id };
     }
+    if (entrada.verb === "activity.get") {
+      // O modelo aponta pelo número da lista; o id interno nunca passa por ele.
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "atividade" });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      args = { atividade_id: selected.item.id };
+    }
     if (paginada) {
       const continuation = referencias?.continuacao;
       if (args.mais === true) {
@@ -181,7 +191,11 @@ export async function despacharLeituras(params: {
         args = { ...continuation.args, cursor: continuation.cursor };
       } else {
         // Model-provided cursors and identifiers never select a page.
-        args = typeof args.estado === "string" ? { estado: args.estado } : {};
+        const filtro = entrada.verb === "activity.list" && lerFiltroDeAtividade(args.filtro);
+        args = {
+          ...(typeof args.estado === "string" ? { estado: args.estado } : {}),
+          ...(filtro ? { filtro } : {}),
+        };
       }
       args.limite = ITENS_POR_LISTA;
     }
@@ -230,6 +244,11 @@ export async function despacharLeituras(params: {
   }
 
   return { resultados, trilha, referencias };
+}
+
+/** Recortes que o servidor aceita em `activity.list`. Valor fora da lista some (sem filtro). */
+export function lerFiltroDeAtividade(v: unknown): "minhas" | "atrasadas" | "hoje" | null {
+  return v === "minhas" || v === "atrasadas" || v === "hoje" ? v : null;
 }
 
 /** O executor de leitura: `scope-query` no servidor + a rede da regra 5. */

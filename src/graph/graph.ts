@@ -10,6 +10,9 @@ import { startTask, finishTask, executeIntent } from "@/lib/runtime/store";
 import { getControl, assertBotWrite } from "@/lib/runtime/handoff";
 import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
+import { rotearBotaoDeAtividade } from "@/lib/atividade-botao";
+import { iniciarAtividade, TEXTO_ATIVIDADE_NAO_LIBERADA, type OperacaoDeAtividade } from "./atividades";
+import { resolverReferencia } from "./referencias";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
 import {
@@ -894,6 +897,13 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
  * Um turn com fluxo de criação em andamento. Responde por template e decide o
  * passo seguinte; sem fluxo (ou vencido), passa adiante sem tocar em nada.
  */
+const OPERACAO_DA_TOOL_DE_ATIVIDADE: Record<string, OperacaoDeAtividade | undefined> = {
+  criar_atividade: "criar",
+  comentar_atividade: "comentar",
+  concluir_atividade: "concluir",
+  recusar_atividade: "recusar",
+};
+
 async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const agora = Date.now();
   const userText = textoDoTurno(state).trim();
@@ -902,7 +912,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
   // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
   // resumo velhos não podem capturar um "2" dias depois (review 09/10).
-  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave);
+  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave) || (state.fluxo?.kind === "atividade" && !!state.fluxo.chave);
   const atual = vencido ? (sobrevive ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
   const escritaEmAberto = !!(atual && "chave" in atual && atual.chave);
 
@@ -910,7 +920,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // sistema, nunca do modelo (prod 09/10). O fluxo em curso fica como está.
   // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
   const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha" || atual?.kind === "credito" ||
-    atual?.kind === "captacao";
+    atual?.kind === "captacao" || atual?.kind === "atividade";
   // Continuidade e gestão vêm antes: "converte a proposta… pra gerar o contrato" é conversão.
   // Rascunho aberto para ajuste (sem escrita pendente) não prende o turno: pedido
   // sobre OUTRA proposta ("muda o valor da proposta do João…"), consulta ou
@@ -919,6 +929,35 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const rascunhoAberto = atual?.kind === "proposta" && !!atual.propostaId && !atual.chave &&
     ["ajustes", "revisao_ajuste", "metodo"].includes(atual.etapa);
   const livre = !coletando || rascunhoAberto;
+
+  // Toque em botão de atividade (`atv:<id>:concluir|comentar|recusar`, M1). Fica aqui, e não no
+  // `interceptar`, porque precisa de identidade e política. Nunca escreve: abre a proposta.
+  const payloadDeAtividade = state.inbound.buttonPayload ?? null;
+  if (payloadDeAtividade?.startsWith("atv:")) {
+    const ocupado = escritaEmAberto || (coletando && atual?.kind !== "atividade");
+    const reply = ocupado
+      ? "Antes, vamos terminar o pedido em andamento (responda ou diga \"cancelar\"). Depois toque no botão de novo."
+      : null;
+    const toque = reply === null
+      ? await rotearBotaoDeAtividade({
+          payload: payloadDeAtividade,
+          ctx: { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+            politicaIndisponivel: state.politicaIndisponivel, agora, orgName: state.identity.orgName,
+            thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) },
+          identity: state.identity,
+          ler: (atividadeId) => consultarEscopo({ orgId: state.identity.orgId, rawPhone: state.inbound.fromPhone,
+            subject: subjectDe(state.identity), verb: "activity.get", args: { atividade_id: atividadeId } }),
+        })
+      : { reply: reply as string, fluxo: null, evento: "atividade_botao_ocupado" };
+    // Negado/indisponível não mexe no fluxo aberto (fica rebaixado); aberto, substitui.
+    const fluxo = toque.fluxo ?? (atual ? rebaixarFluxo(atual) : vencido ? null : undefined);
+    return {
+      ...(fluxo !== undefined ? { fluxo } : {}),
+      reply: toque.reply,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: toque.reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "atividade", botao: true }, outcome: toque.evento }],
+    };
+  }
 
   if (livre && !escritaEmAberto) {
     const marketing = await marketingStep({ orgId: state.identity.orgId, text: userText, messageId: state.inbound.messageId, now: agora, canWrite: podeEscrever(state.identity), policy: state.policy, pending: state.marketingPending }, async (verb,args,key) => {
@@ -1585,6 +1624,45 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       policy: state.policy,
       identity: state.identity,
     });
+
+    // Atividades (M1): fluxo próprio, determinístico (`atividades.ts`). Recusa e resolução da
+    // referência são texto fixo; o modelo nunca vê id nem decide o texto da confirmação.
+    const operacaoDeAtividade = Object.hasOwn(OPERACAO_DA_TOOL_DE_ATIVIDADE, chamada.name) ? OPERACAO_DA_TOOL_DE_ATIVIDADE[chamada.name] : undefined;
+    if (operacaoDeAtividade) {
+      const responder = (texto: string, outcome: string, fluxo?: Fluxo | null): MaxUpdate => ({
+        ...daOferta,
+        ...(fluxo !== undefined ? { fluxo } : {}),
+        messages: [{ role: "user", content: userText }, { role: "assistant", content: texto }],
+        reply: texto,
+        usage: usageDoTurn,
+        toolLog: [...trilha, { name: chamada.name, args: { operacao: operacaoDeAtividade }, outcome }],
+        piiMap: mapaTurno,
+      });
+      if (!auth.ok) return responder(TEXTO_ATIVIDADE_NAO_LIBERADA, auth.motivo);
+      if (state.fluxo) {
+        return responder("Você já tem um pedido em andamento comigo. Continue por aqui, ou diga CANCELAR para começar outro.", "fluxo_em_andamento");
+      }
+      const alvo = resolverReferencia(state.referencias, chamada.args.numero, {
+        agora: Date.now(), tipo: operacaoDeAtividade === "criar" ? "negocio" : "atividade",
+      });
+      if (!alvo.ok) {
+        return responder(
+          operacaoDeAtividade === "criar"
+            ? "Não achei esse negócio na última lista. Peça a lista de negócios de novo e me diga o número."
+            : "Não achei essa atividade na última lista. Peça a lista de atividades de novo e me diga o número.",
+          "referencia_invalida"
+        );
+      }
+      const passo = iniciarAtividade(
+        { operacao: operacaoDeAtividade, alvo: { id: alvo.item.id, rotulo: alvo.item.rotulo },
+          tipo: chamada.args.tipo, titulo: chamada.args.titulo, vencimento: chamada.args.vencimento,
+          notas: chamada.args.notas, texto: chamada.args.texto, motivo: chamada.args.motivo },
+        { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+          politicaIndisponivel: state.politicaIndisponivel, agora: Date.now(), orgName: state.identity.orgName,
+          thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) }
+      );
+      return responder(passo.reply, passo.evento, passo.fluxo);
+    }
 
     if (auth.ok) {
       // `auth.ok` garante tipo válido (`capabilityDaChamada` não foi null).
