@@ -8,6 +8,7 @@ import type { MotivoQueda } from "./connection";
 import { query } from "./db";
 import { sign } from "./hmac";
 import { OrgSuspensaError, ehOrgSuspensa } from "./org-suspensa";
+import { deployProfile } from "./deploy-profile";
 import {
   fetchWithTimeout,
   imobproBase,
@@ -94,7 +95,7 @@ export async function fetchProfile(orgId: string): Promise<AgentProfile | null> 
   }
   const org = await orgById(orgId);
   if (!org) return null;
-  return get<AgentProfile>("/api/agents/profile?agentKey=max", org.apiToken);
+  return get<AgentProfile>(`/api/agents/profile?agentKey=${deployProfile().agentKey}`, org.apiToken);
 }
 
 export interface KnowledgeHit {
@@ -122,7 +123,7 @@ export async function searchKnowledge(
         Authorization: `Bearer ${org.apiToken}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ agentKey: "max", query: query_, topK }),
+      body: JSON.stringify({ agentKey: deployProfile().agentKey, query: query_, topK }),
     },
     IMOBPRO_TIMEOUT_MS
   ).catch(() => null);
@@ -166,7 +167,7 @@ export async function transcribeMedia(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          agentKey: "max",
+          agentKey: deployProfile().agentKey,
           kind: media.kind,
           mimeType: media.mimeType,
           data: media.data.toString("base64"),
@@ -584,7 +585,7 @@ export async function reportUsage(
          * precisar dele.
          */
         body: JSON.stringify({
-          agentKey: "max",
+          agentKey: deployProfile().agentKey,
           provider: "openrouter",
           model: usage.model,
           promptTokens: usage.promptTokens,
