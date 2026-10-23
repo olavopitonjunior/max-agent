@@ -15,6 +15,7 @@ import {
   type PendingAction,
 } from "./tools";
 import { ITENS_POR_LISTA, REFERENCIA_TTL_MS, resolverReferencia, numerarLista, type MapaDeReferencias } from "./referencias";
+import type { StageClarification } from "./query-options";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -98,6 +99,7 @@ export interface ResultadoDeTool {
   items: unknown[] | null;
   truncated: boolean;
   hasMore?: boolean;
+  clarification?: StageClarification;
 }
 
 /**
@@ -213,6 +215,12 @@ export async function despacharLeituras(params: {
       continue;
     }
 
+    if (r.clarification) {
+      resultados.push({ tool: chamada.name, items: null, truncated: false, clarification: r.clarification });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "filtro_invalido" });
+      continue;
+    }
+
     // G2: o código numera, o modelo vê só número + rótulo. Leitura que não
     // declara o que produz passa como veio (nenhuma hoje).
     const produz = (a.entrada as EntradaDeLeitura).refs?.produz;
@@ -258,7 +266,7 @@ async function executarLeitura(params: {
   identity: Candidate;
   subject: ReturnType<typeof subjectDe>;
   fromPhone: string;
-}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string } | null> {
+}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification } | null> {
   const r = await consultarEscopo({
     orgId: params.identity.orgId,
     rawPhone: params.fromPhone,
@@ -268,7 +276,7 @@ async function executarLeitura(params: {
   });
   if (!r) return null;
   // Rede de segurança da regra 5 — a projeção que VALE é a do servidor.
-  return { items: descartarSeVazou(r.items, params.identity.kind), truncated: r.truncated, nextCursor: r.nextCursor };
+  return { items: descartarSeVazou(r.items, params.identity.kind), truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}) };
 }
 
 // ─── Executor de ESCRITA (proposta, nunca execução) ───────────────────────

@@ -11,6 +11,7 @@ import {
   type ScopeSubject,
 } from "@/graph/scope-contract";
 import type { Candidate } from "./identity";
+import { readStageClarification, type StageClarification } from "@/graph/query-options";
 
 /**
  * Cliente do `POST /api/agents/scope-query` — a leitura de negócio do Max.
@@ -37,6 +38,7 @@ export interface ResultadoDeLeitura {
   items: unknown[];
   truncated: boolean;
   nextCursor?: string;
+  clarification?: StageClarification;
 }
 
 /**
@@ -94,7 +96,13 @@ export async function consultarEscopo(params: {
       return null;
     }
 
-    const r = (await res.json()) as { items?: unknown; truncated?: unknown; nextCursor?: unknown };
+    const r = (await res.json()) as { items?: unknown; truncated?: unknown; nextCursor?: unknown; clarification?: unknown };
+    if (r.clarification !== undefined) {
+      const clarification = readStageClarification(r.clarification);
+      if (params.verb !== "deal.list" || !clarification || !Array.isArray(r.items) || r.items.length !== 0) return null;
+      runEvent("tool.needs_input", params.verb, { field: "estado", optionCount: clarification.options.length });
+      return { items: [], truncated: false, clarification };
+    }
     if (!Array.isArray(r.items)) return null;
     runEvent("tool.completed", params.verb, { count: r.items.length, truncated: r.truncated === true });
     return { items: descartarSeVazou(r.items, params.subject.kind), truncated: r.truncated === true, ...(typeof r.nextCursor === "string" ? { nextCursor: r.nextCursor } : {}) };
