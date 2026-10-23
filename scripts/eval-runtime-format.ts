@@ -7,6 +7,8 @@ export const RuntimeEvalSchema = z.object({
   workflowVersion: z.string().min(1),
   catalogVersion: z.string().min(1),
   reviewRequired: z.literal(false),
+  /** Perfil de deploy sob o qual o replay roda (AGENT_DEPLOY_PROFILE). Ausente = max. */
+  profile: z.enum(["max", "newton"]).default("max"),
   scenarios: z.array(z.object({
     id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
     input: z.string().min(1).max(2000),
