@@ -103,7 +103,7 @@ describe("etapa pedida com filtro omitido pelo modelo",()=>{
  });
  it("bloqueia nova omissão do modelo após uma consulta filtrada sem repetir lookup",async()=>{
   llm.mockResolvedValue({text:"",toolCalls:[{name:"listar_negocios",args:{}}],usage});
-  scope.mockResolvedValueOnce(invalid).mockResolvedValueOnce({items:[],truncated:false});
+  scope.mockResolvedValueOnce(invalid).mockResolvedValueOnce({items:[{id:"D1",titulo:"QA",etapa:"Formulário"}],truncated:false});
   const state=await buildGraph().compile().invoke(turn("Meus negócios em Formulário"));
   expect(scope.mock.calls.map(call=>call[0].args)).toEqual([{opcoes_etapas:true},{estado:"Formulário"}]);
   expect(llm).toHaveBeenCalledTimes(3);expect(state.toolLog.map(entry=>entry.outcome)).toEqual(["opcoes_consulta","ok","aguardando_etapa","aguardando_etapa"]);
@@ -133,7 +133,7 @@ it("devolve opções sem segunda chamada de modelo e aceita número com nova che
  expect(first.queryOptions?.subjectKey).toBe(key);
  const second=await app.invoke(turn("opção 1"),config);
  expect(scope.mock.calls[1][0]).toMatchObject({subject:{kind:"user",userId:"broker"},args:{estado:"Formulário"}});
- expect(second.queryOptions).toBeNull();expect(llm).toHaveBeenCalledTimes(2);
+ expect(second.queryOptions).toBeNull();expect(llm).toHaveBeenCalledTimes(1);
 });
 it("não repete automaticamente mais de uma consulta se opções mudarem",async()=>{
  llm.mockResolvedValueOnce({text:"",toolCalls:[{name:"listar_negocios",args:{estado:"venda"}}],usage});scope.mockResolvedValue(invalid);
