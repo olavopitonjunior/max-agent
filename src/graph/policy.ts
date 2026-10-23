@@ -145,6 +145,13 @@ export const CAPABILITIES = [
   "contract.status",
   "marketing.read",
   "marketing.generate",
+  /**
+   * Atividades v2 (22/10/2026, par do contractmaker PR11): criar, comentar, concluir e
+   * recusar atividade pelo WhatsApp. Posição 26 (0-based, a ÚLTIMA), FIXA. Fora do
+   * padrão (`POLITICA_PADRAO`): nasce DESLIGADA, a org liga. A leitura (`activity.list`
+   * e `activity.get`) segue na capability que já existia.
+   */
+  "activity.write",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

@@ -66,6 +66,12 @@ export const VERBOS_DE_ACAO = [
   "marketing.prepare",
   "marketing.generate",
   "marketing.status",
+  // Atividades v2 (M1, par do contractmaker PR11): as quatro escritas levam `x-idempotency-key`
+  // (a `messageId` do "sim"); capability `activity.write`. A leitura `activity.get` é scope-query.
+  "activity.create",
+  "activity.comment",
+  "activity.complete",
+  "activity.refuse",
 ] as const;
 export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
 

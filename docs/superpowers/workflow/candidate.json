@@ -464,6 +464,15 @@
     },
     {
       "dot": "cyan",
+      "title": "Atividades (Atividades v2 / M1)",
+      "items": [
+        "Capability activity.write (índice 26, última da lista de 27, fail-closed: fora do padrão, a org liga). Leitura: listar_atividades (filtro minhas / atrasadas / hoje) e ver_atividade (activity.list / activity.get, atrás de MAX_EXTENDED_QUERIES). Escrita: criar_atividade, comentar_atividade, concluir_atividade, recusar_atividade (activity.create / comment / complete / refuse).",
+        "Toda escrita é proposta + confirmação humana (fluxo determinístico, sem modelo no texto da confirmação): o verbo só roda no SIM, com x-idempotency-key = messageId do SIM, mantida se o resultado for incerto. Recusa exige motivo (3 a 500). Só usuário interno; nenhuma tool cita, cobra ou contata parte ou cliente. Vencimento sem fuso é recusado.",
+        "Botão atv:<id>:concluir|comentar|recusar (src/lib/atividade-botao.ts, tratado no nó conduzir por precisar de identidade e política): concluir abre a proposta; comentar e recusar pedem o texto e então propõem. Payload malformado, id inexistente ou de outra org: resposta neutra única. Erros 403 / 404 / 409 / 422 do CM viram frase legível. Resumo diário usa o template aprovado max_atividades_pendentes; sem template novo. Contrato: contractmaker docs/max.md §19."
+      ]
+    },
+    {
+      "dot": "cyan",
       "title": "Marketing coordenador",
       "items": [
         "Entrada Max: property.list e marketing.options / prepare / generate / status / library. API scope-action encaminha ao mesmo executeMarketingAction do estúdio. Marca, templates, aprovações e reserva de cota são serviços internos ImobPro; não são tools extras fictícias.",

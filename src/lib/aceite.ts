@@ -627,6 +627,10 @@ export async function interceptar(inbound: InboundMessage): Promise<Interceptado
     if (parsed) return responderAcao(inbound, parsed.rowId, parsed.acao);
   }
 
+  // Botão de atividade (`atv:`, M1): o roteamento precisa de identidade e política, então é do grafo
+  // (`atividade-botao.ts`). Aqui o payload só NÃO pode virar "dúvida" nem apresentação pelo texto do botão.
+  if (payload?.startsWith("atv:")) return null;
+
   // 2. O botão digitado à mão — ANTES do repasse, senão a própria frase
   //    "tenho uma dúvida" viraria a dúvida.
   if (ehPedidoDeDuvida(texto)) {
