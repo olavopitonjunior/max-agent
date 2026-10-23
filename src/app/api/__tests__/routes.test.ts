@@ -392,6 +392,18 @@ describe("GET /api/admin/status — a query entra na assinatura", () => {
       statusReq("?orgId=org1", "GET./api/admin/status?orgId=org1")
     );
     expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ agentKey: "max", agentName: "Max" });
+  });
+
+  it("perfil newton: o status se identifica como Newton", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    try {
+      const res = await adminStatus(statusReq("", "GET./api/admin/status"));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ agentKey: "newton", agentName: "Newton" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("assinatura de UMA query não vale para outra org", async () => {

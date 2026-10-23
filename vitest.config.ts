@@ -18,6 +18,8 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    // Perfil vazio = Max: um AGENT_DEPLOY_PROFILE no shell não troca o agente dos testes.
+    env: { AGENT_DEPLOY_PROFILE: "" },
     /**
      * Arquivos em SÉRIE, não em paralelo. Os testes de integração compartilham
      * UM Postgres, e o outbox é global por desenho: `dispatchDue` reivindica

@@ -43,6 +43,14 @@ O Max nunca atende a Newcore e o Newton nunca atende RE/MAX. A garantia vem de t
   - As capabilities somam ao catálogo do deploy (`capabilitiesDoDeploy`).
   - `CAPABILITIES` continua sendo o núcleo espelhado no ImobPro pelo teste de paridade.
 
+## Admin e playground por agente
+
+Cada deploy tem o próprio `/api/admin/*`, com o próprio `MAX_NOTIFY_SECRET`; a plataforma escolhe o deploy pelo agente (Max ou Newton) e mostra painéis separados.
+
+- `GET /api/admin/status` e `GET /api/admin/catalog` devolvem `agentKey` e `agentName` do perfil. O catálogo do Newton anuncia o agente `newton`, o prompt `newton.system` e o canal `whatsapp.newton-bridge`.
+- `POST /api/admin/playground` devolve `agentKey`, e os eventos `run.*` levam o agente do deploy. O playground não envia nada pelo canal (sem `afterReply`).
+- O deploy de staging do Newton (`newton-agent`, branch `staging`) roda com `AGENT_DEPLOY_PROFILE=newton`, `MAX_PLAYGROUND=true`, `MAX_OUTBOUND_KILL=true` e sem `NEWTON_BRIDGE_*`: o playground funciona e nenhuma mensagem sai.
+
 ## Envs
 
 Só `AGENT_DEPLOY_PROFILE` é nova, mais `AGENT_TRANSPORT` para homologação. Os nomes `MAX_*` (kill switches, flags de rollout) são do motor e valem nos dois perfis.

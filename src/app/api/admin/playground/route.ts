@@ -2,6 +2,7 @@ import { privacyEpoch } from "@/lib/runtime/privacy";
 import {NextRequest,NextResponse} from 'next/server';
 import {z} from 'zod';
 import {requireHmac} from '@/lib/auth';
+import {deployProfile} from '@/lib/deploy-profile';
 import {invokeIsolatedGraph} from '@/graph/graph';
 import {resolveIdentity,type Candidate} from '@/lib/identity';
 import {limparThreadDoCheckpointer} from '@/lib/checkpointer-reset';
@@ -36,17 +37,18 @@ export async function POST(req:NextRequest){
  try{
   if(p.novo)await limparThreadDoCheckpointer(threadId);
   if(!p.text){await finishTask(context,'succeeded',[]);return NextResponse.json({reply:null,rastro:null,threadId,sessionId:p.sessionId,mode:p.mode,traces:[],catalogVersion:CATALOG_VERSION,workflowVersion:WORKFLOW_VERSION});}
+  const agentKey=deployProfile().agentKey;
   const {result,events}=await withExecution(context,async()=>{
-   runEvent('run.started','max');
+   runEvent('run.started',agentKey);
    const result=await invokeIsolatedGraph({messageId:`playground-${p.requestId}`,fromPhone:p.phone,kind:'text',text:p.text!,groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()},identity,threadId);
-   runEvent('run.completed','max');return {result,events:currentExecution()!.events};
+   runEvent('run.completed',agentKey);return {result,events:currentExecution()!.events};
   });
   // No afterReply: production memory/identity/transport are outside this namespace.
   await savePlaygroundMessage(p.sessionId,p.requestId,'user',p.text);
   if(result.reply)await savePlaygroundMessage(p.sessionId,p.requestId,'assistant',result.reply);
   await finishTask(context,'succeeded',events);
   const rastro={orgId:p.orgId,route:'graph',inboundText:redigirCredito(p.text),replyText:result.reply?redigirCredito(result.reply):null,tools:(result.toolLog??[]).map(t=>({name:t.name,outcome:t.outcome})),usage:result.usage??[],timings:result.timings??[],identidade:{kind:p.mode==='simulation'?'fixture':'resolved',orgId:p.orgId}};
-  return NextResponse.json({reply:result.reply??null,rastro,threadId,sessionId:p.sessionId,mode:p.mode,traces:events,catalogVersion:CATALOG_VERSION,workflowVersion:WORKFLOW_VERSION});
+  return NextResponse.json({agentKey,reply:result.reply??null,rastro,threadId,sessionId:p.sessionId,mode:p.mode,traces:events,catalogVersion:CATALOG_VERSION,workflowVersion:WORKFLOW_VERSION});
  }catch(error){await finishTask(context,'unknown',[]);console.error('[playground] execution failed',error instanceof Error?error.name:'unknown');return NextResponse.json({error:'execution_unknown',sessionId:p.sessionId,mode:p.mode},{status:409});}
 }
 const historySchema=z.object({orgId:z.string().min(1),phone:z.string().regex(/^\+[1-9]\d{6,14}$/),sessionId:z.string().uuid(),mode:z.enum(['simulation','staging'])});
