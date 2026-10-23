@@ -4,7 +4,7 @@ import {
   iniciarFilaDeAutorizacao,
   pedeFilaDeAutorizacao,
   captacaoAutorizacaoLigada,
-  TEXTO_CAPTACAO_SEM_POLITICA,
+  textoCaptacaoSemPolitica,
   CODIGOS_DA_AUTORIZACAO,
   textoDoItemDaFila,
   type FluxoCaptacao,
@@ -442,7 +442,7 @@ describe("gerente: fila de autorização", () => {
     const acao = vi.fn(async (): Promise<RespostaDoServidor | null> => { throw new Error("não deveria chamar"); });
     const passo = await iniciarFilaDeAutorizacao(ctxDe("tem pedido de autorização?", []), depsCom(acao), true);
     expect(acao).not.toHaveBeenCalled();
-    expect(passo.reply).toBe(TEXTO_CAPTACAO_SEM_POLITICA);
+    expect(passo.reply).toBe(textoCaptacaoSemPolitica());
   });
 
   it("CASO NEGADO: flag desligada (mesmo com a capability) é inerte — não chama o verbo", async () => {
@@ -760,7 +760,7 @@ describe("gerente: fila de autorização", () => {
       autorizacaoDecisao: { autorizacaoId: "aut-1", tipo: "proprietario", decisao: "aprovar", codigo: "CAP-2026-0007", solicitante: "Ana Souza", documento: "***.456.789-**" },
     };
     const passo = await conduzirCaptacao(f, ctxDe("sim", COM_CAP), depsCom(acao), true);
-    expect(passo.reply).toBe(TEXTO_CAPTACAO_SEM_POLITICA);
+    expect(passo.reply).toBe(textoCaptacaoSemPolitica());
     expect(passo.reply).not.toContain("Veja na tela: ");
     expect(passo.reply).not.toContain("Não consegui processar o pedido");
   });
@@ -776,7 +776,7 @@ describe("gerente: fila de autorização", () => {
       autorizacaoDecisao: { autorizacaoId: "aut-1", tipo: "proprietario", decisao: "aprovar", codigo: "CAP-2026-0007", solicitante: "Ana Souza", documento: "***.456.789-**" },
     };
     const passo = await conduzirCaptacao(f, ctxDe("sim", COM_CAP), depsCom(acao), true);
-    expect(passo.reply).toBe(TEXTO_CAPTACAO_SEM_POLITICA);
+    expect(passo.reply).toBe(textoCaptacaoSemPolitica());
     expect(passo.reply).not.toContain("Veja na tela: ");
     expect(passo.reply).not.toContain("Não consegui processar o pedido");
   });

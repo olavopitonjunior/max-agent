@@ -1,4 +1,5 @@
 import type { Candidate } from "@/lib/identity";
+import { packsDoPerfil, capabilitiesDosPacks, type ToolPack } from "@/packs";
 
 /**
  * Capabilities do Max e a resolução da política efetiva de um sujeito.
@@ -156,7 +157,18 @@ export const CAPABILITIES = [
 
 export type Capability = (typeof CAPABILITIES)[number];
 
-const CATALOGO = new Set<string>(CAPABILITIES);
+/**
+ * O catálogo DESTE deploy: o núcleo (`CAPABILITIES`, espelhado no ImobPro pelo
+ * teste de paridade) mais as capabilities que os packs do perfil introduzem,
+ * sem repetir. Sem packs, é o núcleo, na mesma ordem.
+ */
+export function capabilitiesDoDeploy(packs: readonly ToolPack[] = packsDoPerfil()): string[] {
+  return [...new Set<string>([...CAPABILITIES, ...capabilitiesDosPacks(packs)])];
+}
+
+// Capability de pack é string fora do tipo `Capability` até a Fase 2 tipá-la;
+// com os packs vazios de hoje, este conjunto é exatamente o núcleo.
+const CATALOGO = new Set<string>(capabilitiesDoDeploy());
 
 /**
  * A política como o ImobPro a emite, em `GET /api/agents/profile`.

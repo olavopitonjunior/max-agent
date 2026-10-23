@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled } from '@/lib/runtime/rollout';
 import type { LlmTool } from "@/lib/llm";
 import type { Capability } from "./policy";
@@ -5,6 +6,7 @@ import type { ScopeQueryVerb } from "./scope-contract";
 import { ESTADOS_DE_PROPOSTA } from "./scope-contract";
 import type { Candidate } from "@/lib/identity";
 import { captacaoLigada } from "./captacao-flags";
+import { packsDoPerfil, type ToolPack } from "@/packs";
 
 /**
  * Ferramentas do Max — e, mais importante, o que elas NÃO são.
@@ -361,7 +363,7 @@ export const TEXTO_CANCELADO = "Beleza, não criei nada.";
  */
 export function textoSemPermissao(args: Pick<PendingAction["args"], "tipo" | "natureza" | "finalidade">): string {
   return (
-    `Criar ${descreverPendencia(args)} pelo Max não está liberado para você. ` +
+    `Criar ${descreverPendencia(args)} pelo ${nomeDoAgente()} não está liberado para você. ` +
     "Nada foi criado. Dá pra fazer pelo sistema, ou fala com quem administra a conta."
   );
 }
@@ -756,7 +758,7 @@ export const CRIAR_ATIVIDADE = escritaDeAtividade(
 export const COMENTAR_ATIVIDADE = escritaDeAtividade(
   "comentar_atividade",
   "Propõe comentar numa atividade. Só registra o pedido; a pessoa confirma com 'sim'. " +
-    "Se ela não disse o texto, deixe texto vazio: o Max pergunta.",
+    `Se ela não disse o texto, deixe texto vazio: o ${nomeDoAgente()} pergunta.`,
   { numero: NUMERO_DA_ATIVIDADE, texto: { type: "string", description: "O comentário, como a pessoa disse. Opcional." } },
   ["numero"],
   2,
@@ -775,7 +777,7 @@ export const CONCLUIR_ATIVIDADE = escritaDeAtividade(
 export const RECUSAR_ATIVIDADE = escritaDeAtividade(
   "recusar_atividade",
   "Propõe recusar uma atividade atribuída à pessoa, devolvendo-a a quem a passou. Precisa de motivo (mín. 3 caracteres). " +
-    "Só registra o pedido; a pessoa confirma com 'sim'. Se ela não disse o motivo, deixe motivo vazio: o Max pergunta.",
+    `Só registra o pedido; a pessoa confirma com 'sim'. Se ela não disse o motivo, deixe motivo vazio: o ${nomeDoAgente()} pergunta.`,
   { numero: NUMERO_DA_ATIVIDADE, motivo: { type: "string", description: "Por que recusa, como a pessoa disse. Opcional." } },
   ["numero"],
   4,
@@ -797,8 +799,23 @@ export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, PENDENCIAS_DO_NEGOC
  */
 export const REGISTRO_DE_TOOLS: EntradaDeTool[] = [PROPOR_CRIACAO, ...TOOLS_DE_ATIVIDADE_ESCRITA, ...TOOLS_DE_LEITURA];
 
-export function buscarNoRegistro(nome: string): EntradaDeTool | undefined {
-  return REGISTRO_DE_TOOLS.find((e) => e.nome === nome);
+/** O registro deste deploy: o núcleo mais as entradas dos packs do perfil (`src/packs`). */
+export function entradasDoDeploy(packs: readonly ToolPack[] = packsDoPerfil()): EntradaDeTool[] {
+  const todas = [...REGISTRO_DE_TOOLS, ...packs.flatMap((p) => p.entradas)];
+  // Nome repetido faria o `find` do despachante escolher uma das duas em
+  // silêncio; o pack que colide com o núcleo não pode subir.
+  if (packs.length) {
+    const vistos = new Set<string>();
+    for (const e of todas) {
+      if (vistos.has(e.nome)) throw new Error(`tool_nome_duplicado: ${e.nome}`);
+      vistos.add(e.nome);
+    }
+  }
+  return todas;
+}
+
+export function buscarNoRegistro(nome: string, packs?: readonly ToolPack[]): EntradaDeTool | undefined {
+  return entradasDoDeploy(packs).find((e) => e.nome === nome);
 }
 
 /**
@@ -809,7 +826,7 @@ export function buscarNoRegistro(nome: string): EntradaDeTool | undefined {
  * a tool que o PR 6 acrescentar nascer bloqueada sem ninguém lembrar de editar
  * dois arquivos.
  */
-export const NOMES_DE_TOOL: string[] = REGISTRO_DE_TOOLS.map((e) => e.nome);
+export const NOMES_DE_TOOL: string[] = entradasDoDeploy().map((e) => e.nome);
 
 /**
  * Quais tools de LEITURA entram no prompt deste turn.
@@ -911,14 +928,25 @@ export function ferramentasDoTurno(params: {
   textoAnterior?: string | null;
   /** Relógio do turno (testes); o padrão é agora. Alimenta a data na descrição do `vencimento`. */
   agora?: number;
+  /** Packs do perfil (testes); o padrão é `packsDoPerfil()`. */
+  packs?: readonly ToolPack[];
 }): { entradas: EntradaDeTool[]; cortadas: number } {
-  const escrita = REGISTRO_DE_TOOLS.filter(
+  const registro = entradasDoDeploy(params.packs);
+  const escrita = registro.filter(
     (e): e is EntradaDeEscrita =>
       e.tipo === "escrita" &&
       escritaPermitida(e, params.identity, params.policy) &&
       (e.combina(params.texto) || (!!params.textoAnterior && e.combina(params.textoAnterior)))
   );
-  const leitura = selecionarTools({ policy: params.policy, texto: params.texto, orgId: params.identity.orgId });
+  const leiturasDosPacks = registro.filter(
+    (e): e is EntradaDeLeitura => e.tipo === "leitura" && !TOOLS_DE_LEITURA.includes(e)
+  );
+  const leitura = selecionarTools({
+    policy: params.policy,
+    texto: params.texto,
+    orgId: params.identity.orgId,
+    catalogo: leiturasDosPacks.length ? [...TOOLS_DE_LEITURA, ...leiturasDosPacks] : undefined,
+  });
   return { entradas: [...escrita.map((e) => comDataDeHoje(e, params.agora)), ...leitura.tools], cortadas: leitura.cortadas };
 }
 
@@ -992,7 +1020,7 @@ export function textoCriacaoIndisponivel(modo: Exclude<ModoDeCriacao, "disponive
   }
   if (falhaTransitoria) return TEXTO_INDISPONIVEL_AGORA;
   return (
-    "Criar formulário ou proposta pelo Max não está disponível para você " +
+    `Criar formulário ou proposta pelo ${nomeDoAgente()} não está disponível para você ` +
     "agora. Nada foi criado — dá pra criar pelo sistema."
   );
 }

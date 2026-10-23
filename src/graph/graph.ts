@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled, durableRuntimeEnabled } from '@/lib/runtime/rollout';
 import { liveNamespaceFor } from "@/lib/runtime/context";
 import { query } from "@/lib/db";
@@ -11,7 +12,7 @@ import { getControl, assertBotWrite } from "@/lib/runtime/handoff";
 import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { rotearBotaoDeAtividade } from "@/lib/atividade-botao";
-import { iniciarAtividade, textoDeOcupado, TEXTO_ATIVIDADE_NAO_LIBERADA, type OperacaoDeAtividade } from "./atividades";
+import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
 import { resolverReferencia } from "./referencias";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
@@ -1121,7 +1122,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     const r = state.politicaIndisponivel
       ? { reply: "Não consegui validar sua permissão para consultar propostas agora. Tente de novo em instantes.", evento: "consulta_politica_indisponivel" }
       : !state.policy.includes("proposal.list")
-        ? { reply: "Você não tem permissão para consultar propostas pelo Max nesta imobiliária.", evento: "consulta_sem_politica" }
+        ? { reply: `Você não tem permissão para consultar propostas pelo ${nomeDoAgente()} nesta imobiliária.`, evento: "consulta_sem_politica" }
         : await responderConsulta(depsDoFluxo(state, usage), userText);
     return {
       ...(atual ? { fluxo: rebaixarFluxo(atual) } : vencido ? { fluxo: null } : {}),
@@ -1371,7 +1372,7 @@ async function executarCriacaoDireta(
     const proposta = await criarRascunhoProposta(orgId, {
       // `title` é obrigatório na rota; sem nome, um rótulo que diz de onde veio
       // é melhor que "Proposta" — quem abrir a lista amanhã sabe a origem.
-      title: nome ? `Proposta — ${nome}` : "Proposta (criada pelo Max)",
+      title: nome ? `Proposta — ${nome}` : `Proposta (criada pelo ${nomeDoAgente()})`,
       schemaType,
       idempotencyKey,
       // O rascunho fica com quem pediu. Só usuário da plataforma tem `userId`;
@@ -1461,7 +1462,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       if (pending.subjectKey !== stageSubject || Date.now() - pending.createdAt > QUERY_OPTIONS_TTL || pending.createdAt > Date.now())
         return respond("Essa lista de etapas expirou. Peça uma nova consulta de negócios.", null);
       if (choice.kind === "cancel") return respond("Consulta cancelada.", null);
-      if (!state.policy.includes("deal.list")) return respond("Você não tem permissão para consultar negócios pelo Max nesta imobiliária.", null);
+      if (!state.policy.includes("deal.list")) return respond(`Você não tem permissão para consultar negócios pelo ${nomeDoAgente()} nesta imobiliária.`, null);
       if (choice.kind === "select") return { queryOptions: null, selectedDealQuery: stageSubject, toolsOferecidas: ["listar_negocios"],
         pendingToolCalls: [{ name: "listar_negocios", args: choice.stage ? { estado: choice.stage } : {} }],
         messages: [{ role: "user", content: text }] };
@@ -1700,7 +1701,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
         toolLog: [...trilha, { name: chamada.name, args: { operacao: operacaoDeAtividade }, outcome }],
         piiMap: mapaTurno,
       });
-      if (!auth.ok) return responder(TEXTO_ATIVIDADE_NAO_LIBERADA, auth.motivo);
+      if (!auth.ok) return responder(textoAtividadeNaoLiberada(), auth.motivo);
       if (state.fluxo) {
         return responder(textoDeOcupado(state.fluxo), "fluxo_em_andamento");
       }
@@ -2094,7 +2095,7 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
   const keep = state.messages.slice(-KEEP_AFTER_COMPACT);
   const older = state.messages.slice(0, -KEEP_AFTER_COMPACT);
   const transcript = older
-    .map((m) => `${m.role === "user" ? "Cliente" : "Max"}: ${m.content}`)
+    .map((m) => `${m.role === "user" ? "Cliente" : nomeDoAgente()}: ${m.content}`)
     .join("\n")
     .slice(0, 8000);
 
@@ -2521,7 +2522,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
       }
       const org = await orgById(orgId).catch(() => null);
       return sair(
-        `Oi! Sou o Max${org ? `, da ${org.orgName}` : ""}. Para eu te atender por aqui, ` +
+        `Oi! Sou o ${nomeDoAgente()}${org ? `, da ${org.orgName}` : ""}. Para eu te atender por aqui, ` +
           "falta concluir o seu primeiro acesso ao ImobPro pelo botão da mensagem de " +
           "boas-vindas. Depois disso é só me chamar de novo.",
         { orgId, error: "primeiro_acesso_pendente" }
@@ -2548,7 +2549,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
     // derrubar a resposta por isso.
     await markGreeted(inbound.fromPhone).catch(() => undefined);
     return sair(
-      "Oi! Sou o Max, assistente das imobiliárias parceiras. Não reconheci " +
+      `Oi! Sou o ${nomeDoAgente()}, assistente das imobiliárias parceiras. Não reconheci ` +
         "este número — fale com seu corretor para liberar o acesso.",
       { error: "desconhecido_apresentado" }
     );
