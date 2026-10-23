@@ -117,11 +117,12 @@ export async function GET(req: NextRequest) {
     delivery.map((c) => [c.delivery_status, Number(c.n)])
   );
 
+  const { agentKey, agentName } = deployProfile();
   return NextResponse.json({
     service: "max-agent",
     // O mesmo serviço sobe como Max ou Newton; o admin separa os painéis por aqui.
-    agentKey: deployProfile().agentKey,
-    agentName: deployProfile().agentName,
+    agentKey,
+    agentName,
     /**
      * Qual canal está ligado (`WHATSAPP_PROVIDER`). O bloco continua se
      * chamando `zapi` por compatibilidade com o painel já publicado; é o

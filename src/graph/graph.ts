@@ -2896,11 +2896,12 @@ async function runResolvedTurn(inbound:InboundMessage,identity:Extract<Identity,
  return withExecution(context,async()=>{
   const execution=currentExecution()!;
   await query(`INSERT INTO live_conversation_binding(org_id,phone,subject_digest,thread_id) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,phone,subject_digest) DO UPDATE SET bound_at=now()`,[orgId,conversationKey(inbound.fromPhone),contentDigest(subject),conversationId]);
-  runEvent("run.started","max");
+  const agentKey=deployProfile().agentKey;
+  runEvent("run.started",agentKey);
   try{
-   const result=await runTurnCore(inbound,identity);runEvent("run.completed","max");
+   const result=await runTurnCore(inbound,identity);runEvent("run.completed",agentKey);
    if(durable)await finishTask(context,"succeeded",execution.events);
    return {...result,control:fence,dispatchFence,afterReply:()=>withExistingExecution(execution,async()=>{await result.afterReply();if(durable)await finishTask(context,"succeeded",execution.events);})};
-  }catch(error){runEvent("run.unknown","max");if(durable)await finishTask(context,"unknown",execution.events);throw error;}
+  }catch(error){runEvent("run.unknown",agentKey);if(durable)await finishTask(context,"unknown",execution.events);throw error;}
  });
 }
