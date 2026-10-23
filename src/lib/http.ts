@@ -18,6 +18,9 @@ import { semCredencial } from "./redigir";
 /** Graph API da Meta: API de mensageria, responde em ms; 10s já é generosidade. */
 export const META_TIMEOUT_MS = 10_000;
 
+/** Bridge do Newton: repassa para a Z-API dentro do próprio POST; 15s cobre o salto extra. */
+export const NEWTON_BRIDGE_TIMEOUT_MS = 15_000;
+
 /** ImobPro: consultas de identidade/RAG/escrita. A transcrição é a exceção —
  * sobe até 3 MB em base64 E espera o Gemini transcrever um áudio que pode ter
  * minutos; 20s cortava exatamente as mídias que MAX_MEDIA_BYTES aceita

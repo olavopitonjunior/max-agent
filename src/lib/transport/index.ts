@@ -17,6 +17,7 @@ import { currentExecution } from "../runtime/context";
 import { deployProfile } from "../deploy-profile";
 import { logAdapter } from "./adapters/log";
 import { metaAdapter } from "./adapters/meta";
+import { newtonBridgeAdapter } from "./adapters/newton-bridge";
 import type {
   BotaoEnviado,
   ConnectionState,
@@ -60,6 +61,7 @@ export function adapter(): TransportAdapter {
     avisarProvedorMeta();
     return metaAdapter;
   }
+  if (nome === "newton-bridge") return newtonBridgeAdapter;
   if (nome === "log") return logAdapter;
   throw new Error(`transport_nao_implementado: ${nome}`);
 }

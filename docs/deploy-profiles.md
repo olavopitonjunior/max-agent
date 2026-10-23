@@ -16,7 +16,11 @@ O Max nunca atende a Newcore e o Newton nunca atende RE/MAX. A garantia vem de t
 - `src/lib/transport/`: `adapter()` escolhe pelo perfil.
   - `meta`: o código de antes.
   - `log`: sem rede, todas as capacidades desligadas.
-  - `newton-bridge`: lança `transport_nao_implementado` até a Fase 2.
+  - `newton-bridge` (`adapters/newton-bridge.ts`): `POST {NEWTON_BRIDGE_URL}/api/send` com `Bearer NEWTON_BRIDGE_TOKEN` (o `BRIDGE_INTERNAL_TOKEN` do bridge). Só texto, até 4096 caracteres, destino DM ou `<id>-group`. Sem template, janela, mídia ou status. Nunca cita id sintético (`newton:`).
+- `src/app/api/agents/newton/run/route.ts`: entrada do bridge (`forwardToNewton`), com o mesmo corpo que ia ao sidecar.
+  - Só responde no perfil `newton`; no Max devolve 404. Exige `Bearer NEWTON_GATEWAY_TOKEN` e, sem ele configurado, devolve 503.
+  - Enfileira com id sintético de (telefone, grupo, texto, anexos, minuto), roda o turn em `waitUntil` e responde `{text:"", blocked:false}`. O bridge não envia texto vazio; a resposta sai pelo adapter.
+  - O `orgId` do corpo é ignorado, porque a org sai da identidade do telefone. Grupos são ignorados até o PR 2.2. Anexo sem texto vira `unknown`.
 
   `AGENT_TRANSPORT=log` força o adapter `log` fora de produção. Com `VERCEL_ENV=production`, lança `transport_log_em_producao`.
 - `src/lib/outbox.ts`: a regra da janela de 24h só vale quando o adapter tem `capabilities.window24h`. Sem ela, como no `log` e no bridge, sai texto livre.
@@ -33,9 +37,14 @@ O Max nunca atende a Newcore e o Newton nunca atende RE/MAX. A garantia vem de t
 
 Só `AGENT_DEPLOY_PROFILE` é nova, mais `AGENT_TRANSPORT` para homologação. Os nomes `MAX_*` (kill switches, flags de rollout) são do motor e valem nos dois perfis.
 
+Só no deploy do Newton, todas vindas do 1Password via `op inject`:
+- `NEWTON_BRIDGE_URL`
+- `NEWTON_BRIDGE_TOKEN`
+- `NEWTON_GATEWAY_TOKEN`: o token que o bridge manda na entrada.
+
 ## Ainda não feito (fases seguintes)
 
-- Fase 2: adapter `newton-bridge` (envio e rota de entrada), grupos, porteiro, packs nc-data e memória. A capability de pack ganha tipo próprio quando o primeiro pack chegar.
+- Fase 2 (feito no PR 2.1: adapter `newton-bridge` e rota de entrada): grupos, porteiro, packs nc-data e memória. A capability de pack ganha tipo próprio quando o primeiro pack chegar.
 - Pendências do review da Fase 1 que precisam estar resolvidas antes do Newton subir:
   - allowlist de orgs por perfil, além do banco;
   - `cm.ts` posta em `/api/webhooks/max` com cabeçalhos `x-max-*`;

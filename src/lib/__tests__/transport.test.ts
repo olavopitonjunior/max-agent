@@ -158,10 +158,15 @@ describe("adapter pelo perfil", () => {
     expect(() => provider()).toThrow("transport_invalido");
   });
 
-  it("perfil newton sem adapter ainda lança, sem cair na Meta", async () => {
+  it("perfil newton vai ao bridge, sem template e sem cair na Meta", async () => {
     vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
-    expect(() => provider()).toThrow("transport_nao_implementado");
-    await expect(sendText({ to: "1", body: "x" })).rejects.toThrow("transport_nao_implementado");
+    vi.stubEnv("NEWTON_BRIDGE_URL", "");
+    expect(provider()).toBe("newton-bridge");
+    expect(capabilities().window24h).toBe(false);
+    await expect(sendText({ to: "5511999990000", body: "x" })).rejects.toThrow("newton_bridge_nao_configurado");
+    await expect(
+      sendTemplate({ to: "5511999990000", name: "t", lang: "pt_BR", bodyParams: [], botoes: [] })
+    ).rejects.toThrow("transport_sem_template");
     expect(meta.sendText).not.toHaveBeenCalled();
   });
 
