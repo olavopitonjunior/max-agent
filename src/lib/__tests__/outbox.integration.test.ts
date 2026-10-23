@@ -122,6 +122,37 @@ d("outbox (Postgres real)", () => {
     expect(row[0].provider_message_id).toBe("MID");
   });
 
+  /**
+   * Provedor sem janela de 24h (hoje o `log`; amanhã o bridge do Newton):
+   * janela fechada NÃO represa por template — sai texto livre.
+   */
+  it("transporte log com janela fechada sai em texto livre, sem template", async () => {
+    vi.stubEnv("AGENT_TRANSPORT", "log");
+    try {
+      await query(`DELETE FROM conversation_window WHERE phone = '5511987654321'`);
+      await enqueue(args({ dedupeKey: "k-log" }));
+      await query(
+        `UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = 'k-log'`
+      );
+
+      await dispatchDue();
+
+      expect(sent).not.toHaveBeenCalled();
+      const row = await query<{
+        status: string;
+        provider_message_id: string | null;
+        template_name: string | null;
+      }>(
+        `SELECT status, provider_message_id, template_name FROM outbox WHERE dedupe_key = 'k-log'`
+      );
+      expect(row[0].status).toBe("sent");
+      expect(row[0].provider_message_id).toMatch(/^log-/);
+      expect(row[0].template_name).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   /** O que ainda não venceu não pode sair — é a janela 7h–22h em ação. */
   it("não toca no que está agendado pro futuro", async () => {
     await enqueue(args({ dedupeKey: "k-future" }));

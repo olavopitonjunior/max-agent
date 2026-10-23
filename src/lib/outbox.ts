@@ -2,7 +2,7 @@ import {captureDispatchFence,DispatchFenceSchema,withCapturedPrivacy,withDeliver
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
-import { sendText, sendTemplate, connectionStatus, provider, type ConnectionState } from "./transport";
+import { sendText, sendTemplate, connectionStatus, capabilities, type ConnectionState } from "./transport";
 import { janelaAberta } from "./janela24h";
 import { reservarAvisoNeutro } from "./atividades-pendentes";
 import { seedNotification } from "@/graph/graph";
@@ -568,11 +568,12 @@ export async function dispatchDue(
      * aprovação em `templates/aprovacao.ts`) — se estiver, sai por ELE; senão
      * represa com a tentativa devolvida e o motivo à vista no painel. Quem
      * libera é a pessoa escrevendo de novo, a Meta aprovando o template, ou
-     * (se nenhum dos dois) o alerta chegando à mão do Olavo. Só vale para a
-     * Meta: a Z-API não tem janela.
+     * (se nenhum dos dois) o alerta chegando à mão do Olavo. Só vale para
+     * provedor com janela (`capabilities().window24h`, hoje só a Meta): sem
+     * janela, sai texto livre sempre.
      */
     let envioTemplate: TemplateDef | null = null;
-    if (provider() === "meta" && !(await janelaAberta(row.phone))) {
+    if (capabilities().window24h && !(await janelaAberta(row.phone))) {
       const candidatosDoKind = templatesDoKind(row.kind);
       if (candidatosDoKind.length === 0) {
         await query(

@@ -14,8 +14,17 @@ import { currentExecution } from "../runtime/context";
  * próprio parser, e todas desembocam nos tipos de `./types`.
  */
 
-import * as meta from "../meta";
-import type { BotaoEnviado, ConnectionState, ProviderName, SendResult } from "./types";
+import { deployProfile } from "../deploy-profile";
+import { logAdapter } from "./adapters/log";
+import { metaAdapter } from "./adapters/meta";
+import type {
+  BotaoEnviado,
+  ConnectionState,
+  ProviderName,
+  SendResult,
+  TransportAdapter,
+  TransportCapabilities,
+} from "./types";
 
 export type {
   BotaoEnviado,
@@ -25,21 +34,44 @@ export type {
   ProviderName,
   SendResult,
   StatusCallback,
+  TransportAdapter,
+  TransportCapabilities,
 } from "./types";
 
 /** Para não repetir o `console.warn` em TODA chamada de um processo que nunca corrige a env. */
 let avisouProvedorInvalido = false;
 
 /**
- * Qual provedor está valendo. Só existe um: `meta`.
- *
+ * O adapter valendo. Vem do perfil de deploy (`AGENT_DEPLOY_PROFILE`; ausente
+ * é o Max, na Meta). `AGENT_TRANSPORT=log` desvia para o transporte sem rede
+ * do playground e de staging, e é recusado em produção. Qualquer outro valor
+ * lança: cair na Meta por engano mandaria mensagem pelo número errado.
+ */
+export function adapter(): TransportAdapter {
+  const desvio = (process.env.AGENT_TRANSPORT ?? "").trim().toLowerCase();
+  if (desvio === "log") {
+    if (process.env.VERCEL_ENV === "production") throw new Error("transport_log_em_producao");
+    return logAdapter;
+  }
+  if (desvio !== "") throw new Error(`transport_invalido: ${desvio}`);
+
+  const nome = deployProfile().transport;
+  if (nome === "meta") {
+    avisarProvedorMeta();
+    return metaAdapter;
+  }
+  if (nome === "log") return logAdapter;
+  throw new Error(`transport_nao_implementado: ${nome}`);
+}
+
+/**
  * `WHATSAPP_PROVIDER` ausente ou com qualquer valor que não seja `"meta"` NÃO
  * lança — a Z-API foi desligada em 10/09 e não há para onde cair. Lançar aqui
  * derrubaria outbox, inbound e admin por uma env desatualizada ou ausente;
  * um `console.warn` (uma vez por processo) é o suficiente para alguém notar e
  * corrigir a env sem silenciar o Max inteiro.
  */
-export function provider(): ProviderName {
+function avisarProvedorMeta(): void {
   const v = (process.env.WHATSAPP_PROVIDER ?? "").trim().toLowerCase();
   if (v !== "meta" && !avisouProvedorInvalido) {
     avisouProvedorInvalido = true;
@@ -47,7 +79,16 @@ export function provider(): ProviderName {
       `[transport] WHATSAPP_PROVIDER="${v}" — só "meta" existe desde a migração; seguindo com meta`
     );
   }
-  return "meta";
+}
+
+/** Qual provedor está valendo. */
+export function provider(): ProviderName {
+  return adapter().name;
+}
+
+/** O que o provedor valendo sabe fazer (janela de 24h, template, mídia...). */
+export function capabilities(): TransportCapabilities {
+  return adapter().capabilities;
 }
 
 export async function sendText(params: {
@@ -57,8 +98,7 @@ export async function sendText(params: {
 }): Promise<SendResult> {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
-  provider();
-  return meta.sendText(params);
+  return adapter().sendText(params);
 }
 
 /**
@@ -74,18 +114,17 @@ export async function sendTemplate(params: {
 }): Promise<SendResult> {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
-  provider();
-  return meta.sendTemplate(params);
+  const a = adapter();
+  if (!a.capabilities.templates || !a.sendTemplate) throw new Error("transport_sem_template");
+  return a.sendTemplate(params);
 }
 
 export async function connectionStatus(): Promise<ConnectionState> {
-  provider();
-  return meta.connectionStatus();
+  return adapter().connectionStatus();
 }
 
 export async function downloadMedia(
   ref: string
 ): Promise<{ data: Buffer; contentType: string | null } | null> {
-  provider();
-  return meta.downloadMedia(ref);
+  return adapter().downloadMedia(ref);
 }

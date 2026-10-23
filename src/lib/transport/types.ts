@@ -85,4 +85,33 @@ export interface SendResult {
   messageId: string | null;
 }
 
-export type ProviderName = "meta";
+export type ProviderName = "meta" | "newton-bridge" | "log";
+
+/**
+ * O que o provedor sabe fazer. A outbox decide por aqui, e não pelo nome:
+ * janela de 24h e template são regras da Meta; um provedor sem elas manda
+ * texto livre sempre.
+ */
+export interface TransportCapabilities {
+  templates: boolean;
+  window24h: boolean;
+  media: boolean;
+  groups: boolean;
+  status: boolean;
+}
+
+export interface TransportAdapter {
+  name: ProviderName;
+  capabilities: TransportCapabilities;
+  sendText(params: { to: string; body: string; quoteMessageId?: string }): Promise<SendResult>;
+  /** Ausente quando `capabilities.templates` é `false`. */
+  sendTemplate?(params: {
+    to: string;
+    name: string;
+    lang: string;
+    bodyParams: string[];
+    botoes: BotaoEnviado[];
+  }): Promise<SendResult>;
+  connectionStatus(): Promise<ConnectionState>;
+  downloadMedia(ref: string): Promise<{ data: Buffer; contentType: string | null } | null>;
+}
