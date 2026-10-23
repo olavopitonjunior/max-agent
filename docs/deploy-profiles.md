@@ -18,9 +18,18 @@ O Max nunca atende a Newcore e o Newton nunca atende RE/MAX. A garantia vem de t
   - `log`: sem rede, todas as capacidades desligadas.
   - `newton-bridge` (`adapters/newton-bridge.ts`): `POST {NEWTON_BRIDGE_URL}/api/send` com `Bearer NEWTON_BRIDGE_TOKEN` (o `BRIDGE_INTERNAL_TOKEN` do bridge). Só texto, até 4096 caracteres, destino DM ou `<id>-group`. Sem template, janela, mídia ou status. Nunca cita id sintético (`newton:`).
 - `src/app/api/agents/newton/run/route.ts`: entrada do bridge (`forwardToNewton`), com o mesmo corpo que ia ao sidecar.
-  - Só responde no perfil `newton`; no Max devolve 404. Exige `Bearer NEWTON_GATEWAY_TOKEN` e, sem ele configurado, devolve 503.
-  - Enfileira com id sintético de (telefone, grupo, texto, anexos, minuto), roda o turn em `waitUntil` e responde `{text:"", blocked:false}`. O bridge não envia texto vazio; a resposta sai pelo adapter.
-  - O `orgId` do corpo é ignorado, porque a org sai da identidade do telefone. Grupos são ignorados até o PR 2.2. Anexo sem texto vira `unknown`.
+  - O bridge chama `/agents/newton/run` na raiz; o rewrite em `next.config.js` leva a `/api/agents/newton/run`.
+  - Só responde no perfil `newton`; no Max devolve 404. Exige `Bearer NEWTON_INBOUND_TOKEN` (exclusivo; o `NEWTON_GATEWAY_TOKEN` do sidecar não abre) e, sem ele configurado, devolve 503.
+  - Enfileira com o `messageId` da Z-API quando o corpo trouxer; senão, id sintético de (telefone, grupo, texto bruto, anexos, minuto). Roda o turn em `waitUntil` e responde `{text:"", blocked:false}`. O bridge não envia texto vazio; a resposta sai pelo adapter. Falha na fila é logada (`newton.fila_falhou`) e responde 200, porque o bridge não reenvia.
+  - O `orgId` do corpo é ignorado, porque a org sai da identidade do telefone. Grupos são ignorados até o PR 2.2.
+  - Marcador do bridge sozinho (`[imagem enviada]`, `[documento: …]`, áudio sem transcrição) não é texto e vira `unknown`; áudio transcrito entra só com a transcrição.
+- `src/graph/graph.ts`: no perfil `newton`, número desconhecido fica em silêncio (sem apresentação e sem repasse à equipe), porque o Newton só fala com usuário interno. O convidado sem primeiro acesso continua recebendo o aviso. O `interceptar` do aceite roda antes da identidade, mas só responde a pendência criada por template, que o Newton não tem.
+- Limites conhecidos do PR 2.1, para o PR 4.2 do bridge:
+  - o bridge precisa mandar `messageId` (o id sintético deixa passar reentrega que cruza o minuto e junta a mesma frase repetida no minuto);
+  - o papel do contato (`contacts-gate`) não chega ao motor; o porteiro (PR 2.3) depende disso;
+  - o bridge manda os anexos em base64 no corpo, e a Vercel recusa corpo acima de 4,5 MB (413): o bridge deve cortar o base64 para o v2, que não usa mídia;
+  - `connectionStatus` do adapter falha aberto (sempre conectado), então a guarda de "transporte fora" não vale no Newton até o bridge expor status;
+  - `/api/meta-webhook` continua no deploy do Newton, sem credencial Meta; a remoção fica para a allowlist por perfil.
 
   `AGENT_TRANSPORT=log` força o adapter `log` fora de produção. Com `VERCEL_ENV=production`, lança `transport_log_em_producao`.
 - `src/lib/outbox.ts`: a regra da janela de 24h só vale quando o adapter tem `capabilities.window24h`. Sem ela, como no `log` e no bridge, sai texto livre.
@@ -40,7 +49,7 @@ Só `AGENT_DEPLOY_PROFILE` é nova, mais `AGENT_TRANSPORT` para homologação. O
 Só no deploy do Newton, todas vindas do 1Password via `op inject`:
 - `NEWTON_BRIDGE_URL`
 - `NEWTON_BRIDGE_TOKEN`
-- `NEWTON_GATEWAY_TOKEN`: o token que o bridge manda na entrada.
+- `NEWTON_INBOUND_TOKEN`: o token que o bridge manda na entrada. Novo, diferente do `NEWTON_GATEWAY_TOKEN` do sidecar.
 
 ## Ainda não feito (fases seguintes)
 

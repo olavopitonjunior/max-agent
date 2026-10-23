@@ -4,7 +4,7 @@ import { waitUntil } from "@vercel/functions";
 import { deployProfile } from "@/lib/deploy-profile";
 import { enqueueInbound, processInboundNow } from "@/lib/inbound";
 import { log } from "@/lib/log";
-import { idSintetico } from "@/lib/transport/newton-inbound";
+import { idDoBridge, idSintetico, textoDoBridge } from "@/lib/transport/newton-inbound";
 import type { InboundMessage } from "@/lib/transport";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +16,11 @@ export const maxDuration = 60;
  * Entrada do Newton: o bridge (`whatsapp-newton-bridge`, `forwardToNewton`)
  * faz POST aqui com o mesmo corpo que mandava ao sidecar do VPS —
  * `{caller:{phone,name}, channel, orgId, groupId, groupName, members, text,
- * attachments}` — e `Bearer NEWTON_GATEWAY_TOKEN`.
+ * attachments, messageId?}` — e `Bearer NEWTON_INBOUND_TOKEN`, exclusivo desta
+ * porta (não o `NEWTON_GATEWAY_TOKEN` que o bridge usa com o sidecar).
+ *
+ * O bridge chama `/agents/newton/run` na raiz; o rewrite em `next.config.js`
+ * traz para cá.
  *
  * ── Resposta ─────────────────────────────────────────────────────────────
  * Sempre `{text: "", blocked: false}`: texto vazio o bridge não envia. A
@@ -25,15 +29,17 @@ export const maxDuration = 60;
  * prazo de 58 s do bridge nunca corta um turn longo.
  *
  * ── Dedupe ───────────────────────────────────────────────────────────────
- * O bridge não repassa o id da Z-API. O id é sintetizado de (telefone, grupo,
- * texto, anexos, minuto): uma reentrega no mesmo minuto bate no `ON CONFLICT`
- * da fila. O preço é que a MESMA frase repetida de propósito no mesmo minuto
- * vira uma só — aceitável até o bridge mandar o `messageId` (fase 4.2).
+ * Com `messageId` (id da Z-API, fase 4.2), vale ele. Sem ele, o id é
+ * sintetizado de (telefone, grupo, texto, anexos, minuto): uma reentrega no
+ * mesmo minuto bate no `ON CONFLICT` da fila. Limites: reentrega que cruza a
+ * virada do minuto passa, e a MESMA frase repetida de propósito no mesmo
+ * minuto vira uma só.
  *
  * ── Fora do escopo desta rota (por ora) ──────────────────────────────────
  * Grupo: aceito e ignorado até a resposta a menção existir (PR 2.2). Anexo:
- * sem mídia no transporte; com texto vale o texto, sem texto vira `unknown`
- * e o grafo pede por escrito. `orgId` do corpo não é confiado: a org sai da
+ * sem mídia no transporte; o marcador do bridge ("[imagem enviada]",
+ * "[documento: …]") não conta como texto, e sem texto vira `unknown` para o
+ * grafo pedir por escrito. Áudio transcrito entra como a transcrição. `orgId` do corpo não é confiado: a org sai da
  * identidade do telefone, como no Max.
  */
 
@@ -42,12 +48,13 @@ interface CorpoDoBridge {
   groupId?: unknown;
   text?: unknown;
   attachments?: unknown;
+  messageId?: unknown;
 }
 
 const VAZIO = { text: "", blocked: false } as const;
 
 function autorizado(header: string | null): "ok" | "negado" | "sem_token" {
-  const esperado = (process.env.NEWTON_GATEWAY_TOKEN ?? "").trim();
+  const esperado = (process.env.NEWTON_INBOUND_TOKEN ?? "").trim();
   if (!esperado) return "sem_token";
   const recebido = header?.startsWith("Bearer ") ? header.slice(7).trim() : "";
   if (!recebido) return "negado";
@@ -65,7 +72,7 @@ export async function POST(req: NextRequest) {
 
   const auth = autorizado(req.headers.get("authorization"));
   if (auth === "sem_token") {
-    console.error("[newton-run] NEWTON_GATEWAY_TOKEN ausente — nada aceito");
+    console.error("[newton-run] NEWTON_INBOUND_TOKEN ausente — nada aceito");
     return NextResponse.json({ error: "not_configured" }, { status: 503 });
   }
   if (auth === "negado") return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -82,7 +89,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invalid_caller" }, { status: 400 });
   }
   const groupId = typeof corpo.groupId === "string" && corpo.groupId.trim() ? corpo.groupId.trim() : null;
-  const text = typeof corpo.text === "string" ? corpo.text.trim() : "";
+  // O id usa o texto bruto: com o marcador, foto e documento no mesmo minuto
+  // não colidem.
+  const bruto = typeof corpo.text === "string" ? corpo.text.trim() : "";
+  const text = textoDoBridge(bruto);
   const anexos = Array.isArray(corpo.attachments) ? corpo.attachments.length : 0;
 
   if (groupId) {
@@ -93,7 +103,7 @@ export async function POST(req: NextRequest) {
 
   const agoraMs = Date.now();
   const msg: InboundMessage = {
-    messageId: idSintetico({ phone, groupId, text, anexos, agoraMs }),
+    messageId: idDoBridge(corpo.messageId) ?? idSintetico({ phone, groupId, text: bruto, anexos, agoraMs }),
     fromPhone: phone,
     groupId: null,
     kind: text ? "text" : "unknown",
@@ -105,10 +115,20 @@ export async function POST(req: NextRequest) {
     replyToMessageId: null,
   };
 
-  const r = await enqueueInbound(msg);
-  if (r.status === "queued") {
-    log.info("inbound.aceito", { messageId: msg.messageId, rowId: r.id, phone, kind: msg.kind });
-    waitUntil(processInboundNow(r.id));
+  // O bridge não reenvia: falha na fila é registrada e a mensagem se perde,
+  // sem devolver 500 (que o bridge só loga).
+  try {
+    const r = await enqueueInbound(msg);
+    if (r.status === "queued") {
+      log.info("inbound.aceito", { messageId: msg.messageId, rowId: r.id, phone, kind: msg.kind });
+      waitUntil(processInboundNow(r.id));
+    }
+  } catch (err) {
+    log.error("newton.fila_falhou", {
+      messageId: msg.messageId,
+      phone,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
   return NextResponse.json(VAZIO);
 }

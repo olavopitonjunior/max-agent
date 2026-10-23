@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,7 +45,7 @@ function req(body: unknown, auth: string | null = `Bearer ${TOKEN}`) {
 
 beforeEach(() => {
   vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
-  vi.stubEnv("NEWTON_GATEWAY_TOKEN", TOKEN);
+  vi.stubEnv("NEWTON_INBOUND_TOKEN", TOKEN);
   enqueue.mockResolvedValue({ status: "queued", id: "row-1" });
 });
 
@@ -62,8 +63,8 @@ describe("POST /api/agents/newton/run", () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  it("sem NEWTON_GATEWAY_TOKEN configurado nada passa (503)", async () => {
-    vi.stubEnv("NEWTON_GATEWAY_TOKEN", "");
+  it("sem NEWTON_INBOUND_TOKEN configurado nada passa (503)", async () => {
+    vi.stubEnv("NEWTON_INBOUND_TOKEN", "");
     vi.spyOn(console, "error").mockImplementation(() => {});
     expect((await POST(req(corpoDM()))).status).toBe(503);
     expect(enqueue).not.toHaveBeenCalled();
@@ -135,7 +136,7 @@ describe("POST /api/agents/newton/run", () => {
         corpoDM({
           groupId: "120363012345678901-group",
           groupName: "Deals Newcore",
-          members: [{ phone: "5511900000001", name: "Olavo" }],
+          members: ["5511900000001", "5511900000002"],
           text: "@Newton status do AP101?",
         })
       )
@@ -156,5 +157,57 @@ describe("POST /api/agents/newton/run", () => {
     const res = await POST(req(corpoDM({ text: "   " })));
     expect(await res.json()).toEqual({ text: "", blocked: false });
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("o token antigo do sidecar não abre esta porta", async () => {
+    vi.stubEnv("NEWTON_GATEWAY_TOKEN", "token-do-sidecar");
+    expect((await POST(req(corpoDM(), "Bearer token-do-sidecar"))).status).toBe(401);
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("marcador do bridge sozinho não é texto: imagem e documento sem legenda viram unknown", async () => {
+    const anexo = { type: "image", mime: "image/jpeg", base64: "AAAA", filename: "foto.jpg" };
+    await POST(req(corpoDM({ text: "[imagem enviada]", attachments: [anexo] })));
+    await POST(req(corpoDM({ text: "[documento: matricula.pdf]", attachments: [{ ...anexo, type: "document" }] })));
+    await POST(
+      req(corpoDM({ text: "[áudio enviado — transcrição indisponível, OPENROUTER_API_KEY não configurada ou Whisper falhou]", attachments: [anexo] }))
+    );
+    for (const [m] of enqueue.mock.calls) expect(m).toMatchObject({ kind: "unknown", text: null });
+    // Foto e documento no mesmo minuto são duas mensagens, não uma.
+    expect(new Set(enqueue.mock.calls.map(([m]) => m.messageId)).size).toBe(3);
+  });
+
+  it("áudio transcrito entra só com a transcrição", async () => {
+    await POST(req(corpoDM({ text: "[áudio transcrito · 12.3KB]\nquais negócios estão parados?" })));
+    expect(enqueue.mock.calls[0][0]).toMatchObject({ kind: "text", text: "quais negócios estão parados?" });
+  });
+
+  it("com messageId do bridge vale o id da Z-API; id sintético no corpo é recusado", async () => {
+    await POST(req(corpoDM({ messageId: "3EB0C431D8A1B2" })));
+    await POST(req(corpoDM({ messageId: "newton:forjado" })));
+    expect(enqueue.mock.calls[0][0].messageId).toBe("3EB0C431D8A1B2");
+    expect(enqueue.mock.calls[1][0].messageId).toMatch(/^newton:[0-9a-f]{40}$/);
+  });
+
+  it("fila fora do ar não devolve 500: registra e responde vazio", async () => {
+    enqueue.mockRejectedValue(new Error("pg down"));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await POST(req(corpoDM()));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ text: "", blocked: false });
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(err.mock.calls.flat().join(" ")).toContain("newton.fila_falhou");
+    err.mockRestore();
+  });
+});
+
+/** O bridge chama o caminho do sidecar antigo, na raiz. */
+describe("rewrite do caminho do bridge", () => {
+  it("/agents/newton/run cai na rota /api/agents/newton/run", async () => {
+    const cfg = createRequire(import.meta.url)("../../../../next.config.js") as {
+      rewrites(): Promise<unknown[]>;
+    };
+    const regras = await cfg.rewrites();
+    expect(regras).toContainEqual({ source: "/agents/newton/run", destination: "/api/agents/newton/run" });
   });
 });

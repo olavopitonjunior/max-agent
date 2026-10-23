@@ -19,3 +19,30 @@ export function idSintetico(p: {
     .digest("hex");
   return `${NEWTON_SYNTHETIC_PREFIX}${h.slice(0, 40)}`;
 }
+
+/**
+ * O bridge sempre preenche `text` para mídia, com um marcador no lugar do
+ * conteúdo (`whatsapp-newton-bridge`, rotas de webhook). Marcador sozinho não
+ * é texto: sem isso o modelo acharia que recebeu o arquivo. Áudio transcrito
+ * vira só a transcrição.
+ */
+const MARCADOR_SEM_CONTEUDO =
+  /^\[(imagem enviada|documento: [^\]\n]*|áudio enviado — transcrição indisponível[^\]\n]*)\]$/;
+const MARCADOR_AUDIO = /^\[áudio transcrito · [\d.]+KB\]\n/;
+
+export function textoDoBridge(bruto: string): string {
+  const t = bruto.trim();
+  if (MARCADOR_SEM_CONTEUDO.test(t)) return "";
+  return t.replace(MARCADOR_AUDIO, "").trim();
+}
+
+/**
+ * Id da Z-API, quando o bridge passar a mandá-lo (fase 4.2). Vale como está,
+ * para que a resposta possa citar a mensagem; o prefixo sintético é recusado.
+ */
+export function idDoBridge(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const id = v.trim();
+  if (!/^[A-Za-z0-9._:-]{6,128}$/.test(id) || id.startsWith(NEWTON_SYNTHETIC_PREFIX)) return null;
+  return id;
+}

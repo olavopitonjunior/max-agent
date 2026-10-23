@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { newtonBridgeAdapter } from "../transport/adapters/newton-bridge";
-import { idSintetico } from "../transport/newton-inbound";
+import { idDoBridge, idSintetico, textoDoBridge } from "../transport/newton-inbound";
 
 /**
  * Contrato com o `whatsapp-newton-bridge` (`src/app/api/send/route.ts`):
@@ -116,5 +116,31 @@ describe("idSintetico", () => {
     expect(idSintetico({ ...base, phone: "5511999990000" })).not.toBe(a);
     expect(idSintetico({ ...base, groupId: "1203-group" })).not.toBe(a);
     expect(idSintetico({ ...base, anexos: 1 })).not.toBe(a);
+  });
+});
+
+describe("textoDoBridge", () => {
+  it("marcador sem conteúdo vira vazio; legenda e texto comum ficam", () => {
+    expect(textoDoBridge("[imagem enviada]")).toBe("");
+    expect(textoDoBridge(" [documento: sem nome] ")).toBe("");
+    expect(textoDoBridge("[áudio enviado — transcrição indisponível, Whisper falhou]")).toBe("");
+    expect(textoDoBridge("segue a matrícula")).toBe("segue a matrícula");
+    expect(textoDoBridge("[imagem enviada] e mais isto")).toBe("[imagem enviada] e mais isto");
+  });
+
+  it("áudio transcrito vira só a transcrição", () => {
+    expect(textoDoBridge("[áudio transcrito · 8.0KB]\nme liga amanhã")).toBe("me liga amanhã");
+  });
+});
+
+describe("idDoBridge", () => {
+  it("aceita id da Z-API e recusa vazio, curto, forjado ou fora do formato", () => {
+    expect(idDoBridge("3EB0C431D8A1B2")).toBe("3EB0C431D8A1B2");
+    expect(idDoBridge(" 3EB0C431D8A1B2 ")).toBe("3EB0C431D8A1B2");
+    expect(idDoBridge("newton:abcdef")).toBeNull();
+    expect(idDoBridge("abc")).toBeNull();
+    expect(idDoBridge("id com espaço")).toBeNull();
+    expect(idDoBridge(123)).toBeNull();
+    expect(idDoBridge(undefined)).toBeNull();
   });
 });

@@ -9,6 +9,11 @@ const nextConfig = {
       "@langchain/langgraph-checkpoint-postgres",
     ],
   },
+  // O bridge do Newton (`forwardToNewton`) chama `/agents/newton/run` na raiz,
+  // o caminho do sidecar antigo. A rota mora em `/api/...`.
+  async rewrites() {
+    return [{ source: "/agents/newton/run", destination: "/api/agents/newton/run" }];
+  },
 };
 
 module.exports = nextConfig;

@@ -124,4 +124,26 @@ describe("runTurn × aceite", () => {
     expect(complete).not.toHaveBeenCalled();
     avisou.mockResolvedValue(false);
   });
+
+  /**
+   * O Newton só fala com usuário interno: número desconhecido não recebe a
+   * apresentação nem vai para a equipe, nem na primeira vez nem insistindo.
+   */
+  it("perfil newton: desconhecido fica em silêncio, sem apresentação nem repasse", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    try {
+      intercepta.mockResolvedValue(null);
+      repassa.mockResolvedValue({ reply: "Passei sua mensagem para a nossa equipe.", marca: "desconhecido_repassado" });
+      identidade.mockResolvedValue({ kind: "unknown", alreadyGreeted: false });
+      const r1 = await runTurn({ ...MSG, messageId: "newton:a1", text: "oi", buttonPayload: null });
+      identidade.mockResolvedValue({ kind: "unknown", alreadyGreeted: true });
+      const r2 = await runTurn({ ...MSG, messageId: "newton:a2", text: "alô?", buttonPayload: null });
+      expect(r1.reply).toBeNull();
+      expect(r2.reply).toBeNull();
+      expect(repassa).not.toHaveBeenCalled();
+      expect(complete).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
