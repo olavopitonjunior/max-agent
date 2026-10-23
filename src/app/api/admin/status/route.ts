@@ -4,6 +4,7 @@ import { connectionStatus, provider } from "@/lib/transport";
 import { erroSemSegredo, folhasSemCredencial } from "@/lib/redigir";
 import { requireHmac } from "@/lib/auth";
 import { isWithinWindow, nextDeliveryTime } from "@/lib/window";
+import { deployProfile } from "@/lib/deploy-profile";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -118,6 +119,9 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     service: "max-agent",
+    // O mesmo serviço sobe como Max ou Newton; o admin separa os painéis por aqui.
+    agentKey: deployProfile().agentKey,
+    agentName: deployProfile().agentName,
     /**
      * Qual canal está ligado (`WHATSAPP_PROVIDER`). O bloco continua se
      * chamando `zapi` por compatibilidade com o painel já publicado; é o
