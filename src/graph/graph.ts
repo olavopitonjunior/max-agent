@@ -131,6 +131,7 @@ import {
 import { executarAcao, type VerboDeAcao } from "@/lib/acao";
 import { OrgSuspensaError, TEXTO_ORG_SUSPENSA } from "@/lib/org-suspensa";
 import { subjectDe, consultarEscopo } from "@/lib/scope";
+import { explicitStage, queryChoice, renderQueryOptions, nextQueryPage, QUERY_OPTIONS_TTL, type QueryOptions } from "./query-options";
 import { chaveDePolitica } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
 import { SEM_ORG } from "@/lib/sem-org";
@@ -248,6 +249,7 @@ function blindarCredito(state: MaxStateType, update: MaxUpdate): MaxUpdate {
 }
 
 export const MaxState = Annotation.Root({
+  queryOptions: Annotation<QueryOptions | null>({ reducer: (_p,n) => n, default: () => null }),
   marketingPending: Annotation<MarketingPending | null>({ reducer: (_p,n) => n, default: () => null }),
   inbound: Annotation<InboundMessage>,
   /** Resolvida ANTES do grafo — é ela que determina o `thread_id`. */
@@ -820,6 +822,9 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
  * três horas depois responde outra coisa na cabeça da pessoa.
  */
 async function continuar(state: MaxStateType): Promise<MaxUpdate> {
+  // An active creation/confirmation owns its numbers; old read options cannot capture them.
+  if (state.queryOptions && (state.fluxo || state.pendingAction)) return { queryOptions: null };
+  if (state.queryOptions?.numbered !== false && state.queryOptions) return { restoDaResposta: null };
   const guardado = state.restoDaResposta;
   if (!guardado) return {};
 
@@ -1425,6 +1430,41 @@ async function retrieve(state: MaxStateType): Promise<MaxUpdate> {
 }
 
 async function answer(state: MaxStateType): Promise<MaxUpdate> {
+  const stageSubject = JSON.stringify([state.identity.orgId, subjectDe(state.identity)]);
+  const text = textoDoTurno(state).trim();
+  const clarification = state.toolResults.find(r => r.tool === "listar_negocios" && r.clarification)?.clarification;
+  if (state.toolRounds > 0 && clarification && state.toolResults.length === 1) {
+    const pending: QueryOptions = { subjectKey: stageSubject, createdAt: Date.now(), options: clarification.options, offset: 0 };
+    const reply = pending.options.length ? renderQueryOptions(pending) : "Não consegui obter as etapas disponíveis para esta consulta. Tente novamente mais tarde.";
+    return { queryOptions: pending.options.length ? pending : null, referencias: null, restoDaResposta: null,
+      reply, messages: [{ role: "assistant", content: reply }] };
+  }
+  if (state.toolRounds === 0 && state.queryOptions) {
+    const pending = state.queryOptions;
+    const choice = queryChoice(text, pending);
+    if (choice.kind !== "unrelated") {
+      const respond = (reply: string, queryOptions: QueryOptions | null): MaxUpdate => ({ queryOptions, reply,
+        messages: [{ role: "user", content: text }, { role: "assistant", content: reply }] });
+      if (pending.subjectKey !== stageSubject || Date.now() - pending.createdAt > QUERY_OPTIONS_TTL || pending.createdAt > Date.now())
+        return respond("Essa lista de etapas expirou. Peça uma nova consulta de negócios.", null);
+      if (choice.kind === "cancel") return respond("Consulta cancelada.", null);
+      if (!state.policy.includes("deal.list")) return respond("Você não tem permissão para consultar negócios pelo Max nesta imobiliária.", null);
+      if (choice.kind === "select") return { queryOptions: null, toolsOferecidas: ["listar_negocios"],
+        pendingToolCalls: [{ name: "listar_negocios", args: choice.stage ? { estado: choice.stage } : {} }],
+        messages: [{ role: "user", content: text }] };
+      // Scope may change while the capability remains. Never reveal another cached page.
+      const refresh = await despacharLeituras({ chamadas: [{ name: "listar_negocios", args: { opcoes_etapas: true } }],
+        oferecidas: ["listar_negocios"], policy: state.policy, identity: state.identity,
+        fromPhone: state.inbound.fromPhone, referencias: state.referencias, turno: state.inbound.messageId });
+      const fresh = refresh.resultados[0]?.clarification;
+      if (!fresh?.options.length) return { ...respond("Não consegui atualizar as etapas disponíveis. Peça uma nova consulta de negócios.", null), toolLog: refresh.trilha };
+      const same = JSON.stringify(fresh.options) === JSON.stringify(pending.options);
+      const current = { ...pending, options: fresh.options, offset: same ? pending.offset : 0, numbered: true };
+      const updated = choice.kind === "more" && same ? nextQueryPage(current) : current;
+      return { ...respond(renderQueryOptions(updated), updated), referencias: null, toolLog: refresh.trilha };
+    }
+  }
+
   /**
    * B1 — a seção de criação do prompt e a oferta da tool vêm do MESMO
    * predicado (`modoDeCriacao` → `escritaPermitida`, o que `ferramentasDoTurno`
@@ -1511,7 +1551,9 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   const oferecidas =
     state.toolRounds === 0 ? oferta.entradas.map((e) => e.nome) : state.toolsOferecidas;
   // Só a volta 0 grava: as seguintes herdam a oferta do turn.
-  const daOferta = state.toolRounds === 0 ? { toolsOferecidas: oferecidas } : {};
+  const daOferta = state.toolRounds === 0 ? { toolsOferecidas: oferecidas, queryOptions: null }
+    : clarification?.options.length ? { queryOptions: { subjectKey: stageSubject, createdAt: Date.now(),
+        options: clarification.options, offset: 0, numbered: false } } : {};
   const defs = oferta.entradas.map((e) => e.def);
   const tools = defs.length > 0 ? defs : undefined;
 
@@ -1595,6 +1637,13 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   // ao usuário por causa dela é pior.
   void reportUsage(state.identity.orgId, result.usage);
   const usageDoTurn: LlmUsage[] = [result.usage];
+  // Once the server requests a stage, model-emitted retries cannot drop or
+  // guess its filter. Only a new explicit user choice may resume the read.
+  if (clarification && state.toolRounds > 0 && result.toolCalls.length) {
+    return { ...daOferta, usage: usageDoTurn, piiMap: mapaTurno,
+      draft: result.text.trim() || "Para continuar a consulta de negócios, informe a etapa pelo nome ou diga ETAPAS. Não consegui resumir as demais consultas agora.",
+      toolLog: result.toolCalls.map(c => ({ name: c.name, args: c.args, outcome: "aguardando_etapa" })) };
+  }
 
   /**
    * O modelo pediu para propor uma escrita.
@@ -1858,7 +1907,7 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
    * superfície). Mesma classe do `descartarSeVazou`, uma camada acima: lá o
    * campo, aqui o verbo.
    */
-  const { resultados, trilha, referencias } = await despacharLeituras({
+  let { resultados, trilha, referencias } = await despacharLeituras({
     chamadas,
     oferecidas: state.toolsOferecidas,
     policy: state.policy,
@@ -1867,6 +1916,20 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
     referencias: state.referencias,
     turno: state.inbound.messageId,
   });
+
+  // One bounded repair using only a stage explicitly present in the request AND
+  // returned by the scoped server. Every retry goes through all dispatcher gates.
+  const clarification = resultados.length === 1 ? resultados[0].clarification : undefined;
+  const namedStage = clarification && explicitStage(textoDoTurno(state), clarification.options);
+  if (state.toolRounds === 0 && chamadas.length === 1 && chamadas[0].name === "listar_negocios" &&
+      namedStage && namedStage !== chamadas[0].args.estado) {
+    const corrected = await despacharLeituras({ chamadas: [{ ...chamadas[0], args: { ...chamadas[0].args, estado: namedStage } }],
+      oferecidas: state.toolsOferecidas, policy: state.policy, identity: state.identity,
+      fromPhone: state.inbound.fromPhone, referencias, turno: state.inbound.messageId });
+    resultados = corrected.resultados;
+    trilha = [...trilha, ...corrected.trilha];
+    referencias = corrected.referencias;
+  }
 
   return {
     pendingToolCalls: [],

@@ -406,12 +406,18 @@ const RECEBIDO_POR: Record<"audio" | "image", string> = {
  * primeira como a segunda mentiria para a pessoa sobre a carteira dela.
  */
 export function fenceToolResults(
-  results: { tool: string; items: unknown[] | null; truncated: boolean }[]
+  results: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] } }[]
 ): string {
   if (results.length === 0) return "";
 
   const blocos = results
     .map((r) => {
+      if (r.clarification) {
+        const options = escaparDelimitadores(JSON.stringify(r.clarification.options));
+        return `Uma consulta tem filtro de etapa inválido, não carteira vazia. Responda os outros resultados disponíveis.
+Para essa consulta, peça uma etapa pelo nome ou diga que a pessoa pode escrever ETAPAS para ver opções; não numere etapas junto de negócios/propostas.
+<dados_do_sistema origem="${r.tool}" filtro_invalido="estado">${options}</dados_do_sistema>`;
+      }
       if (r.items === null) {
         return `<dados_do_sistema origem="${r.tool}" falhou="true">
 A consulta não respondeu agora. Diga que não conseguiu verificar neste momento
@@ -480,7 +486,7 @@ export function buildSystemPrompt(params: {
    */
   criacao?: "disponivel" | "sem_login" | "sem_politica";
   /** Resultado das tools de leitura deste turn, já cercado. */
-  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean }[];
+  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] } }[];
   /** Flag `MAX_CREDITO` ligada: entra a regra de crédito. */
   credito?: boolean;
 }): string {
