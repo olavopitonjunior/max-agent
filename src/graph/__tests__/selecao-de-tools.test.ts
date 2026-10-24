@@ -265,7 +265,16 @@ describe("minhas_pendencias: o que EU tenho pendente", () => {
     expect(nomes(texto, AMBAS)[0]).toBe("minhas_pendencias");
   });
 
-  it.each(["minhas pendências", "o que eu tenho de pendente hoje?", "tenho alguma pendência?"])(
+  it.each([
+    "minhas pendências",
+    "o que eu tenho de pendente hoje?",
+    "tenho alguma pendência?",
+    "o que está pendente?",
+    "quais pendências eu tenho",
+    "tem alguma pendência?",
+    "pendências",
+    "o que me falta fazer",
+  ])(
     "pergunta genérica: %s → minhas_pendencias",
     (texto) => {
       expect(nomes(texto, ["pending.summary"])).toEqual(["minhas_pendencias"]);

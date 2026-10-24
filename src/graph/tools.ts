@@ -609,12 +609,13 @@ export const PENDENCIAS_DO_NEGOCIO: ToolDef = {
 const PEDE_ITEM_PENDENTE = /formul[aá]rio|proposta|atividade/i;
 const PEDE_FALTA = /pendent|pend[eê]ncia|falta(m|ndo)?\b/i;
 /**
- * A pergunta genérica, sem nomear o item: "o que tenho pendente?", "minhas
- * pendências". Ancorada na PESSOA (tenho/minhas/comigo) de propósito: "certidões
- * pendentes" ou "o que falta no negócio" são da `pendencias_do_negocio`.
+ * A pergunta genérica, sem nomear o item: "o que está pendente?", "pendências",
+ * "o que me falta fazer". Vale quando o texto NÃO fala de certidão, documento ou
+ * travamento (terreno da `pendencias_do_negocio`); se fala, só entra quando cita
+ * formulário, proposta ou atividade.
  */
-const PEDE_MINHAS_GENERICA =
-  /\bo que (eu )?tenho( de| para| pra)? (pendente|pendentes|pendencias?)|\bminhas? pendencias?\b|\b(tenho|temos) (algo|alguma coisa|alguma pendencia|pendencias?)\b|\bo que (esta |ta )?pendente (comigo|pra mim|para mim)/i;
+const PEDE_PENDENCIA_GENERICA = /pendent|pend[eê]ncia|\bme falta\b|\bfalta fazer\b/i;
+const FALA_DE_NEGOCIO_TRAVADO = /certid|documento|travad|parad/i;
 
 /**
  * "O que tenho pendente": formulários, propostas e atividades DESTA pessoa num
@@ -638,7 +639,8 @@ export const MINHAS_PENDENCIAS: ToolDef = {
   prioridade: 15,
   combina: (t) => {
     const n = normalizar(t);
-    return PEDE_MINHAS_GENERICA.test(n) || (PEDE_ITEM_PENDENTE.test(n) && PEDE_FALTA.test(n));
+    if (PEDE_ITEM_PENDENTE.test(n) && PEDE_FALTA.test(n)) return true;
+    return PEDE_PENDENCIA_GENERICA.test(n) && !FALA_DE_NEGOCIO_TRAVADO.test(n);
   },
   def: {
     name: "minhas_pendencias",
