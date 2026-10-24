@@ -13,8 +13,8 @@
  * onboarding (boas-vindas, configuração pendente e o repasse de dúvida) e
  * proposta (assinada, recusada, expirada, entregue) e, desde 14/10/2026
  * (decisão do Olavo, atividades agendadas), um aviso NEUTRO de atividades
- * pendentes (`activity_assigned` e `activity_due`, mesmo template, um por
- * janela; `activity_completed` fica fora) e, desde 20/10/2026 (pedido do
+ * pendentes (`activity_assigned`, `activity_due` e `activity_due_soon`, mesmo
+ * template, um por janela; `activity_completed` fica fora) e, desde 20/10/2026 (pedido do
  * Olavo), o aviso de novidade no link do cliente do portal do negócio
  * (`portal_notice_parte`). Nenhum texto cita o nome
  * do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
@@ -387,6 +387,9 @@ export const CATALOGO: Record<string, TemplateDef> = {
   // Atividades agendadas (14/10/2026): mesmo template para os dois avisos.
   activity_assigned: ATIVIDADES_PENDENTES,
   activity_due: ATIVIDADES_PENDENTES,
+  // Lembrete antes do prazo (pendências, 24/10/2026): o mesmo aviso neutro, fora
+  // da janela. Dentro dela (e no Newton) sai o texto completo do emissor.
+  activity_due_soon: ATIVIDADES_PENDENTES,
   portal_notice_parte: PORTAL_AVISO_PARTE,
 };
 
