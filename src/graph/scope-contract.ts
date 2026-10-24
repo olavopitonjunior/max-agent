@@ -97,6 +97,10 @@ export interface ScopeQueryRequest {
     filtro?: "minhas" | "atrasadas" | "hoje";
     /** `activity.get`. */
     atividade_id?: string;
+    /** `pending.summary`: blocos pedidos (um, ou ausente = os três). */
+    blocos?: ("formularios" | "propostas" | "atividades")[];
+    /** `pending.summary`: restringe os formulários a este negócio. */
+    dealId?: string;
   };
 }
 

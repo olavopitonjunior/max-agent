@@ -584,15 +584,76 @@ export const PENDENCIAS_DO_NEGOCIO: ToolDef = {
   def: {
     name: "pendencias_do_negocio",
     description:
-      "Lista só os negócios desta pessoa que têm alguma pendência, e quais são. " +
-      "Use quando ela perguntar o que falta, o que está pendente ou travado, " +
-      "ou se algum negócio dela precisa de algo.",
+      "Lista só os negócios desta pessoa que têm certidão ou documento pendente ou travado " +
+      "no processo, e quais são. Use quando ela perguntar por certidões, documentos ou " +
+      "pendências de um negócio. Para formulários, propostas e atividades pendentes dela, " +
+      "use minhas_pendencias.",
     parameters: {
       type: "object",
       properties: {
         limite: {
           type: "integer",
           description: "Quantos negócios trazer. Padrão 10.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+/**
+ * Formulário, proposta ou atividade JUNTO de "pendente"/"falta": "o que falta no
+ * formulário do negócio X", "tem atividade faltando?". Sozinhas, as palavras
+ * são de outras tools (`listar_propostas`, `listar_atividades`).
+ */
+const PEDE_ITEM_PENDENTE = /formul[aá]rio|proposta|atividade/i;
+const PEDE_FALTA = /pendent|falt/i;
+
+/**
+ * "O que tenho pendente": formulários, propostas e atividades DESTA pessoa num
+ * só verbo (`pending.summary`). O servidor decide o escopo por papel e devolve
+ * total exato + até 5 itens por bloco; o motor não conta nem recorta nada.
+ *
+ * Prioridade 15, antes da `pendencias_do_negocio` (20): a pergunta genérica
+ * "o que tenho pendente?" é desta tool; certidões e documentos do negócio
+ * continuam na outra (a descrição de cada uma aponta para a vizinha).
+ *
+ * Params: `filtro` vira `blocos` (um bloco) e `negocio_id` vira `dealId` no
+ * despachante — o modelo nunca fala o nome de campo do servidor.
+ */
+export const MINHAS_PENDENCIAS: ToolDef = {
+  nome: "minhas_pendencias",
+  tipo: "leitura",
+  capability: "pending.summary",
+  verb: "pending.summary",
+  risco: "nenhum",
+  confirmacao: false,
+  prioridade: 15,
+  combina: (t) => {
+    const n = normalizar(t);
+    return PEDE_PENDENCIA.test(n) || (PEDE_ITEM_PENDENTE.test(n) && PEDE_FALTA.test(n));
+  },
+  def: {
+    name: "minhas_pendencias",
+    description:
+      "Resume o que está pendente com esta pessoa: formulários a preencher, propostas " +
+      "e atividades, cada bloco com o total exato e alguns itens. Use quando ela " +
+      "perguntar o que tem pendente, o que falta no formulário de um negócio, ou " +
+      "por formulários, propostas ou atividades pendentes. Sem filtro, traz os três " +
+      "blocos; com filtro, só o bloco pedido. Para certidões e documentos de um " +
+      "negócio, use pendencias_do_negocio.",
+    parameters: {
+      type: "object",
+      properties: {
+        filtro: {
+          type: "string",
+          enum: ["formularios", "propostas", "atividades"],
+          description: "Só o bloco pedido. Omita quando a pergunta for geral. Opcional.",
+        },
+        negocio_id: {
+          type: "string",
+          description:
+            "Restringe aos formulários de um negócio, só se o identificador veio num resultado anterior desta ferramenta. Opcional.",
         },
       },
       additionalProperties: false,
@@ -792,7 +853,7 @@ export const TOOLS_DE_ATIVIDADE_ESCRITA: EntradaDeEscrita[] = [
   RECUSAR_ATIVIDADE,
 ];
 
-export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS, ...TOOLS_EXTENDIDAS];
+export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, MINHAS_PENDENCIAS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS, ...TOOLS_EXTENDIDAS];
 
 /**
  * O registro inteiro: a escrita e as leituras. É a ÚNICA lista que o

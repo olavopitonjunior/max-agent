@@ -186,6 +186,13 @@ export async function despacharLeituras(params: {
       }
       args = { atividade_id: selected.item.id };
     }
+    if (entrada.verb === "pending.summary") {
+      // Só passa o que o servidor entende: `filtro` (enum) vira `blocos` com um
+      // bloco, `negocio_id` vira `dealId`. Qualquer outro campo do modelo some.
+      const filtro = lerBlocoDePendencia(args.filtro);
+      const dealId = typeof args.negocio_id === "string" ? args.negocio_id.trim().slice(0, 64) : "";
+      args = { ...(filtro ? { blocos: [filtro] } : {}), ...(dealId ? { dealId } : {}) };
+    }
     if (paginada) {
       const continuation = referencias?.continuacao;
       if (args.mais === true) {
@@ -205,13 +212,19 @@ export async function despacharLeituras(params: {
       }
       args.limite = ITENS_POR_LISTA;
     }
-    const r = await executarLeitura({
+    const lido = await executarLeitura({
       entrada: a.entrada as EntradaDeLeitura,
       chamada: { ...chamada, args },
       identity: params.identity,
       subject,
       fromPhone: params.fromPhone,
     });
+    // `null` da plataforma = sem permissão. Não pode virar lista vazia (o
+    // modelo diria "nada pendente") nem falha (ofereceria tentar de novo).
+    const r =
+      lido && entrada.verb === "pending.summary" && !ehResumoDePendencias(lido.items[0])
+        ? { ...lido, items: [{ sem_permissao: true }] }
+        : lido;
 
     if (!r) {
       resultados.push({ tool: chamada.name, items: null, truncated: false });
@@ -264,6 +277,16 @@ export async function despacharLeituras(params: {
   }
 
   return { resultados, trilha, referencias };
+}
+
+/** Blocos que o servidor aceita em `pending.summary`. Valor fora da lista some (todos os blocos). */
+export function lerBlocoDePendencia(v: unknown): "formularios" | "propostas" | "atividades" | null {
+  return v === "formularios" || v === "propostas" || v === "atividades" ? v : null;
+}
+
+/** O item de `pending.summary` é o resumo (objeto), e não o `null` de "sem permissão". */
+function ehResumoDePendencias(v: unknown): boolean {
+  return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
 /** Recortes que o servidor aceita em `activity.list`. Valor fora da lista some (sem filtro). */
