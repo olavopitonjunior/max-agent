@@ -878,7 +878,7 @@ export const TOOLS_DE_ATIVIDADE_ESCRITA: EntradaDeEscrita[] = [
  * `criar_atividade`), e "quais são minhas notificações" é a LISTA
  * (`listar_notificacoes`), não a preferência.
  */
-const TEMA_DE_AVISO = /notifica|aviso|lembrete|lembra|relat[oó]rio|resumo/;
+const TEMA_DE_AVISO = /notifica|avis[aeo]|lembrete|lembra|relat[oó]rio|resumo/;
 /** O relatório da manhã dos avisos: frase própria desta feature, vale sem mais nada. */
 const RELATORIO_DA_MANHA = /\b(relatorio|resumo) (da manha|matinal|diario|de todo dia)\b/;
 /**
@@ -889,13 +889,25 @@ const PREFERENCIA_DE_RELATORIO =
   /\b(nao quero|n quero|para(r)? de|deix(a|e) de|desliga\w*|desativ\w*|ativ(a|ar|e)|cancel\w*|mud(a|ar|e)|troc(a|ar|e)|altera\w*|horario)\b|\bas \d{1,2}(h|:\d{2})|\b(pra|para) \d{1,2}(h|:\d{2})/;
 /** "Relatório" de outro assunto (vendas, carteira, período…): é de outra tool, nunca desta. */
 const OUTRO_RELATORIO =
-  /\b(venda|vendas|negocios?|propostas?|contratos?|carteira|comiss\w*|financeir\w*|mensal|semanal|anual|mes|semana|ano|desempenho|metas?|captac\w*|imove(l|is)|corretores?|equipe|time|pendencias?|atividades?)\b/;
+  /\b(venda|vendas|negocios?|propostas?|contratos?|carteira|comiss\w*|financeir\w*|mensal|semanal|anual|mes|semana|ano|desempenho|metas?|captac\w*|imove(l|is)|corretores?|equipe|time)\b/;
+/**
+ * Pendências/atividades: o relatório da manhã É sobre elas, mas "me manda o relatório das pendências" é
+ * pedido de consulta (`minhas_pendencias`). Aqui só vale com verbo de gestão ou horário explícito.
+ */
+const PENDENCIA_OU_ATIVIDADE = /\b(pendencias?|atividades?)\b/;
 /** Deslocamento de tempo do lembrete: "1 hora antes", "30 minutos antes", "antes do vencimento". */
 const ANTECEDENCIA =
   /((\d+|uma?|meia|duas|tres|quatro)\s*(min\w*|hora\w*|h|dia\w*)\s*antes)|antes d[oe] (vencimento|prazo)|antecedencia/;
 /** "Me lembra DE ligar…" cria atividade; não é preferência. */
 const LEMBRA_DE_ALGO = /\blembr\w*\s+(de|que|do|da|dos|das|pra|para|a|o)\b/;
 const PEDE_GERIR_AVISOS = /\b(notifica\w*|avisos?|alertas?)\b/;
+/**
+ * "Lembrete" também é o nome do aviso, mas "deixa um lembrete" / "liga e cria lembrete" são
+ * outra coisa: com ele só valem os verbos de preferência (sem "liga"/"ativa" soltos).
+ */
+const LEMBRETE = /\blembretes?\b/;
+const GERIR_LEMBRETE =
+  /\b(nao quero|n quero|quero (receber|parar|mudar|trocar|ativar|desativar|desligar)|para(r)? de|deix(a|e) de|desliga\w*|desativ\w*|configur\w*|prefer\w*|receb\w*|por (e-?mail|whatsapp|zap))\b/;
 /** "Como estão meus avisos": consulta do estado. Fica de fora "como estão minhas notificações", que também pode ser a lista. */
 const CONSULTA_DE_AVISOS = /\bcomo (estao|esta|ta|tao|andam) (meus|minhas|os|as) (avisos?|alertas?|notificacoes? d[aeo]s? (atividades?|vencimentos?|relatorios?))\b/;
 const GERIR =
@@ -904,10 +916,11 @@ const GERIR =
 export function pedePreferencias(texto: string): boolean {
   const t = normalizar(texto);
   if (!TEMA_DE_AVISO.test(t)) return false;
-  if (RELATORIO_DA_MANHA.test(t)) return true;
+  if (RELATORIO_DA_MANHA.test(t)) return !PENDENCIA_OU_ATIVIDADE.test(t) || PREFERENCIA_DE_RELATORIO.test(t);
   if (/relatorio|resumo/.test(t) && !OUTRO_RELATORIO.test(t) && PREFERENCIA_DE_RELATORIO.test(t)) return true;
   if (ANTECEDENCIA.test(t) && /lembr|avis|notific|alert/.test(t) && !(LEMBRA_DE_ALGO.test(t) && !/vencimento|prazo|antecedencia/.test(t))) return true;
   if (CONSULTA_DE_AVISOS.test(t)) return true;
+  if (LEMBRETE.test(t) && GERIR_LEMBRETE.test(t)) return true;
   return PEDE_GERIR_AVISOS.test(t) && GERIR.test(t);
 }
 

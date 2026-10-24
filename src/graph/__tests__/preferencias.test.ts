@@ -286,6 +286,11 @@ describe("combina: pede aviso, não rouba o de outras tools", () => {
     "para de me mandar o resumo da manhã",
     "não quero mais o relatório",
     "me notifica quando receber proposta",
+    "me avisa 1 hora antes",
+    "não quero mais o lembrete",
+    "não quero mais receber lembrete por whatsapp",
+    "quero o resumo das pendências às 9h",
+    "para de me mandar o relatório da manhã das atividades",
     "como estão meus avisos de atividade?",
   ])("combina: %s", (texto) => {
     expect(pedePreferencias(texto)).toBe(true);
@@ -303,6 +308,10 @@ describe("combina: pede aviso, não rouba o de outras tools", () => {
     "me manda o relatório do João",
     "me envia o relatório do imóvel da Rua A",
     "me envia o relatório dos imóveis",
+    "manda o relatório da manhã das minhas pendências",
+    "me manda o resumo da manhã das atividades",
+    "deixa um lembrete de ligar pro João",
+    "liga pro João e cria um lembrete",
     "me lembra de ligar pro João",
     "me lembra de ligar pro João amanhã às 10h",
     "me lembra que preciso enviar o contrato",

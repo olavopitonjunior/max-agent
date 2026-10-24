@@ -15,7 +15,7 @@ describe("buildSystemPrompt", () => {
   const base = { orgName: "RE/MAX Trio", hits: [hit()] };
 
   it("pendências: total exato por bloco, no máximo 5 itens, genérica = os três blocos", () => {
-    const p = buildSystemPrompt(base).replace(/\s+/g, " ");
+    const p = buildSystemPrompt({ ...base, pendencias: true }).replace(/\s+/g, " ");
     expect(p).toContain("o que está pendente com você");
     expect(p).toContain("diga sempre o total exato de cada bloco");
     expect(p).toContain("no máximo 5 itens por bloco");

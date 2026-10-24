@@ -1524,6 +1524,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     // a forma mais barata de um modelo pequeno prometer o que não entrega.
     criacao,
     avisos: state.identity.kind === "user" && preferenciasPermitidas({ policy: state.policy, politicaIndisponivel: state.politicaIndisponivel }),
+    pendencias: !state.politicaIndisponivel && state.policy.includes("pending.summary"),
     // Vazio na primeira volta; preenchido quando o `tools` já rodou.
     toolResults: state.toolResults,
     credito: creditoLigado(),
