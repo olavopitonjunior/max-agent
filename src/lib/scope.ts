@@ -39,6 +39,8 @@ export interface ResultadoDeLeitura {
   truncated: boolean;
   nextCursor?: string;
   clarification?: StageClarification;
+  /** Só `template.decisions`: modelos sem relatório de regras ("não medidos", nunca "sem pendência"). */
+  naoMedidos?: number;
 }
 
 /**
@@ -96,7 +98,7 @@ export async function consultarEscopo(params: {
       return null;
     }
 
-    const r = (await res.json()) as { items?: unknown; truncated?: unknown; nextCursor?: unknown; clarification?: unknown };
+    const r = (await res.json()) as { items?: unknown; truncated?: unknown; nextCursor?: unknown; clarification?: unknown; naoMedidos?: unknown };
     if (r.clarification !== undefined) {
       const clarification = readStageClarification(r.clarification);
       if (params.verb !== "deal.list" || !clarification || !Array.isArray(r.items) || r.items.length !== 0) return null;
@@ -105,7 +107,7 @@ export async function consultarEscopo(params: {
     }
     if (!Array.isArray(r.items)) return null;
     runEvent("tool.completed", params.verb, { count: r.items.length, truncated: r.truncated === true });
-    return { items: descartarSeVazou(r.items, params.subject.kind), truncated: r.truncated === true, ...(typeof r.nextCursor === "string" ? { nextCursor: r.nextCursor } : {}) };
+    return { items: descartarSeVazou(r.items, params.subject.kind), truncated: r.truncated === true, ...(typeof r.nextCursor === "string" ? { nextCursor: r.nextCursor } : {}), ...(Number.isInteger(r.naoMedidos) && (r.naoMedidos as number) >= 0 ? { naoMedidos: r.naoMedidos as number } : {}) };
   } catch (err) {
     console.warn(
       `[scope] ${params.verb} falhou na org ${params.orgId}:`,

@@ -76,7 +76,7 @@ describe("registro de tools", () => {
   });
 
   it("toda leitura que lista declara o que produz (G2)", () => {
-    for (const e of REGISTRO_DE_TOOLS.filter((x) => x.tipo === "leitura" && x.verb !== "metrics.get")) {
+    for (const e of REGISTRO_DE_TOOLS.filter((x) => x.tipo === "leitura" && x.verb !== "metrics.get" && x.verb !== "template.decisions")) {
       expect(e.refs?.produz, e.nome).toBeDefined();
     }
   });

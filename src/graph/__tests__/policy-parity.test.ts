@@ -311,6 +311,7 @@ const CATALOGO_DO_IMOBPRO = [
       "marketing.read",
       "marketing.generate",
       "activity.write",
+      "template.decisions",
 ];
 
 describe("paridade do catálogo de capabilities", () => {

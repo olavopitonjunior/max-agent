@@ -153,6 +153,13 @@ export const CAPABILITIES = [
    * e `activity.get`) segue na capability que já existia.
    */
   "activity.write",
+  /**
+   * Modelos autônomos PR 7b (24/10/2026, par do contractmaker): leitura "decisões
+   * pendentes da imobiliária" (verbo `template.decisions`). Só User com a área de
+   * Modelos; decidir segue na tela. Fora do padrão: nasce DESLIGADA, a org liga.
+   * Posição 27 (0-based, a ÚLTIMA), FIXA.
+   */
+  "template.decisions",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
