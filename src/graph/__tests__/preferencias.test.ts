@@ -282,6 +282,10 @@ describe("combina: pede aviso, não rouba o de outras tools", () => {
     "quero receber o relatório diário por whatsapp",
     "muda o lembrete de vencimento para 2 horas antes",
     "desativa as notificações por e-mail",
+    "muda o relatório pra 9h",
+    "para de me mandar o resumo da manhã",
+    "não quero mais o relatório",
+    "me notifica quando receber proposta",
     "como estão meus avisos de atividade?",
   ])("combina: %s", (texto) => {
     expect(pedePreferencias(texto)).toBe(true);
@@ -294,6 +298,11 @@ describe("combina: pede aviso, não rouba o de outras tools", () => {
     "resumo das vendas do time",
     "me dá um resumo dos negócios",
     "relatório de propostas",
+    "me manda o relatório das pendências",
+    "manda o relatório de atividades atrasadas",
+    "me manda o relatório do João",
+    "me envia o relatório do imóvel da Rua A",
+    "me envia o relatório dos imóveis",
     "me lembra de ligar pro João",
     "me lembra de ligar pro João amanhã às 10h",
     "me lembra que preciso enviar o contrato",
@@ -314,6 +323,40 @@ describe("combina: pede aviso, não rouba o de outras tools", () => {
     expect(n("relatório de vendas do mês")).not.toContain("mudar_minhas_notificacoes");
     expect(n("me lembra de ligar pro João")).not.toContain("mudar_minhas_notificacoes");
     expect(n("quais são minhas notificações?")).not.toContain("mudar_minhas_notificacoes");
+  });
+});
+
+describe("recusa do servidor com code desconhecido", () => {
+  it("textoDaRecusa nunca devolve texto indefinido", async () => {
+    const { textoDaRecusa } = await import("../preferencias");
+    for (const code of ["valor_invalido", "tipo_desconhecido", "sem_telefone", "email_nao_configuravel", "recusa_desconhecida", "inventado_pelo_servidor"]) {
+      const t = textoDaRecusa({ ok: false, code } as never);
+      expect(typeof t).toBe("string");
+      expect(t.length).toBeGreaterThan(10);
+      expect(t).toContain("Nada foi alterado");
+    }
+  });
+
+  it("no grafo: code desconhecido vira recusa genérica e encerra o fluxo", async () => {
+    llm.mockResolvedValue(chamada({ antecedencia_lembrete_min: 60 }));
+    const prop = await run("me lembra 1 hora antes do vencimento");
+    patchar.mockResolvedValueOnce({ ok: false, code: "recusa_desconhecida" });
+    const r = await run("sim", { fluxo: prop.fluxo }, "m2");
+    expect(r.reply).toContain("não aceitou essa mudança");
+    expect(r.reply).not.toContain("undefined");
+    expect(r.fluxo ?? null).toBeNull();
+  });
+});
+
+describe("escopo do prompt só com prefs.self", () => {
+  it("avisos entram no escopo quando a pessoa tem a capability; sem ela, o texto é o de antes", async () => {
+    const { buildSystemPrompt } = await import("../prompt");
+    const base = { orgName: "FINCasa", hits: [], podeEscrever: true };
+    const com = buildSystemPrompt({ ...base, avisos: true });
+    const sem = buildSystemPrompt({ ...base });
+    expect(com).toContain("avisos da própria pessoa");
+    expect(sem).not.toContain("avisos da própria pessoa");
+    expect(com).toContain("imobiliária. Para qualquer\n  outro assunto");
   });
 });
 

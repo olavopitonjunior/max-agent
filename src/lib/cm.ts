@@ -3,6 +3,7 @@ import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import type { MaxPolicy } from "@/graph/policy";
 import type { PrefsDaPessoa, PrefsPatch, PrefsPatchResult, PrefsView } from "@/graph/preferencias-contract";
+import { CODIGOS_DE_RECUSA_DE_PREFS } from "@/graph/preferencias-contract";
 import { assertBotWrite } from "./runtime/handoff";
 // Só tipo: `connection.ts` importa `reportAlert` daqui, e um import de valor
 // fecharia um ciclo.
@@ -437,7 +438,9 @@ export async function atualizarPreferencias(params: {
     if (res.status === 422 && ehObjeto(body) && body.ok === false && typeof body.code === "string") {
       return {
         ok: false,
-        code: body.code as Extract<PrefsPatchResult, { ok: false }>["code"],
+        code: (CODIGOS_DE_RECUSA_DE_PREFS as readonly string[]).includes(body.code)
+          ? (body.code as Extract<PrefsPatchResult, { ok: false }>["code"])
+          : "recusa_desconhecida",
         ...(Array.isArray(body.allowed) ? { allowed: body.allowed.filter((x): x is string | number => typeof x === "string" || typeof x === "number") } : {}),
         ...(typeof body.subject === "string" ? { subject: body.subject } : {}),
       };

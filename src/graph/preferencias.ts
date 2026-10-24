@@ -372,6 +372,9 @@ export function textoDaRecusa(r: Extract<PrefsPatchResult, { ok: false }>): stri
       return `Não achei um telefone seu cadastrado no sistema, então não dá para ligar o aviso por WhatsApp. ${TEXTO_NADA_ALTERADO}`;
     case "email_nao_configuravel":
       return `Esse aviso não pode ser enviado por e-mail. ${TEXTO_NADA_ALTERADO}`;
+    default:
+      // Código que o contrato não conhece (ou um novo do servidor): recusa genérica, nunca texto indefinido.
+      return `O sistema não aceitou essa mudança. ${TEXTO_NADA_ALTERADO}`;
   }
 }
 

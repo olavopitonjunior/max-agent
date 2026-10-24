@@ -13,7 +13,7 @@ import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { rotearBotaoDeAtividade } from "@/lib/atividade-botao";
 import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
-import { iniciarPreferencias, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
+import { iniciarPreferencias, preferenciasPermitidas, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
 import { resolverReferencia } from "./referencias";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
@@ -1523,6 +1523,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     // diz de quem é o caminho. Descrever capacidade que não está no pedido é
     // a forma mais barata de um modelo pequeno prometer o que não entrega.
     criacao,
+    avisos: state.identity.kind === "user" && preferenciasPermitidas({ policy: state.policy, politicaIndisponivel: state.politicaIndisponivel }),
     // Vazio na primeira volta; preenchido quando o `tools` já rodou.
     toolResults: state.toolResults,
     credito: creditoLigado(),

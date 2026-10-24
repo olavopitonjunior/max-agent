@@ -49,7 +49,14 @@ export interface PrefsPatch {
   schedule?: { morningReportAt?: string; dueSoonLeadMin?: number };
 }
 
-export type CodigoDeRecusaDePrefs = "valor_invalido" | "tipo_desconhecido" | "sem_telefone" | "email_nao_configuravel";
+/** Os códigos de recusa que o contrato do servidor define. */
+export const CODIGOS_DE_RECUSA_DE_PREFS = ["valor_invalido", "tipo_desconhecido", "sem_telefone", "email_nao_configuravel"] as const;
+
+/**
+ * `recusa_desconhecida` é do CLIENTE: o servidor mandou um `code` que o contrato não
+ * conhece (versão nova da rota, por exemplo). Vira recusa genérica, nunca texto indefinido.
+ */
+export type CodigoDeRecusaDePrefs = (typeof CODIGOS_DE_RECUSA_DE_PREFS)[number] | "recusa_desconhecida";
 
 /** 200 → `ok: true`; 422 → `ok: false`. Não compare o erro com `toEqual` estrito: `subject` pode vir. */
 export type PrefsPatchResult =

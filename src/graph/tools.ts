@@ -878,15 +878,18 @@ export const TOOLS_DE_ATIVIDADE_ESCRITA: EntradaDeEscrita[] = [
  * `criar_atividade`), e "quais são minhas notificações" é a LISTA
  * (`listar_notificacoes`), não a preferência.
  */
-const TEMA_DE_AVISO = /notifica|aviso|lembrete|lembra|relat[oó]rio|resumo da manh/;
-/** Gerir/mudar/receber/horário — a intenção de mexer na preferência, e não de consultar uma lista. */
-const INTENCAO_DE_PREFERENCIA =
-  /\b(nao quero|n quero|quero (receber|parar|mudar|trocar|ativar|desativar|desligar|ligar)|para(r)? de|deix(a|e) de|desliga\w*|desativ\w*|ativ(a|ar|e)|liga(r)?|mud(a|ar|e)|troc(a|ar|e)|altera\w*|configur\w*|prefer\w*|receb\w*|horario|antecedencia|mand(a|ar|e)|envi(a|ar|e)|avis(a|ar|e)|lembr(a|ar|e))\b/;
+const TEMA_DE_AVISO = /notifica|aviso|lembrete|lembra|relat[oó]rio|resumo/;
 /** O relatório da manhã dos avisos: frase própria desta feature, vale sem mais nada. */
-const RELATORIO_DA_MANHA = /\b(relatorio|resumo) (da manha|matinal|diario)\b/;
+const RELATORIO_DA_MANHA = /\b(relatorio|resumo) (da manha|matinal|diario|de todo dia)\b/;
+/**
+ * Verbo de PREFERÊNCIA sobre o relatório/resumo (parar, não querer, desligar, mudar o horário, "às 9h").
+ * "Manda/envia/me dá o relatório" NÃO está aqui: é pedido de relatório, não de configuração.
+ */
+const PREFERENCIA_DE_RELATORIO =
+  /\b(nao quero|n quero|para(r)? de|deix(a|e) de|desliga\w*|desativ\w*|ativ(a|ar|e)|cancel\w*|mud(a|ar|e)|troc(a|ar|e)|altera\w*|horario)\b|\bas \d{1,2}(h|:\d{2})|\b(pra|para) \d{1,2}(h|:\d{2})/;
 /** "Relatório" de outro assunto (vendas, carteira, período…): é de outra tool, nunca desta. */
 const OUTRO_RELATORIO =
-  /\b(venda|vendas|negocios?|propostas?|contratos?|carteira|comiss\w*|financeir\w*|mensal|semanal|anual|mes|semana|ano|desempenho|metas?|captac\w*|imoveis?|corretores?|equipe|time)\b/;
+  /\b(venda|vendas|negocios?|propostas?|contratos?|carteira|comiss\w*|financeir\w*|mensal|semanal|anual|mes|semana|ano|desempenho|metas?|captac\w*|imove(l|is)|corretores?|equipe|time|pendencias?|atividades?)\b/;
 /** Deslocamento de tempo do lembrete: "1 hora antes", "30 minutos antes", "antes do vencimento". */
 const ANTECEDENCIA =
   /((\d+|uma?|meia|duas|tres|quatro)\s*(min\w*|hora\w*|h|dia\w*)\s*antes)|antes d[oe] (vencimento|prazo)|antecedencia/;
@@ -902,7 +905,7 @@ export function pedePreferencias(texto: string): boolean {
   const t = normalizar(texto);
   if (!TEMA_DE_AVISO.test(t)) return false;
   if (RELATORIO_DA_MANHA.test(t)) return true;
-  if (/relatorio/.test(t) && !OUTRO_RELATORIO.test(t) && INTENCAO_DE_PREFERENCIA.test(t)) return true;
+  if (/relatorio|resumo/.test(t) && !OUTRO_RELATORIO.test(t) && PREFERENCIA_DE_RELATORIO.test(t)) return true;
   if (ANTECEDENCIA.test(t) && /lembr|avis|notific|alert/.test(t) && !(LEMBRA_DE_ALGO.test(t) && !/vencimento|prazo|antecedencia/.test(t))) return true;
   if (CONSULTA_DE_AVISOS.test(t)) return true;
   return PEDE_GERIR_AVISOS.test(t) && GERIR.test(t);
