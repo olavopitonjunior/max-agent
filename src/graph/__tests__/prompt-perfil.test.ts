@@ -57,4 +57,61 @@ describe("prompt do Newton", () => {
       expect(p).toContain("Você é o Newton");
     }
   });
+
+  it("perfil newton: a regra das pendências está no prompt", () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    for (const entrada of [CORRETOR_SEM_TOOLS, GERENTE_COM_LEITURA, DESCONHECIDO]) {
+      const p = buildSystemPrompt({ ...entrada, pendencias: true }).replace(/\s+/g, " ");
+      expect(p).toContain("diga sempre o total exato de cada bloco");
+      expect(p).toContain("no máximo 5 itens por bloco");
+      expect(p).toContain("pergunta genérica = formulários, propostas e atividades");
+      expect(p).toContain("pergunta específica = só o bloco pedido");
+      expect(p).toContain("os itens de dentro de cada formulário já vêm limitados");
+      expect(p).toContain("sem_permissao");
+    }
+  });
+});
+
+/**
+ * Pendências e avisos só entram no prompt de quem tem a capability (`pending.summary`, `prefs.self`).
+ * Sem nenhuma das duas, o texto é byte a byte o do baseline (os snapshots acima, gravados antes
+ * de existirem); cada trecho abaixo só aparece com a sua flag.
+ */
+describe("trechos condicionais do prompt", () => {
+  const entradas = [CORRETOR_SEM_TOOLS, GERENTE_COM_LEITURA, DESCONHECIDO];
+  const achatar = (t: string) => t.replace(/\s+/g, " ");
+
+  it("sem pending.summary nem prefs.self: nenhum trecho de pendências ou avisos", () => {
+    for (const entrada of entradas) {
+      const p = achatar(buildSystemPrompt(entrada));
+      expect(p).not.toContain("Ao listar pendências");
+      expect(p).not.toContain("o que está pendente com você");
+      expect(p).not.toContain("avisos da própria pessoa");
+      // explícito: as duas flags desligadas são o mesmo que omitidas
+      expect(buildSystemPrompt({ ...entrada, pendencias: false, avisos: false })).toBe(buildSystemPrompt(entrada));
+    }
+  });
+
+  it("pending.summary liga só o trecho de pendências", () => {
+    for (const entrada of entradas) {
+      const p = achatar(buildSystemPrompt({ ...entrada, pendencias: true }));
+      expect(p).toContain("Ao listar pendências, diga sempre o total exato");
+      expect(p).toContain('o que está pendente com você": formulários, propostas e atividades)');
+      expect(p).not.toContain("avisos da própria pessoa");
+    }
+  });
+
+  it("prefs.self liga só o trecho de avisos", () => {
+    for (const entrada of entradas) {
+      const p = achatar(buildSystemPrompt({ ...entrada, avisos: true }));
+      expect(p).toContain("consulta de negócios e pendências e os avisos da própria pessoa (relatório da manhã, lembrete antes do vencimento) — e, dentro disso");
+      expect(p).toContain("Só fala de propostas, negócios, dos avisos da própria pessoa e do processo da imobiliária.");
+      expect(p).not.toContain("Ao listar pendências");
+    }
+  });
+
+  it("as duas ligadas: os dois trechos, na ordem certa", () => {
+    const p = achatar(buildSystemPrompt({ ...GERENTE_COM_LEITURA, pendencias: true, avisos: true }));
+    expect(p).toContain('consulta de negócios e pendências (inclusive "o que está pendente com você": formulários, propostas e atividades) e os avisos da própria pessoa');
+  });
 });

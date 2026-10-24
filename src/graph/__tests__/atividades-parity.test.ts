@@ -9,8 +9,8 @@ import { catalog } from "@/lib/runtime/catalog";
  * verbos de `scope-action-atividade.ts` / `scope-query-atividade.ts`). Regra 1
  * da governança do Max: vetor fixo dos dois lados.
  *
- * O literal abaixo é literal de propósito (copiado do report do PR11 do CM, hoje 28
- * itens com o PR 7b): derivar da constante deste lado acompanharia uma divergência em silêncio.
+ * O literal abaixo é literal de propósito (copiado do report do PR11 do CM; 28 itens com o PR 7b,
+ * 30 com a série de pendências: `pending.summary` e `prefs.self` nas posições 28 e 29): derivar da constante deste lado acompanharia uma divergência em silêncio.
  */
 const MAX_CAPABILITIES_DO_CM = [
   "deal.list", "deal.detail", "deal.pending",
@@ -23,15 +23,20 @@ const MAX_CAPABILITIES_DO_CM = [
   "marketing.read", "marketing.generate",
   "activity.write",
   "template.decisions",
+  "pending.summary",
+  "prefs.self",
 ];
 
 const gerente = { orgId: "org1", orgName: "Imob", kind: "user" as const, userId: "u1", userName: "Marcia" };
 
 describe("paridade de atividades com o contractmaker", () => {
-  it("a lista de capabilities é a do CM, literal a literal, e activity.write segue no índice 26", () => {
+  it("a lista de capabilities é a do CM, literal a literal: activity.write no 26, template.decisions no 27, pending.summary no 28 e prefs.self no 29", () => {
     expect([...CAPABILITIES]).toEqual(MAX_CAPABILITIES_DO_CM);
-    expect(CAPABILITIES).toHaveLength(28);
+    expect(CAPABILITIES).toHaveLength(30);
     expect(CAPABILITIES.indexOf("activity.write")).toBe(26);
+    expect(CAPABILITIES.indexOf("template.decisions")).toBe(27);
+    expect(CAPABILITIES.indexOf("pending.summary")).toBe(28);
+    expect(CAPABILITIES.indexOf("prefs.self")).toBe(29);
   });
 
   it("os verbos de escrita existem como ação e activity.get como leitura", () => {

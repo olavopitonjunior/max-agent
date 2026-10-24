@@ -2,6 +2,9 @@ import { currentExecution, runEvent } from "./runtime/context";
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import type { MaxPolicy } from "@/graph/policy";
+import type { PrefsDaPessoa, PrefsPatch, PrefsPatchResult, PrefsView } from "@/graph/preferencias-contract";
+import { CODIGOS_DE_RECUSA_DE_PREFS } from "@/graph/preferencias-contract";
+import { assertBotWrite } from "./runtime/handoff";
 // Só tipo: `connection.ts` importa `reportAlert` daqui, e um import de valor
 // fecharia um ciclo.
 import type { MotivoQueda } from "./connection";
@@ -320,6 +323,133 @@ export async function chaveDePolitica(
   } catch (err) {
     console.warn(
       `[cm] user-scope falhou na org ${orgId}:`,
+      err instanceof Error ? err.message : String(err)
+    );
+    return null;
+  }
+}
+
+// ─── Preferências de aviso (Pendências e avisos / M3) ──────────────────────
+
+const ehObjeto = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** O GET só vale se tiver a forma do contrato: forma estranha é "não consegui ler", nunca um chute. */
+function lerPrefsView(v: unknown): PrefsView | null {
+  if (!ehObjeto(v) || !ehObjeto(v.prefs) || !ehObjeto(v.defaults) || !ehObjeto(v.options)) return null;
+  const { morningReportAt, dueSoonLeadMin } = v.defaults;
+  const { morningReport, dueSoon } = v.options;
+  if (typeof morningReportAt !== "string" || typeof dueSoonLeadMin !== "number") return null;
+  if (!Array.isArray(morningReport) || !morningReport.every((x) => typeof x === "string")) return null;
+  if (!Array.isArray(dueSoon) || !dueSoon.every((x) => typeof x === "number")) return null;
+  if (!Array.isArray(v.tipos) || !v.tipos.every((t) => ehObjeto(t) && typeof t.type === "string" && typeof t.label === "string")) return null;
+  return {
+    prefs: v.prefs as PrefsView["prefs"],
+    defaults: { morningReportAt, dueSoonLeadMin },
+    options: { morningReport: morningReport as string[], dueSoon: dueSoon as number[] },
+    tipos: (v.tipos as { type: string; label: string }[]).map((t) => ({ type: t.type, label: t.label })),
+  };
+}
+
+/**
+ * As preferências de aviso da PRÓPRIA pessoa (a do telefone), com as opções que
+ * o servidor aceita. Mesma autenticação das demais rotas `/api/agents/*`
+ * (Bearer da org); a pessoa é resolvida no servidor pelo telefone — não há
+ * parâmetro que aponte para outro usuário.
+ *
+ * `null` = sem resposta utilizável (org sem token, telefone impossível, rede,
+ * timeout, status de erro, corpo fora do contrato). Quem chama diz "não consegui
+ * ver agora" e não escreve nada.
+ */
+export async function lerPreferencias(params: { orgId: string; rawPhone: string }): Promise<PrefsView | null> {
+  if (currentExecution()?.context.mode === "simulation") {
+    runEvent("tool.simulated", "prefs.get");
+    return null;
+  }
+  const org = await orgById(params.orgId);
+  if (!org) return null;
+  const e164 = normalizeBrPhone(params.rawPhone);
+  if (!e164) return null;
+  try {
+    const res = await fetchWithTimeout(
+      `${BASE()}/api/agents/notification-preferences?phone=${encodeURIComponent(e164)}`,
+      { headers: { Authorization: `Bearer ${org.apiToken}` } },
+      IMOBPRO_TIMEOUT_MS
+    );
+    if (!res.ok) {
+      console.warn(`[cm] notification-preferences GET ${res.status} na org ${params.orgId}`);
+      return null;
+    }
+    return lerPrefsView(await res.json().catch(() => null));
+  } catch (err) {
+    console.warn(
+      `[cm] notification-preferences GET falhou na org ${params.orgId}:`,
+      err instanceof Error ? err.message : String(err)
+    );
+    return null;
+  }
+}
+
+/**
+ * Muda as preferências de aviso da PRÓPRIA pessoa. Só é chamada depois do "sim"
+ * (fluxo `preferencias.ts`). O PATCH leva valores absolutos, então repeti-lo é
+ * seguro e não há chave de idempotência.
+ *
+ * 200 → `{ ok: true, … }`; 422 → `{ ok: false, code, … }` (resposta de negócio,
+ * o fluxo a traduz). Qualquer outra coisa — rede, timeout, 5xx, 401/403/404,
+ * corpo fora do contrato, simulação, kill switch — é `null`: sem resposta
+ * utilizável, e o fluxo NÃO afirma que mudou.
+ */
+export async function atualizarPreferencias(params: {
+  orgId: string;
+  rawPhone: string;
+  patch: PrefsPatch;
+}): Promise<PrefsPatchResult | null> {
+  const e = currentExecution();
+  if (e?.context.mode === "simulation") {
+    runEvent("tool.simulated", "prefs.patch");
+    return null;
+  }
+  if (process.env.MAX_WRITES_KILL === "true") return null;
+  const org = await orgById(params.orgId);
+  if (!org) return null;
+  const e164 = normalizeBrPhone(params.rawPhone);
+  if (!e164) return null;
+  // Mesma trava das escritas do `scope-action`: conversa em mãos de humano, o bot não escreve.
+  if (e) await assertBotWrite(e.context, params.rawPhone);
+  try {
+    const res = await fetchWithTimeout(
+      `${BASE()}/api/agents/notification-preferences`,
+      {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${org.apiToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ phone: e164, patch: params.patch }),
+      },
+      IMOBPRO_TIMEOUT_MS
+    );
+    const body: unknown = await res.json().catch(() => null);
+    if (res.status === 200 && ehObjeto(body) && body.ok === true && ehObjeto(body.prefs)) {
+      const optIn = body.whatsappOptIn;
+      return {
+        ok: true,
+        prefs: body.prefs as PrefsDaPessoa,
+        whatsappOptIn: optIn === "set" || optIn === "cleared" ? optIn : "unchanged",
+      };
+    }
+    if (res.status === 422 && ehObjeto(body) && body.ok === false && typeof body.code === "string") {
+      return {
+        ok: false,
+        code: (CODIGOS_DE_RECUSA_DE_PREFS as readonly string[]).includes(body.code)
+          ? (body.code as Extract<PrefsPatchResult, { ok: false }>["code"])
+          : "recusa_desconhecida",
+        ...(Array.isArray(body.allowed) ? { allowed: body.allowed.filter((x): x is string | number => typeof x === "string" || typeof x === "number") } : {}),
+        ...(typeof body.subject === "string" ? { subject: body.subject } : {}),
+      };
+    }
+    console.warn(`[cm] notification-preferences PATCH ${res.status} na org ${params.orgId}`);
+    return null;
+  } catch (err) {
+    console.warn(
+      `[cm] notification-preferences PATCH falhou na org ${params.orgId}:`,
       err instanceof Error ? err.message : String(err)
     );
     return null;

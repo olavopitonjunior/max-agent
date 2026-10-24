@@ -246,3 +246,82 @@ describe("pedido de criação não oferece leitura nenhuma", () => {
     expect(nomes(texto)).toContain("listar_propostas");
   });
 });
+
+// ── minhas_pendencias (M2) × pendencias_do_negocio ─────────────────────────
+
+describe("minhas_pendencias: o que EU tenho pendente", () => {
+  const nomes = (texto: string, policy: Capability[]) =>
+    selecionarTools({ policy, texto }).tools.map((t) => t.def.name);
+  const AMBAS: Capability[] = ["pending.summary", "deal.pending"];
+
+  it.each([
+    "o que tenho pendente?",
+    "o que falta no formulário do negócio X",
+    "tenho algum formulário pendente?",
+    "quais propostas estão pendentes?",
+    "tem atividade faltando?",
+  ])("%s → minhas_pendencias", (texto) => {
+    expect(nomes(texto, ["pending.summary"])).toEqual(["minhas_pendencias"]);
+    expect(nomes(texto, AMBAS)[0]).toBe("minhas_pendencias");
+  });
+
+  it.each([
+    "minhas pendências",
+    "o que eu tenho de pendente hoje?",
+    "tenho alguma pendência?",
+    "o que está pendente?",
+    "quais pendências eu tenho",
+    "tem alguma pendência?",
+    "pendências",
+    "o que me falta fazer",
+  ])(
+    "pergunta genérica: %s → minhas_pendencias",
+    (texto) => {
+      expect(nomes(texto, ["pending.summary"])).toEqual(["minhas_pendencias"]);
+    }
+  );
+
+  it("certidões travadas → pendencias_do_negocio", () => {
+    expect(nomes("certidões travadas", ["deal.pending"])).toEqual(["pendencias_do_negocio"]);
+  });
+
+  it.each(["certidões travadas", "documentos parados do negócio X", "certidões pendentes do negócio X"])(
+    "com as duas capabilities, %s fica só com pendencias_do_negocio",
+    (texto) => {
+      const r = nomes(texto, AMBAS);
+      expect(r).toContain("pendencias_do_negocio");
+      expect(r).not.toContain("minhas_pendencias");
+    }
+  );
+
+  it.each(["quais propostas tenho", "tenho propostas?", "minhas atividades de hoje", "como está o formulário do negócio X"])(
+    "consulta que não fala de pendência não aciona minhas_pendencias: %s",
+    (texto) => {
+      expect(nomes(texto, AMBAS)).not.toContain("minhas_pendencias");
+    }
+  );
+
+  it("sem a capability pending.summary a tool não entra", () => {
+    expect(nomes("o que tenho pendente?", ["deal.pending"])).toEqual(["pendencias_do_negocio"]);
+    expect(nomes("o que tenho pendente?", [])).toEqual([]);
+  });
+
+  it("texto que não pede pendência: fora", () => {
+    expect(nomes("bom dia, tudo bem?", AMBAS)).toEqual([]);
+    expect(nomes("quero ver a atividade de amanhã", ["pending.summary"])).toEqual([]);
+  });
+
+  it("registro: leitura pending.summary, prioridade 15 e params filtro/negocio_id", () => {
+    const t = TOOLS_DE_LEITURA.find((x) => x.nome === "minhas_pendencias")!;
+    expect(t).toMatchObject({ tipo: "leitura", capability: "pending.summary", verb: "pending.summary", prioridade: 15 });
+    const props = (t.def.parameters as { properties: Record<string, { enum?: string[]; type?: string }> }).properties;
+    expect(props.filtro.enum).toEqual(["formularios", "propostas", "atividades"]);
+    expect(props.negocio_id.type).toBe("string");
+  });
+
+  it("pendencias_do_negocio descreve só certidões/pendências do negócio", () => {
+    const d = TOOLS_DE_LEITURA.find((x) => x.nome === "pendencias_do_negocio")!.def.description;
+    expect(d).toMatch(/certid/i);
+    expect(d).not.toMatch(/o que (está|esta) pendente/i);
+  });
+});

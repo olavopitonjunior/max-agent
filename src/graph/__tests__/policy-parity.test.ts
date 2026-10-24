@@ -312,6 +312,9 @@ const CATALOGO_DO_IMOBPRO = [
       "marketing.generate",
       "activity.write",
       "template.decisions",
+      // Pendências e avisos (24/10/2026): posições 27 e 28 (0-based), FIXAS.
+      "pending.summary",
+      "prefs.self",
 ];
 
 describe("paridade do catálogo de capabilities", () => {

@@ -219,6 +219,8 @@ describe("POST /api/notify", () => {
     const familias = [
       { audience: "platform_user", kind: "activity_assigned", params: { atividade: "Ligar para o comprador", negocio: "Venda Apto 302" } },
       { audience: "platform_user", kind: "activity_due", params: { atividade: "Vistoria", prazo: "24/10 10:00" } },
+      { audience: "platform_user", kind: "activity_due_soon", params: { atividade: "Vistoria", prazo: "24/10 10:00", org: "RE/MAX Trio" } },
+      { audience: "platform_user", kind: "activity_completed", params: { quem: "Marina Lopes", atividade: "Conferir comprovante do sinal", negocio: "Venda Apto 302" } },
       { audience: "platform_user", kind: "form_reminder", params: { negocio: "Venda Apto 302" } },
       { audience: "deal_broker", kind: "proposal_completed", params: { negocio: "Venda Apto 302" } },
       { audience: "deal_broker", kind: "stage_change", params: { negocio: "Venda Apto 302", etapa: "Assinatura" } },

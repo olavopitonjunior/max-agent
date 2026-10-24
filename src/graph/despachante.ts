@@ -1,6 +1,7 @@
 import type { LlmToolCall } from "@/lib/llm";
 import type { Candidate } from "@/lib/identity";
 import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
+import { lerPreferencias } from "@/lib/cm";
 import type { ToolLogEntry } from "@/lib/turnlog";
 import type { Capability } from "./policy";
 import {
@@ -16,6 +17,7 @@ import {
 } from "./tools";
 import { ITENS_POR_LISTA, REFERENCIA_TTL_MS, resolverReferencia, numerarLista, type MapaDeReferencias } from "./referencias";
 import type { StageClarification } from "./query-options";
+import { projetarParaOModelo } from "./preferencias";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -186,6 +188,13 @@ export async function despacharLeituras(params: {
       }
       args = { atividade_id: selected.item.id };
     }
+    if (entrada.verb === "pending.summary") {
+      // Só passa o que o servidor entende: `filtro` (enum) vira `blocos` com um
+      // bloco, `negocio_id` vira `dealId`. Qualquer outro campo do modelo some.
+      const filtro = lerBlocoDePendencia(args.filtro);
+      const dealId = typeof args.negocio_id === "string" ? args.negocio_id.trim().slice(0, 64) : "";
+      args = { ...(filtro ? { blocos: [filtro] } : {}), ...(dealId ? { dealId } : {}) };
+    }
     if (paginada) {
       const continuation = referencias?.continuacao;
       if (args.mais === true) {
@@ -205,13 +214,19 @@ export async function despacharLeituras(params: {
       }
       args.limite = ITENS_POR_LISTA;
     }
-    const r = await executarLeitura({
+    const lido = await executarLeitura({
       entrada: a.entrada as EntradaDeLeitura,
       chamada: { ...chamada, args },
       identity: params.identity,
       subject,
       fromPhone: params.fromPhone,
     });
+    // Formato fixado com a plataforma: COM permissão, `items: [PendenciasDoUsuario]`
+    // (totais 0 quando não há nada pendente); SEM permissão, `[]` ou `[null]`.
+    // O "sem permissão" não pode virar lista vazia (o modelo diria "nada
+    // pendente") nem falha (ofereceria tentar de novo).
+    const semPermissao = !!lido && entrada.verb === "pending.summary" && !ehResumoDePendencias(lido.items[0]);
+    const r = semPermissao && lido ? { ...lido, items: [{ sem_permissao: true }] } : lido;
 
     if (!r) {
       resultados.push({ tool: chamada.name, items: null, truncated: false });
@@ -260,10 +275,20 @@ export async function despacharLeituras(params: {
     } else {
       resultados.push({ tool: chamada.name, items: r.items, truncated: r.truncated, ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) });
     }
-    trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+    trilha.push({ name: chamada.name, args: chamada.args, outcome: semPermissao ? "sem_permissao" : "ok" });
   }
 
   return { resultados, trilha, referencias };
+}
+
+/** Blocos que o servidor aceita em `pending.summary`. Valor fora da lista some (todos os blocos). */
+export function lerBlocoDePendencia(v: unknown): "formularios" | "propostas" | "atividades" | null {
+  return v === "formularios" || v === "propostas" || v === "atividades" ? v : null;
+}
+
+/** O item de `pending.summary` é o resumo (objeto), e não o `null` de "sem permissão". */
+function ehResumoDePendencias(v: unknown): boolean {
+  return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
 /** Recortes que o servidor aceita em `activity.list`. Valor fora da lista some (sem filtro). */
@@ -279,6 +304,13 @@ async function executarLeitura(params: {
   subject: ReturnType<typeof subjectDe>;
   fromPhone: string;
 }): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification; naoMedidos?: number } | null> {
+  // Preferências de aviso (M3): rota própria, sempre da PRÓPRIA pessoa (telefone do turn). Só usuário
+  // da plataforma tem preferência; qualquer outra identidade volta como "sem permissão", nunca como lista vazia.
+  if (params.entrada.verb === "prefs.get") {
+    if (params.identity.kind !== "user") return { items: [{ sem_permissao: true }], truncated: false };
+    const view = await lerPreferencias({ orgId: params.identity.orgId, rawPhone: params.fromPhone });
+    return view ? { items: [projetarParaOModelo(view)], truncated: false } : null;
+  }
   const r = await consultarEscopo({
     orgId: params.identity.orgId,
     rawPhone: params.fromPhone,

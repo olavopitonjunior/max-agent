@@ -62,6 +62,7 @@ describe("a régua do Olavo (01/10/2026)", () => {
       [
         "activity_assigned",
         "activity_due",
+        "activity_due_soon",
         "contract_signed",
         "contract_signed_parte",
         "credit_result",
@@ -465,6 +466,11 @@ describe("atividades pendentes (2026-10-14)", () => {
     expect(CATALOGO.activity_due).toBe(CATALOGO.activity_assigned);
     expect(templatesDoKind("activity_assigned").map((d) => d.name)).toEqual(["max_atividades_pendentes"]);
     expect(templatesDoKind("activity_due").map((d) => d.name)).toEqual(["max_atividades_pendentes"]);
+  });
+
+  it("activity_due_soon (lembrete antes do prazo) usa o MESMO template neutro, fora da janela", () => {
+    expect(CATALOGO.activity_due_soon).toBe(CATALOGO.activity_assigned);
+    expect(templatesDoKind("activity_due_soon").map((d) => d.name)).toEqual(["max_atividades_pendentes"]);
   });
 
   it("sem repetição na submissão: o template aparece UMA vez em todosOsTemplates", () => {

@@ -41,6 +41,8 @@ import { lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
 import { conduzirAtividade, rebaixarAtividade, type FluxoAtividade } from "./atividades";
+import { conduzirPreferencias, rebaixarPreferencias, type FluxoPreferencias } from "./preferencias";
+import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-contract";
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
@@ -120,6 +122,7 @@ export type Fluxo =
   | FluxoCredito
   | FluxoCaptacao
   | FluxoAtividade
+  | FluxoPreferencias
   | {
       kind: "escolha";
       natureza?: "venda" | "locacao";
@@ -200,6 +203,14 @@ export interface DepsDoFluxo {
   extrairCredito?(texto: string, campo: CampoCredito): Promise<Record<string, unknown> | null>;
   /** Captação (P9): extrator de UMA seção (imóvel, endereço, pessoa). Opcional: sem ele, só o código interpreta. */
   extrairCaptacao?(texto: string, secao: SecaoDeExtracao): Promise<Record<string, unknown> | null>;
+  /**
+   * Preferências de aviso (M3): leitura e PATCH das preferências da PRÓPRIA pessoa (telefone do turn).
+   * `null` = sem resposta utilizável. Opcional: sem ele, o fluxo responde que não conseguiu.
+   */
+  preferencias?: {
+    ler(): Promise<PrefsView | null>;
+    atualizar(patch: PrefsPatch): Promise<PrefsPatchResult | null>;
+  };
 }
 
 export interface ContextoDoTurno {
@@ -789,6 +800,8 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
   // Atividade (M1): a confirmação volta ao resumo; com `chave` (escrita incerta) a etapa fica.
   if (f.kind === "atividade") return rebaixarAtividade(f);
+  // Preferências (M3): a confirmação volta ao resumo; o SIM seguinte só reapresenta.
+  if (f.kind === "preferencias") return rebaixarPreferencias(f);
   // Crédito: a revisão (o SIM que envia, no M3) volta para a coleta; o servidor diz o que falta.
   if (f.kind === "credito") return f.etapa === "revisao" ? { ...f, etapa: "coleta", campoAtual: undefined } : f;
   // Captação: o resumo (o "enviar" que escreve) volta para a conferência; o servidor refaz o resumo.
@@ -1240,6 +1253,7 @@ export async function conduzirFluxo(
   if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (fluxo.kind === "gestao") return conduzirGestao(fluxo, ctx, deps);
   if (fluxo.kind === "atividade") return conduzirAtividade(fluxo, ctx, deps);
+  if (fluxo.kind === "preferencias") return conduzirPreferencias(fluxo, ctx, deps);
   if (fluxo.kind === "credito") return conduzirCredito(fluxo, ctx, deps);
   // Achado 20: este caminho nunca é alcançado em produção (graph.ts despacha
   // `captacao` direto pra `conduzirCaptacao`, com `podeEscrever(identity)` — não
