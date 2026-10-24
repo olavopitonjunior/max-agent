@@ -222,6 +222,9 @@ describe("POST /api/notify", () => {
       { audience: "platform_user", kind: "form_reminder", params: { negocio: "Venda Apto 302" } },
       { audience: "deal_broker", kind: "proposal_completed", params: { negocio: "Venda Apto 302" } },
       { audience: "deal_broker", kind: "stage_change", params: { negocio: "Venda Apto 302", etapa: "Assinatura" } },
+      { audience: "platform_user", kind: "form_completed", params: undefined },
+      { audience: "platform_user", kind: "envelope_signed", params: undefined },
+      { audience: "platform_user", kind: "proposal_aceite_not_delivered", params: undefined },
       { audience: "deal_broker", kind: undefined, params: undefined },
     ];
     for (const [i, f] of familias.entries()) {
