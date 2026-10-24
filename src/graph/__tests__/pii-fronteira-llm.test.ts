@@ -95,7 +95,7 @@ describe("answer — tokeniza antes do modelo, destokeniza o que volta", () => {
       return {
         text: "",
         toolCalls: [
-          { name: "listar_propostas", args: { nome_buscado: "⟨TEL_1⟩", observacao: "⟨CPF_1⟩" } },
+          { name: "listar_negocios", args: { nome_buscado: "⟨TEL_1⟩", observacao: "⟨CPF_1⟩" } },
         ],
         usage: uso,
       };
@@ -104,7 +104,9 @@ describe("answer — tokeniza antes do modelo, destokeniza o que volta", () => {
     const r = await buildGraph().compile().invoke({
       inbound: {
         fromPhone: "+5511999990000",
-        text: `quais minhas propostas? meu telefone é ${TEL} e meu cpf é ${CPF}`,
+        // Propostas sem capability são recusadas antes do LLM. Negócios
+        // continuam exercitando a fronteira de destokenização do answer.
+        text: `quais meus negócios? meu telefone é ${TEL} e meu cpf é ${CPF}`,
         messageId: "m3",
       },
       identity: gerente,

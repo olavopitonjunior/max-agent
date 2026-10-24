@@ -100,6 +100,21 @@ const NOTIFY_BODY = JSON.stringify({
 });
 
 describe("POST /api/notify", () => {
+  it("perfil newton recusa aviso a parte do negócio (403) e não enfileira; no Max passa", async () => {
+    const corpo = JSON.stringify({ ...JSON.parse(NOTIFY_BODY), audience: "deal_party" });
+    const assinado = () => {
+      const ts = String(Date.now());
+      return notifyReq(corpo, { "x-max-timestamp": ts, "x-max-signature": sign(ts, corpo, SECRET) });
+    };
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    const res = await notifyPost(assinado());
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "audience_not_allowed" });
+    expect(enfileiraOut).not.toHaveBeenCalled();
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "");
+    expect((await notifyPost(assinado())).status).toBe(202);
+  });
+
   it("sem assinatura é 401", async () => {
     expect((await notifyPost(notifyReq(NOTIFY_BODY, {}))).status).toBe(401);
   });
@@ -196,6 +211,36 @@ describe("POST /api/notify", () => {
         linkUrl: "https://trio.imobpro.ia.br/deals/cmx1",
       })
     );
+  });
+
+  it("perfil newton: cada família de aviso interno entra na fila com kind e params", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    const base = JSON.parse(CORPO_DO_CM);
+    const familias = [
+      { audience: "platform_user", kind: "activity_assigned", params: { atividade: "Ligar para o comprador", negocio: "Venda Apto 302" } },
+      { audience: "platform_user", kind: "activity_due", params: { atividade: "Vistoria", prazo: "24/10 10:00" } },
+      { audience: "platform_user", kind: "form_reminder", params: { negocio: "Venda Apto 302" } },
+      { audience: "deal_broker", kind: "proposal_completed", params: { negocio: "Venda Apto 302" } },
+      { audience: "deal_broker", kind: "stage_change", params: { negocio: "Venda Apto 302", etapa: "Assinatura" } },
+      { audience: "platform_user", kind: "form_completed", params: undefined },
+      { audience: "platform_user", kind: "envelope_signed", params: undefined },
+      { audience: "platform_user", kind: "proposal_aceite_not_delivered", params: undefined },
+      { audience: "deal_broker", kind: undefined, params: undefined },
+    ];
+    for (const [i, f] of familias.entries()) {
+      enfileiraOut.mockClear();
+      const corpo = JSON.stringify({ ...base, ...f, dedupeKey: `newton-${i}` });
+      const res = await postar(corpo);
+      expect(res.status, f.kind ?? "sem kind").toBe(202);
+      expect(enfileiraOut).toHaveBeenCalledWith(expect.objectContaining({
+        audience: f.audience,
+        kind: f.kind ?? null,
+        params: f.params ?? null,
+        title: base.title,
+        body: base.body,
+        linkUrl: base.linkUrl,
+      }));
+    }
   });
 
   it("credit_result (M3): o corpo vira o texto fixo do aviso, com o link", async () => {
@@ -377,6 +422,18 @@ describe("GET /api/admin/status — a query entra na assinatura", () => {
       statusReq("?orgId=org1", "GET./api/admin/status?orgId=org1")
     );
     expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ agentKey: "max", agentName: "Max" });
+  });
+
+  it("perfil newton: o status se identifica como Newton", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    try {
+      const res = await adminStatus(statusReq("", "GET./api/admin/status"));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ agentKey: "newton", agentName: "Newton" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("assinatura de UMA query não vale para outra org", async () => {

@@ -2,12 +2,28 @@ import { describe, expect, it, vi } from "vitest";
 
 const query = vi.fn();
 const sendText = vi.fn();
-vi.mock("../db", () => ({ query }));
+// Keep the real privacy/delivery fences; only the SQL boundary is synthetic.
+// The selected queue row exists at epoch zero, so the provider rejection is
+// reached through the same marker + transaction path as production.
+const rawQuery = async (sql: string, params: unknown[] = []) => {
+  if (sql.startsWith("SELECT id FROM outbox") || sql.startsWith("SELECT id FROM inbound_queue")) {
+    return { rows: [{ id: params[0] }] };
+  }
+  return { rows: await query(sql, params) };
+};
+vi.mock("../db", () => ({
+  query,
+  db: () => ({
+    query: rawQuery,
+    connect: async () => ({ query: rawQuery, release: vi.fn() }),
+  }),
+}));
 vi.mock("../transport", () => ({
   sendText,
   sendTemplate: vi.fn(),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true }),
   provider: () => "meta",
+  capabilities: () => ({ templates: true, window24h: true, media: true, groups: false, status: true }),
 }));
 vi.mock("../janela24h", () => ({ janelaAberta: vi.fn().mockResolvedValue(true), abrirJanela: vi.fn() }));
 vi.mock("@/graph/graph", () => ({ seedNotification: vi.fn(), runTurn: vi.fn() }));
@@ -20,9 +36,9 @@ const { runQueued } = await import("../inbound");
 const erro = (code: number) => new MetaHttpError("/messages", 400, JSON.stringify({ error: { code, message: "recusado" } }));
 
 describe("recusa Meta 131048/131049", () => {
-  it("outbox liquida a mensagem como falha terminal, com código, sem reagendar", async () => {
+  it.each([131048, 131049])("outbox liquida %i como falha terminal, com código, sem reagendar", async (code) => {
     query.mockReset();
-    sendText.mockReset().mockRejectedValue(erro(131049));
+    sendText.mockReset().mockRejectedValue(erro(code));
     query.mockImplementation(async (sql: string) => {
       if (sql.includes("SELECT count(*)::int AS due")) return [{ due: 1 }];
       if (sql.includes("RETURNING id, org_id")) return [{
@@ -36,14 +52,15 @@ describe("recusa Meta 131048/131049", () => {
 
     const totals = await dispatchDue(1, { connected: true });
     expect(totals.failed).toBe(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
     const updates = query.mock.calls.filter(([sql]) => String(sql).includes("UPDATE outbox"));
-    expect(updates.some(([sql, params]) => String(sql).includes("status = 'failed'") && params.includes(131049))).toBe(true);
+    expect(updates.some(([sql, params]) => String(sql).includes("status = 'failed'") && params.includes(code))).toBe(true);
     expect(updates.some(([sql]) => String(sql).includes("deliver_after = CASE"))).toBe(false);
   });
 
-  it("outbox repete a gravação se o banco falhar após a recusa da Meta", async () => {
+  it.each([131048, 131049])("outbox repete somente a gravação se o banco falhar após a recusa %i", async (code) => {
     query.mockReset();
-    sendText.mockReset().mockRejectedValue(erro(131048));
+    sendText.mockReset().mockRejectedValue(erro(code));
     let gravacoes = 0;
     query.mockImplementation(async (sql: string) => {
       if (sql.includes("SELECT count(*)::int AS due")) return [{ due: 1 }];
@@ -62,11 +79,13 @@ describe("recusa Meta 131048/131049", () => {
 
     expect((await dispatchDue(1, { connected: true })).failed).toBe(1);
     expect(gravacoes).toBe(2);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("deliver_after = CASE"))).toBe(false);
   });
 
-  it("inbound encerra a resposta recusada sem tentar novamente", async () => {
+  it.each([131048, 131049])("inbound encerra a resposta recusada %i sem tentar novamente", async (code) => {
     query.mockReset().mockResolvedValue([]);
-    sendText.mockReset().mockRejectedValue(erro(131048));
+    sendText.mockReset().mockRejectedValue(erro(code));
     const row = {
       id: "in-1", message_id: "wamid.in-1", from_phone: "5511999990000", group_id: null,
       kind: "text", text: "oi", media_url: null, mime_type: null, sender_name: null,
@@ -75,6 +94,8 @@ describe("recusa Meta 131048/131049", () => {
     };
 
     expect(await runQueued(row)).toBe("failed");
-    expect(query.mock.calls.some(([sql, params]) => String(sql).includes("SET status = 'failed'") && String(params[1]).includes("#131048"))).toBe(true);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("last_send_started_at = NULL"))).toBe(true);
+    expect(query.mock.calls.some(([sql, params]) => String(sql).includes("SET status = 'failed'") && String(params[1]).includes(`#${code}`))).toBe(true);
   });
 });

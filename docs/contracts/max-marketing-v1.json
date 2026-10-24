@@ -1,0 +1,139 @@
+{
+  "contractVersion": "marketing-v1",
+  "description": "Synthetic channel=max public response vectors; no provider price, source URLs or tenant identity.",
+  "options": {
+    "enabled": true,
+    "paidEnabled": true,
+    "version": 1,
+    "canManage": false,
+    "canGenerate": true,
+    "videoAvailable": true,
+    "workflowVersion": "marketing-v1",
+    "templates": [
+      {
+        "id": "fixture-template",
+        "name": "Modelo institucional",
+        "layout": "minimal",
+        "headlineMax": 100,
+        "ctaMax": 80,
+        "enabled": true
+      }
+    ],
+    "quotas": [
+      {
+        "modality": "video",
+        "monthlyLimit": 2
+      }
+    ]
+  },
+  "prepare": {
+    "briefId": "fixture-brief",
+    "confirmationDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expiresAt": "2030-01-01T00:00:00.000Z",
+    "snapshot": {
+      "propertyId": "fixture-property",
+      "modality": "video",
+      "template": "Modelo institucional",
+      "brand": "Marca sintética",
+      "events": [
+        {
+          "kind": "worker",
+          "name": "marketing.qa",
+          "version": "1",
+          "skill": "marketing-factual-qa-v1",
+          "model": null,
+          "status": "succeeded",
+          "revision": 0,
+          "occurredAt": "2026-10-20T12:00:00.000Z",
+          "metadata": {
+            "checks": [
+              "fatos_oficiais"
+            ]
+          }
+        }
+      ],
+      "quality": {
+        "passed": true,
+        "issues": [],
+        "checks": [
+          "fatos_oficiais"
+        ]
+      },
+      "copy": "Apartamento no Centro. Consulte os dados atuais no ImobPro.",
+      "script": "Conheça este apartamento no Centro.",
+      "quotaUnits": 1
+    }
+  },
+  "states": {
+    "queued": {
+      "job": {
+        "id": "fixture-job",
+        "state": "queued",
+        "modality": "video",
+        "revisions": 0,
+        "createdAt": "2026-10-20T12:00:00.000Z",
+        "updatedAt": "2026-10-20T12:00:00.000Z",
+        "link": "/marketing?job=fixture-job",
+        "events": [],
+        "artifacts": [],
+        "stale": false
+      }
+    },
+    "running": {
+      "job": {
+        "id": "fixture-job",
+        "state": "running",
+        "modality": "video",
+        "revisions": 0,
+        "createdAt": "2026-10-20T12:00:00.000Z",
+        "updatedAt": "2026-10-20T12:00:00.000Z",
+        "link": "/marketing?job=fixture-job",
+        "events": [],
+        "artifacts": [],
+        "stale": false
+      }
+    },
+    "succeeded": {
+      "job": {
+        "id": "fixture-job",
+        "state": "succeeded",
+        "modality": "video",
+        "revisions": 0,
+        "createdAt": "2026-10-20T12:00:00.000Z",
+        "updatedAt": "2026-10-20T12:00:00.000Z",
+        "link": "/marketing?job=fixture-job",
+        "events": [],
+        "artifacts": [],
+        "stale": false
+      }
+    },
+    "failed": {
+      "job": {
+        "id": "fixture-job",
+        "state": "failed",
+        "modality": "video",
+        "revisions": 0,
+        "createdAt": "2026-10-20T12:00:00.000Z",
+        "updatedAt": "2026-10-20T12:00:00.000Z",
+        "link": "/marketing?job=fixture-job",
+        "events": [],
+        "artifacts": [],
+        "stale": false
+      }
+    },
+    "unknown": {
+      "job": {
+        "id": "fixture-job",
+        "state": "unknown",
+        "modality": "video",
+        "revisions": 0,
+        "createdAt": "2026-10-20T12:00:00.000Z",
+        "updatedAt": "2026-10-20T12:00:00.000Z",
+        "link": "/marketing?job=fixture-job",
+        "events": [],
+        "artifacts": [],
+        "stale": false
+      }
+    }
+  }
+}

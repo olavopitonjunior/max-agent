@@ -14,7 +14,8 @@ import {
   type EntradaDeTool,
   type PendingAction,
 } from "./tools";
-import { numerarLista, type MapaDeReferencias } from "./referencias";
+import { ITENS_POR_LISTA, REFERENCIA_TTL_MS, resolverReferencia, numerarLista, type MapaDeReferencias } from "./referencias";
+import type { StageClarification } from "./query-options";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -97,6 +98,8 @@ export interface ResultadoDeTool {
   tool: string;
   items: unknown[] | null;
   truncated: boolean;
+  hasMore?: boolean;
+  clarification?: StageClarification;
 }
 
 /**
@@ -154,9 +157,53 @@ export async function despacharLeituras(params: {
       continue;
     }
 
+    const entrada = a.entrada as EntradaDeLeitura;
+    let args = { ...chamada.args };
+    const agora = params.agora ?? Date.now();
+    const subjectKey = JSON.stringify([params.identity.orgId, subject]);
+    const paginada = ["property.list", "activity.list", "notification.list"].includes(entrada.verb);
+    if (entrada.verb === "property.detail" || entrada.verb === "contract.status") {
+      const property = entrada.verb === "property.detail";
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: property ? "imovel" : "negocio" });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      args = { [property ? "imovel_id" : "negocio_id"]: selected.item.id };
+    }
+    if (entrada.verb === "activity.get") {
+      // O modelo aponta pelo número da lista; o id interno nunca passa por ele.
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "atividade" });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      args = { atividade_id: selected.item.id };
+    }
+    if (paginada) {
+      const continuation = referencias?.continuacao;
+      if (args.mais === true) {
+        if (!continuation || continuation.tool !== chamada.name || continuation.subjectKey !== subjectKey || agora - continuation.criadoEm > REFERENCIA_TTL_MS) {
+          resultados.push({ tool: chamada.name, items: null, truncated: false, hasMore: false });
+          trilha.push({ name: chamada.name, args: chamada.args, outcome: "continuacao_invalida" });
+          continue;
+        }
+        args = { ...continuation.args, cursor: continuation.cursor };
+      } else {
+        // Model-provided cursors and identifiers never select a page.
+        const filtro = entrada.verb === "activity.list" && lerFiltroDeAtividade(args.filtro);
+        args = {
+          ...(typeof args.estado === "string" ? { estado: args.estado } : {}),
+          ...(filtro ? { filtro } : {}),
+        };
+      }
+      args.limite = ITENS_POR_LISTA;
+    }
     const r = await executarLeitura({
       entrada: a.entrada as EntradaDeLeitura,
-      chamada,
+      chamada: { ...chamada, args },
       identity: params.identity,
       subject,
       fromPhone: params.fromPhone,
@@ -165,6 +212,12 @@ export async function despacharLeituras(params: {
     if (!r) {
       resultados.push({ tool: chamada.name, items: null, truncated: false });
       trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+      continue;
+    }
+
+    if (r.clarification) {
+      resultados.push({ tool: chamada.name, items: null, truncated: false, clarification: r.clarification });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: chamada.args.opcoes_etapas === true ? "opcoes_consulta" : "filtro_invalido" });
       continue;
     }
 
@@ -180,12 +233,17 @@ export async function despacharLeituras(params: {
         agora: params.agora ?? Date.now(),
       });
       referencias = numerada.mapa;
+      if (paginada && r.nextCursor) {
+        const { cursor: _cursor, ...filters } = args;
+        referencias.continuacao = { tool: chamada.name, cursor: r.nextCursor, args: filters, subjectKey, criadoEm: agora };
+      }
       resultados.push({
         tool: chamada.name,
         items: numerada.paraOModelo,
         // Corte NOSSO (teto de 5) também se declara: lista cortada não pode
         // passar por completa.
         truncated: r.truncated || numerada.cortados > 0,
+        ...(paginada ? { hasMore: !!r.nextCursor } : {}),
       });
     } else {
       resultados.push({ tool: chamada.name, items: r.items, truncated: r.truncated });
@@ -196,6 +254,11 @@ export async function despacharLeituras(params: {
   return { resultados, trilha, referencias };
 }
 
+/** Recortes que o servidor aceita em `activity.list`. Valor fora da lista some (sem filtro). */
+export function lerFiltroDeAtividade(v: unknown): "minhas" | "atrasadas" | "hoje" | null {
+  return v === "minhas" || v === "atrasadas" || v === "hoje" ? v : null;
+}
+
 /** O executor de leitura: `scope-query` no servidor + a rede da regra 5. */
 async function executarLeitura(params: {
   entrada: EntradaDeLeitura;
@@ -203,7 +266,7 @@ async function executarLeitura(params: {
   identity: Candidate;
   subject: ReturnType<typeof subjectDe>;
   fromPhone: string;
-}): Promise<{ items: unknown[]; truncated: boolean } | null> {
+}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification } | null> {
   const r = await consultarEscopo({
     orgId: params.identity.orgId,
     rawPhone: params.fromPhone,
@@ -213,7 +276,7 @@ async function executarLeitura(params: {
   });
   if (!r) return null;
   // Rede de segurança da regra 5 — a projeção que VALE é a do servidor.
-  return { items: descartarSeVazou(r.items, params.identity.kind), truncated: r.truncated };
+  return { items: descartarSeVazou(r.items, params.identity.kind), truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}) };
 }
 
 // ─── Executor de ESCRITA (proposta, nunca execução) ───────────────────────

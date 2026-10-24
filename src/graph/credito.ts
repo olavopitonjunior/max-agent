@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "./fluxos";
 import { codigoCitado } from "./localizar";
 import { lerConfirmacao, normalizar } from "./tools";
@@ -1002,7 +1003,7 @@ async function gravar(
   }
   if (r.status === 404) {
     return resposta({ ...f, cofre: undefined, campoAtual: "cpf", atualizadoEm: ctx.agora },
-      `Não consegui abrir a ficha desse CPF pelo Max. Confira o número ou use a tela: ${linkDoLead()}`, "credito_upsert_404");
+      `Não consegui abrir a ficha desse CPF pelo ${nomeDoAgente()}. Confira o número ou use a tela: ${linkDoLead()}`, "credito_upsert_404");
   }
   if (r.status === 403) return resposta(null, TEXTO_CREDITO_SEM_POLITICA, "credito_upsert_403");
   if (r.status !== 200 && r.status !== 201) {
@@ -1226,7 +1227,7 @@ function traduzirEnvio(f: FluxoCredito, r: { status: number; body: Record<string
     case 402: return resposta(null, TEXTO_TETO, "credito_envio_402");
     case 503: return resposta(null, TEXTO_INDISPONIVEL, "credito_envio_503");
     case 403: return resposta(null, TEXTO_CREDITO_SEM_POLITICA, "credito_envio_403");
-    case 404: return resposta(null, `Não consegui abrir essa ficha pelo Max. Confira na tela: ${url}`, "credito_envio_404");
+    case 404: return resposta(null, `Não consegui abrir essa ficha pelo ${nomeDoAgente()}. Confira na tela: ${url}`, "credito_envio_404");
     default: return resposta(null, `O sistema não aceitou o envio. Confira a ficha na tela: ${url}`, `credito_envio_${r.status}`);
   }
 }
@@ -1297,7 +1298,7 @@ async function desdobrarResultado(f: FluxoCredito, ctx: ContextoDoTurno, deps: D
   // Outra conversa: o resultado já foi dito; o fluxo acaba e o modelo responde.
   if (confirmacao !== "sim") return { liberar: true, fluxo: null, evento: "credito_resultado_liberado" };
   if (!ctx.policy.includes("proposal.create")) {
-    return resposta(null, `Sua conta não tem permissão para criar proposta pelo Max. A análise fica na tela do lead: ${url}`, "credito_proposta_sem_politica");
+    return resposta(null, `Sua conta não tem permissão para criar proposta pelo ${nomeDoAgente()}. A análise fica na tela do lead: ${url}`, "credito_proposta_sem_politica");
   }
   // Nome pro cabeçalho e aluguel do cofre são só conveniência: quem garante os
   // dois (e o CPF, que o Max nunca manda) é o `proposal.create` com

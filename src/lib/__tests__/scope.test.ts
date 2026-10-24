@@ -210,3 +210,14 @@ describe("limparArgs — filtro vazio do modelo não derruba a leitura", () => {
     expect(JSON.parse(init.body).args).toEqual({ limite: 10 });
   });
 });
+
+describe("etapas inválidas não são resultados vazios",()=>{
+ it("preserva opções válidas sem confundir com itens",async()=>{
+  responde({ok:true,status:200,body:{items:[],clarification:{field:"estado",options:["Formulário"]}}});
+  expect(await consultarEscopo({orgId:"org1",rawPhone:PHONE,subject:SUJEITO,verb:"deal.list"})).toEqual({items:[],truncated:false,clarification:{field:"estado",options:["Formulário"]}});
+ });
+ it.each([{field:"estado",options:[42]},{field:"estado",options:["a\nb"]},{field:"estado",options:Array(51).fill("A")},{field:"wrong",options:[]}])("recusa opções malformadas",async clarification=>{
+  responde({ok:true,status:200,body:{items:[],clarification}});
+  expect(await consultarEscopo({orgId:"org1",rawPhone:PHONE,subject:SUJEITO,verb:"deal.list"})).toBeNull();
+ });
+});

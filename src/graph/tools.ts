@@ -1,9 +1,12 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
+import { featureEnabled } from '@/lib/runtime/rollout';
 import type { LlmTool } from "@/lib/llm";
 import type { Capability } from "./policy";
 import type { ScopeQueryVerb } from "./scope-contract";
 import { ESTADOS_DE_PROPOSTA } from "./scope-contract";
 import type { Candidate } from "@/lib/identity";
 import { captacaoLigada } from "./captacao-flags";
+import { packsDoPerfil, type ToolPack } from "@/packs";
 
 /**
  * Ferramentas do Max — e, mais importante, o que elas NÃO são.
@@ -360,7 +363,7 @@ export const TEXTO_CANCELADO = "Beleza, não criei nada.";
  */
 export function textoSemPermissao(args: Pick<PendingAction["args"], "tipo" | "natureza" | "finalidade">): string {
   return (
-    `Criar ${descreverPendencia(args)} pelo Max não está liberado para você. ` +
+    `Criar ${descreverPendencia(args)} pelo ${nomeDoAgente()} não está liberado para você. ` +
     "Nada foi criado. Dá pra fazer pelo sistema, ou fala com quem administra a conta."
   );
 }
@@ -422,7 +425,7 @@ interface EntradaBase {
  * O que a lista de uma leitura PRODUZ, para as referências numeradas (G2):
  * o código numera os itens e guarda número → id; o modelo só vê o número.
  */
-export type TipoDeReferencia = "negocio" | "proposta";
+export type TipoDeReferencia = "negocio" | "proposta" | "imovel" | "atividade" | "notificacao" | "contrato";
 
 export interface EntradaDeLeitura extends EntradaBase {
   tipo: "leitura";
@@ -516,7 +519,7 @@ export const PROPOR_CRIACAO: EntradaDeEscrita = {
 export const TETO_DE_TOOLS = 5;
 
 const PEDE_NEGOCIO =
-  /\b(neg[oó]cio|neg[oó]cios|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid\w*|documentos?)\b/i;
+  /\b(neg[oó]cio|neg[oó]cios|vendas|processo|andamento|etapa|status|carteira|pend[eê]ncia|pendencias|falta|faltando|certid\w*|documentos?)\b/i;
 
 export const LISTAR_NEGOCIOS: ToolDef = {
   nome: "listar_negocios",
@@ -681,16 +684,138 @@ export const LISTAR_PROPOSTAS: ToolDef = {
  * o nano confundir — a medição que fez `propor_criacao` ser uma tool só.
  * Entram quando o servidor tiver projeção de detalhe mais rica.
  */
-export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS];
+const EXTENDED_READS: Array<{nome:string;verb:ScopeQueryVerb;pattern:RegExp;description:string;required?:string[];capability?:Capability;props?:Record<string,unknown>}> = [
+ {nome:"listar_notificacoes",verb:"notification.list",pattern:/notific|avisos?/i,description:"Lista metadados das notificações desta pessoa, sem corpo nem título privado."},
+ {nome:"listar_atividades",verb:"activity.list",pattern:/atividades?|tarefas?|agenda|atrasad/i,description:"Lista atividades autorizadas. estado: abertas, atrasadas, hoje, 7d ou concluidas. filtro: minhas, atrasadas ou hoje (recorte do servidor).",props:{filtro:{type:"string",enum:["minhas","atrasadas","hoje"],description:"Recorte pedido: só as minhas, só as atrasadas ou só as de hoje. Opcional."}}},
+ {nome:"ver_atividade",verb:"activity.get",capability:"activity.list",pattern:/atividades?|tarefas?|agenda|atrasad/i,description:"Mostra uma atividade com notas, responsáveis e comentários, escolhida pelo número da lista de atividades anterior. Se não houver lista, use listar_atividades primeiro.",required:["numero"]},
+ {nome:"resumo_carteira",verb:"metrics.get",pattern:/resumo|quantos|quantas|metric|m[eé]trica|carteira/i,description:"Conta negócios, propostas e contratos visíveis desta pessoa, sem dados financeiros."},
+ {nome:"listar_imoveis",verb:"property.list",pattern:/im[oó]ve[il]|apartament|casas?|propriedad/i,description:"Lista imóveis autorizados com características públicas. Nunca revela proprietário, endereço completo ou preço de terceiro."},
+ {nome:"detalhar_imovel",verb:"property.detail",pattern:/im[oó]vel|apartament|propriedad/i,description:"Consulta características atuais de imóvel autorizado selecionado pelo número da lista de imóveis anterior.",required:["numero"]},
+ {nome:"situacao_contrato",verb:"contract.status",pattern:/contrat|assinatur/i,description:"Consulta estado e versão do contrato de negócio autorizado. Use numero da lista de negócios; se não houver lista, consulte listar_negocios primeiro. Não retorna corpo nem signatários do contrato.",required:["numero"]},
+];
+export const TOOLS_EXTENDIDAS: ToolDef[] = EXTENDED_READS.map((e,index)=>({nome:e.nome,tipo:"leitura",capability:e.capability??(e.verb as Capability),verb:e.verb,risco:"nenhum",confirmacao:false,...(e.verb!=="metrics.get"?{refs:{produz:(e.verb.startsWith("property.")?"imovel":e.verb.startsWith("activity.")?"atividade":e.verb.startsWith("notification.")?"notificacao":"contrato") as TipoDeReferencia}}:{}),prioridade:40+index,combina:(text)=>process.env.MAX_EXTENDED_QUERIES==="true"&&e.pattern.test(text),def:{name:e.nome,description:e.description,parameters:{type:"object",properties:{mais:{type:"boolean",description:"Continua a última página desta lista; o servidor controla o cursor. Use quando a pessoa pedir mais resultados."},estado:{type:"string"},...(e.props??{}),numero:{type:"integer",minimum:1,description:"Número exibido na lista anterior, nunca um ID interno."}},required:e.required??[],additionalProperties:false}}}));
+/**
+ * Atividades v2 (M1): as quatro escritas. Todas exigem `activity.write` (fora do padrão: a org liga),
+ * identidade de USUÁRIO (`podeEscrever`) e confirmação humana. A tool só REGISTRA o pedido: o
+ * fluxo determinístico (`atividades.ts`) mostra o resumo, espera o "sim" e só então chama o verbo,
+ * com a `messageId` do "sim" como `x-idempotency-key`. O modelo NUNCA vê ids: aponta pelo `numero`
+ * da lista anterior (atividades; negócios, no `criar_atividade`). Ninguém é cobrado nem contatado:
+ * é atividade INTERNA da imobiliária.
+ */
+const PALAVRA_DE_ATIVIDADE = /\b(atividades?|tarefas?|pendencias?|lembretes?|agenda|compromissos?)\b/;
+// Verbo solto ("conclui a 2", depois de uma lista) só vale sem OUTRO objeto na frase: "a proposta foi recusada" não é atividade.
+const OUTRO_OBJETO = /\b(propostas?|contratos?|formularios?|fichas?|cobrancas?|captacoes?|captacao|assinaturas?|credito|certidoes?|certidao)\b/;
+const VERBO_DE_ATIVIDADE_SOLTO = /\b(conclu\w*|finaliz\w*|recus\w*|coment\w*)\b/;
+export function pedeAtividade(texto: string): boolean {
+  const t = normalizar(texto);
+  return PALAVRA_DE_ATIVIDADE.test(t) || (VERBO_DE_ATIVIDADE_SOLTO.test(t) && !OUTRO_OBJETO.test(t));
+}
+const NUMERO_DA_ATIVIDADE = {
+  type: "integer",
+  minimum: 1,
+  description: "Número da atividade na lista exibida antes, nunca um ID interno.",
+} as const;
+
+function escritaDeAtividade(
+  nome: string,
+  description: string,
+  properties: Record<string, unknown>,
+  required: string[],
+  prioridade: number,
+  consome: TipoDeReferencia
+): EntradaDeEscrita {
+  return {
+    nome,
+    tipo: "escrita",
+    capabilities: ["activity.write"],
+    capabilityDaChamada: () => "activity.write",
+    risco: "nenhum",
+    confirmacao: true,
+    refs: { consome },
+    prioridade,
+    combina: (t) => pedeAtividade(t),
+    def: { name: nome, description, parameters: { type: "object", properties, required, additionalProperties: false } },
+  };
+}
+
+export const CRIAR_ATIVIDADE = escritaDeAtividade(
+  "criar_atividade",
+  "Propõe criar uma atividade interna (ligação, visita, reunião, documento, pendência) num negócio da pessoa. " +
+    "Só registra o pedido: a pessoa confirma com 'sim' antes de qualquer coisa ser criada. Não contata cliente nem parte. " +
+    "Use numero da lista de negócios; se não houver lista, consulte listar_negocios primeiro.",
+  {
+    numero: { type: "integer", minimum: 1, description: "Número do negócio na lista de negócios anterior, nunca um ID interno." },
+    tipo: { type: "string", enum: ["ligacao", "visita", "reuniao", "documento", "pendencia", "outro"] },
+    titulo: { type: "string", description: "Título curto, até 140 caracteres." },
+    vencimento: { type: "string", description: "Quando vence: data AAAA-MM-DD ou data e hora ISO com fuso. Só o que a pessoa disse." },
+    notas: { type: "string", description: "Observação opcional." },
+  },
+  ["numero", "tipo", "titulo", "vencimento"],
+  1,
+  "negocio"
+);
+
+export const COMENTAR_ATIVIDADE = escritaDeAtividade(
+  "comentar_atividade",
+  "Propõe comentar numa atividade. Só registra o pedido; a pessoa confirma com 'sim'. " +
+    `Se ela não disse o texto, deixe texto vazio: o ${nomeDoAgente()} pergunta.`,
+  { numero: NUMERO_DA_ATIVIDADE, texto: { type: "string", description: "O comentário, como a pessoa disse. Opcional." } },
+  ["numero"],
+  2,
+  "atividade"
+);
+
+export const CONCLUIR_ATIVIDADE = escritaDeAtividade(
+  "concluir_atividade",
+  "Propõe marcar uma atividade como concluída. Só registra o pedido; a pessoa confirma com 'sim'.",
+  { numero: NUMERO_DA_ATIVIDADE },
+  ["numero"],
+  3,
+  "atividade"
+);
+
+export const RECUSAR_ATIVIDADE = escritaDeAtividade(
+  "recusar_atividade",
+  "Propõe recusar uma atividade atribuída à pessoa, devolvendo-a a quem a passou. Precisa de motivo (mín. 3 caracteres). " +
+    `Só registra o pedido; a pessoa confirma com 'sim'. Se ela não disse o motivo, deixe motivo vazio: o ${nomeDoAgente()} pergunta.`,
+  { numero: NUMERO_DA_ATIVIDADE, motivo: { type: "string", description: "Por que recusa, como a pessoa disse. Opcional." } },
+  ["numero"],
+  4,
+  "atividade"
+);
+
+export const TOOLS_DE_ATIVIDADE_ESCRITA: EntradaDeEscrita[] = [
+  CRIAR_ATIVIDADE,
+  COMENTAR_ATIVIDADE,
+  CONCLUIR_ATIVIDADE,
+  RECUSAR_ATIVIDADE,
+];
+
+export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS, ...TOOLS_EXTENDIDAS];
 
 /**
  * O registro inteiro: a escrita e as leituras. É a ÚNICA lista que o
  * despachante consulta — nome fora daqui é `tool_desconhecida`.
  */
-export const REGISTRO_DE_TOOLS: EntradaDeTool[] = [PROPOR_CRIACAO, ...TOOLS_DE_LEITURA];
+export const REGISTRO_DE_TOOLS: EntradaDeTool[] = [PROPOR_CRIACAO, ...TOOLS_DE_ATIVIDADE_ESCRITA, ...TOOLS_DE_LEITURA];
 
-export function buscarNoRegistro(nome: string): EntradaDeTool | undefined {
-  return REGISTRO_DE_TOOLS.find((e) => e.nome === nome);
+/** O registro deste deploy: o núcleo mais as entradas dos packs do perfil (`src/packs`). */
+export function entradasDoDeploy(packs: readonly ToolPack[] = packsDoPerfil()): EntradaDeTool[] {
+  const todas = [...REGISTRO_DE_TOOLS, ...packs.flatMap((p) => p.entradas)];
+  // Nome repetido faria o `find` do despachante escolher uma das duas em
+  // silêncio; o pack que colide com o núcleo não pode subir.
+  if (packs.length) {
+    const vistos = new Set<string>();
+    for (const e of todas) {
+      if (vistos.has(e.nome)) throw new Error(`tool_nome_duplicado: ${e.nome}`);
+      vistos.add(e.nome);
+    }
+  }
+  return todas;
+}
+
+export function buscarNoRegistro(nome: string, packs?: readonly ToolPack[]): EntradaDeTool | undefined {
+  return entradasDoDeploy(packs).find((e) => e.nome === nome);
 }
 
 /**
@@ -701,7 +826,7 @@ export function buscarNoRegistro(nome: string): EntradaDeTool | undefined {
  * a tool que o PR 6 acrescentar nascer bloqueada sem ninguém lembrar de editar
  * dois arquivos.
  */
-export const NOMES_DE_TOOL: string[] = REGISTRO_DE_TOOLS.map((e) => e.nome);
+export const NOMES_DE_TOOL: string[] = entradasDoDeploy().map((e) => e.nome);
 
 /**
  * Quais tools de LEITURA entram no prompt deste turn.
@@ -722,6 +847,7 @@ export function selecionarTools(params: {
   policy: Capability[];
   texto: string;
   catalogo?: ToolDef[];
+  orgId?: string;
 }): { tools: ToolDef[]; cortadas: number } {
   const catalogo = params.catalogo ?? TOOLS_DE_LEITURA;
   const texto = params.texto;
@@ -734,6 +860,7 @@ export function selecionarTools(params: {
   if (ehPedidoDeCriacao(texto)) return { tools: [], cortadas: 0 };
 
   const elegiveis = catalogo
+    .filter(t => !TOOLS_EXTENDIDAS.includes(t) || featureEnabled("queries",params.orgId))
     .filter((t) => params.policy.includes(t.capability))
     .filter((t) => t.combina(texto))
     .sort((a, b) => a.prioridade - b.prioridade);
@@ -772,21 +899,55 @@ export function selecionarTools(params: {
  * de desambiguação no meio. Continua exigindo política e identidade, e a
  * criação continua exigindo o "sim".
  */
+/** Data de hoje (America/Sao_Paulo, AAAA-MM-DD) e o fuso: o modelo não tem relógio. */
+export function dataDeHojeEmSaoPaulo(agora: number = Date.now()): string {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(agora));
+}
+
+/** Só `criar_atividade` muda por turno: a descrição do `vencimento` ganha a data de hoje e o fuso. */
+function comDataDeHoje(e: EntradaDeEscrita, agora?: number): EntradaDeEscrita {
+  if (e.nome !== "criar_atividade") return e;
+  const params = e.def.parameters as { properties: Record<string, { description?: string }> };
+  const venc = params.properties.vencimento;
+  if (!venc) return e;
+  const hoje = dataDeHojeEmSaoPaulo(agora);
+  return {
+    ...e,
+    def: { ...e.def, parameters: { ...params, properties: { ...params.properties, vencimento: {
+      ...venc,
+      description: `${venc.description ?? ""} Hoje é ${hoje} (America/Sao_Paulo, fuso -03:00). Converta "amanhã", "sexta" etc. a partir dessa data; com hora, use o fuso -03:00 (ex.: ${hoje}T14:00:00-03:00).`.trim(),
+    } } } },
+  };
+}
+
 export function ferramentasDoTurno(params: {
   policy: Capability[];
   texto: string;
   identity: Candidate;
   /** O pedido que o Max deixou em aberto com uma pergunta (`pedidoEmAberto`). */
   textoAnterior?: string | null;
+  /** Relógio do turno (testes); o padrão é agora. Alimenta a data na descrição do `vencimento`. */
+  agora?: number;
+  /** Packs do perfil (testes); o padrão é `packsDoPerfil()`. */
+  packs?: readonly ToolPack[];
 }): { entradas: EntradaDeTool[]; cortadas: number } {
-  const escrita = REGISTRO_DE_TOOLS.filter(
+  const registro = entradasDoDeploy(params.packs);
+  const escrita = registro.filter(
     (e): e is EntradaDeEscrita =>
       e.tipo === "escrita" &&
       escritaPermitida(e, params.identity, params.policy) &&
       (e.combina(params.texto) || (!!params.textoAnterior && e.combina(params.textoAnterior)))
   );
-  const leitura = selecionarTools({ policy: params.policy, texto: params.texto });
-  return { entradas: [...escrita, ...leitura.tools], cortadas: leitura.cortadas };
+  const leiturasDosPacks = registro.filter(
+    (e): e is EntradaDeLeitura => e.tipo === "leitura" && !TOOLS_DE_LEITURA.includes(e)
+  );
+  const leitura = selecionarTools({
+    policy: params.policy,
+    texto: params.texto,
+    orgId: params.identity.orgId,
+    catalogo: leiturasDosPacks.length ? [...TOOLS_DE_LEITURA, ...leiturasDosPacks] : undefined,
+  });
+  return { entradas: [...escrita.map((e) => comDataDeHoje(e, params.agora)), ...leitura.tools], cortadas: leitura.cortadas };
 }
 
 /**
@@ -859,7 +1020,7 @@ export function textoCriacaoIndisponivel(modo: Exclude<ModoDeCriacao, "disponive
   }
   if (falhaTransitoria) return TEXTO_INDISPONIVEL_AGORA;
   return (
-    "Criar formulário ou proposta pelo Max não está disponível para você " +
+    `Criar formulário ou proposta pelo ${nomeDoAgente()} não está disponível para você ` +
     "agora. Nada foi criado — dá pra criar pelo sistema."
   );
 }

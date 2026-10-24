@@ -1,4 +1,5 @@
 import type { Candidate } from "@/lib/identity";
+import { packsDoPerfil, capabilitiesDosPacks, type ToolPack } from "@/packs";
 
 /**
  * Capabilities do Max e a resolução da política efetiva de um sujeito.
@@ -137,11 +138,37 @@ export const CAPABILITIES = [
    */
   "captacao.autorizacao.pedir",
   "captacao.autorizacao.decidir",
+  "notification.list",
+  "activity.list",
+  "metrics.get",
+  "property.list",
+  "property.detail",
+  "contract.status",
+  "marketing.read",
+  "marketing.generate",
+  /**
+   * Atividades v2 (22/10/2026, par do contractmaker PR11): criar, comentar, concluir e
+   * recusar atividade pelo WhatsApp. Posição 26 (0-based, a ÚLTIMA), FIXA. Fora do
+   * padrão (`POLITICA_PADRAO`): nasce DESLIGADA, a org liga. A leitura (`activity.list`
+   * e `activity.get`) segue na capability que já existia.
+   */
+  "activity.write",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
 
-const CATALOGO = new Set<string>(CAPABILITIES);
+/**
+ * O catálogo DESTE deploy: o núcleo (`CAPABILITIES`, espelhado no ImobPro pelo
+ * teste de paridade) mais as capabilities que os packs do perfil introduzem,
+ * sem repetir. Sem packs, é o núcleo, na mesma ordem.
+ */
+export function capabilitiesDoDeploy(packs: readonly ToolPack[] = packsDoPerfil()): string[] {
+  return [...new Set<string>([...CAPABILITIES, ...capabilitiesDosPacks(packs)])];
+}
+
+// Capability de pack é string fora do tipo `Capability` até a Fase 2 tipá-la;
+// com os packs vazios de hoje, este conjunto é exatamente o núcleo.
+const CATALOGO = new Set<string>(capabilitiesDoDeploy());
 
 /**
  * A política como o ImobPro a emite, em `GET /api/agents/profile`.

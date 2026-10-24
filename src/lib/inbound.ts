@@ -1,3 +1,4 @@
+import { captureDispatchFence, DispatchFenceSchema, withCapturedPrivacy, withDeliveryFence, withTransportFence, TransportAcceptedCommitError, type DispatchFence } from "./runtime/delivery-fence";
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, type InboundMessage } from "./transport";
@@ -46,6 +47,9 @@ export interface InboundRow extends Record<string, unknown> {
   button_payload: string | null;
   attempts: number;
   reply_text: string | null;
+  dispatch_fence?: DispatchFence | null;
+  control_org_id?: string | null;
+  control_version?: number | null;
   /** Turno da ficha de crédito: `reply_text` está redigido (migration 021). */
   sensivel?: boolean;
   /** O envio COMEÇOU numa tentativa (ver migration 007). */
@@ -67,11 +71,13 @@ export async function enqueueInbound(
   msg: InboundMessage
 ): Promise<EnqueueInboundResult> {
   const id = randomUUID();
-  const rows = await query<{ id: string }>(
+  const dispatchFence=await captureDispatchFence(msg.fromPhone);
+  const inserted = await withCapturedPrivacy(dispatchFence,async(client)=>{
+    const result=await client.query<{id:string}>(
     `INSERT INTO inbound_queue
        (id, message_id, from_phone, group_id, kind, text, media_url, mime_type,
-        sender_name, reply_to_message_id, timestamp_ms, button_payload)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        sender_name, reply_to_message_id, timestamp_ms, button_payload,dispatch_fence)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      ON CONFLICT (message_id) DO NOTHING
      RETURNING id`,
     [
@@ -87,8 +93,13 @@ export async function enqueueInbound(
       msg.replyToMessageId,
       msg.timestampMs,
       msg.buttonPayload ?? null,
+      JSON.stringify(dispatchFence),
     ]
   );
+    if(result.rows.length)await abrirJanela(msg,client);
+    return result;
+  });
+  const rows=inserted.rows;
 
   if (rows.length === 0) {
     const existing = await query<{ id: string }>(
@@ -97,13 +108,12 @@ export async function enqueueInbound(
     );
     return { status: "duplicate", id: existing[0]?.id ?? null };
   }
-  await abrirJanela(msg);
   return { status: "queued", id };
 }
 
 const CLAIM_COLUMNS = `id, message_id, from_phone, group_id, kind, text,
   media_url, mime_type, sender_name, reply_to_message_id, timestamp_ms,
-  button_payload, attempts, reply_text, sensivel, last_send_started_at`;
+  button_payload, attempts, reply_text, sensivel, last_send_started_at, control_org_id, control_version, dispatch_fence`;
 
 /**
  * Dá pra responder agora?
@@ -313,8 +323,16 @@ export const TEXTO_REENVIO_SENSIVEL =
   "Tive um problema para enviar sua resposta. Mande *RESUMO* para ver a ficha de novo.";
 
 export async function runQueued(row: InboundRow): Promise<SettleStatus> {
+  if (process.env.MAX_OUTBOUND_KILL === "true") {
+    await query(`UPDATE inbound_queue SET status='pending',attempts=GREATEST(attempts-1,0),last_error='outbound_disabled: held without attempt' WHERE id=$1`,[row.id]);
+    return "retry";
+  }
   try {
     let reply = row.reply_text;
+    let dispatchFence:DispatchFence;
+    if(row.dispatch_fence)dispatchFence=DispatchFenceSchema.parse(row.dispatch_fence);
+    else {dispatchFence=await captureDispatchFence(row.from_phone);if(dispatchFence.privacyEpoch>0)throw new Error("execution_revoked");}
+    let control = row.control_org_id && row.control_version != null ? { orgId: row.control_org_id, controlVersion: row.control_version } : undefined;
     /**
      * Trabalho pós-resposta do turn — hoje, a extração de memória.
      *
@@ -325,8 +343,11 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
     let afterReply: (() => Promise<void>) | undefined;
 
     if (reply == null) {
-      const turn = await runTurn(toInboundMessage(row));
+      const turn = await runTurn(toInboundMessage(row),{dispatchFence});
       reply = turn.reply;
+      control = turn.control;
+      if(turn.dispatchFence){if(turn.dispatchFence.personDigest!==dispatchFence.personDigest||turn.dispatchFence.privacyEpoch!==dispatchFence.privacyEpoch)throw new Error("execution_revoked");dispatchFence=turn.dispatchFence;}
+      else if(control)dispatchFence={...dispatchFence,orgId:control.orgId,controlVersion:control.controlVersion};
       afterReply = turn.afterReply;
       // Grava mesmo quando é null: "o grafo decidiu não responder" é resultado,
       // e sem persistir isso a retentativa rodaria o modelo de novo à toa.
@@ -337,17 +358,9 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
       // próprio CPF de volta quando pedir confirmação.
       // Turno da ficha de crédito: a fala (CPF, renda) sai da fila — o texto
       // foi gravado no INSERT, antes de se saber — e a resposta vai sem valores.
-      if (turn.sensivel) {
-        await query(`UPDATE inbound_queue SET text = NULL, sensivel = true, reply_text = $2 WHERE id = $1`, [
-          row.id,
-          reply ? redigirCredito(reply) : reply,
-        ]);
-      } else {
-        await query(`UPDATE inbound_queue SET reply_text = $2 WHERE id = $1`, [
-          row.id,
-          reply ? redigir(reply, CAMPOS_DA_AUDITORIA) : reply,
-        ]);
-      }
+      await withDeliveryFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},async(client)=>{
+        await client.query(`UPDATE inbound_queue SET text=CASE WHEN $3 THEN NULL ELSE text END,sensivel=$3,reply_text=$2,dispatch_fence=$4,control_org_id=$5,control_version=$6 WHERE id=$1`,[row.id,reply?(turn.sensivel?redigirCredito(reply):redigir(reply,CAMPOS_DA_AUDITORIA)):reply,!!turn.sensivel,JSON.stringify(dispatchFence),control?.orgId??null,control?.controlVersion??null]);
+      });
     } else if (row.last_send_started_at != null) {
       /**
        * Resposta pronta E envio já iniciado: a tentativa anterior morreu ENTRE
@@ -373,19 +386,18 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
 
     let replyMessageId: string | null = null;
     if (reply) {
-      // Marcador ANTES do send — é ele que a retentativa consulta acima.
-      await query(
-        `UPDATE inbound_queue SET last_send_started_at = now() WHERE id = $1`,
-        [row.id]
-      );
       let res;
       try {
-        res = await sendText({
-          to: row.from_phone,
-          body: reply,
-          quoteMessageId: row.message_id,
+        if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
+        // Commit the at-most-once marker before calling the provider. A crash after
+        // delivery must not roll it back and authorize a duplicate on replay.
+        await withDeliveryFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},async(client)=>{
+          await client.query(`UPDATE inbound_queue SET last_send_started_at=now() WHERE id=$1`,[row.id]);
         });
+        res=await withTransportFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},()=>
+          sendText({to:row.from_phone,body:reply!,quoteMessageId:row.message_id}));
       } catch (err) {
+        if(err instanceof TransportAcceptedCommitError)throw err;
         /**
          * Envio FALHOU: limpa o marcador para que a retentativa reenvie de
          * verdade — sem isto ela concluiria "provavelmente enviado" e calaria
@@ -452,6 +464,14 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
 
     return "done";
   } catch (err) {
+    if(err instanceof TransportAcceptedCommitError){
+      await query(`UPDATE inbound_queue SET status='done',settled_at=now(),last_error=$2 WHERE id=$1`,[row.id,err.message]);
+      return "done";
+    }
+    if(err instanceof Error&&['execution_revoked','control_conflict'].includes(err.message)){
+      await query(`UPDATE inbound_queue SET status='done',settled_at=now(),last_error=$2 WHERE id=$1`,[row.id,err.message]);
+      return "done";
+    }
     /**
      * O CANAL recusou (400 de assinatura, 401/403), não a resposta. Mesma
      * regra do outbox: a tentativa é devolvida e a linha espera o canal — a

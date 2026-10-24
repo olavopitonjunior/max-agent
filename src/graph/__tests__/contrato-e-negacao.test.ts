@@ -83,6 +83,19 @@ describe("negaAcao", () => {
 
 describe("conferirDitado (eval 09/10: '11 98888-7777' virou '119888-7777')", async () => {
   const { conferirDitado } = await import("../fluxos");
+  it.each(['telefone: 11900000101','Telefone do comprador: 11900000101','celular é 11900000101','WhatsApp 11900000101','telefone do cliente: 11900000101'])(
+    'preserva telefone de 11 dígitos explicitamente identificado: %s', (texto) => {
+      expect(conferirDitado({proponente:{telefone:'11900000101'}},texto)).toEqual({proponente:{telefone:'11900000101'}});
+    }
+  );
+  it('separa telefone sem máscara de CPF e recusa CPF inventado a partir do telefone',()=>{
+    expect(conferirDitado({proponente:{telefone:'11900000101',cpf:'11144477735'}},'Telefone do comprador: 11900000101; CPF: 111.444.777-35'))
+      .toEqual({proponente:{telefone:'11900000101',cpf:'11144477735'}});
+    expect(conferirDitado({proponente:{telefone:'11900000101',cpf:'11900000101'}},'Telefone: 11900000101'))
+      .toEqual({proponente:{telefone:'11900000101'}});
+    expect(conferirDitado({proponente:{telefone:'+55 11900000101',cpf:'11900000101'}},'Telefone: +55 11900000101'))
+      .toEqual({proponente:{telefone:'+55 11900000101'}});
+  });
   it("telefone com dígito a menos vira o que a pessoa escreveu", () => {
     expect(conferirDitado({ proponente: { telefone: "119888-7777" } }, "troca o telefone do comprador para 11 98888-7777"))
       .toEqual({ proponente: { telefone: "11 98888-7777" } });

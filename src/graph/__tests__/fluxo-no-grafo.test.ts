@@ -439,3 +439,13 @@ describe("fila de autorização do gerente exige a FLAG, não só a capability (
     expect(llm).not.toHaveBeenCalled();
   });
 });
+
+it('marketing enabled preserves proposal free text collection', async () => {
+ vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({[usuario.orgId]:['marketing']}));vi.stubEnv('MAX_MARKETING','true');
+ try {
+  llm.mockResolvedValue({ text:'', toolCalls:[{name:'preencher_proposta',args:{pagamento:{forma:'serviços de marketing'}}}],usage:uso });
+  const s=await run('forma de pagamento: serviços de marketing',{fluxo:{kind:'proposta',etapa:'coleta',natureza:'venda',dados:{},atualizadoEm:Date.now()}});
+  expect(s.fluxo).toMatchObject({kind:'proposta',dados:{pagamento:{forma:'serviços de marketing'}}});
+  expect(s.toolLog.some((t:{name:string})=>t.name==='marketing')).toBe(false);
+ } finally { vi.unstubAllEnvs(); }
+});

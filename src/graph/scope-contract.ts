@@ -38,6 +38,13 @@ export const VERBOS_DE_LEITURA = [
   "deal.pending",
   "proposal.list",
   "proposal.detail",
+  "notification.list",
+  "activity.list",
+  "activity.get",
+  "metrics.get",
+  "property.list",
+  "property.detail",
+  "contract.status",
 ] as const;
 
 export type ScopeQueryVerb = (typeof VERBOS_DE_LEITURA)[number];
@@ -81,6 +88,12 @@ export interface ScopeQueryRequest {
     limite?: number;
     negocio_id?: string;
     proposta_id?: string;
+    imovel_id?: string;
+    cursor?: string;
+    /** `activity.list`: recorte pedido (par do contractmaker PR11). */
+    filtro?: "minhas" | "atrasadas" | "hoje";
+    /** `activity.get`. */
+    atividade_id?: string;
   };
 }
 

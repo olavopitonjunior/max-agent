@@ -1,4 +1,5 @@
 import type { KnowledgeHit } from "@/lib/cm";
+import { nomeDoAgente } from "@/lib/deploy-profile";
 
 /**
  * Prompt do Max.
@@ -200,7 +201,8 @@ export function comoMensagemDoUsuario(texto: string): string {
 // em todo prompt, e "<material>" escrito ali seria indistinguível da cerca de
 // verdade para quem procura por ela (o modelo, e os testes de que a cerca só
 // aparece quando há conteúdo).
-const BASE = `Você é o Max, assistente de WhatsApp de uma imobiliária.
+function base(nome: string): string {
+  return `Você é o ${nome}, assistente de WhatsApp de uma imobiliária.
 
 Fala com corretores e clientes sobre o PROCESSO de vendas e locação: como
 funciona a proposta, a assinatura da proposta, o formulário do negócio e as
@@ -219,7 +221,7 @@ Como você escreve:
   máximo 5, e nunca mostre outro identificador.
 
 Proposta não é negócio:
-- Proposta é a proposta rápida que o comprador ou inquilino assina: o Max
+- Proposta é a proposta rápida que o comprador ou inquilino assina: o ${nome}
   colhe os dados, gera o rascunho, manda o PDF e envia para assinatura.
 - Por mensagem, a pessoa também acha, ajusta (rascunho), duplica, exclui e
   converte em negócio uma proposta dela, citando o cliente ou o código — por
@@ -264,6 +266,7 @@ O que você NÃO faz:
   é para anexar pelo ImobPro.
 - Só fala de propostas, negócios e do processo da imobiliária. Para qualquer
   outro assunto, responda exatamente: "${TEXTO_FORA_DO_ESCOPO}"`;
+}
 
 /**
  * A seção de escrita, que só existe para quem PODE escrever.
@@ -282,9 +285,13 @@ Análise de crédito:
 - Nunca diga que enviou, reenviou ou aprovou uma análise: o envio é do
   sistema, só com o SIM no resumo da ficha, e quem decide é a Upestate.`;
 
+/** Instrução medida no experimento pareado de intenção de criação. */
+export const CREATION_INTENT_GUIDANCE = "Intenção de criação: identifique primeiro o OBJETO pedido. PROPOSTA de venda ou locação usa tipo=proposta e natureza=venda ou locacao; nunca tipo=venda só porque a proposta é de venda. NEGÓCIO ou FORMULÁRIO de venda usa tipo=venda. Pedir para criar sem enviar ainda continua sendo criação de rascunho, sem envio. Não execute pedidos negados. Não trate o título de teste como nome de cliente.";
+
 const SABE_CRIAR_FORM = `
 
 Criar proposta ou formulário de negócio:
+${CREATION_INTENT_GUIDANCE}
 - Quando a pessoa PEDIR para criar, gerar, fazer ou mandar uma proposta, um
   formulário, uma ficha ou um cadastro, chame a ferramenta NA HORA, sem
   perguntar nada antes. Quem conduz as perguntas (proposta ou negócio, venda ou
@@ -318,9 +325,9 @@ com o gerente, que gera o link em um minuto. Não prometa fazer depois.`;
  * instrução "use a ferramenta" e sem a ferramenta, o nano encenava a criação
  * (achado B1 do review de segurança do PR 2).
  */
-const CRIACAO_INDISPONIVEL = `
+const criacaoIndisponivel = (nome: string): string => `
 
-Criar formulário ou proposta pelo Max não está disponível para esta pessoa
+Criar formulário ou proposta pelo ${nome} não está disponível para esta pessoa
 agora. Se ela pedir, diga que por aqui não dá neste momento e que ela cria pelo
 sistema. Nunca diga que criou, nem que vai criar.`;
 
@@ -402,12 +409,18 @@ const RECEBIDO_POR: Record<"audio" | "image", string> = {
  * primeira como a segunda mentiria para a pessoa sobre a carteira dela.
  */
 export function fenceToolResults(
-  results: { tool: string; items: unknown[] | null; truncated: boolean }[]
+  results: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] } }[]
 ): string {
   if (results.length === 0) return "";
 
   const blocos = results
     .map((r) => {
+      if (r.clarification) {
+        const options = escaparDelimitadores(JSON.stringify(r.clarification.options));
+        return `Uma consulta tem filtro de etapa inválido, não carteira vazia. Responda os outros resultados disponíveis.
+Para essa consulta, peça uma etapa pelo nome ou diga que a pessoa pode escrever ETAPAS para ver opções; não numere etapas junto de negócios/propostas.
+<dados_do_sistema origem="${r.tool}" filtro_invalido="estado">${options}</dados_do_sistema>`;
+      }
       if (r.items === null) {
         return `<dados_do_sistema origem="${r.tool}" falhou="true">
 A consulta não respondeu agora. Diga que não conseguiu verificar neste momento
@@ -476,7 +489,7 @@ export function buildSystemPrompt(params: {
    */
   criacao?: "disponivel" | "sem_login" | "sem_politica";
   /** Resultado das tools de leitura deste turn, já cercado. */
-  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean }[];
+  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] } }[];
   /** Flag `MAX_CREDITO` ligada: entra a regra de crédito. */
   credito?: boolean;
 }): string {
@@ -490,12 +503,13 @@ export function buildSystemPrompt(params: {
   // Com o prompt global, este bloco ficou idêntico entre TENANTS também (só o
   // nome da org difere, e ele vem no fim do estável) — o cache do provedor
   // passa a valer para as quatro imobiliárias, não só para as pessoas de uma.
+  const nome = nomeDoAgente();
   const parts = [
-    BASE,
+    base(nome),
     {
       disponivel: SABE_CRIAR_FORM,
       sem_login: NAO_SABE_CRIAR_FORM,
-      sem_politica: CRIACAO_INDISPONIVEL,
+      sem_politica: criacaoIndisponivel(nome),
     }[params.criacao ?? (params.podeEscrever ? "disponivel" : "sem_login")],
   ];
   if (params.credito) parts.push(REGRA_CREDITO);

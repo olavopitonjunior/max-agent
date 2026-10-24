@@ -1,3 +1,4 @@
+import { currentExecution, runEvent } from "./runtime/context";
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import type { MaxPolicy } from "@/graph/policy";
@@ -7,6 +8,7 @@ import type { MotivoQueda } from "./connection";
 import { query } from "./db";
 import { sign } from "./hmac";
 import { OrgSuspensaError, ehOrgSuspensa } from "./org-suspensa";
+import { deployProfile } from "./deploy-profile";
 import {
   fetchWithTimeout,
   imobproBase,
@@ -87,9 +89,13 @@ export interface AgentProfile {
  * quem chama precisa distinguir "desligado" de "não consegui ler".
  */
 export async function fetchProfile(orgId: string): Promise<AgentProfile | null> {
+  if (currentExecution()?.context.mode === "simulation") {
+    runEvent("adapter.fixture", "profile");
+    return { enabled: true, model: "openai/gpt-5.4-nano", maxPolicy: { byRole: { "*": ["deal.list", "proposal.list", "form.create", "proposal.create"] } } };
+  }
   const org = await orgById(orgId);
   if (!org) return null;
-  return get<AgentProfile>("/api/agents/profile?agentKey=max", org.apiToken);
+  return get<AgentProfile>(`/api/agents/profile?agentKey=${deployProfile().agentKey}`, org.apiToken);
 }
 
 export interface KnowledgeHit {
@@ -106,6 +112,7 @@ export async function searchKnowledge(
   query_: string,
   topK = 5
 ): Promise<KnowledgeHit[]> {
+  if (currentExecution()?.context.mode === "simulation") { runEvent("adapter.fixture", "knowledge"); return []; }
   const org = await orgById(orgId);
   if (!org) return [];
   const res = await fetchWithTimeout(
@@ -116,7 +123,7 @@ export async function searchKnowledge(
         Authorization: `Bearer ${org.apiToken}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ agentKey: "max", query: query_, topK }),
+      body: JSON.stringify({ agentKey: deployProfile().agentKey, query: query_, topK }),
     },
     IMOBPRO_TIMEOUT_MS
   ).catch(() => null);
@@ -160,7 +167,7 @@ export async function transcribeMedia(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          agentKey: "max",
+          agentKey: deployProfile().agentKey,
           kind: media.kind,
           mimeType: media.mimeType,
           data: media.data.toString("base64"),
@@ -288,6 +295,7 @@ export async function chaveDePolitica(
   orgId: string,
   rawPhone: string
 ): Promise<string | null> {
+  if (currentExecution()?.context.mode === "simulation") return "admin";
   const org = await orgById(orgId);
   if (!org) return null;
   const e164 = normalizeBrPhone(rawPhone);
@@ -555,6 +563,7 @@ export async function reportUsage(
     dealId?: string | null;
   }
 ): Promise<void> {
+  if (currentExecution()?.context.mode === "simulation") return;
   const org = await orgById(orgId);
   if (!org) return;
   try {
@@ -576,7 +585,7 @@ export async function reportUsage(
          * precisar dele.
          */
         body: JSON.stringify({
-          agentKey: "max",
+          agentKey: deployProfile().agentKey,
           provider: "openrouter",
           model: usage.model,
           promptTokens: usage.promptTokens,

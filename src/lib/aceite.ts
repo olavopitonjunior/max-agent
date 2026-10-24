@@ -21,6 +21,7 @@
  * Fora disso a mensagem segue para a conversa normal.
  */
 
+import { nomeDoAgente } from "./deploy-profile";
 import { query } from "./db";
 import { enqueue } from "./outbox";
 import { log } from "./log";
@@ -244,9 +245,9 @@ export async function repassarDesconhecido(
     recipientName: process.env.MAX_ESCALATION_NAME || "equipe",
     title: "Mensagem de número sem cadastro",
     body: org
-      ? `${quem} (+${inbound.fromPhone}), que recebeu aviso da ${org.org_name}, escreveu ao Max ` +
+      ? `${quem} (+${inbound.fromPhone}), que recebeu aviso da ${org.org_name}, escreveu ao ${nomeDoAgente()} ` +
         `de um número sem cadastro:\n\n${texto}`
-      : `${quem} (+${inbound.fromPhone}) escreveu ao Max de um número que nenhuma ` +
+      : `${quem} (+${inbound.fromPhone}) escreveu ao ${nomeDoAgente()} de um número que nenhuma ` +
         `imobiliária reconhece:\n\n${texto}`,
     linkUrl: null,
     dealId: null,
@@ -626,6 +627,10 @@ export async function interceptar(inbound: InboundMessage): Promise<Interceptado
     // desconhecido — segue para o caminho normal da mensagem.
     if (parsed) return responderAcao(inbound, parsed.rowId, parsed.acao);
   }
+
+  // Botão de atividade (`atv:`, M1): o roteamento precisa de identidade e política, então é do grafo
+  // (`atividade-botao.ts`). Aqui o payload só NÃO pode virar "dúvida" nem apresentação pelo texto do botão.
+  if (payload?.startsWith("atv:")) return null;
 
   // 2. O botão digitado à mão — ANTES do repasse, senão a própria frase
   //    "tenho uma dúvida" viraria a dúvida.
