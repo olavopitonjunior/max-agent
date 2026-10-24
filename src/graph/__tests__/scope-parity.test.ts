@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   CAMPOS_PROIBIDOS_AO_BROKER,
   type DealProjetadoBroker,
@@ -7,7 +7,7 @@ import {
   type ScopeQueryResponse,
   VERBOS_DE_LEITURA,
 } from "../scope-contract";
-import { catalog } from "@/lib/runtime/catalog";
+import { catalog, executableTool } from "@/lib/runtime/catalog";
 
 /**
  * Vetor fixo do contrato de `POST /api/agents/scope-query` — a metade daqui.
@@ -135,14 +135,31 @@ describe("paridade dos verbos de leitura", () => {
     expect([...VERBOS_DE_LEITURA]).toEqual(VERBOS_DE_LEITURA_DO_IMOBPRO);
   });
 
-  it("pending.summary está no catálogo como leitura, atrás da flag de consultas novas, com a capability de mesmo nome", () => {
+  it("pending.summary está no catálogo como leitura, SEM flag (o gate é a capability), com a capability de mesmo nome", () => {
     const t = catalog("org1").tools.find((x) => x.id === "pending.summary");
     expect(t).toMatchObject({
       executor: "scope-query",
       effect: "read",
-      flag: "MAX_EXTENDED_QUERIES",
+      enabled: true,
+      status: "current",
       permission: "pending.summary",
       policyCapability: "pending.summary",
     });
+    expect(t).not.toHaveProperty("flag");
+  });
+
+  it("pending.summary executa com MAX_EXTENDED_QUERIES desligada; activity.list não", () => {
+    vi.stubEnv("MAX_EXTENDED_QUERIES", "false");
+    try {
+      expect(executableTool("pending.summary", "scope-query", "org1")).toBeDefined();
+      expect(executableTool("activity.list", "scope-query", "org1")).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("os outros verbos de consulta nova continuam atrás de MAX_EXTENDED_QUERIES", () => {
+    const t = catalog("org1").tools.find((x) => x.id === "activity.list");
+    expect(t).toMatchObject({ flag: "MAX_EXTENDED_QUERIES" });
   });
 });

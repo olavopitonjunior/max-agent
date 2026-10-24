@@ -57,4 +57,17 @@ describe("prompt do Newton", () => {
       expect(p).toContain("Você é o Newton");
     }
   });
+
+  it("perfil newton: a regra das pendências está no prompt", () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    for (const entrada of [CORRETOR_SEM_TOOLS, GERENTE_COM_LEITURA, DESCONHECIDO]) {
+      const p = buildSystemPrompt(entrada).replace(/\s+/g, " ");
+      expect(p).toContain("diga sempre o total exato de cada bloco");
+      expect(p).toContain("no máximo 5 itens por bloco");
+      expect(p).toContain("pergunta genérica = formulários, propostas e atividades");
+      expect(p).toContain("pergunta específica = só o bloco pedido");
+      expect(p).toContain("os itens de dentro de cada formulário já vêm limitados");
+      expect(p).toContain("sem_permissao");
+    }
+  });
 });

@@ -607,7 +607,14 @@ export const PENDENCIAS_DO_NEGOCIO: ToolDef = {
  * são de outras tools (`listar_propostas`, `listar_atividades`).
  */
 const PEDE_ITEM_PENDENTE = /formul[aá]rio|proposta|atividade/i;
-const PEDE_FALTA = /pendent|falt/i;
+const PEDE_FALTA = /pendent|pend[eê]ncia|falta(m|ndo)?\b/i;
+/**
+ * A pergunta genérica, sem nomear o item: "o que tenho pendente?", "minhas
+ * pendências". Ancorada na PESSOA (tenho/minhas/comigo) de propósito: "certidões
+ * pendentes" ou "o que falta no negócio" são da `pendencias_do_negocio`.
+ */
+const PEDE_MINHAS_GENERICA =
+  /\bo que (eu )?tenho( de| para| pra)? (pendente|pendentes|pendencias?)|\bminhas? pendencias?\b|\b(tenho|temos) (algo|alguma coisa|alguma pendencia|pendencias?)\b|\bo que (esta |ta )?pendente (comigo|pra mim|para mim)/i;
 
 /**
  * "O que tenho pendente": formulários, propostas e atividades DESTA pessoa num
@@ -631,7 +638,7 @@ export const MINHAS_PENDENCIAS: ToolDef = {
   prioridade: 15,
   combina: (t) => {
     const n = normalizar(t);
-    return PEDE_PENDENCIA.test(n) || (PEDE_ITEM_PENDENTE.test(n) && PEDE_FALTA.test(n));
+    return PEDE_MINHAS_GENERICA.test(n) || (PEDE_ITEM_PENDENTE.test(n) && PEDE_FALTA.test(n));
   },
   def: {
     name: "minhas_pendencias",

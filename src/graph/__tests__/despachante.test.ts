@@ -333,6 +333,7 @@ describe("despacharLeituras — minhas_pendencias", () => {
       escopo.mockResolvedValue({ items, truncated: false });
       const r = await despacharLeituras({ ...ctx, chamadas: [{ name: "minhas_pendencias", args: {} }] });
       expect(r.resultados[0].items).toEqual([{ sem_permissao: true }]);
+      expect(r.trilha[0].outcome).toBe("sem_permissao");
     }
   });
 

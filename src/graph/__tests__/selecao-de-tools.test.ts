@@ -265,10 +265,32 @@ describe("minhas_pendencias: o que EU tenho pendente", () => {
     expect(nomes(texto, AMBAS)[0]).toBe("minhas_pendencias");
   });
 
+  it.each(["minhas pendências", "o que eu tenho de pendente hoje?", "tenho alguma pendência?"])(
+    "pergunta genérica: %s → minhas_pendencias",
+    (texto) => {
+      expect(nomes(texto, ["pending.summary"])).toEqual(["minhas_pendencias"]);
+    }
+  );
+
   it("certidões travadas → pendencias_do_negocio", () => {
     expect(nomes("certidões travadas", ["deal.pending"])).toEqual(["pendencias_do_negocio"]);
-    expect(nomes("certidões travadas", AMBAS)).toContain("pendencias_do_negocio");
   });
+
+  it.each(["certidões travadas", "documentos parados do negócio X", "certidões pendentes do negócio X"])(
+    "com as duas capabilities, %s fica só com pendencias_do_negocio",
+    (texto) => {
+      const r = nomes(texto, AMBAS);
+      expect(r).toContain("pendencias_do_negocio");
+      expect(r).not.toContain("minhas_pendencias");
+    }
+  );
+
+  it.each(["quais propostas tenho", "tenho propostas?", "minhas atividades de hoje", "como está o formulário do negócio X"])(
+    "consulta que não fala de pendência não aciona minhas_pendencias: %s",
+    (texto) => {
+      expect(nomes(texto, AMBAS)).not.toContain("minhas_pendencias");
+    }
+  );
 
   it("sem a capability pending.summary a tool não entra", () => {
     expect(nomes("o que tenho pendente?", ["deal.pending"])).toEqual(["pendencias_do_negocio"]);

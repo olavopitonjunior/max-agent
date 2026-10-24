@@ -219,12 +219,12 @@ export async function despacharLeituras(params: {
       subject,
       fromPhone: params.fromPhone,
     });
-    // `null` da plataforma = sem permissão. Não pode virar lista vazia (o
-    // modelo diria "nada pendente") nem falha (ofereceria tentar de novo).
-    const r =
-      lido && entrada.verb === "pending.summary" && !ehResumoDePendencias(lido.items[0])
-        ? { ...lido, items: [{ sem_permissao: true }] }
-        : lido;
+    // Formato fixado com a plataforma: COM permissão, `items: [PendenciasDoUsuario]`
+    // (totais 0 quando não há nada pendente); SEM permissão, `[]` ou `[null]`.
+    // O "sem permissão" não pode virar lista vazia (o modelo diria "nada
+    // pendente") nem falha (ofereceria tentar de novo).
+    const semPermissao = !!lido && entrada.verb === "pending.summary" && !ehResumoDePendencias(lido.items[0]);
+    const r = semPermissao && lido ? { ...lido, items: [{ sem_permissao: true }] } : lido;
 
     if (!r) {
       resultados.push({ tool: chamada.name, items: null, truncated: false });
@@ -273,7 +273,7 @@ export async function despacharLeituras(params: {
     } else {
       resultados.push({ tool: chamada.name, items: r.items, truncated: r.truncated, ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) });
     }
-    trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+    trilha.push({ name: chamada.name, args: chamada.args, outcome: semPermissao ? "sem_permissao" : "ok" });
   }
 
   return { resultados, trilha, referencias };

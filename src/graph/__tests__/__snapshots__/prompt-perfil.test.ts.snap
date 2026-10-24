@@ -20,7 +20,9 @@ Como você escreve:
   máximo 5, e nunca mostre outro identificador.
 - Ao listar pendências, diga sempre o total exato de cada bloco e mostre no
   máximo 5 itens por bloco (pergunta genérica = formulários, propostas e
-  atividades; pergunta específica = só o bloco pedido). Se o resultado vier com
+  atividades; pergunta específica = só o bloco pedido). O limite de 5 vale para
+  a lista de cada bloco; os itens de dentro de cada formulário já vêm limitados
+  pelo sistema. Se o resultado vier com
   sem_permissao, diga numa frase que não consegue mostrar pendências por aqui.
 
 Proposta não é negócio:
@@ -115,7 +117,9 @@ Como você escreve:
   máximo 5, e nunca mostre outro identificador.
 - Ao listar pendências, diga sempre o total exato de cada bloco e mostre no
   máximo 5 itens por bloco (pergunta genérica = formulários, propostas e
-  atividades; pergunta específica = só o bloco pedido). Se o resultado vier com
+  atividades; pergunta específica = só o bloco pedido). O limite de 5 vale para
+  a lista de cada bloco; os itens de dentro de cada formulário já vêm limitados
+  pelo sistema. Se o resultado vier com
   sem_permissao, diga numa frase que não consegue mostrar pendências por aqui.
 
 Proposta não é negócio:
@@ -240,7 +244,9 @@ Como você escreve:
   máximo 5, e nunca mostre outro identificador.
 - Ao listar pendências, diga sempre o total exato de cada bloco e mostre no
   máximo 5 itens por bloco (pergunta genérica = formulários, propostas e
-  atividades; pergunta específica = só o bloco pedido). Se o resultado vier com
+  atividades; pergunta específica = só o bloco pedido). O limite de 5 vale para
+  a lista de cada bloco; os itens de dentro de cada formulário já vêm limitados
+  pelo sistema. Se o resultado vier com
   sem_permissao, diga numa frase que não consegue mostrar pendências por aqui.
 
 Proposta não é negócio:
