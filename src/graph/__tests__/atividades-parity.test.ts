@@ -9,8 +9,8 @@ import { catalog } from "@/lib/runtime/catalog";
  * verbos de `scope-action-atividade.ts` / `scope-query-atividade.ts`). Regra 1
  * da governança do Max: vetor fixo dos dois lados.
  *
- * O literal abaixo é literal de propósito (copiado do report do PR11 do CM, 27
- * itens): derivar da constante deste lado acompanharia uma divergência em silêncio.
+ * O literal abaixo é literal de propósito (copiado do report do PR11 do CM, hoje 28
+ * itens com o PR 7b): derivar da constante deste lado acompanharia uma divergência em silêncio.
  */
 const MAX_CAPABILITIES_DO_CM = [
   "deal.list", "deal.detail", "deal.pending",
@@ -22,14 +22,15 @@ const MAX_CAPABILITIES_DO_CM = [
   "notification.list", "activity.list", "metrics.get", "property.list", "property.detail", "contract.status",
   "marketing.read", "marketing.generate",
   "activity.write",
+  "template.decisions",
 ];
 
 const gerente = { orgId: "org1", orgName: "Imob", kind: "user" as const, userId: "u1", userName: "Marcia" };
 
 describe("paridade de atividades com o contractmaker", () => {
-  it("a lista de capabilities é a do CM, literal a literal, e activity.write é a última (índice 26)", () => {
+  it("a lista de capabilities é a do CM, literal a literal, e activity.write segue no índice 26", () => {
     expect([...CAPABILITIES]).toEqual(MAX_CAPABILITIES_DO_CM);
-    expect(CAPABILITIES).toHaveLength(27);
+    expect(CAPABILITIES).toHaveLength(28);
     expect(CAPABILITIES.indexOf("activity.write")).toBe(26);
   });
 

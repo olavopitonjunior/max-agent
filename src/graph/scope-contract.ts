@@ -45,6 +45,7 @@ export const VERBOS_DE_LEITURA = [
   "property.list",
   "property.detail",
   "contract.status",
+  "template.decisions",
 ] as const;
 
 export type ScopeQueryVerb = (typeof VERBOS_DE_LEITURA)[number];

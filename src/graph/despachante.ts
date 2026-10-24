@@ -100,6 +100,8 @@ export interface ResultadoDeTool {
   truncated: boolean;
   hasMore?: boolean;
   clarification?: StageClarification;
+  /** `template.decisions`: modelos não medidos (o modelo nunca diz "sem pendência" com isso > 0). */
+  naoMedidos?: number;
 }
 
 /**
@@ -172,6 +174,8 @@ export async function despacharLeituras(params: {
       }
       args = { [property ? "imovel_id" : "negocio_id"]: selected.item.id };
     }
+    // Sem argumento nenhum: o servidor responde pela org da sessão, o modelo não escolhe nada.
+    if (entrada.verb === "template.decisions") args = {};
     if (entrada.verb === "activity.get") {
       // O modelo aponta pelo número da lista; o id interno nunca passa por ele.
       const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "atividade" });
@@ -215,6 +219,14 @@ export async function despacharLeituras(params: {
       continue;
     }
 
+    // Negado no servidor volta `{items:[]}` SEM `naoMedidos`; vazio de verdade sempre o traz.
+    // Sem ele, o modelo diria "não há pendência" a quem só não tem acesso.
+    if (entrada.verb === "template.decisions" && r.naoMedidos === undefined) {
+      resultados.push({ tool: chamada.name, items: null, truncated: false });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+      continue;
+    }
+
     if (r.clarification) {
       resultados.push({ tool: chamada.name, items: null, truncated: false, clarification: r.clarification });
       trilha.push({ name: chamada.name, args: chamada.args, outcome: chamada.args.opcoes_etapas === true ? "opcoes_consulta" : "filtro_invalido" });
@@ -246,7 +258,7 @@ export async function despacharLeituras(params: {
         ...(paginada ? { hasMore: !!r.nextCursor } : {}),
       });
     } else {
-      resultados.push({ tool: chamada.name, items: r.items, truncated: r.truncated });
+      resultados.push({ tool: chamada.name, items: r.items, truncated: r.truncated, ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) });
     }
     trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
   }
@@ -266,7 +278,7 @@ async function executarLeitura(params: {
   identity: Candidate;
   subject: ReturnType<typeof subjectDe>;
   fromPhone: string;
-}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification } | null> {
+}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification; naoMedidos?: number } | null> {
   const r = await consultarEscopo({
     orgId: params.identity.orgId,
     rawPhone: params.fromPhone,
@@ -276,7 +288,7 @@ async function executarLeitura(params: {
   });
   if (!r) return null;
   // Rede de segurança da regra 5 — a projeção que VALE é a do servidor.
-  return { items: descartarSeVazou(r.items, params.identity.kind), truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}) };
+  return { items: descartarSeVazou(r.items, params.identity.kind), truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}), ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) };
 }
 
 // ─── Executor de ESCRITA (proposta, nunca execução) ───────────────────────
