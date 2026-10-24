@@ -22,7 +22,7 @@ const VETOR_DO_CM =
 const VERBOS_DE_LEITURA_DO_CM = [
   "deal.list", "deal.detail", "deal.pending", "proposal.list", "proposal.detail",
   "notification.list", "activity.list", "activity.get", "metrics.get",
-  "property.list", "property.detail", "contract.status", "template.decisions",
+  "property.list", "property.detail", "contract.status", "template.decisions", "pending.summary",
 ];
 
 const CHAVES_PROIBIDAS = [
@@ -88,8 +88,8 @@ describe("template.decisions — negado (fail-closed)", () => {
 });
 
 describe("template.decisions — permitido", () => {
-  it("a lista de capabilities tem template.decisions no índice 27 (a última)", () => {
-    expect(CAPABILITIES).toHaveLength(28);
+  it("a lista de capabilities tem template.decisions no índice 27 (antes de pending.summary e prefs.self)", () => {
+    expect(CAPABILITIES).toHaveLength(30);
     expect(CAPABILITIES.indexOf("template.decisions")).toBe(27);
   });
 

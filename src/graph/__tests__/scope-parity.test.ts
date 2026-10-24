@@ -127,6 +127,7 @@ const VERBOS_DE_LEITURA_DO_IMOBPRO = [
   "property.list",
   "property.detail",
   "contract.status",
+  "template.decisions",
   "pending.summary",
 ];
 
