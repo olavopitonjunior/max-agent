@@ -8,7 +8,7 @@ import { CATALOG_VERSION, WORKFLOW_VERSION } from './contracts';
 import { deployProfile } from '../deploy-profile';
 export const READ_ACTIONS = new Set<string>(['proposal.list','proposal.status','proposal.options','proposal.preflight','form.options','credit.preflight','credit.status','captacao.options','captacao.preflight','captacao.list','captacao.autorizacao.listar','marketing.options','marketing.library','marketing.status']);
 export function isWriteVerb(verb:string):boolean {return !READ_ACTIONS.has(verb);}
-export const NEW_QUERIES=['notification.list','activity.list','activity.get','metrics.get','property.list','property.detail','contract.status','template.decisions'];
+export const NEW_QUERIES=['notification.list','activity.list','activity.get','metrics.get','property.list','property.detail','contract.status','template.decisions','pending.summary'];
 export interface CatalogTool {
  id:string;version:string;status:'current'|'disabled'|'planned';installed:boolean;enabled:boolean;executor:'scope-action'|'scope-query'|'graph'|null;effect:'read'|'write'|'paid';flag?:string;recoveryOnly?:boolean;
  schema:Record<string,unknown>;permission:Capability|null;policyCapability:Capability|null;domainScope:string;projection:string;dataClass:string;timeoutMs:number;retry:string;reconciliation:string;confirmation:boolean;evaluationCases:string[];provenance:string;

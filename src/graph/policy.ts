@@ -148,7 +148,7 @@ export const CAPABILITIES = [
   "marketing.generate",
   /**
    * Atividades v2 (22/10/2026, par do contractmaker PR11): criar, comentar, concluir e
-   * recusar atividade pelo WhatsApp. Posição 26 (0-based, a ÚLTIMA), FIXA. Fora do
+   * recusar atividade pelo WhatsApp. Posição 26 (0-based), FIXA. Fora do
    * padrão (`POLITICA_PADRAO`): nasce DESLIGADA, a org liga. A leitura (`activity.list`
    * e `activity.get`) segue na capability que já existia.
    */
@@ -157,9 +157,20 @@ export const CAPABILITIES = [
    * Modelos autônomos PR 7b (24/10/2026, par do contractmaker): leitura "decisões
    * pendentes da imobiliária" (verbo `template.decisions`). Só User com a área de
    * Modelos; decidir segue na tela. Fora do padrão: nasce DESLIGADA, a org liga.
-   * Posição 27 (0-based, a ÚLTIMA), FIXA.
+   * Posição 27 (0-based), FIXA.
    */
   "template.decisions",
+  /**
+   * Pendências e avisos (24/10/2026, par do contractmaker): `pending.summary` é a
+   * leitura "o que tenho pendente" (formulários, propostas e atividades; até 5
+   * itens + total exato; o servidor recorta por papel). `prefs.self` deixa o
+   * usuário mudar, pela conversa, as PRÓPRIAS preferências de aviso (horário do
+   * relatório e antecedência do lembrete). Posições 28 e 29 (0-based), FIXAS,
+   * logo após `template.decisions`: mesma posição da lista de lá (teste de paridade).
+   * `activity.write` segue como estava.
+   */
+  "pending.summary",
+  "prefs.self",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
