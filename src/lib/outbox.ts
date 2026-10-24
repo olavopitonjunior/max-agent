@@ -231,7 +231,8 @@ export function renderMessage(row: {
   const first = row.recipient_name.trim().split(/\s+/)[0] ?? "";
   const hello = first ? `Oi, ${first}! ` : "";
   const parts = [`${hello}*${row.title}*`, row.body];
-  if (row.link_url) parts.push(row.link_url);
+  // Avisos de proposta já chegam com a URL no corpo; repetir duplicava o link.
+  if (row.link_url && !row.body.includes(row.link_url)) parts.push(row.link_url);
   if (row.org_name) parts.push(`— ${row.org_name}`);
   return parts.filter(Boolean).join("\n\n");
 }

@@ -521,3 +521,17 @@ describe("aviso do portal do negócio à parte (2026-10-20)", () => {
     expect(d.umPorJanela).toBeUndefined();
   });
 });
+
+describe("renderMessage: link no texto livre", () => {
+  const base = { title: "Proposta entregue", link_url: "https://x.test/pipeline/propostas/p1", org_name: "Newcore", recipient_name: "Olavo Piton" };
+
+  it("corpo que já traz o link: não repete o link_url", () => {
+    const texto = renderMessage({ ...base, body: "A proposta chegou ao destinatário. https://x.test/pipeline/propostas/p1" });
+    expect(texto.split("https://x.test/pipeline/propostas/p1").length - 1).toBe(1);
+  });
+
+  it("corpo sem link: o link_url vai em parágrafo próprio (controle)", () => {
+    expect(renderMessage({ ...base, body: "A proposta chegou ao destinatário." })).toBe(
+      "Oi, Olavo! *Proposta entregue*\n\nA proposta chegou ao destinatário.\n\nhttps://x.test/pipeline/propostas/p1\n\n— Newcore");
+  });
+});
