@@ -45,6 +45,8 @@ export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: 
   if (podeEscrever && tem("form.create")) negocio.push("criar o formulário");
   if (tem("deal.list") || tem("deal.pending")) negocio.push("consultar negócios e pendências");
   if (negocio.length) linhas.push(`- Negócios: ${negocio.join(", ")}.`);
+  // Preferências de aviso (M3): só usuário da plataforma (`podeEscrever`) e com `prefs.self` na política.
+  if (podeEscrever && tem("prefs.self")) linhas.push("- Avisos: ver e mudar o seu relatório da manhã e o lembrete antes do vencimento.");
   // Crédito só com a flag `MAX_CREDITO` E a política da org.
   if (credito && podeEscrever && tem("credit.request")) {
     // M3: com `MAX_CREDITO_ENVIO`, o envio também é pelo Max (sempre com a confirmação).

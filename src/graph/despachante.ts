@@ -1,6 +1,7 @@
 import type { LlmToolCall } from "@/lib/llm";
 import type { Candidate } from "@/lib/identity";
 import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
+import { lerPreferencias } from "@/lib/cm";
 import type { ToolLogEntry } from "@/lib/turnlog";
 import type { Capability } from "./policy";
 import {
@@ -16,6 +17,7 @@ import {
 } from "./tools";
 import { ITENS_POR_LISTA, REFERENCIA_TTL_MS, resolverReferencia, numerarLista, type MapaDeReferencias } from "./referencias";
 import type { StageClarification } from "./query-options";
+import { projetarParaOModelo } from "./preferencias";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -302,6 +304,13 @@ async function executarLeitura(params: {
   subject: ReturnType<typeof subjectDe>;
   fromPhone: string;
 }): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification; naoMedidos?: number } | null> {
+  // Preferências de aviso (M3): rota própria, sempre da PRÓPRIA pessoa (telefone do turn). Só usuário
+  // da plataforma tem preferência; qualquer outra identidade volta como "sem permissão", nunca como lista vazia.
+  if (params.entrada.verb === "prefs.get") {
+    if (params.identity.kind !== "user") return { items: [{ sem_permissao: true }], truncated: false };
+    const view = await lerPreferencias({ orgId: params.identity.orgId, rawPhone: params.fromPhone });
+    return view ? { items: [projetarParaOModelo(view)], truncated: false } : null;
+  }
   const r = await consultarEscopo({
     orgId: params.identity.orgId,
     rawPhone: params.fromPhone,

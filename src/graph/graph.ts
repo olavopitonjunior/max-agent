@@ -13,6 +13,7 @@ import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { rotearBotaoDeAtividade } from "@/lib/atividade-botao";
 import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
+import { iniciarPreferencias, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
 import { resolverReferencia } from "./referencias";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
@@ -64,6 +65,7 @@ import {
   TEXTO_INDISPONIVEL_AGORA,
   TEXTO_CANCELADO,
   textoFalhou,
+  MUDAR_MINHAS_NOTIFICACOES,
   type PendingAction,
 } from "./tools";
 import { downloadMedia } from "@/lib/transport";
@@ -133,7 +135,7 @@ import { executarAcao, type VerboDeAcao } from "@/lib/acao";
 import { OrgSuspensaError, TEXTO_ORG_SUSPENSA } from "@/lib/org-suspensa";
 import { subjectDe, consultarEscopo } from "@/lib/scope";
 import { explicitStage, queryChoice, renderQueryOptions, nextQueryPage, QUERY_OPTIONS_TTL, type QueryOptions } from "./query-options";
-import { chaveDePolitica } from "@/lib/cm";
+import { chaveDePolitica, lerPreferencias, atualizarPreferencias } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
 import { SEM_ORG } from "@/lib/sem-org";
 
@@ -897,6 +899,12 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
     extrairCredito: async (texto, campo) => extrair(texto, toolExtrairCredito(campo)),
     // Captação (P9): passa pelo MESMO `extrair`, que tokeniza o texto, destokeniza a saída e reporta o custo (AIUsage).
     extrairCaptacao: async (texto, secao) => extrair(texto, toolExtrairCaptacao(secao)),
+    // Preferências de aviso (M3): SEMPRE da própria pessoa (telefone do turn); só usuário da plataforma tem preferência.
+    preferencias: {
+      ler: async () => (state.identity.kind === "user" ? lerPreferencias({ orgId, rawPhone: state.inbound.fromPhone }) : null),
+      atualizar: async (patch) =>
+        state.identity.kind === "user" ? atualizarPreferencias({ orgId, rawPhone: state.inbound.fromPhone, patch }) : null,
+    },
   };
 }
 
@@ -927,7 +935,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // sistema, nunca do modelo (prod 09/10). O fluxo em curso fica como está.
   // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
   const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha" || atual?.kind === "credito" ||
-    atual?.kind === "captacao" || atual?.kind === "atividade";
+    atual?.kind === "captacao" || atual?.kind === "atividade" || atual?.kind === "preferencias";
   // Continuidade e gestão vêm antes: "converte a proposta… pra gerar o contrato" é conversão.
   // Rascunho aberto para ajuste (sem escrita pendente) não prende o turno: pedido
   // sobre OUTRA proposta ("muda o valor da proposta do João…"), consulta ou
@@ -1723,6 +1731,31 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
         { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
           politicaIndisponivel: state.politicaIndisponivel, agora: Date.now(), orgName: state.identity.orgName,
           thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) }
+      );
+      return responder(passo.reply, passo.evento, passo.fluxo);
+    }
+
+    // Preferências de aviso (M3): fluxo próprio, determinístico (`preferencias.ts`). Só da PRÓPRIA pessoa
+    // (telefone do turn); o modelo nunca escolhe usuário. Valor fora das opções do servidor = resposta, sem PATCH.
+    if (chamada.name === MUDAR_MINHAS_NOTIFICACOES.nome) {
+      const responder = (texto: string, outcome: string, fluxo?: Fluxo | null): MaxUpdate => ({
+        ...daOferta,
+        ...(fluxo !== undefined ? { fluxo } : {}),
+        messages: [{ role: "user", content: userText }, { role: "assistant", content: texto }],
+        reply: texto,
+        usage: usageDoTurn,
+        toolLog: [...trilha, { name: chamada.name, args: {}, outcome }],
+        piiMap: mapaTurno,
+      });
+      if (!auth.ok) return responder(TEXTO_PREFS_NAO_LIBERADO, auth.motivo);
+      if (state.fluxo) return responder(textoDeOcupado(state.fluxo), "fluxo_em_andamento");
+      const passo = await iniciarPreferencias(
+        { avisos: chamada.args.avisos, horario_relatorio: chamada.args.horario_relatorio,
+          antecedencia_lembrete_min: chamada.args.antecedencia_lembrete_min },
+        { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+          politicaIndisponivel: state.politicaIndisponivel, agora: Date.now(), orgName: state.identity.orgName,
+          thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) },
+        depsDoFluxo(state, usageDoTurn)
       );
       return responder(passo.reply, passo.evento, passo.fluxo);
     }

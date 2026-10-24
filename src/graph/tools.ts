@@ -4,6 +4,7 @@ import type { LlmTool } from "@/lib/llm";
 import type { Capability } from "./policy";
 import type { ScopeQueryVerb } from "./scope-contract";
 import { ESTADOS_DE_PROPOSTA } from "./scope-contract";
+import { ALIAS_DE_TIPO_DE_AVISO } from "./preferencias-contract";
 import type { Candidate } from "@/lib/identity";
 import { captacaoLigada } from "./captacao-flags";
 import { packsDoPerfil, type ToolPack } from "@/packs";
@@ -430,7 +431,11 @@ export type TipoDeReferencia = "negocio" | "proposta" | "imovel" | "atividade" |
 export interface EntradaDeLeitura extends EntradaBase {
   tipo: "leitura";
   capability: Capability;
-  verb: ScopeQueryVerb;
+  /**
+   * O verbo do `scope-query`. `prefs.get` não é verbo do servidor: é a leitura das preferências
+   * da PRÓPRIA pessoa, por rota própria (`lerPreferencias`), tratada no despachante.
+   */
+  verb: ScopeQueryVerb | "prefs.get";
   /** Leitura não muda nada, não custa nada e não pede confirmação. */
   risco: "nenhum";
   confirmacao: false;
@@ -862,13 +867,142 @@ export const TOOLS_DE_ATIVIDADE_ESCRITA: EntradaDeEscrita[] = [
   RECUSAR_ATIVIDADE,
 ];
 
-export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, MINHAS_PENDENCIAS, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS, ...TOOLS_EXTENDIDAS];
+// ─── Preferências de aviso (Pendências e avisos / M3) ──────────────────────
+
+/**
+ * A pessoa fala dos PRÓPRIOS avisos (o relatório da manhã, o lembrete antes do
+ * vencimento, a conclusão de atividade). O prefiltro é generoso com o tema
+ * ("notifica", "aviso", "lembrete", "relatório", "resumo da manhã") e estreito
+ * na intenção, para não roubar a frase de outra tool: "relatório de vendas",
+ * "resumo da carteira" e "me lembra de ligar pro João" são de outras (ou de
+ * `criar_atividade`), e "quais são minhas notificações" é a LISTA
+ * (`listar_notificacoes`), não a preferência.
+ */
+const TEMA_DE_AVISO = /notifica|aviso|lembrete|lembra|relat[oó]rio|resumo da manh/;
+/** Gerir/mudar/receber/horário — a intenção de mexer na preferência, e não de consultar uma lista. */
+const INTENCAO_DE_PREFERENCIA =
+  /\b(nao quero|n quero|quero (receber|parar|mudar|trocar|ativar|desativar|desligar|ligar)|para(r)? de|deix(a|e) de|desliga\w*|desativ\w*|ativ(a|ar|e)|liga(r)?|mud(a|ar|e)|troc(a|ar|e)|altera\w*|configur\w*|prefer\w*|receb\w*|horario|antecedencia|mand(a|ar|e)|envi(a|ar|e)|avis(a|ar|e)|lembr(a|ar|e))\b/;
+/** O relatório da manhã dos avisos: frase própria desta feature, vale sem mais nada. */
+const RELATORIO_DA_MANHA = /\b(relatorio|resumo) (da manha|matinal|diario)\b/;
+/** "Relatório" de outro assunto (vendas, carteira, período…): é de outra tool, nunca desta. */
+const OUTRO_RELATORIO =
+  /\b(venda|vendas|negocios?|propostas?|contratos?|carteira|comiss\w*|financeir\w*|mensal|semanal|anual|mes|semana|ano|desempenho|metas?|captac\w*|imoveis?|corretores?|equipe|time)\b/;
+/** Deslocamento de tempo do lembrete: "1 hora antes", "30 minutos antes", "antes do vencimento". */
+const ANTECEDENCIA =
+  /((\d+|uma?|meia|duas|tres|quatro)\s*(min\w*|hora\w*|h|dia\w*)\s*antes)|antes d[oe] (vencimento|prazo)|antecedencia/;
+/** "Me lembra DE ligar…" cria atividade; não é preferência. */
+const LEMBRA_DE_ALGO = /\blembr\w*\s+(de|que|do|da|dos|das|pra|para|a|o)\b/;
+const PEDE_GERIR_AVISOS = /\b(notifica\w*|avisos?|alertas?)\b/;
+/** "Como estão meus avisos": consulta do estado. Fica de fora "como estão minhas notificações", que também pode ser a lista. */
+const CONSULTA_DE_AVISOS = /\bcomo (estao|esta|ta|tao|andam) (meus|minhas|os|as) (avisos?|alertas?|notificacoes? d[aeo]s? (atividades?|vencimentos?|relatorios?))\b/;
+const GERIR =
+  /\b(nao quero|n quero|quero (receber|parar|mudar|trocar|ativar|desativar|desligar|ligar)|para(r)? de|deix(a|e) de|desliga\w*|desativ\w*|ativ(a|ar|e)|liga(r)?|mud(a|ar|e)|troc(a|ar|e)|altera\w*|configur\w*|prefer\w*|receb\w*|por (e-?mail|whatsapp|zap))\b/;
+
+export function pedePreferencias(texto: string): boolean {
+  const t = normalizar(texto);
+  if (!TEMA_DE_AVISO.test(t)) return false;
+  if (RELATORIO_DA_MANHA.test(t)) return true;
+  if (/relatorio/.test(t) && !OUTRO_RELATORIO.test(t) && INTENCAO_DE_PREFERENCIA.test(t)) return true;
+  if (ANTECEDENCIA.test(t) && /lembr|avis|notific|alert/.test(t) && !(LEMBRA_DE_ALGO.test(t) && !/vencimento|prazo|antecedencia/.test(t))) return true;
+  if (CONSULTA_DE_AVISOS.test(t)) return true;
+  return PEDE_GERIR_AVISOS.test(t) && GERIR.test(t);
+}
+
+/**
+ * "Como estão meus avisos": estado atual + as opções que o servidor aceita.
+ * Leitura por rota própria (`notification-preferences`), sempre da PRÓPRIA
+ * pessoa — não há parâmetro que aponte para outra.
+ */
+export const MINHAS_NOTIFICACOES: ToolDef = {
+  nome: "minhas_notificacoes",
+  tipo: "leitura",
+  capability: "prefs.self",
+  verb: "prefs.get",
+  risco: "nenhum",
+  confirmacao: false,
+  prioridade: 16,
+  combina: pedePreferencias,
+  def: {
+    name: "minhas_notificacoes",
+    description:
+      "Mostra como estão os avisos desta pessoa (relatório da manhã, lembrete antes do vencimento, " +
+      "conclusão de atividade): por qual canal cada um chega, o horário do relatório, a antecedência do " +
+      "lembrete e as opções que o sistema aceita. Use quando ela perguntar como estão ou o que dá para " +
+      "configurar nos avisos dela. Para a lista de notificações recebidas, use listar_notificacoes.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+  },
+};
+
+/**
+ * Muda os avisos da PRÓPRIA pessoa. Só registra o pedido: o fluxo determinístico
+ * (`preferencias.ts`) valida contra as opções do servidor, mostra o resumo e só
+ * faz o PATCH depois do "sim". Horário ou antecedência fora das opções viram
+ * resposta com as opções, sem escrita.
+ */
+export const MUDAR_MINHAS_NOTIFICACOES: EntradaDeEscrita = {
+  nome: "mudar_minhas_notificacoes",
+  tipo: "escrita",
+  capabilities: ["prefs.self"],
+  capabilityDaChamada: () => "prefs.self",
+  risco: "nenhum",
+  confirmacao: true,
+  prioridade: 5,
+  combina: pedePreferencias,
+  def: {
+    name: "mudar_minhas_notificacoes",
+    description:
+      "Propõe mudar os avisos DESTA pessoa (nunca de outra): ligar ou desligar o relatório da manhã, o lembrete " +
+      "antes do vencimento ou o aviso de conclusão, por e-mail e/ou WhatsApp, mudar o horário do relatório ou a " +
+      "antecedência do lembrete. Só registra o pedido: a pessoa confirma com 'sim' antes de qualquer coisa mudar. " +
+      "Não precisa consultar minhas_notificacoes antes. Passe só o que ela pediu, sem inventar horário nem antecedência.",
+    parameters: {
+      type: "object",
+      properties: {
+        avisos: {
+          type: "array",
+          description: "Os avisos a mudar. Cada item diz o aviso e o que muda.",
+          items: {
+            type: "object",
+            properties: {
+              tipo: {
+                type: "string",
+                enum: Object.keys(ALIAS_DE_TIPO_DE_AVISO),
+                description:
+                  "relatorio_manha = relatório da manhã (formulários e atividades); lembrete_vencimento = lembrete antes do vencimento; conclusao_atividade = aviso de atividade concluída.",
+              },
+              email: { type: "boolean", description: "Receber por e-mail. Só se ela falou de e-mail." },
+              whatsapp: { type: "boolean", description: "Receber por WhatsApp. Só se ela falou de WhatsApp." },
+              ativo: {
+                type: "boolean",
+                description:
+                  "Use false para 'não quero mais' (desliga e-mail e WhatsApp). Para ligar, diga o canal em email/whatsapp.",
+              },
+            },
+            required: ["tipo"],
+            additionalProperties: false,
+          },
+        },
+        horario_relatorio: {
+          type: "string",
+          description: "Horário do relatório da manhã, HH:MM (ex.: 08:00), exatamente como ela pediu. Opcional.",
+        },
+        antecedencia_lembrete_min: {
+          type: "integer",
+          description: "Quantos minutos antes do vencimento avisar (1 hora = 60), exatamente como ela pediu. Opcional.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+};
+
+export const TOOLS_DE_LEITURA: ToolDef[] = [LISTAR_NEGOCIOS, MINHAS_PENDENCIAS, MINHAS_NOTIFICACOES, PENDENCIAS_DO_NEGOCIO, LISTAR_PROPOSTAS, ...TOOLS_EXTENDIDAS];
 
 /**
  * O registro inteiro: a escrita e as leituras. É a ÚNICA lista que o
  * despachante consulta — nome fora daqui é `tool_desconhecida`.
  */
-export const REGISTRO_DE_TOOLS: EntradaDeTool[] = [PROPOR_CRIACAO, ...TOOLS_DE_ATIVIDADE_ESCRITA, ...TOOLS_DE_LEITURA];
+export const REGISTRO_DE_TOOLS: EntradaDeTool[] = [PROPOR_CRIACAO, ...TOOLS_DE_ATIVIDADE_ESCRITA, MUDAR_MINHAS_NOTIFICACOES, ...TOOLS_DE_LEITURA];
 
 /** O registro deste deploy: o núcleo mais as entradas dos packs do perfil (`src/packs`). */
 export function entradasDoDeploy(packs: readonly ToolPack[] = packsDoPerfil()): EntradaDeTool[] {
