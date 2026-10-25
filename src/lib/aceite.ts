@@ -26,7 +26,12 @@ import { query } from "./db";
 import { enqueue } from "./outbox";
 import { log } from "./log";
 import { destinoPermitido } from "./redirect";
-import { KINDS_COM_ACEITE, templatesDoKind } from "./templates/catalog";
+import {
+  KINDS_ATIVIDADE,
+  KINDS_COM_ACEITE,
+  templatesDeAtividadeComAceite,
+  templatesDoKind,
+} from "./templates/catalog";
 import type { InboundMessage } from "./transport";
 import { SEM_ORG } from "./sem-org";
 
@@ -289,9 +294,10 @@ async function liberar(
   const candidatas = await query<{ id: string; tamanho: number }>(
     `SELECT id, length(body) AS tamanho FROM outbox o
       WHERE phone = $1
-        AND kind = ANY($2::text[])
         AND status = 'sent'
         AND template_name IS NOT NULL
+        AND (kind = ANY($2::text[])
+             OR ($7 AND kind = ANY($8::text[]) AND template_name = ANY($9::text[])))
         AND (released_at IS NULL OR released_by = $3)
         AND sent_at > now() - ($4 || ' days')::interval
         AND ($5::text IS NULL OR id = $5)
@@ -309,6 +315,12 @@ async function liberar(
       String(VALIDADE_ACEITE_DIAS),
       o.rowId,
       o.soSemConversaDepois,
+      // Aviso de atividade (template com botão `ok`, v2): só no TOQUE, que
+      // aponta a linha. O "ok" digitado não a libera — a atividade não é
+      // resposta a ele, e o v1 (URL) nunca tem o que liberar.
+      o.rowId !== null,
+      [...KINDS_ATIVIDADE],
+      templatesDeAtividadeComAceite(),
     ]
   );
 

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   CATALOGO,
+  KINDS_ATIVIDADE,
   KINDS_COM_ACEITE,
+  entregaPorAceite,
+  templatesDeAtividadeComAceite,
   textoDoAvisoDeCredito,
   templatesDoKind,
   botoesEmOrdem,
@@ -464,17 +467,62 @@ describe("atividades pendentes (2026-10-14)", () => {
   it("activity_assigned e activity_due usam o MESMO template neutro", () => {
     expect(CATALOGO.activity_assigned.name).toBe("max_atividades_pendentes");
     expect(CATALOGO.activity_due).toBe(CATALOGO.activity_assigned);
-    expect(templatesDoKind("activity_assigned").map((d) => d.name)).toEqual(["max_atividades_pendentes"]);
-    expect(templatesDoKind("activity_due").map((d) => d.name)).toEqual(["max_atividades_pendentes"]);
+    expect(templatesDoKind("activity_assigned").map((d) => d.name)).toEqual([
+      "max_atividades_pendentes_v2",
+      "max_atividades_pendentes",
+    ]);
+    expect(templatesDoKind("activity_due").map((d) => d.name)).toEqual([
+      "max_atividades_pendentes_v2",
+      "max_atividades_pendentes",
+    ]);
   });
 
   it("activity_due_soon (lembrete antes do prazo) usa o MESMO template neutro, fora da janela", () => {
     expect(CATALOGO.activity_due_soon).toBe(CATALOGO.activity_assigned);
-    expect(templatesDoKind("activity_due_soon").map((d) => d.name)).toEqual(["max_atividades_pendentes"]);
+    expect(templatesDoKind("activity_due_soon").map((d) => d.name)).toEqual([
+      "max_atividades_pendentes_v2",
+      "max_atividades_pendentes",
+    ]);
   });
 
   it("sem repetição na submissão: o template aparece UMA vez em todosOsTemplates", () => {
     expect(todosOsTemplates().filter((d) => d.name === "max_atividades_pendentes")).toHaveLength(1);
+    expect(todosOsTemplates().filter((d) => d.name === "max_atividades_pendentes_v2")).toHaveLength(1);
+  });
+
+  it("v2: mesmo texto e variáveis do v1, botão 'Ver atividades' vira resposta rápida `ok` (o v1 não muda)", () => {
+    const [v2, v1] = templatesDoKind("activity_assigned");
+    expect(v2.name).toBe("max_atividades_pendentes_v2");
+    expect(v2.lang).toBe("pt_BR");
+    expect(v2.category).toBe("UTILITY");
+    expect(v2.body).toBe(v1.body);
+    expect(v2.vars).toEqual(v1.vars);
+    expect(v2.exemplos).toEqual(v1.exemplos);
+    expect(v2.botao).toEqual({ tipo: "ok", texto: "Ver atividades" });
+    expect(botoesEmOrdem(v2.botao)).toEqual([{ tipo: "quick_reply", texto: "Ver atividades", prefixo: "ok" }]);
+    expect(botoesDaLinha(v2, "r1")).toEqual([{ tipo: "quick_reply", payload: "ok:r1" }]);
+    expect(parametrosDoCorpo(v2, linha)).toEqual(["Carlos", "RE/MAX Trio"]);
+    expect(v2.umPorJanela).toBe(true);
+    // v1 intacto: trocar o botão de um template aprovado o marcaria DIVERGENTE.
+    expect(v1.botao).toEqual({ tipo: "url", texto: "Ver atividades" });
+    expect(templatesDoKind("activity_due")[0]).toBe(v2);
+    expect(templatesDoKind("activity_due_soon")[0]).toBe(v2);
+  });
+
+  it("aceite: só a linha de atividade que saiu pelo v2 (botão ok) guarda o corpo até o toque", () => {
+    expect(KINDS_COM_ACEITE).not.toContain("activity_assigned");
+    expect(templatesDeAtividadeComAceite()).toEqual(["max_atividades_pendentes_v2"]);
+    for (const k of KINDS_ATIVIDADE) {
+      expect(entregaPorAceite(k, "max_atividades_pendentes_v2"), k).toBe(true);
+      expect(entregaPorAceite(k, "max_atividades_pendentes"), k).toBe(false);
+      // Texto livre (sem template, ex.: Newton ou janela aberta): já foi entregue inteiro.
+      expect(entregaPorAceite(k, null), k).toBe(false);
+    }
+    // Os kinds de sempre continuam valendo com qualquer template; os fora da régua, nunca.
+    expect(entregaPorAceite("manual_message", "max_mensagem_imobiliaria")).toBe(true);
+    expect(entregaPorAceite("manual_message", null)).toBe(false);
+    expect(entregaPorAceite("form_completed", "max_atividades_pendentes_v2")).toBe(false);
+    expect(entregaPorAceite("activity_completed", "max_atividades_pendentes_v2")).toBe(false);
   });
 
   it("corpo neutro: só nome e org, sem dado da atividade, botão 'Ver atividades' (URL)", () => {
@@ -495,8 +543,9 @@ describe("atividades pendentes (2026-10-14)", () => {
 
   it("só este template é 'um por janela'", () => {
     expect(CATALOGO.activity_assigned.umPorJanela).toBe(true);
-    expect(todosOsTemplates().filter((d) => d.umPorJanela).map((d) => d.name)).toEqual([
+    expect(todosOsTemplates().filter((d) => d.umPorJanela).map((d) => d.name).sort()).toEqual([
       "max_atividades_pendentes",
+      "max_atividades_pendentes_v2",
     ]);
   });
 
