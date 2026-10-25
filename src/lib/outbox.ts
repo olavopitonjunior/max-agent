@@ -16,7 +16,7 @@ import {
   type Inoperancia,
 } from "./transport/erro";
 import {
-  KINDS_COM_ACEITE,
+  entregaPorAceite,
   botoesEmOrdem,
   templatesDoKind,
   textoDoAvisoDeCredito,
@@ -523,7 +523,9 @@ export async function dispatchDue(
         if (row.kind === "support_handoff") return;
         // Saiu como "tem uma mensagem — responda OK": a pessoa ainda não viu
         // o texto, e semeá-lo faria o Max "lembrar" do que não foi entregue.
-        if (envioTemplate && row.kind && KINDS_COM_ACEITE.includes(row.kind)) return;
+        // Inclui o aviso de atividade que saiu pelo v2 (botão `ok`): a lista só
+        // chega no toque. O v1 (botão de URL) segue semeado como sempre.
+        if (envioTemplate && entregaPorAceite(row.kind, envioTemplate.name)) return;
 
         const identity = await resolveIdentity(row.phone);
         if (identity.kind !== "resolved") return;
