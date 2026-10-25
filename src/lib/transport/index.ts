@@ -19,9 +19,11 @@ import { log } from "../log";
 import { logAdapter } from "./adapters/log";
 import { metaAdapter } from "./adapters/meta";
 import { NEWTON_SYNTHETIC_PREFIX, newtonBridgeAdapter } from "./adapters/newton-bridge";
+import { MetaHttpError, classificarMeta, falhaDaMensagemMeta } from "./erro";
 import type {
   BotaoEnviado,
   ConnectionState,
+  Interativo,
   ProviderName,
   SendResult,
   TransportAdapter,
@@ -33,6 +35,8 @@ export type {
   ConnectionState,
   InboundKind,
   InboundMessage,
+  Interativo,
+  OpcaoInterativa,
   ProviderName,
   SendResult,
   StatusCallback,
@@ -108,14 +112,40 @@ export function capabilities(): TransportCapabilities {
   return adapter().capabilities;
 }
 
+/**
+ * Texto livre. Com `interativo`, e onde o provedor sabe (`capabilities.interactive`),
+ * vai como botões/lista; `body` é o texto numerado equivalente, que vai no
+ * lugar quando o provedor não tem botão (Newton, log), quando
+ * `MAX_INTERACTIVE=off`, ou quando a Meta RECUSA a forma (400: nada foi
+ * entregue, então mandar o texto não duplica). Timeout e 5xx não caem para o
+ * texto: podem ter sido aceitos, e a retentativa da fila decide.
+ */
 export async function sendText(params: {
   to: string;
   body: string;
   quoteMessageId?: string;
+  interativo?: Interativo | null;
 }): Promise<SendResult> {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
-  return adapter().sendText(params);
+  const { interativo, ...texto } = params;
+  const a = adapter();
+  if (interativo && a.capabilities.interactive && a.sendInteractive && interativoLigado()) {
+    try {
+      return await a.sendInteractive({ to: texto.to, interativo, quoteMessageId: texto.quoteMessageId });
+    } catch (err) {
+      // Só a FORMA recusada (parâmetro inválido) cai no texto. Conta, número,
+      // vazão e restrição também vêm como 400, mas o texto bateria no mesmo
+      // muro — relança para a fila classificar, como faria com o texto.
+      if (!(err instanceof MetaHttpError) || err.status !== 400 || classificarMeta(err.code) || falhaDaMensagemMeta(err)) throw err;
+      log.warn("transport.interativo_recusado", { tipo: interativo.tipo, code: err.code });
+    }
+  }
+  return a.sendText(texto);
+}
+
+function interativoLigado(): boolean {
+  return (process.env.MAX_INTERACTIVE ?? "").trim().toLowerCase() !== "off";
 }
 
 /**

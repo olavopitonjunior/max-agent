@@ -10,7 +10,7 @@ import type { TransportAdapter } from "../types";
  */
 export const logAdapter: TransportAdapter = {
   name: "log",
-  capabilities: { templates: false, window24h: false, media: false, groups: false, status: false, typing: false },
+  capabilities: { templates: false, window24h: false, media: false, groups: false, status: false, typing: false, interactive: false },
   async sendText({ to, body }) {
     log.info("transport.log", { to, chars: body.length });
     return { messageId: `log-${randomUUID()}` };

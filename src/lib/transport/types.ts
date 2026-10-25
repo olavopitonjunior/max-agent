@@ -46,6 +46,25 @@ export interface InboundMessage {
   flowResponse?: Record<string, unknown>;
 }
 
+/**
+ * Uma opção tocável. O `id` é `op:<o texto que a pessoa digitaria>`: o toque
+ * volta como esse texto, e o grafo trata igual a digitar (ver `lib/meta.ts`).
+ */
+export interface OpcaoInterativa {
+  id: string;
+  titulo: string;
+  descricao?: string;
+}
+
+/**
+ * Mensagem com botões de resposta (até 3) ou lista (até 10 linhas), dentro da
+ * janela de 24h. É só a forma: o texto numerado equivalente vai junto como
+ * fallback, e o toque nunca é escrita (o SIM continua obrigatório).
+ */
+export type Interativo =
+  | { tipo: "botoes"; corpo: string; opcoes: OpcaoInterativa[] }
+  | { tipo: "lista"; corpo: string; botao: string; opcoes: OpcaoInterativa[] };
+
 /** Botão preenchido na hora do envio, na ordem em que o template os declara. */
 export type BotaoEnviado =
   | { tipo: "url"; param: string }
@@ -106,6 +125,8 @@ export interface TransportCapabilities {
   status: boolean;
   /** Mark-as-read + "digitando…" ao receber (Meta). */
   typing: boolean;
+  /** Botões de resposta e lista na conversa (Meta). Sem isso, texto numerado. */
+  interactive: boolean;
 }
 
 export interface TransportAdapter {
@@ -120,6 +141,8 @@ export interface TransportAdapter {
     bodyParams: string[];
     botoes: BotaoEnviado[];
   }): Promise<SendResult>;
+  /** Ausente quando `capabilities.interactive` é `false`. */
+  sendInteractive?(params: { to: string; interativo: Interativo; quoteMessageId?: string }): Promise<SendResult>;
   /**
    * Marca a mensagem recebida como lida e mostra "digitando…". Ausente quando
    * `capabilities.typing` é `false`. Nunca lança; `false` = não foi.

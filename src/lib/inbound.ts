@@ -2,12 +2,13 @@ import { captureDispatchFence, DispatchFenceSchema, withCapturedPrivacy, withDel
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, markReadTyping, type InboundMessage } from "./transport";
+import { derivarInterativo, PREFIXO_OPCAO } from "./interativo";
 import { falhaDaMensagemMeta, inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
 import { abrirJanela } from "./janela24h";
 import { log } from "./log";
 import { redigir, CAMPOS_DA_AUDITORIA, redigirCredito } from "./pii";
-import { runTurn } from "@/graph/graph";
+import { runTurn, type TurnResult } from "@/graph/graph";
 import { remetenteConhecido } from "./identity";
 
 /**
@@ -320,6 +321,29 @@ export type SettleStatus = "done" | "failed" | "retry";
  * reenvia — não re-invoca o grafo, que já gravou o turn no checkpoint e faria a
  * fala da pessoa aparecer duas vezes na thread.
  */
+export const TEXTO_BOTAO_ANTIGO =
+  "Esse botão é de uma mensagem anterior. Use os botões da última mensagem ou digite a resposta.";
+
+/**
+ * Toque em opção (`op:`) de mensagem que NÃO é a última resposta do Max.
+ *
+ * A Meta deixa botões antigos tocáveis para sempre. Digitar SIM é um ato no
+ * contexto atual; tocar o SIM de uma pergunta de ontem confirmaria a pendência
+ * de HOJE, que a pessoa pode nem ter lido. Por isso o toque só vale quando
+ * `context.id` é a resposta mais recente enviada a esse telefone. Sem
+ * `context.id`, fail-closed.
+ */
+async function toqueEmMensagemAntiga(row: InboundRow): Promise<boolean> {
+  if (!row.button_payload?.startsWith(PREFIXO_OPCAO)) return false;
+  const [ultima] = await query<{ reply_message_id: string }>(
+    `SELECT reply_message_id FROM inbound_queue
+      WHERE from_phone = $1 AND id <> $2 AND reply_message_id IS NOT NULL
+      ORDER BY created_at DESC LIMIT 1`,
+    [row.from_phone, row.id]
+  );
+  return !row.reply_to_message_id || row.reply_to_message_id !== ultima?.reply_message_id;
+}
+
 export const TEXTO_REENVIO_SENSIVEL =
   "Tive um problema para enviar sua resposta. Mande *RESUMO* para ver a ficha de novo.";
 
@@ -351,7 +375,9 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
       // Só para remetente já conhecido (consulta local, fail-closed): número
       // desconhecido não pode ver "lida" e ficar sem resposta.
       if (row.attempts <= 1 && await remetenteConhecido(row.from_phone)) void markReadTyping(row.message_id).catch(() => {});
-      const turn = await runTurn(toInboundMessage(row),{dispatchFence});
+      const turn: TurnResult = (await toqueEmMensagemAntiga(row))
+        ? { reply: TEXTO_BOTAO_ANTIGO, dispatchFence, afterReply: async () => {} }
+        : await runTurn(toInboundMessage(row),{dispatchFence});
       reply = turn.reply;
       control = turn.control;
       if(turn.dispatchFence){if(turn.dispatchFence.personDigest!==dispatchFence.personDigest||turn.dispatchFence.privacyEpoch!==dispatchFence.privacyEpoch)throw new Error("execution_revoked");dispatchFence=turn.dispatchFence;}
@@ -403,7 +429,7 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
           await client.query(`UPDATE inbound_queue SET last_send_started_at=now() WHERE id=$1`,[row.id]);
         });
         res=await withTransportFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},()=>
-          sendText({to:row.from_phone,body:reply!,quoteMessageId:row.message_id}));
+          sendText({to:row.from_phone,body:reply!,quoteMessageId:row.message_id,...comInterativo(reply!)}));
       } catch (err) {
         if(err instanceof TransportAcceptedCommitError)throw err;
         /**
@@ -733,4 +759,14 @@ export async function podarTextoDaFila(dias = 30): Promise<number> {
     [String(dias)]
   );
   return rows.length;
+}
+
+/**
+ * Botões/lista para a resposta, quando ela é um "Responda SIM" ou um menu
+ * numerado (`lib/interativo.ts`). Só entra no envio quando existe, para que
+ * a chamada sem botão continue idêntica à de antes.
+ */
+function comInterativo(reply: string): { interativo?: NonNullable<ReturnType<typeof derivarInterativo>> } {
+  const interativo = derivarInterativo(reply);
+  return interativo ? { interativo } : {};
 }
