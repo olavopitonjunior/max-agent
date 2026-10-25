@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { destinoPermitido, ehIdDeOutbox } from "../redirect";
+import { DESTINO_SEM_LINK, destinoDaLinha, destinoPermitido, ehIdDeOutbox } from "../redirect";
 
 describe("destinoPermitido — anti open-redirect", () => {
   it.each([
@@ -40,5 +40,17 @@ describe("ehIdDeOutbox", () => {
     expect(ehIdDeOutbox("1")).toBe(false);
     expect(ehIdDeOutbox("' OR 1=1 --")).toBe(false);
     expect(ehIdDeOutbox("3f2b8c1e-9a4d-4e2f-8b1a-2c3d4e5f6a7b/../x")).toBe(false);
+  });
+});
+
+describe("destinoDaLinha — linha existente", () => {
+  it.each([null, undefined, ""])("sem link (%s) vai para a home", (link) => {
+    expect(destinoDaLinha(link)?.toString()).toBe(DESTINO_SEM_LINK);
+  });
+  it("link válido segue o link", () => {
+    expect(destinoDaLinha("https://trio.imobpro.ia.br/deals/x")?.toString()).toBe("https://trio.imobpro.ia.br/deals/x");
+  });
+  it("link fora da regra continua recusado", () => {
+    expect(destinoDaLinha("https://evil.com/x")).toBeNull();
   });
 });

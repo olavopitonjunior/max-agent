@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { waitUntil } from "@vercel/functions";
 import { query } from "@/lib/db";
-import { destinoPermitido, ehIdDeOutbox } from "@/lib/redirect";
+import { destinoDaLinha, ehIdDeOutbox } from "@/lib/redirect";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -38,7 +38,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     `SELECT link_url FROM outbox WHERE id = $1`,
     [params.id]
   );
-  const destino = destinoPermitido(rows[0]?.link_url);
+  if (rows.length === 0) return naoEncontrado();
+  const destino = destinoDaLinha(rows[0].link_url);
   if (!destino) return naoEncontrado();
 
   // Primeiro clique só: COALESCE mantém o carimbo original. Melhor-esforço e

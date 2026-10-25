@@ -372,7 +372,7 @@ d("canal Meta (Postgres real)", () => {
      * Fora da janela ele desiste na hora — represar seria esperar uma
      * aprovação que nunca vem.
      */
-    it.each([["stage_change"], [null]])(
+    it.each([["deal_sla_breached"], [null]])(
       "janela fechada, tipo FORA DA RÉGUA (%s): não chama a Meta e falha com o motivo",
       async (kind) => {
         await linhaVencida(`k-fora-${kind}`, kind);
@@ -391,7 +391,7 @@ d("canal Meta (Postgres real)", () => {
       await query(`INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now() - interval '1 hour')`, [
         PHONE,
       ]);
-      await linhaVencida("k-fora-aberta", "stage_change");
+      await linhaVencida("k-fora-aberta", "deal_sla_breached");
       const totals = await dispatchDue();
       expect(totals.sent).toBe(1);
       expect(metaSend).toHaveBeenCalledTimes(1);
@@ -645,13 +645,31 @@ d("canal Meta (Postgres real)", () => {
       expect(new Date(l.deliver_after).getTime()).toBeGreaterThan(Date.now() + 4 * 60_000);
     });
 
-    it("activity_completed, janela fechada: fora da régua (failed), não vira aviso neutro", async () => {
+    it("activity_completed, janela fechada: sai pelo template da família, não pelo aviso neutro (sem 'um por janela')", async () => {
       await aprovarNeutro();
-      await linhaVencida("k-concl", "activity_completed");
+      await query(`INSERT INTO wa_template (name, lang, status) VALUES ('max_atividade_andamento', 'pt_BR', 'APPROVED')`);
+      try {
+        await linhaVencida("k-concl-1", "activity_completed");
+        await linhaVencida("k-concl-2", "activity_completed");
+        const totals = await dispatchDue();
+        expect(totals.sent).toBe(2);
+        expect(totals.coalesced).toBe(0);
+        expect(metaSendTemplate.mock.calls.map((c) => c[0].name)).toEqual([
+          "max_atividade_andamento",
+          "max_atividade_andamento",
+        ]);
+      } finally {
+        await query(`DELETE FROM wa_template WHERE name = 'max_atividade_andamento'`);
+      }
+    });
+
+    it("activity_completed, janela fechada, família ainda não aprovada: represa (template_pendente), nunca usa o aviso neutro", async () => {
+      await aprovarNeutro();
+      await linhaVencida("k-concl-pend", "activity_completed");
       const totals = await dispatchDue();
-      expect(totals.failed).toBe(1);
+      expect(totals.held).toBe(1);
       expect(metaSendTemplate).not.toHaveBeenCalled();
-      expect((await linha("k-concl")).last_error).toBe(MARCA_FORA_DA_REGUA);
+      expect((await linha("k-concl-pend")).last_error).toBe(MARCA_TEMPLATE_PENDENTE);
     });
 
     it("outro telefone não é afetado pelo aviso do primeiro", async () => {
