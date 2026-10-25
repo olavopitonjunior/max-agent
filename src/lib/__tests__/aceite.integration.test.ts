@@ -143,6 +143,64 @@ d("aceite (Postgres real)", () => {
     });
 
     /**
+     * Aviso de atividades (25/10/2026): o botão "Ver atividades" do v2 é um
+     * `ok`, e o toque traz a lista guardada no corpo. O v1 (URL) e o "ok"
+     * digitado não liberam nada.
+     */
+    describe("atividades pendentes (botão Ver atividades)", () => {
+      const V2 = "max_atividades_pendentes_v2";
+      const LISTA = "- Ligar para o comprador (Apto 302): https://imobpro.ia.br/deals/1\n- Vistoria (Casa 7): https://imobpro.ia.br/deals/2";
+
+      it("toque em `ok:<id>` de atividade enviada pelo v2 entrega a lista no chat, com a assinatura", async () => {
+        for (const kind of ["activity_assigned", "activity_due", "activity_due_soon"]) {
+          const id = await enviada(`a-ativ-${kind}`, { kind, body: LISTA, template: V2 });
+          const r = await interceptar(msg({ text: "Ver atividades", buttonPayload: `ok:${id}` }));
+          expect(r, kind).toEqual({ reply: `*Mensagem da RE/MAX Trio*\n\n${LISTA}`, orgId: ORG, marca: "aceite_entregue" });
+        }
+      });
+
+      it("toque repetido não entrega de novo; a retentativa da MESMA mensagem reencontra", async () => {
+        const id = await enviada("a-ativ-dup", { kind: "activity_assigned", body: LISTA, template: V2 });
+        const m = msg({ buttonPayload: `ok:${id}` });
+        expect((await interceptar(m))?.marca).toBe("aceite_entregue");
+        expect((await interceptar(m))?.marca).toBe("aceite_entregue");
+        expect((await interceptar(msg({ buttonPayload: `ok:${id}` })))?.marca).toBe("aceite_sem_pendencia");
+      });
+
+      it("linha de atividade que saiu pelo v1 (URL) ou como texto livre não é liberada", async () => {
+        const v1 = await enviada("a-ativ-v1", { kind: "activity_assigned", body: LISTA, template: "max_atividades_pendentes" });
+        const livre = await enviada("a-ativ-livre", { kind: "activity_due", body: LISTA, template: null });
+        expect((await interceptar(msg({ buttonPayload: `ok:${v1}` })))?.marca).toBe("aceite_sem_pendencia");
+        expect((await interceptar(msg({ buttonPayload: `ok:${livre}` })))?.marca).toBe("aceite_sem_pendencia");
+      });
+
+      it("template de atividade em kind que não é de atividade não vale", async () => {
+        const id = await enviada("a-ativ-kind", { kind: "contract_signed", body: LISTA, template: V2 });
+        expect((await interceptar(msg({ buttonPayload: `ok:${id}` })))?.marca).toBe("aceite_sem_pendencia");
+      });
+
+      it("o 'ok' digitado não libera atividade (só o toque, que aponta a linha)", async () => {
+        const id = await enviada("a-ativ-digitado", { kind: "activity_assigned", body: LISTA, template: V2 });
+        expect(await interceptar(msg({ text: "ok" }))).toBeNull();
+        const [l] = await query<{ released_at: Date | null }>(`SELECT released_at FROM outbox WHERE id = $1`, [id]);
+        expect(l.released_at).toBeNull();
+      });
+
+      it("o 'ok' digitado segue liberando só a mensagem da imobiliária, sem arrastar a atividade", async () => {
+        await enviada("a-ativ-junto-a", { kind: "activity_assigned", body: LISTA, template: V2 });
+        await enviada("a-ativ-junto-m", { kind: "manual_message", body: "Só esta." });
+        const r = await interceptar(msg({ text: "ok" }));
+        expect(r?.reply).toContain("Só esta.");
+        expect(r?.reply).not.toContain("Ligar para o comprador");
+      });
+
+      it("payload de atividade de OUTRO telefone não entrega", async () => {
+        const id = await enviada("a-ativ-alheio", { kind: "activity_assigned", body: LISTA, template: V2, phone: OUTRO });
+        expect((await interceptar(msg({ buttonPayload: `ok:${id}` })))?.marca).toBe("aceite_sem_pendencia");
+      });
+    });
+
+    /**
      * O turn pode morrer DEPOIS de liberar e antes de a resposta sair: a
      * retentativa da MESMA mensagem tem de reencontrar o texto (achado do
      * code review — antes, a linha ficava marcada como entregue e o texto

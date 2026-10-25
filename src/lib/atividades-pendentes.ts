@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { KINDS_ATIVIDADE, templatesDoKind } from "./templates/catalog";
 
 /**
  * Aviso NEUTRO de atividades pendentes (decisão do Olavo, 14/10/2026).
@@ -63,14 +64,20 @@ export async function reservarAvisoNeutro(p: {
   try {
     await c.query("BEGIN");
     await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`atividades_pendentes:${p.phone}`]);
+    // Qualquer versão do aviso conta como "já avisado" (v1 e v2 coexistem
+    // durante a transição): senão o v2 aprovado mandaria um segundo aviso na
+    // mesma janela a quem acabou de receber o v1.
+    const nomes = [
+      ...new Set([p.templateName, ...KINDS_ATIVIDADE.flatMap((k) => templatesDoKind(k).map((d) => d.name))]),
+    ];
     const r = await c.query<{ ultimo_aviso: Date | null; ultima_entrada: Date | null; agora: Date }>(
       `SELECT (SELECT max(COALESCE(sent_at, send_started_at))
                  FROM outbox
-                WHERE phone = $1 AND template_name = $2 AND id <> $3
+                WHERE phone = $1 AND template_name = ANY($2::text[]) AND id <> $3
                   AND (status = 'sent' OR (status = 'sending' AND send_started_at IS NOT NULL))) AS ultimo_aviso,
               (SELECT last_inbound_at FROM conversation_window WHERE phone = $1) AS ultima_entrada,
               now() AS agora`,
-      [p.phone, p.templateName, p.rowId]
+      [p.phone, nomes, p.rowId]
     );
     const e = r.rows[0];
     const ja = jaAvisadoNestaJanela({
