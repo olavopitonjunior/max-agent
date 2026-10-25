@@ -8,6 +8,7 @@ import { abrirJanela } from "./janela24h";
 import { log } from "./log";
 import { redigir, CAMPOS_DA_AUDITORIA, redigirCredito } from "./pii";
 import { runTurn } from "@/graph/graph";
+import { remetenteConhecido } from "./identity";
 
 /**
  * Fila de ENTRADA — o espelho do outbox, do outro lado da conversa.
@@ -347,7 +348,9 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
       // não segura o turn, e `markReadTyping` nunca lança. Só na primeira
       // tentativa (`attempts` já foi incrementado pelo claim): retentativa não
       // repete, e a linha duplicada nem chega aqui (o INSERT a descarta).
-      if (row.attempts <= 1) void markReadTyping(row.message_id).catch(() => {});
+      // Só para remetente já conhecido (consulta local, fail-closed): número
+      // desconhecido não pode ver "lida" e ficar sem resposta.
+      if (row.attempts <= 1 && await remetenteConhecido(row.from_phone)) void markReadTyping(row.message_id).catch(() => {});
       const turn = await runTurn(toInboundMessage(row),{dispatchFence});
       reply = turn.reply;
       control = turn.control;

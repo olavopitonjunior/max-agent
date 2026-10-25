@@ -210,6 +210,15 @@ describe("parseWebhook — mensagens", () => {
       expect(m.buttonPayload ?? null).toBeNull();
     });
 
+    it("texto do Flow tem o mesmo teto de 4096 do texto digitado", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F9", { response_json: JSON.stringify({ obs: "x".repeat(5000) }) }),
+        PNID
+      );
+      expect(ev.messages[0].text).toHaveLength(4096);
+      expect(ev.messages[0].text?.startsWith("obs: x")).toBe(true);
+    });
+
     it("só flow_token: unknown, sem texto", () => {
       const ev = parseWebhook(
         nfm("wamid.F2", { response_json: JSON.stringify({ flow_token: "T" }) }),

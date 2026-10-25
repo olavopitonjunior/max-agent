@@ -621,7 +621,8 @@ function lerFlowResponse(raw: unknown): { campos: Record<string, unknown>; texto
     campos[k] = v;
     linhas.push(`${k}: ${legivel}`);
   }
-  return linhas.length > 0 ? { campos, texto: linhas.join("\n") } : null;
+  // Mesmo teto do texto digitado: Flow nosso, mas o texto vai ao modelo.
+  return linhas.length > 0 ? { campos, texto: linhas.join("\n").slice(0, MAX_TEXT_CHARS) } : null;
 }
 
 function valorLegivel(v: unknown): string {

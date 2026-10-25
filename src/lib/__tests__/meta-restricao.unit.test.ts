@@ -29,6 +29,8 @@ vi.mock("../transport", () => ({
 vi.mock("../janela24h", () => ({ janelaAberta: vi.fn().mockResolvedValue(true), abrirJanela: vi.fn() }));
 vi.mock("@/graph/graph", () => ({ seedNotification: vi.fn(), runTurn: vi.fn() }));
 vi.mock("../connection", () => ({ observeConnection: vi.fn() }));
+const remetenteConhecido = vi.fn().mockResolvedValue(true);
+vi.mock("../identity", () => ({ remetenteConhecido, resolveIdentity: vi.fn() }));
 
 const { MetaHttpError } = await import("../transport/erro");
 const { dispatchDue } = await import("../outbox");
@@ -132,5 +134,26 @@ describe("recusa Meta 131048/131049", () => {
     // Indicador que rejeita não derruba o turno.
     typing.mockRejectedValue(new Error("boom"));
     expect(await runQueued({ ...base, attempts: 1 })).toBe("done");
+  });
+
+  it("remetente desconhecido não vê 'lida + digitando' (o grafo pode não responder)", async () => {
+    const { markReadTyping } = await import("../transport");
+    const { runTurn } = await import("@/graph/graph");
+    const typing = vi.mocked(markReadTyping);
+    typing.mockReset().mockResolvedValue(true);
+    vi.mocked(runTurn).mockReset().mockResolvedValue({ reply: null } as never);
+    query.mockReset().mockResolvedValue([]);
+    remetenteConhecido.mockReset().mockResolvedValue(false);
+    const row = {
+      id: "in-10", message_id: "wamid.in-10", from_phone: "5511988880000", group_id: null,
+      kind: "text", text: "oi", media_url: null, mime_type: null, sender_name: null,
+      reply_to_message_id: null, timestamp_ms: null, button_payload: null,
+      reply_text: null, last_send_started_at: null, attempts: 1,
+    };
+    expect(await runQueued(row)).toBe("done");
+    expect(remetenteConhecido).toHaveBeenCalledWith("5511988880000");
+    expect(typing).not.toHaveBeenCalled();
+    expect(runTurn).toHaveBeenCalledTimes(1);
+    remetenteConhecido.mockResolvedValue(true);
   });
 });
