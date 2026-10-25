@@ -53,6 +53,8 @@ const TPL = "max_formulario_concluido";
 
 /** Template neutro das atividades (compartilhado por activity_assigned e activity_due). */
 const NEUTRO = "max_atividades_pendentes";
+/** v2 do aviso neutro: o botão "Ver atividades" é um `ok` que entrega a lista no chat. */
+const NEUTRO_V2 = "max_atividades_pendentes_v2";
 
 async function linhaVencida(dedupeKey: string, kind: string | null = "form_completed") {
   await enqueue({
@@ -105,7 +107,7 @@ d("canal Meta (Postgres real)", () => {
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
     // Sem isto, um teste que aprova o template vazaria pro próximo.
     await query(`DELETE FROM wa_template WHERE name = $1`, [TPL]);
-    await query(`DELETE FROM wa_template WHERE name = $1`, [NEUTRO]);
+    await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [[NEUTRO, NEUTRO_V2]]);
   });
 
   afterEach(() => vi.unstubAllEnvs());
@@ -115,7 +117,7 @@ d("canal Meta (Postgres real)", () => {
     await query(`DELETE FROM conversation_window WHERE phone = $1`, [PHONE]);
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
     await query(`DELETE FROM wa_template WHERE name = $1`, [TPL]);
-    await query(`DELETE FROM wa_template WHERE name = $1`, [NEUTRO]);
+    await query(`DELETE FROM wa_template WHERE name = ANY($1)`, [[NEUTRO, NEUTRO_V2]]);
   });
 
   describe("janela de 24h no outbox", () => {
@@ -479,6 +481,79 @@ d("canal Meta (Postgres real)", () => {
       const l = await linha("k-ativ-1");
       expect(l.status).toBe("sent");
       expect(l.template_name).toBe(NEUTRO);
+    });
+
+    const aprovarV2 = (status = "APPROVED") =>
+      query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', $2)`, [NEUTRO_V2, status]);
+
+    it("v2 aprovado: sai pelo v2 com o botão `ok:<id>`; v2 ainda PENDING, segue o v1 (URL)", async () => {
+      await aprovarNeutro();
+      await aprovarV2("PENDING");
+      await linhaVencida("k-v2-pend", "activity_assigned");
+      await dispatchDue();
+      expect(metaSendTemplate.mock.calls.at(-1)![0].name).toBe(NEUTRO);
+      expect(metaSendTemplate.mock.calls.at(-1)![0].botoes).toEqual([
+        { tipo: "url", param: await idDa("k-v2-pend") },
+      ]);
+
+      await query(`UPDATE wa_template SET status = 'APPROVED' WHERE name = $1`, [NEUTRO_V2]);
+      await query(`UPDATE outbox SET sent_at = now() - interval '25 hours' WHERE dedupe_key = 'k-v2-pend'`);
+      for (const kind of ["activity_due", "activity_due_soon"]) {
+        await query(`UPDATE outbox SET sent_at = now() - interval '25 hours' WHERE phone = $1 AND status = 'sent'`, [PHONE]);
+        await linhaVencida(`k-v2-${kind}`, kind);
+        await dispatchDue();
+        const chamada = metaSendTemplate.mock.calls.at(-1)![0];
+        expect(chamada).toMatchObject({ name: NEUTRO_V2, bodyParams: ["Ana", "FINCasa"] });
+        expect(chamada.botoes).toEqual([{ tipo: "quick_reply", payload: `ok:${await idDa(`k-v2-${kind}`)}` }]);
+        expect((await linha(`k-v2-${kind}`)).template_name).toBe(NEUTRO_V2);
+      }
+    });
+
+    it("só o v2 aprovado (sem o v1) também sai", async () => {
+      await aprovarV2();
+      await linhaVencida("k-so-v2", "activity_assigned");
+      await dispatchDue();
+      expect(metaSendTemplate.mock.calls.at(-1)![0].name).toBe(NEUTRO_V2);
+    });
+
+    it("um aviso por janela vale entre versões: v1 já enviado, o v2 aprovado depois NÃO manda outro", async () => {
+      await aprovarNeutro();
+      await linhaVencida("k-ver-1", "activity_assigned");
+      await dispatchDue();
+      expect((await linha("k-ver-1")).template_name).toBe(NEUTRO);
+      await aprovarV2();
+      metaSendTemplate.mockClear();
+
+      await linhaVencida("k-ver-2", "activity_due");
+      const totals = await dispatchDue();
+      expect(metaSendTemplate).not.toHaveBeenCalled();
+      expect(totals.coalesced).toBe(1);
+      expect((await linha("k-ver-2")).last_error).toBe(MARCA_ATIVIDADES_JA_AVISADAS);
+    });
+
+    /** v2 guarda a lista até o toque: não vira "lembrança" do Max; o v1 segue semeado como sempre. */
+    it("thread: a linha enviada pelo v2 NÃO é semeada (a pessoa ainda não viu a lista); a do v1 é", async () => {
+      const { seedNotification } = await import("@/graph/graph");
+      const { resolveIdentity } = await import("../identity");
+      const identidade = { kind: "resolved", candidate: { orgId: "org-meta", kind: "user", userId: "u1" } };
+      (resolveIdentity as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(identidade);
+      const semeia = seedNotification as unknown as ReturnType<typeof vi.fn>;
+      try {
+        await aprovarNeutro();
+        await linhaVencida("k-seed-v1", "activity_assigned");
+        await dispatchDue();
+        expect(semeia).toHaveBeenCalledTimes(1);
+
+        semeia.mockClear();
+        await aprovarV2();
+        await query(`UPDATE outbox SET sent_at = now() - interval '25 hours' WHERE dedupe_key = 'k-seed-v1'`);
+        await linhaVencida("k-seed-v2", "activity_assigned");
+        await dispatchDue();
+        expect((await linha("k-seed-v2")).template_name).toBe(NEUTRO_V2);
+        expect(semeia).not.toHaveBeenCalled();
+      } finally {
+        (resolveIdentity as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ kind: "unknown" });
+      }
     });
 
     it("as seguintes (assigned ou due) com a janela ainda fechada: dropped com a marca, sem chamar a Meta", async () => {

@@ -183,6 +183,8 @@ const QUEM = { param: "quem" };
 const ABRIR_NEGOCIO: Botao = { tipo: "url", texto: "Abrir negócio" };
 const OK: Botao = { tipo: "ok", texto: "OK" };
 const VER_ATIVIDADES: Botao = { tipo: "url", texto: "Ver atividades" };
+/** Mesmo rótulo do v1, mas resposta rápida `ok`: o toque traz a lista para o chat (`lib/aceite.ts`). */
+const VER_ATIVIDADES_OK: Botao = { tipo: "ok", texto: "Ver atividades" };
 
 const CONVERTER: AcaoItem = { texto: "Converter em negócio", acao: "converter" };
 const AGORA_NAO: AcaoItem = { texto: "Agora não", acao: "agora_nao" };
@@ -415,6 +417,38 @@ export const KINDS_COM_ACEITE: readonly string[] = [
 ];
 
 /**
+ * Avisos de atividade (`activity_*`): NÃO entram em `KINDS_COM_ACEITE`, porque
+ * o v1 (`max_atividades_pendentes`, botão de URL) não tem botão `ok` — não há
+ * o que o toque libere, e o texto dele sempre foi semeado no thread. Só a
+ * linha que saiu pelo v2 (botão `ok` "Ver atividades") guarda o corpo até o
+ * toque. Ver `entregaPorAceite`.
+ */
+export const KINDS_ATIVIDADE: readonly string[] = ["activity_assigned", "activity_due", "activity_due_soon"];
+
+/**
+ * Nomes dos templates de atividade cujo botão é `ok` (v2 em diante): o que o
+ * aceite aceita liberar no toque. Derivado das definições, não digitado.
+ */
+export function templatesDeAtividadeComAceite(): string[] {
+  return KINDS_ATIVIDADE.flatMap((k) => templatesDoKind(k))
+    .filter((d) => d.botao?.tipo === "ok")
+    .map((d) => d.name)
+    .filter((n, i, a) => a.indexOf(n) === i);
+}
+
+/**
+ * O corpo desta linha só é entregue depois do OK/toque? Os kinds de
+ * `KINDS_COM_ACEITE` sim, sempre que saíram por template; os de atividade só
+ * se o template usado tem botão `ok` (v2). Fora da janela e sem template
+ * (`templateName` nulo — texto livre), a pessoa já recebeu o corpo.
+ */
+export function entregaPorAceite(kind: string | null | undefined, templateName: string | null | undefined): boolean {
+  if (!kind || !templateName) return false;
+  if (KINDS_COM_ACEITE.includes(kind)) return true;
+  return KINDS_ATIVIDADE.includes(kind) && templatesDeAtividadeComAceite().includes(templateName);
+}
+
+/**
  * O texto do aviso `credit_result` (M3): "A análise de crédito de {lead}
  * saiu: {decisao}. {link}". Dentro da janela é o texto livre; fora, é o que o
  * OK entrega. Só nome/código e rótulo — o emissor nunca manda CPF, renda ou
@@ -497,6 +531,29 @@ const MENSAGEM_V2 = t(
 V2.manual_message = MENSAGEM_V2;
 V2.manual_message_parte = MENSAGEM_V2;
 V2.credit_result = MENSAGEM_V2;
+
+/**
+ * Atividades pendentes v2 (25/10/2026, pedido do Olavo): o botão "Ver
+ * atividades" deixa de abrir o app e vira resposta rápida `ok` — o toque
+ * entrega no chat a lista de atividades (uma linha por atividade, com o link
+ * do negócio), guardada no corpo da linha pelo contractmaker. Mesmo texto e
+ * variáveis do v1 (a Meta já o aceitou; o v1 NÃO muda — o botão diferente
+ * marcaria o v1 como DIVERGENTE no refresh). Enquanto o v2 não é APROVADO, o
+ * envio segue pelo v1. Também "um por janela".
+ */
+const ATIVIDADES_PENDENTES_V2: TemplateDef = {
+  ...t(
+    "max_atividades_pendentes_v2",
+    ATIVIDADES_PENDENTES.body,
+    ATIVIDADES_PENDENTES.vars,
+    ATIVIDADES_PENDENTES.exemplos,
+    VER_ATIVIDADES_OK
+  ),
+  umPorJanela: true,
+};
+V2.activity_assigned = ATIVIDADES_PENDENTES_V2;
+V2.activity_due = ATIVIDADES_PENDENTES_V2;
+V2.activity_due_soon = ATIVIDADES_PENDENTES_V2;
 
 /**
  * Versão 3 — texto de STATUS da transação (decisão do Olavo, 03/10/2026).
