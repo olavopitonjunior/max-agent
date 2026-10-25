@@ -4,12 +4,14 @@ vi.mock("../meta", async (orig) => ({
   ...(await orig<typeof import("../meta")>()),
   sendText: vi.fn(),
   sendTemplate: vi.fn(),
+  sendInteractive: vi.fn(),
   connectionStatus: vi.fn(),
   downloadMedia: vi.fn(),
   markReadTyping: vi.fn(),
 }));
 
 const meta = await import("../meta");
+const { MetaHttpError } = await import("../transport/erro");
 const { provider, capabilities, sendText, sendTemplate, connectionStatus, downloadMedia, markReadTyping } =
   await import("../transport");
 
@@ -17,6 +19,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.mocked(meta.sendText).mockReset();
   vi.mocked(meta.sendTemplate).mockReset();
+  vi.mocked(meta.sendInteractive).mockReset();
   vi.mocked(meta.connectionStatus).mockReset();
   vi.mocked(meta.downloadMedia).mockReset();
   vi.mocked(meta.markReadTyping).mockReset();
@@ -71,6 +74,61 @@ describe("sendText", () => {
   });
 });
 
+describe("sendText com interativo", () => {
+  const interativo = {
+    tipo: "botoes" as const,
+    corpo: "Responda SIM para confirmar ou NÃO para parar.",
+    opcoes: [{ id: "op:SIM", titulo: "SIM" }, { id: "op:NÃO", titulo: "NÃO" }],
+  };
+  const params = { to: "5511999990000", body: "texto numerado", quoteMessageId: "Q", interativo };
+
+  it("na Meta vai como botões, com a citação, e não manda o texto", async () => {
+    vi.mocked(meta.sendInteractive).mockResolvedValue({ messageId: "wamid.I" });
+    expect(await sendText(params)).toEqual({ messageId: "wamid.I" });
+    expect(meta.sendInteractive).toHaveBeenCalledWith({ to: "5511999990000", interativo, quoteMessageId: "Q" });
+    expect(meta.sendText).not.toHaveBeenCalled();
+  });
+
+  it("MAX_INTERACTIVE=off manda o texto numerado", async () => {
+    vi.stubEnv("MAX_INTERACTIVE", "off");
+    vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.T" });
+    await sendText(params);
+    expect(meta.sendInteractive).not.toHaveBeenCalled();
+    expect(meta.sendText).toHaveBeenCalledWith({ to: "5511999990000", body: "texto numerado", quoteMessageId: "Q" });
+  });
+
+  it.each([131056, 130429, 131048, 131005])("400 com código de vazão/conta/restrição (%i) não cai no texto: relança", async (code) => {
+    const erro = new MetaHttpError("/1/messages", 400, JSON.stringify({ error: { code } }));
+    vi.mocked(meta.sendInteractive).mockRejectedValue(erro);
+    await expect(sendText(params)).rejects.toBe(erro);
+    expect(meta.sendText).not.toHaveBeenCalled();
+  });
+
+  it("400 da Meta (forma recusada, nada entregue) cai no texto numerado", async () => {
+    vi.mocked(meta.sendInteractive).mockRejectedValue(new MetaHttpError("/1/messages", 400, '{"error":{"code":131009}}'));
+    vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.T" });
+    expect(await sendText(params)).toEqual({ messageId: "wamid.T" });
+    expect(meta.sendText).toHaveBeenCalledWith({ to: "5511999990000", body: "texto numerado", quoteMessageId: "Q" });
+  });
+
+  it("5xx ou timeout NÃO cai no texto — pode ter sido aceito; a fila decide", async () => {
+    const erro = new MetaHttpError("/1/messages", 503, "");
+    vi.mocked(meta.sendInteractive).mockRejectedValue(erro);
+    await expect(sendText(params)).rejects.toBe(erro);
+    const timeout = new Error("timeout");
+    vi.mocked(meta.sendInteractive).mockRejectedValue(timeout);
+    await expect(sendText(params)).rejects.toBe(timeout);
+    expect(meta.sendText).not.toHaveBeenCalled();
+  });
+
+  it("transporte sem botão (log) manda só o texto", async () => {
+    vi.stubEnv("AGENT_TRANSPORT", "log");
+    const res = await sendText(params);
+    expect(res.messageId).toMatch(/^log-/);
+    expect(meta.sendInteractive).not.toHaveBeenCalled();
+  });
+});
+
 describe("sendTemplate e downloadMedia", () => {
   it("sendTemplate repassa para a Meta", async () => {
     vi.mocked(meta.sendTemplate).mockResolvedValue({ messageId: "wamid.T1" });
@@ -107,6 +165,7 @@ describe("adapter pelo perfil", () => {
       groups: false,
       status: true,
       typing: true,
+      interactive: true,
     });
   });
 

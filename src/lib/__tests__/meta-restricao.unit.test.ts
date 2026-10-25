@@ -24,7 +24,7 @@ vi.mock("../transport", () => ({
   connectionStatus: vi.fn().mockResolvedValue({ connected: true }),
   markReadTyping: vi.fn().mockResolvedValue(true),
   provider: () => "meta",
-  capabilities: () => ({ templates: true, window24h: true, media: true, groups: false, status: true, typing: true }),
+  capabilities: () => ({ templates: true, window24h: true, media: true, groups: false, status: true, typing: true, interactive: true }),
 }));
 vi.mock("../janela24h", () => ({ janelaAberta: vi.fn().mockResolvedValue(true), abrirJanela: vi.fn() }));
 vi.mock("@/graph/graph", () => ({ seedNotification: vi.fn(), runTurn: vi.fn() }));
@@ -155,5 +155,62 @@ describe("recusa Meta 131048/131049", () => {
     expect(typing).not.toHaveBeenCalled();
     expect(runTurn).toHaveBeenCalledTimes(1);
     remetenteConhecido.mockResolvedValue(true);
+  });
+});
+
+describe("resposta do turno com botões", () => {
+  const row = (id: string) => ({
+    id, message_id: `wamid.${id}`, from_phone: "5511999990000", group_id: null,
+    kind: "text", text: "conclui a atividade", media_url: null, mime_type: null, sender_name: null,
+    reply_to_message_id: null, timestamp_ms: null, button_payload: null,
+    reply_text: null, last_send_started_at: null, attempts: 1,
+  });
+
+  it("'Responda SIM … NÃO' vai com os botões; o texto numerado segue junto como fallback", async () => {
+    const { runTurn } = await import("@/graph/graph");
+    const reply = "Posso concluir?\n\nResponda SIM para confirmar ou NÃO para parar.";
+    vi.mocked(runTurn).mockReset().mockResolvedValue({ reply } as never);
+    query.mockReset().mockResolvedValue([]);
+    sendText.mockReset().mockResolvedValue({ messageId: "wamid.R" });
+    expect(await runQueued(row("in-11"))).toBe("done");
+    expect(sendText).toHaveBeenCalledTimes(1);
+    const [params] = sendText.mock.calls[0];
+    expect(params.body).toBe(reply);
+    expect(params.quoteMessageId).toBe("wamid.in-11");
+    expect(params.interativo?.opcoes.map((o: { id: string }) => o.id)).toEqual(["op:SIM", "op:NÃO"]);
+  });
+
+  const toque = (id: string, contexto: string | null) => ({ ...row(id), text: "SIM", button_payload: "op:SIM", reply_to_message_id: contexto });
+
+  it("toque no botão da ÚLTIMA resposta vale como SIM digitado", async () => {
+    const { runTurn } = await import("@/graph/graph");
+    vi.mocked(runTurn).mockReset().mockResolvedValue({ reply: "Feito." } as never);
+    query.mockReset().mockImplementation(async (sql: string) =>
+      sql.includes("SELECT reply_message_id") ? [{ reply_message_id: "wamid.ULTIMA" }] : []);
+    sendText.mockReset().mockResolvedValue({ messageId: "wamid.R3" });
+    expect(await runQueued(toque("in-13", "wamid.ULTIMA"))).toBe("done");
+    expect(runTurn).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runTurn).mock.calls[0][0]).toMatchObject({ text: "SIM", buttonPayload: "op:SIM" });
+  });
+
+  it.each([["wamid.ANTIGA"], [null]])("toque em mensagem antiga (contexto %s) não chega ao grafo", async (contexto) => {
+    const { runTurn } = await import("@/graph/graph");
+    const { TEXTO_BOTAO_ANTIGO } = await import("../inbound");
+    vi.mocked(runTurn).mockReset();
+    query.mockReset().mockImplementation(async (sql: string) =>
+      sql.includes("SELECT reply_message_id") ? [{ reply_message_id: "wamid.ULTIMA" }] : []);
+    sendText.mockReset().mockResolvedValue({ messageId: "wamid.R4" });
+    expect(await runQueued(toque("in-14", contexto))).toBe("done");
+    expect(runTurn).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith({ to: "5511999990000", body: TEXTO_BOTAO_ANTIGO, quoteMessageId: "wamid.in-14" });
+  });
+
+  it("resposta comum sai exatamente como antes, sem a chave interativo", async () => {
+    const { runTurn } = await import("@/graph/graph");
+    vi.mocked(runTurn).mockReset().mockResolvedValue({ reply: "Você tem 2 negócios." } as never);
+    query.mockReset().mockResolvedValue([]);
+    sendText.mockReset().mockResolvedValue({ messageId: "wamid.R2" });
+    expect(await runQueued(row("in-12"))).toBe("done");
+    expect(sendText).toHaveBeenCalledWith({ to: "5511999990000", body: "Você tem 2 negócios.", quoteMessageId: "wamid.in-12" });
   });
 });

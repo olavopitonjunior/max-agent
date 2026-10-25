@@ -7,6 +7,7 @@ import {
   markReadTyping,
   parseWebhook,
   sendTemplate,
+  sendInteractive,
   sendText,
   verifyChallenge,
   verifySignature,
@@ -168,6 +169,50 @@ describe("parseWebhook — mensagens", () => {
     );
     expect(ev.messages.map((m) => [m.kind, m.text, m.buttonPayload])).toEqual([
       ["text", "Locação", "row_locacao"],
+    ]);
+  });
+
+  it("opção do Max (op:) vale o texto digitado; o payload op: fica para a checagem de toque antigo", () => {
+    const ev = parseWebhook(
+      webhook({
+        messages: [
+          {
+            from: "5511987654321",
+            id: "wamid.OP1",
+            timestamp: "1758549600",
+            type: "interactive",
+            interactive: { type: "list_reply", list_reply: { id: "op:2", title: "Em contrato" } },
+          },
+          {
+            from: "5511987654321",
+            id: "wamid.OP2",
+            timestamp: "1758549601",
+            type: "interactive",
+            interactive: { type: "button_reply", button_reply: { id: "op:NÃO", title: "NÃO" } },
+          },
+          {
+            from: "5511987654321",
+            id: "wamid.OP3",
+            timestamp: "1758549602",
+            type: "interactive",
+            interactive: { type: "button_reply", button_reply: { id: "atv:abc", title: "Concluir" } },
+          },
+          {
+            from: "5511987654321",
+            id: "wamid.OP4",
+            timestamp: "1758549603",
+            type: "interactive",
+            interactive: { type: "button_reply", button_reply: { id: "op:", title: "Vazio" } },
+          },
+        ],
+      }),
+      PNID
+    );
+    expect(ev.messages.map((m) => [m.kind, m.text, m.buttonPayload])).toEqual([
+      ["text", "2", "op:2"],
+      ["text", "NÃO", "op:NÃO"],
+      ["text", "Concluir", "atv:abc"],
+      ["text", "Vazio", "op:"],
     ]);
   });
 
@@ -716,6 +761,62 @@ describe("chamadas à Graph API", () => {
     fetchMock.mockResolvedValue(json(200, { messages: [{ id: "w" }] }));
     await sendText({ to: "1", body: "x" });
     expect(fetchMock.mock.calls[0][0]).toContain("/v26.0/");
+  });
+
+  it("sendInteractive botões: type interactive/button, ids e títulos, com citação", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.BTN" }] }));
+    const res = await sendInteractive({
+      to: "5511987654321",
+      quoteMessageId: "wamid.Q",
+      interativo: {
+        tipo: "botoes",
+        corpo: "Posso criar?\n\nResponda SIM para confirmar ou NÃO para parar.",
+        opcoes: [{ id: "op:SIM", titulo: "SIM" }, { id: "op:NÃO", titulo: "NÃO" }],
+      },
+    });
+    expect(res).toEqual({ messageId: "wamid.BTN" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`https://graph.facebook.com/v24.0/${PNID}/messages`);
+    expect(JSON.parse(init.body)).toEqual({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: "5511987654321",
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: "Posso criar?\n\nResponda SIM para confirmar ou NÃO para parar." },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "op:SIM", title: "SIM" } },
+            { type: "reply", reply: { id: "op:NÃO", title: "NÃO" } },
+          ],
+        },
+      },
+      context: { message_id: "wamid.Q" },
+    });
+  });
+
+  it("sendInteractive lista: uma seção, descrição só quando existe, sem citação se não pedida", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.LST" }] }));
+    await sendInteractive({
+      to: "5511987654321",
+      interativo: {
+        tipo: "lista",
+        corpo: "Qual etapa?",
+        botao: "Ver opções",
+        opcoes: [{ id: "op:0", titulo: "Todas as etapas" }, { id: "op:1", titulo: "Em contr…", descricao: "Em contrato longo" }],
+      },
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.context).toBeUndefined();
+    expect(body.interactive).toEqual({
+      type: "list",
+      body: { text: "Qual etapa?" },
+      action: {
+        button: "Ver opções",
+        sections: [{ rows: [{ id: "op:0", title: "Todas as etapas" }, { id: "op:1", title: "Em contr…", description: "Em contrato longo" }] }],
+      },
+    });
   });
 
   describe("markReadTyping", () => {

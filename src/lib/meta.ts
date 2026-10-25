@@ -29,12 +29,14 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { fetchWithTimeout, META_TIMEOUT_MS } from "./http";
 import { log } from "./log";
+import { PREFIXO_OPCAO } from "./interativo";
 import { classificarMeta, MetaHttpError } from "./transport/erro";
 import type {
   BotaoEnviado,
   ConnectionState,
   InboundKind,
   InboundMessage,
+  Interativo,
   StatusCallback,
 } from "./transport/types";
 
@@ -100,6 +102,54 @@ export async function sendText(params: {
       // Sem preview: o link do formulário é o mesmo em toda notificação, e a
       // prévia gigante empurra o texto para fora da tela do celular.
       text: { body: params.body.slice(0, MAX_TEXT_CHARS), preview_url: false },
+      ...(params.quoteMessageId ? { context: { message_id: params.quoteMessageId } } : {}),
+    }),
+  });
+  return { messageId: res.messages?.[0]?.id ?? null };
+}
+
+/**
+ * Botões de resposta (até 3) ou lista (até 10 linhas) — só dentro da janela de
+ * 24h, como o texto livre. Os limites já vêm aplicados por `lib/interativo.ts`;
+ * a Meta recusa com 400 o que passar, e quem chama cai no texto numerado.
+ */
+export async function sendInteractive(params: {
+  to: string;
+  interativo: Interativo;
+  quoteMessageId?: string;
+}): Promise<{ messageId: string | null }> {
+  const i = params.interativo;
+  const interactive =
+    i.tipo === "botoes"
+      ? {
+          type: "button",
+          body: { text: i.corpo },
+          action: { buttons: i.opcoes.map((o) => ({ type: "reply", reply: { id: o.id, title: o.titulo } })) },
+        }
+      : {
+          type: "list",
+          body: { text: i.corpo },
+          action: {
+            button: i.botao,
+            sections: [
+              {
+                rows: i.opcoes.map((o) => ({
+                  id: o.id,
+                  title: o.titulo,
+                  ...(o.descricao ? { description: o.descricao } : {}),
+                })),
+              },
+            ],
+          },
+        };
+  const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
+    method: "POST",
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: params.to,
+      type: "interactive",
+      interactive,
       ...(params.quoteMessageId ? { context: { message_id: params.quoteMessageId } } : {}),
     }),
   });
@@ -564,8 +614,19 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
         : null;
     if (r) {
       kind = "text";
-      text = str(r.title) ?? "";
-      buttonPayload = str(r.id);
+      const id = str(r.id);
+      if (id?.startsWith(PREFIXO_OPCAO) && id.length > PREFIXO_OPCAO.length) {
+        // Opção que o próprio Max ofereceu (`lib/interativo.ts`): o toque vale
+        // o texto que a pessoa digitaria e o SIM continua passando pela
+        // pendência. O payload `op:` fica só para o `runQueued` recusar toque em
+        // mensagem antiga (`context.id` ≠ última resposta); `atv:`/`ok:` não o
+        // reconhecem.
+        text = id.slice(PREFIXO_OPCAO.length);
+        buttonPayload = id;
+      } else {
+        text = str(r.title) ?? "";
+        buttonPayload = id;
+      }
     } else if (isRec(m.interactive.nfm_reply)) {
       // Resposta de WhatsApp Flow: os campos vêm num JSON em string. Sem campo
       // útil, fica `unknown` — o grafo responde frase fixa, sem modelo.
