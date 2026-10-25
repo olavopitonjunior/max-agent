@@ -4,6 +4,7 @@ import {
   canonicalizarWaId,
   connectionStatus,
   downloadMedia,
+  markReadTyping,
   parseWebhook,
   sendTemplate,
   sendText,
@@ -145,6 +146,124 @@ describe("parseWebhook — mensagens", () => {
       ["text", "Sim", "SIM"],
       ["text", "Venda", "b1"],
     ]);
+  });
+
+  it("list_reply vira texto com o título e o id como payload", () => {
+    const ev = parseWebhook(
+      webhook({
+        messages: [
+          {
+            from: "5511987654321",
+            id: "wamid.LST",
+            timestamp: "1758549600",
+            type: "interactive",
+            interactive: {
+              type: "list_reply",
+              list_reply: { id: "row_locacao", title: "Locação", description: "Aluguel" },
+            },
+          },
+        ],
+      }),
+      PNID
+    );
+    expect(ev.messages.map((m) => [m.kind, m.text, m.buttonPayload])).toEqual([
+      ["text", "Locação", "row_locacao"],
+    ]);
+  });
+
+  describe("nfm_reply (resposta de WhatsApp Flow)", () => {
+    const nfm = (id: string, nfm_reply: unknown) =>
+      webhook({
+        messages: [
+          {
+            from: "5511987654321",
+            id,
+            timestamp: "1758549600",
+            type: "interactive",
+            interactive: { type: "nfm_reply", nfm_reply },
+          },
+        ],
+      });
+
+    it("campos preenchidos: texto legível 'campo: valor' por linha, sem flow_token, objeto bruto guardado", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F1", {
+          name: "flow",
+          body: "Sent",
+          response_json: JSON.stringify({
+            flow_token: "TOKEN-SECRETO",
+            nome: "Ana",
+            vazio: "",
+            ausente: null,
+            interesse: ["venda", "locacao"],
+            quartos: 3,
+          }),
+        }),
+        PNID
+      );
+      expect(ev.messages).toHaveLength(1);
+      const m = ev.messages[0];
+      expect(m.kind).toBe("text");
+      expect(m.text).toBe("nome: Ana\ninteresse: venda, locacao\nquartos: 3");
+      expect(m.text).not.toContain("TOKEN-SECRETO");
+      expect(m.flowResponse).toEqual({ nome: "Ana", interesse: ["venda", "locacao"], quartos: 3 });
+      expect(m.buttonPayload ?? null).toBeNull();
+    });
+
+    it("só flow_token: unknown, sem texto", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F2", { response_json: JSON.stringify({ flow_token: "T" }) }),
+        PNID
+      );
+      expect(ev.messages.map((m) => [m.kind, m.text, m.flowResponse])).toEqual([
+        ["unknown", null, undefined],
+      ]);
+    });
+
+    it("campos todos vazios: unknown", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F3", { response_json: JSON.stringify({ flow_token: "T", a: "", b: "  ", c: null }) }),
+        PNID
+      );
+      expect(ev.messages[0].kind).toBe("unknown");
+    });
+
+    it("response_json inválido: unknown, sem lançar", () => {
+      const ev = parseWebhook(nfm("wamid.F4", { response_json: "{nao-e-json" }), PNID);
+      expect(ev.messages.map((m) => [m.kind, m.text])).toEqual([["unknown", null]]);
+    });
+
+    it("response_json que não é objeto (array/string/número): unknown", () => {
+      for (const raw of ["[1,2]", '"texto"', "7", "null"]) {
+        const ev = parseWebhook(nfm("wamid.F5", { response_json: raw }), PNID);
+        expect(ev.messages[0].kind).toBe("unknown");
+      }
+    });
+
+    it("response_json ausente ou não-string: unknown", () => {
+      expect(parseWebhook(nfm("wamid.F6", { name: "flow" }), PNID).messages[0].kind).toBe("unknown");
+      expect(
+        parseWebhook(nfm("wamid.F7", { response_json: { nome: "Ana" } }), PNID).messages[0].kind
+      ).toBe("unknown");
+    });
+
+    it("interativo sem reply nem nfm_reply também é unknown (não vai ao modelo como texto vazio)", () => {
+      const ev = parseWebhook(
+        webhook({
+          messages: [
+            {
+              from: "5511987654321",
+              id: "wamid.I1",
+              timestamp: "1",
+              type: "interactive",
+              interactive: { type: "outro" },
+            },
+          ],
+        }),
+        PNID
+      );
+      expect(ev.messages[0].kind).toBe("unknown");
+    });
   });
 
   it("texto digitado não traz payload — só o toque diz a qual mensagem responde", () => {
@@ -588,6 +707,47 @@ describe("chamadas à Graph API", () => {
     fetchMock.mockResolvedValue(json(200, { messages: [{ id: "w" }] }));
     await sendText({ to: "1", body: "x" });
     expect(fetchMock.mock.calls[0][0]).toContain("/v26.0/");
+  });
+
+  describe("markReadTyping", () => {
+    it("POST /{pnid}/messages com status=read + typing_indicator e o corpo exato", async () => {
+      fetchMock.mockResolvedValue(json(200, { success: true }));
+      expect(await markReadTyping("wamid.IN1")).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`https://graph.facebook.com/v24.0/${PNID}/messages`);
+      expect(init.method).toBe("POST");
+      expect(init.headers.Authorization).toBe("Bearer TOKEN");
+      expect(init.body).toBe(
+        '{"messaging_product":"whatsapp","status":"read","message_id":"wamid.IN1","typing_indicator":{"type":"text"}}'
+      );
+      expect(init.signal).toBeDefined(); // fetchWithTimeout: mesmo prazo dos outros envios
+    });
+
+    it("erro HTTP da Meta: false, sem lançar, e o log não leva token", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockResolvedValue(json(400, { error: { code: 100, message: "bad" } }));
+      await expect(markReadTyping("wamid.IN2")).resolves.toBe(false);
+      const linha = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(linha).toContain("meta.typing_falhou");
+      expect(linha).not.toContain("TOKEN");
+      warn.mockRestore();
+    });
+
+    it("rede caindo (fetch rejeita): false, sem lançar", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockRejectedValue(new Error("ECONNRESET"));
+      await expect(markReadTyping("wamid.IN3")).resolves.toBe(false);
+      warn.mockRestore();
+    });
+
+    it("env ausente: false, sem lançar e sem chamar a rede", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubEnv("META_ACCESS_TOKEN", "");
+      await expect(markReadTyping("wamid.IN4")).resolves.toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
   });
 
   describe("connectionStatus", () => {

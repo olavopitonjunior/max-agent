@@ -1,7 +1,7 @@
 import { captureDispatchFence, DispatchFenceSchema, withCapturedPrivacy, withDeliveryFence, withTransportFence, TransportAcceptedCommitError, type DispatchFence } from "./runtime/delivery-fence";
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
-import { sendText, connectionStatus, type InboundMessage } from "./transport";
+import { sendText, connectionStatus, markReadTyping, type InboundMessage } from "./transport";
 import { falhaDaMensagemMeta, inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
 import { abrirJanela } from "./janela24h";
@@ -343,6 +343,11 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
     let afterReply: (() => Promise<void>) | undefined;
 
     if (reply == null) {
+      // "Lida + digitando…" ANTES do modelo (que leva segundos). Fire-and-forget:
+      // não segura o turn, e `markReadTyping` nunca lança. Só na primeira
+      // tentativa (`attempts` já foi incrementado pelo claim): retentativa não
+      // repete, e a linha duplicada nem chega aqui (o INSERT a descarta).
+      if (row.attempts <= 1) void markReadTyping(row.message_id).catch(() => {});
       const turn = await runTurn(toInboundMessage(row),{dispatchFence});
       reply = turn.reply;
       control = turn.control;

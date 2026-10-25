@@ -22,8 +22,9 @@ vi.mock("../transport", () => ({
   sendText,
   sendTemplate: vi.fn(),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true }),
+  markReadTyping: vi.fn().mockResolvedValue(true),
   provider: () => "meta",
-  capabilities: () => ({ templates: true, window24h: true, media: true, groups: false, status: true }),
+  capabilities: () => ({ templates: true, window24h: true, media: true, groups: false, status: true, typing: true }),
 }));
 vi.mock("../janela24h", () => ({ janelaAberta: vi.fn().mockResolvedValue(true), abrirJanela: vi.fn() }));
 vi.mock("@/graph/graph", () => ({ seedNotification: vi.fn(), runTurn: vi.fn() }));
@@ -97,5 +98,39 @@ describe("recusa Meta 131048/131049", () => {
     expect(sendText).toHaveBeenCalledTimes(1);
     expect(query.mock.calls.some(([sql]) => String(sql).includes("last_send_started_at = NULL"))).toBe(true);
     expect(query.mock.calls.some(([sql, params]) => String(sql).includes("SET status = 'failed'") && String(params[1]).includes(`#${code}`))).toBe(true);
+  });
+
+  /**
+   * "Lida + digitando…" liga no início do turno (antes do modelo), uma vez por
+   * mensagem: a retentativa não repete e o reenvio de resposta pronta não passa
+   * por aqui. Fire-and-forget: a falha do indicador não derruba o turno.
+   */
+  it("inbound liga o digitando uma vez, na primeira tentativa, antes do modelo", async () => {
+    const { markReadTyping } = await import("../transport");
+    const { runTurn } = await import("@/graph/graph");
+    const typing = vi.mocked(markReadTyping);
+    const ordem: string[] = [];
+    typing.mockReset().mockImplementation(async () => { ordem.push("typing"); return true; });
+    vi.mocked(runTurn).mockReset().mockImplementation((async () => { ordem.push("modelo"); return { reply: null }; }) as never);
+    query.mockReset().mockResolvedValue([]);
+    const base = {
+      id: "in-9", message_id: "wamid.in-9", from_phone: "5511999990000", group_id: null,
+      kind: "text", text: "oi", media_url: null, mime_type: null, sender_name: null,
+      reply_to_message_id: null, timestamp_ms: null, button_payload: null,
+      reply_text: null, last_send_started_at: null,
+    };
+
+    expect(await runQueued({ ...base, attempts: 1 })).toBe("done");
+    expect(typing).toHaveBeenCalledTimes(1);
+    expect(typing).toHaveBeenCalledWith("wamid.in-9");
+    expect(ordem).toEqual(["typing", "modelo"]);
+
+    typing.mockClear();
+    expect(await runQueued({ ...base, attempts: 2 })).toBe("done");
+    expect(typing).not.toHaveBeenCalled();
+
+    // Indicador que rejeita não derruba o turno.
+    typing.mockRejectedValue(new Error("boom"));
+    expect(await runQueued({ ...base, attempts: 1 })).toBe("done");
   });
 });

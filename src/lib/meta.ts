@@ -28,6 +28,7 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { fetchWithTimeout, META_TIMEOUT_MS } from "./http";
+import { log } from "./log";
 import { classificarMeta, MetaHttpError } from "./transport/erro";
 import type {
   BotaoEnviado,
@@ -170,6 +171,38 @@ export async function sendTemplate(params: {
  * pública) nunca é confundida com um ID da Meta depois do cutover.
  */
 export const META_MEDIA_PREFIX = "meta:";
+
+/**
+ * Marca a mensagem recebida como lida e liga o "digitando…" (dura até ~25s ou
+ * até a resposta sair). Um POST só, no mesmo `/messages` do envio. Nunca
+ * lança: é cortesia de UX, e uma falha aqui não pode custar o turno. O log
+ * leva só o status/código da Meta, sem token nem telefone.
+ */
+export async function markReadTyping(messageId: string): Promise<boolean> {
+  try {
+    await graph<unknown>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: messageId,
+        typing_indicator: { type: "text" },
+      }),
+    });
+    return true;
+  } catch (err) {
+    log.warn("meta.typing_falhou", {
+      messageId,
+      motivo:
+        err instanceof MetaHttpError
+          ? `http_${err.status}${err.code !== null ? `_#${err.code}` : ""}`
+          : err instanceof Error
+            ? err.name
+            : "erro",
+    });
+    return false;
+  }
+}
 
 /** Mesmo teto da Z-API — amarrado ao limite do transcribe do ImobPro. */
 export const MAX_MEDIA_BYTES = 3 * 1024 * 1024;
@@ -493,6 +526,7 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
   let mediaUrl: string | null = null;
   let mimeType: string | null = null;
   let buttonPayload: string | null = null;
+  let flowResponse: Record<string, unknown> | undefined;
 
   const media = (k: string): Rec | null => (isRec(m[k]) ? (m[k] as Rec) : null);
 
@@ -528,9 +562,21 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
       : isRec(m.interactive.list_reply)
         ? m.interactive.list_reply
         : null;
-    kind = "text";
-    text = r ? (str(r.title) ?? "") : "";
-    buttonPayload = r ? str(r.id) : null;
+    if (r) {
+      kind = "text";
+      text = str(r.title) ?? "";
+      buttonPayload = str(r.id);
+    } else if (isRec(m.interactive.nfm_reply)) {
+      // Resposta de WhatsApp Flow: os campos vêm num JSON em string. Sem campo
+      // útil, fica `unknown` — o grafo responde frase fixa, sem modelo.
+      const flow = lerFlowResponse(m.interactive.nfm_reply.response_json);
+      if (flow) {
+        kind = "text";
+        text = flow.texto;
+        flowResponse = flow.campos;
+      }
+    }
+    // Outro tipo interativo (sem reply nem nfm): `unknown`, mesmo destino.
   }
 
   const ts = Number(m.timestamp);
@@ -548,5 +594,40 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
     senderName: nomes.get(from) ?? null,
     replyToMessageId: ctx,
     buttonPayload,
+    ...(flowResponse ? { flowResponse } : {}),
   };
+}
+
+/**
+ * `interactive.nfm_reply.response_json` → campos preenchidos + texto legível.
+ * O `flow_token` é do transporte, não da pessoa: sai. `null` quando não sobra
+ * campo com valor (JSON inválido, não-objeto, vazio ou só o token).
+ */
+function lerFlowResponse(raw: unknown): { campos: Record<string, unknown>; texto: string } | null {
+  if (typeof raw !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRec(parsed)) return null;
+  const campos: Record<string, unknown> = {};
+  const linhas: string[] = [];
+  for (const [k, v] of Object.entries(parsed)) {
+    if (k === "flow_token") continue;
+    const legivel = valorLegivel(v);
+    if (legivel === "") continue;
+    campos[k] = v;
+    linhas.push(`${k}: ${legivel}`);
+  }
+  return linhas.length > 0 ? { campos, texto: linhas.join("\n") } : null;
+}
+
+function valorLegivel(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) return v.map(valorLegivel).filter(Boolean).join(", ");
+  return JSON.stringify(v);
 }

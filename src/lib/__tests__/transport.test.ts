@@ -6,10 +6,11 @@ vi.mock("../meta", async (orig) => ({
   sendTemplate: vi.fn(),
   connectionStatus: vi.fn(),
   downloadMedia: vi.fn(),
+  markReadTyping: vi.fn(),
 }));
 
 const meta = await import("../meta");
-const { provider, capabilities, sendText, sendTemplate, connectionStatus, downloadMedia } =
+const { provider, capabilities, sendText, sendTemplate, connectionStatus, downloadMedia, markReadTyping } =
   await import("../transport");
 
 afterEach(() => {
@@ -18,6 +19,7 @@ afterEach(() => {
   vi.mocked(meta.sendTemplate).mockReset();
   vi.mocked(meta.connectionStatus).mockReset();
   vi.mocked(meta.downloadMedia).mockReset();
+  vi.mocked(meta.markReadTyping).mockReset();
 });
 
 describe("provider", () => {
@@ -104,6 +106,7 @@ describe("adapter pelo perfil", () => {
       media: true,
       groups: false,
       status: true,
+      typing: true,
     });
   });
 
@@ -174,5 +177,63 @@ describe("adapter pelo perfil", () => {
     vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
     vi.stubEnv("MAX_OUTBOUND_KILL", "true");
     await expect(sendText({ to: "1", body: "x" })).rejects.toThrow("outbound_disabled");
+  });
+});
+
+/**
+ * `markReadTyping` do transporte: só onde há capacidade, só com id real, e
+ * nunca lança — é cortesia de UX no caminho quente do inbound.
+ */
+describe("markReadTyping", () => {
+  it("meta: chama o adapter com o id e devolve o resultado", async () => {
+    vi.mocked(meta.markReadTyping).mockResolvedValue(true);
+    expect(await markReadTyping("wamid.IN1")).toBe(true);
+    expect(meta.markReadTyping).toHaveBeenCalledOnce();
+    expect(meta.markReadTyping).toHaveBeenCalledWith("wamid.IN1");
+  });
+
+  it("newton-bridge (typing=false): não chama a Meta", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    expect(await markReadTyping("wamid.IN1")).toBe(false);
+    expect(meta.markReadTyping).not.toHaveBeenCalled();
+  });
+
+  it("transporte log (typing=false): não chama a Meta", async () => {
+    vi.stubEnv("AGENT_TRANSPORT", "log");
+    expect(await markReadTyping("wamid.IN1")).toBe(false);
+    expect(meta.markReadTyping).not.toHaveBeenCalled();
+  });
+
+  it("MAX_TYPING_INDICATOR=off desliga (qualquer caixa); ausente liga", async () => {
+    vi.mocked(meta.markReadTyping).mockResolvedValue(true);
+    vi.stubEnv("MAX_TYPING_INDICATOR", "off");
+    expect(await markReadTyping("wamid.IN1")).toBe(false);
+    vi.stubEnv("MAX_TYPING_INDICATOR", " OFF ");
+    expect(await markReadTyping("wamid.IN1")).toBe(false);
+    expect(meta.markReadTyping).not.toHaveBeenCalled();
+    vi.stubEnv("MAX_TYPING_INDICATOR", "");
+    expect(await markReadTyping("wamid.IN1")).toBe(true);
+  });
+
+  it.each(["newton:abc123", "playground-req1", "human-req1", ""])(
+    "id sintético/vazio %j não chama a Meta",
+    async (id) => {
+      expect(await markReadTyping(id)).toBe(false);
+      expect(meta.markReadTyping).not.toHaveBeenCalled();
+    }
+  );
+
+  it("adapter que lança: false, sem propagar", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(meta.markReadTyping).mockRejectedValue(new Error("boom"));
+    await expect(markReadTyping("wamid.IN1")).resolves.toBe(false);
+    warn.mockRestore();
+  });
+
+  it("transporte inválido (adapter() lança): false, sem propagar", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubEnv("AGENT_TRANSPORT", "zapi");
+    await expect(markReadTyping("wamid.IN1")).resolves.toBe(false);
+    warn.mockRestore();
   });
 });
