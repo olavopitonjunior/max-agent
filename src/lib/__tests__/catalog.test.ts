@@ -64,11 +64,8 @@ describe("a régua do Olavo (01/10/2026)", () => {
     expect(Object.keys(CATALOGO).sort()).toEqual(
       [
         "activity_assigned",
-        "activity_commented",
-        "activity_completed",
         "activity_due",
         "activity_due_soon",
-        "activity_refused",
         "certidao_batch_complete",
         "certidao_problem",
         "contract_sent",
@@ -571,9 +568,8 @@ describe("atividades pendentes (2026-10-14)", () => {
     ]);
   });
 
-  it("activity_completed tem template PRÓPRIO (família de 25/10/2026), não o aviso neutro de pendentes", () => {
-    expect(templateDoKind("activity_completed")?.name).toBe("max_atividade_andamento");
-    expect(templateDoKind("activity_completed")).not.toBe(templateDoKind("activity_assigned"));
+  it("activity_completed/commented/refused continuam FORA da régua (decisão de 14/10/2026)", () => {
+    for (const k of ["activity_completed", "activity_commented", "activity_refused"]) expect(templateDoKind(k), k).toBeNull();
   });
 });
 
@@ -663,22 +659,18 @@ describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
       params: ["Ana", "RE/MAX Trio", "Comprador preencheu os dados"],
     },
     {
-      kinds: ["certidao_problem", "certidao_batch_complete"],
-      template: "max_certidoes_status",
+      kinds: ["certidao_problem"],
+      template: "max_certidao_atencao",
       botao: "Abrir relatório",
       linha: doSino("Certidão não saiu: Matrícula 12345 - Maria Souza"),
       params: ["Ana", "RE/MAX Trio"],
     },
     {
-      kinds: ["activity_completed", "activity_commented", "activity_refused"],
-      template: "max_atividade_andamento",
-      botao: "Ver atividade",
-      linha: {
-        ...base,
-        title: "Marina Lopes recusou Conferir comprovante do sinal",
-        params: { quem: "Marina Lopes", atividade: "Conferir comprovante do sinal", negocio: "Venda Apto 302", quando: "amanhã" },
-      },
-      params: ["Ana", "RE/MAX Trio", "Venda Apto 302"],
+      kinds: ["certidao_batch_complete"],
+      template: "max_certidoes_concluidas",
+      botao: "Abrir relatório",
+      linha: doSino("Certidões concluídas: Matrícula 12345 - Maria Souza"),
+      params: ["Ana", "RE/MAX Trio"],
     },
   ];
 
@@ -705,7 +697,7 @@ describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
   it("seis templates novos, todos UTILITY, com os nomes esperados", () => {
     const nomes = todosOsTemplates()
       .map((t) => t.name)
-      .filter((n) => /^max_(assinatura_status|proposta_status|negocio_andamento|formulario_andamento|certidoes_status|atividade_andamento)$/.test(n))
+      .filter((n) => /^max_(assinatura_status|proposta_status|negocio_andamento|formulario_andamento|certidao_atencao|certidoes_concluidas)$/.test(n))
       .sort();
     expect(nomes).toEqual(casos.map((c) => c.template).sort());
   });
@@ -718,19 +710,21 @@ describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
       "Contrato enviado para assinatura",
       "em andamento",
     ]);
-    expect(parametrosDoCorpo(templateDoKind("activity_completed")!, sino)).toEqual(["Ana", "RE/MAX Trio", "em andamento"]);
     // Título vazio e org vazia: fallback, nunca "".
     for (const c of casos)
       for (const v of parametrosDoCorpo(templateDoKind(c.kinds[0])!, { recipient_name: " ", org_name: "", title: "", params: null }))
         expect(v.trim()).not.toBe("");
   });
 
-  it("certidões e atividades NÃO levam o título (rótulo da certidão e nome da atividade podem trazer nome de pessoa)", () => {
-    for (const k of ["certidao_problem", "certidao_batch_complete", "activity_completed", "activity_commented", "activity_refused"]) {
+  it("certidões NÃO levam o título (o rótulo da certidão pode trazer nome de pessoa)", () => {
+    for (const k of ["certidao_problem", "certidao_batch_complete"]) {
       expect(templateDoKind(k)!.vars, k).not.toContain("titulo");
+      const ps = parametrosDoCorpo(templateDoKind(k)!, doSino("Certidão não saiu: Matrícula - Maria Souza"));
+      expect(ps.join(" "), k).not.toMatch(/Maria|Matrícula/);
     }
-    const ps = parametrosDoCorpo(templateDoKind("certidao_problem")!, doSino("Certidão não saiu: Matrícula - Maria Souza"));
-    expect(ps.join(" ")).not.toMatch(/Maria|Matrícula/);
+    // Texto concreto (S1 do review): cada um diz o que aconteceu, nunca "há uma atualização".
+    expect(templateDoKind("certidao_problem")!.body).toMatch(/precisa de atenção/);
+    expect(templateDoKind("certidao_batch_complete")!.body).toMatch(/foi concluído/);
   });
 
   it("texto de STATUS, sem tom de lembrete/convite (o que levou outros templates à MARKETING)", () => {
@@ -746,15 +740,6 @@ describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
     expect(templateDoKind("proposal_delivered")!.name).toBe("max_proposta_entregue");
     expect(templateDoKind("activity_assigned")!.name).toBe("max_atividades_pendentes_v2");
     expect(templateDoKind("proposal_completed")!.paramsObrigatorios).toEqual(["proposta"]);
-  });
-
-  it("os avisos de atividade novos NÃO entram em 'um por janela' nem no aceite (cada evento é distinto)", () => {
-    for (const k of ["activity_completed", "activity_commented", "activity_refused"]) {
-      expect(templateDoKind(k)!.umPorJanela, k).toBeUndefined();
-      expect(KINDS_ATIVIDADE).not.toContain(k);
-      expect(entregaPorAceite(k, templateDoKind(k)!.name), k).toBe(false);
-    }
-    expect(templatesDeAtividadeComAceite()).not.toContain("max_atividade_andamento");
   });
 
   it("deal_form_reminder reaproveita TODAS as versões do form_reminder (nenhum template novo)", () => {

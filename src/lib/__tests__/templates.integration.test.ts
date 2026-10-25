@@ -92,9 +92,15 @@ d("templates (Postgres real)", () => {
     expect(clicked_at).toBeNull();
   });
 
-  it("/r/<id>: sem link, id inexistente ou id que não é UUID — 404", async () => {
+  /** Linha sem link (aviso sem página própria, ex.: locação): o botão do template leva à home, não a 404. */
+  it("/r/<id>: linha existente sem link vai para a home", async () => {
     const semLink = await linha("k-tpl-nolink", null);
-    expect((await abrir(semLink)).status).toBe(404);
+    const res = await abrir(semLink);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("https://imobpro.ia.br/");
+  });
+
+  it("/r/<id>: id inexistente ou id que não é UUID — 404", async () => {
     expect((await abrir("3f2b8c1e-9a4d-4e2f-8b1a-2c3d4e5f6a7b")).status).toBe(404);
     expect((await abrir("1 OR 1=1")).status).toBe(404);
   });

@@ -19,8 +19,9 @@
  * (`portal_notice_parte`) e, desde 25/10/2026, SEIS templates de "família" para
  * os avisos da equipe que antes morriam em silêncio com a janela fechada
  * (`fora_da_regua`: 54 de 126 notificações em 30 dias): assinatura de
- * envelope, status de proposta, andamento do negócio, andamento de formulário,
- * certidões e atividades (ver `FAMILIAS` abaixo). Nenhum texto cita o nome
+ * envelope, status de proposta, andamento do negócio, andamento de formulário
+ * e certidões (pendência e lote concluído) — ver `FAMILIAS` abaixo. Andamento
+ * de atividade (`activity_completed` etc.) continua FORA, pela decisão de 14/10. Nenhum texto cita o nome
  * do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
  * janela de 24h e, fora dela, não sai pelo WhatsApp (`templateDoKind` devolve
  * `null` e o outbox desiste). Não existe mais template genérico — ele fazia
@@ -264,12 +265,12 @@ const PORTAL_AVISO_PARTE = t(
  *    `proposta`/`quem` NÃO são obrigatórios aqui (ao contrário dos
  *    `proposal_*` da régua de propostas) — não há de onde tirar;
  *  · avisos de evento do negócio (`stage_change`, `contract_sent`,
- *    `portal_comment`) e de atividade (`activity_*`) trazem `negocio`;
+ *    `portal_comment`) trazem `negocio`;
  *    sem ele cai no fallback "em andamento".
  * Nada de dado da parte: o título é texto do sistema ("Contrato assinado",
- * "Status do negócio atualizado"), nunca o nome do cliente. Certidões e
- * atividades NÃO levam o título de propósito — o rótulo da certidão e o nome
- * da atividade podem trazer o nome de alguém.
+ * "Status do negócio atualizado"), nunca o nome do cliente. Certidões NÃO
+ * levam o título de propósito — o rótulo da certidão pode trazer o nome de
+ * alguém.
  *
  * O envio continua só depois de `wa_template` dizer APPROVED (o portão do
  * outbox não mudou). Enquanto a Meta analisa, o aviso fica `template_pendente`
@@ -308,21 +309,21 @@ const FAMILIAS = {
     ["Ana", "RE/MAX Trio", "Comprador preencheu os dados"],
     { tipo: "url", texto: "Abrir formulário" }
   ),
-  /** certidao_problem / certidao_batch_complete. Texto fixo: o rótulo da certidão pode trazer nome de pessoa. */
-  certidoes: t(
-    "max_certidoes_status",
-    "Olá, {{1}}! Status de certidões na {{2}}: há uma atualização no relatório de certidões. Os detalhes estão no botão abaixo.",
+  /** certidao_problem. Texto fixo: o rótulo da certidão pode trazer nome de pessoa. */
+  certidaoAtencao: t(
+    "max_certidao_atencao",
+    "Olá, {{1}}! Status de certidões na {{2}}: uma certidão do relatório precisa de atenção. Os detalhes estão no botão abaixo.",
     [NOME, ORG],
     ["Ana", "RE/MAX Trio"],
     { tipo: "url", texto: "Abrir relatório" }
   ),
-  /** activity_completed / activity_commented / activity_refused. Texto fixo: o título traz o nome da atividade e de quem agiu. */
-  atividade: t(
-    "max_atividade_andamento",
-    "Olá, {{1}}! Atualização de atividade na {{2}}: há um novo andamento em uma atividade do negócio {{3}}. Os detalhes estão no botão abaixo.",
-    [NOME, ORG, NEGOCIO],
-    ["Ana", "RE/MAX Trio", "Venda Apto 302"],
-    { tipo: "url", texto: "Ver atividade" }
+  /** certidao_batch_complete. Texto fixo, pelo mesmo motivo. */
+  certidoesConcluidas: t(
+    "max_certidoes_concluidas",
+    "Olá, {{1}}! Status de certidões na {{2}}: o lote de certidões solicitado foi concluído. Os detalhes estão no botão abaixo.",
+    [NOME, ORG],
+    ["Ana", "RE/MAX Trio"],
+    { tipo: "url", texto: "Abrir relatório" }
   ),
 };
 
@@ -502,8 +503,8 @@ for (const kind of [
 ])
   CATALOGO[kind] = FAMILIAS.negocio;
 CATALOGO.participant_completed = FAMILIAS.formulario;
-for (const kind of ["certidao_problem", "certidao_batch_complete"]) CATALOGO[kind] = FAMILIAS.certidoes;
-for (const kind of ["activity_completed", "activity_commented", "activity_refused"]) CATALOGO[kind] = FAMILIAS.atividade;
+CATALOGO.certidao_problem = FAMILIAS.certidaoAtencao;
+CATALOGO.certidao_batch_complete = FAMILIAS.certidoesConcluidas;
 
 // Sem vendedor cadastrado, a assinatura do proponente NÃO significa que
 // todos assinaram. O mesmo fato usa o template parcial, nunca completed.
