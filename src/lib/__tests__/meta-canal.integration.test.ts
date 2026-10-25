@@ -372,7 +372,7 @@ d("canal Meta (Postgres real)", () => {
      * Fora da janela ele desiste na hora — represar seria esperar uma
      * aprovação que nunca vem.
      */
-    it.each([["stage_change"], [null]])(
+    it.each([["deal_sla_breached"], [null]])(
       "janela fechada, tipo FORA DA RÉGUA (%s): não chama a Meta e falha com o motivo",
       async (kind) => {
         await linhaVencida(`k-fora-${kind}`, kind);
@@ -391,7 +391,7 @@ d("canal Meta (Postgres real)", () => {
       await query(`INSERT INTO conversation_window (phone, last_inbound_at) VALUES ($1, now() - interval '1 hour')`, [
         PHONE,
       ]);
-      await linhaVencida("k-fora-aberta", "stage_change");
+      await linhaVencida("k-fora-aberta", "deal_sla_breached");
       const totals = await dispatchDue();
       expect(totals.sent).toBe(1);
       expect(metaSend).toHaveBeenCalledTimes(1);

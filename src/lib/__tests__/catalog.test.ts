@@ -66,9 +66,19 @@ describe("a régua do Olavo (01/10/2026)", () => {
         "activity_assigned",
         "activity_due",
         "activity_due_soon",
+        "certidao_batch_complete",
+        "certidao_problem",
+        "contract_sent",
         "contract_signed",
         "contract_signed_parte",
         "credit_result",
+        "deal_contract_sent",
+        "deal_form_reminder",
+        "deal_portal_comment",
+        "deal_stage_change",
+        "envelope_email_failed",
+        "envelope_refused",
+        "envelope_signed",
         "form_completed",
         "form_completed_parte",
         "form_reminder",
@@ -76,14 +86,21 @@ describe("a régua do Olavo (01/10/2026)", () => {
         "manual_message",
         "manual_message_parte",
         "onboarding_pending",
+        "participant_completed",
+        "portal_comment",
         "portal_notice_parte",
+        "proposal_aceite_not_delivered",
+        "proposal_accepted_party",
         "proposal_completed",
         "proposal_delivered",
+        "proposal_email_failed",
         "proposal_expired",
         "proposal_refused",
+        "proposal_send_canceled",
         "proposal_sent",
         "proposal_signed_proponente",
         "proposal_awaiting_decision",
+        "stage_change",
         "support_handoff",
         "survey_invite",
         "survey_invite_parte",
@@ -108,9 +125,11 @@ describe("a régua do Olavo (01/10/2026)", () => {
 
   it("fora da régua não tem template — nem genérico", () => {
     for (const kind of [
-      "stage_change",
-      "contract_sent",
       "deal_sla_breached",
+      "charge_paid",
+      "dual_approval_pending",
+      "transfer_done",
+      "certidao_data_missing",
       "charge_created",
       "manual_documentos",
       "qualquer_coisa",
@@ -338,7 +357,7 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
     for (const k of ["contract_signed", "contract_signed_parte", "form_completed_parte", "survey_invite"]) {
       expect(templatesDoKind(k), k).toHaveLength(1);
     }
-    expect(templatesDoKind("stage_change")).toEqual([]);
+    expect(templatesDoKind("deal_sla_breached")).toEqual([]);
   });
 
   it(
@@ -549,8 +568,8 @@ describe("atividades pendentes (2026-10-14)", () => {
     ]);
   });
 
-  it("activity_completed fica FORA da régua (só texto livre na janela de 24h)", () => {
-    expect(templateDoKind("activity_completed")).toBeNull();
+  it("activity_completed/commented/refused continuam FORA da régua (decisão de 14/10/2026)", () => {
+    for (const k of ["activity_completed", "activity_commented", "activity_refused"]) expect(templateDoKind(k), k).toBeNull();
   });
 });
 
@@ -588,5 +607,165 @@ describe("renderMessage: link no texto livre", () => {
   it("corpo sem link: o link_url vai em parágrafo próprio (controle)", () => {
     expect(renderMessage({ ...base, body: "A proposta chegou ao destinatário." })).toBe(
       "Oi, Olavo! *Proposta entregue*\n\nA proposta chegou ao destinatário.\n\nhttps://x.test/pipeline/propostas/p1\n\n— Newcore");
+  });
+});
+
+/**
+ * Famílias de avisos da equipe (25/10/2026): 54 de 126 notificações dos
+ * últimos 30 dias morreram em `fora_da_regua` porque o kind não tinha template.
+ * Cada kind abaixo tem que sair do 24h com um template; os params saem de um
+ * payload realista do contractmaker (`user-channels.ts` / `deal-events.ts` /
+ * `activities/notify.ts`).
+ */
+describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
+  const base = { recipient_name: "Ana Maria Corretora", org_name: "RE/MAX Trio" };
+  /** O sino (`user-channels.ts`) manda só título/org/nome/link — nunca `params`. */
+  const doSino = (title: string) => ({ ...base, title, params: null });
+
+  const casos: Array<{
+    kinds: string[];
+    template: string;
+    botao: string;
+    linha: { recipient_name: string; org_name: string; title: string; params: Record<string, string> | null };
+    params: string[];
+  }> = [
+    {
+      kinds: ["envelope_signed", "envelope_refused", "envelope_email_failed"],
+      template: "max_assinatura_status",
+      botao: "Abrir negócio",
+      linha: doSino("Assinatura recusada"),
+      params: ["Ana", "RE/MAX Trio", "Assinatura recusada"],
+    },
+    {
+      kinds: ["proposal_accepted_party", "proposal_send_canceled", "proposal_aceite_not_delivered", "proposal_email_failed"],
+      template: "max_proposta_status",
+      botao: "Abrir proposta",
+      linha: doSino("Parte aceitou a proposta"),
+      params: ["Ana", "RE/MAX Trio", "Parte aceitou a proposta"],
+    },
+    {
+      // Motor de eventos do negócio (com `negocio`/`etapa`) e o sino (sem nada).
+      kinds: ["stage_change", "deal_stage_change", "contract_sent", "deal_contract_sent", "portal_comment", "deal_portal_comment"],
+      template: "max_negocio_andamento",
+      botao: "Abrir negócio",
+      linha: { ...base, title: "Status do negócio atualizado", params: { negocio: "Venda Apto 302", etapa: "Assinatura" } },
+      params: ["Ana", "RE/MAX Trio", "Status do negócio atualizado", "Venda Apto 302"],
+    },
+    {
+      kinds: ["participant_completed"],
+      template: "max_formulario_andamento",
+      botao: "Abrir formulário",
+      linha: doSino("Comprador preencheu os dados"),
+      params: ["Ana", "RE/MAX Trio", "Comprador preencheu os dados"],
+    },
+    {
+      kinds: ["certidao_problem"],
+      template: "max_certidao_atencao",
+      botao: "Abrir relatório",
+      linha: doSino("Certidão não saiu: Matrícula 12345 - Maria Souza"),
+      params: ["Ana", "RE/MAX Trio"],
+    },
+    {
+      kinds: ["certidao_batch_complete"],
+      template: "max_certidoes_concluidas",
+      botao: "Abrir relatório",
+      linha: doSino("Certidões concluídas: Matrícula 12345 - Maria Souza"),
+      params: ["Ana", "RE/MAX Trio"],
+    },
+  ];
+
+  it.each(casos.flatMap((c) => c.kinds.map((k) => [k, c] as const)))("%s sai por template na família certa", (kind, c) => {
+    const def = templateDoKind(kind);
+    expect(def, kind).not.toBeNull();
+    expect(def!.name).toBe(c.template);
+    expect(def!.category).toBe("UTILITY");
+    expect(def!.lang).toBe("pt_BR");
+    // Uma só versão: nada de v2/v3 para uma família nova.
+    expect(templatesDoKind(kind).map((d) => d.name)).toEqual([c.template]);
+    // Sem `paramsObrigatorios`: o sino não manda `proposta`/`quem`; exigir = continuar perdendo o aviso.
+    expect(def!.paramsObrigatorios).toBeUndefined();
+    expect(templateUsavel(def!, c.linha)).toBe(true);
+    expect(botoesEmOrdem(def!.botao)).toEqual([{ tipo: "url", texto: c.botao }]);
+    expect(botoesDaLinha(def!, "r1")).toEqual([{ tipo: "url", param: "r1" }]);
+    expect(parametrosDoCorpo(def!, c.linha)).toEqual(c.params);
+  });
+
+  it("nenhum kind de parte (`*_parte`) usa template de família: família é só para a equipe", () => {
+    const familias = new Set(casos.map((c) => c.template));
+    for (const k of Object.keys(CATALOGO).filter((k) => k.endsWith("_parte")))
+      expect(familias.has(templateDoKind(k)!.name), k).toBe(false);
+  });
+
+  it("os kinds da mesma família compartilham o MESMO template (um para submeter à Meta)", () => {
+    for (const c of casos) for (const k of c.kinds) expect(templateDoKind(k), k).toBe(templateDoKind(c.kinds[0]));
+  });
+
+  it("seis templates novos, todos UTILITY, com os nomes esperados", () => {
+    const nomes = todosOsTemplates()
+      .map((t) => t.name)
+      .filter((n) => /^max_(assinatura_status|proposta_status|negocio_andamento|formulario_andamento|certidao_atencao|certidoes_concluidas)$/.test(n))
+      .sort();
+    expect(nomes).toEqual(casos.map((c) => c.template).sort());
+  });
+
+  it("sem params (sino): `negocio` cai no fallback e nenhum parâmetro sai vazio", () => {
+    const sino = { ...base, title: "Contrato enviado para assinatura", params: null };
+    expect(parametrosDoCorpo(templateDoKind("deal_contract_sent")!, sino)).toEqual([
+      "Ana",
+      "RE/MAX Trio",
+      "Contrato enviado para assinatura",
+      "em andamento",
+    ]);
+    // Título vazio e org vazia: fallback, nunca "".
+    for (const c of casos)
+      for (const v of parametrosDoCorpo(templateDoKind(c.kinds[0])!, { recipient_name: " ", org_name: "", title: "", params: null }))
+        expect(v.trim()).not.toBe("");
+  });
+
+  it("certidões NÃO levam o título (o rótulo da certidão pode trazer nome de pessoa)", () => {
+    for (const k of ["certidao_problem", "certidao_batch_complete"]) {
+      expect(templateDoKind(k)!.vars, k).not.toContain("titulo");
+      const ps = parametrosDoCorpo(templateDoKind(k)!, doSino("Certidão não saiu: Matrícula - Maria Souza"));
+      expect(ps.join(" "), k).not.toMatch(/Maria|Matrícula/);
+    }
+    // Texto concreto (S1 do review): cada um diz o que aconteceu, nunca "há uma atualização".
+    expect(templateDoKind("certidao_problem")!.body).toMatch(/precisa de atenção/);
+    expect(templateDoKind("certidao_batch_complete")!.body).toMatch(/foi concluído/);
+  });
+
+  it("texto de STATUS, sem tom de lembrete/convite (o que levou outros templates à MARKETING)", () => {
+    for (const c of casos) {
+      const def = templateDoKind(c.kinds[0])!;
+      expect(def.body, def.name).toMatch(/^Olá, \{\{1\}\}! (Status|Andamento|Atualização) /);
+      expect(def.body, def.name).not.toMatch(/ainda|incomplet|continue|lembrete|aproveite|não perca|responda|oferta/i);
+    }
+  });
+
+  it("não afeta o que já era da régua: mesmos templates e botões dos kinds antigos", () => {
+    expect(templateDoKind("form_completed")!.name).toBe("max_formulario_concluido_v2");
+    expect(templateDoKind("proposal_delivered")!.name).toBe("max_proposta_entregue");
+    expect(templateDoKind("activity_assigned")!.name).toBe("max_atividades_pendentes_v2");
+    expect(templateDoKind("proposal_completed")!.paramsObrigatorios).toEqual(["proposta"]);
+  });
+
+  it("deal_form_reminder reaproveita TODAS as versões do form_reminder (nenhum template novo)", () => {
+    expect(templatesDoKind("deal_form_reminder").map((d) => d.name)).toEqual(templatesDoKind("form_reminder").map((d) => d.name));
+    expect(templatesDoKind("deal_form_reminder").map((d) => d.name)).toEqual([
+      "max_formulario_pendente_v3",
+      "max_formulario_pendente_v2",
+      "max_formulario_pendente",
+    ]);
+    // Do sino não vem `negocio`: o v3 ("Status do negócio {{2}} …") cai no fallback e ainda lê bem.
+    expect(parametrosDoCorpo(templateDoKind("deal_form_reminder")!, doSino("Lembrete: formulário pendente"))).toEqual([
+      "Ana",
+      "em andamento",
+      "RE/MAX Trio",
+    ]);
+  });
+
+  it("kinds fora da régua continuam sem template — nem as famílias viram genérico", () => {
+    for (const k of ["deal_sla_breached", "charge_paid", "charge_overdue", "dual_approval_pending", "transfer_failed", "certidao_data_missing", "captacao_vencida", "qualquer_coisa"]) {
+      expect(templatesDoKind(k), k).toEqual([]);
+    }
   });
 });

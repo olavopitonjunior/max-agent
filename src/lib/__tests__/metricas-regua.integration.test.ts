@@ -108,12 +108,12 @@ d("métricas da régua — banco do Max (Postgres real)", () => {
     // Não contam: outra org, fora do período, fora da régua.
     await linha({ org: OUTRA, kind: "form_completed", entrega: null });
     await linha({ kind: "form_completed", entrega: null, criado: "2026-04-05T12:00:00Z" });
-    await linha({ kind: "stage_change", entrega: null });
+    await linha({ kind: "deal_sla_breached", entrega: null });
     // Guardrail: fora da régua que saiu por template — com kind e com kind NULL;
     // e uma tentativa que NÃO saiu (não é paga).
-    await linha({ kind: "stage_change", template: "max_formulario_concluido" });
+    await linha({ kind: "deal_sla_breached", template: "max_formulario_concluido" });
     await linha({ kind: null, template: "max_formulario_concluido" });
-    await linha({ kind: "stage_change", status: "pending", enviado: null, template: "max_formulario_concluido" });
+    await linha({ kind: "deal_sla_breached", status: "pending", enviado: null, template: "max_formulario_concluido" });
     // G1 duplicados: o MESMO aviso duas vezes em 1 minuto, com o id do mais
     // antigo MAIOR (UUID não é cronológico).
     await linha({ kind: "contract_signed", phone: "5511900088001", body: "dup", id: "zzzz-antigo", enviado: "2026-03-11T10:00:00Z" });
