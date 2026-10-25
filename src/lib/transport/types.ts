@@ -38,6 +38,12 @@ export interface InboundMessage {
    * quando não é toque em botão, e o texto visível continua em `text`.
    */
   buttonPayload?: string | null;
+  /**
+   * Campos de uma resposta de WhatsApp Flow (`nfm_reply`), sem o `flow_token`.
+   * O `text` já traz a versão legível; este é o objeto bruto. Opcional e
+   * ainda sem consumidor: não é persistido na fila.
+   */
+  flowResponse?: Record<string, unknown>;
 }
 
 /** Botão preenchido na hora do envio, na ordem em que o template os declara. */
@@ -98,6 +104,8 @@ export interface TransportCapabilities {
   media: boolean;
   groups: boolean;
   status: boolean;
+  /** Mark-as-read + "digitando…" ao receber (Meta). */
+  typing: boolean;
 }
 
 export interface TransportAdapter {
@@ -112,6 +120,11 @@ export interface TransportAdapter {
     bodyParams: string[];
     botoes: BotaoEnviado[];
   }): Promise<SendResult>;
+  /**
+   * Marca a mensagem recebida como lida e mostra "digitando…". Ausente quando
+   * `capabilities.typing` é `false`. Nunca lança; `false` = não foi.
+   */
+  markReadTyping?(messageId: string): Promise<boolean>;
   connectionStatus(): Promise<ConnectionState>;
   downloadMedia(ref: string): Promise<{ data: Buffer; contentType: string | null } | null>;
 }

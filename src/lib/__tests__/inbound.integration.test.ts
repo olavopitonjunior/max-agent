@@ -19,6 +19,7 @@ vi.mock("../meta", async (orig) => ({
   ...(await orig<typeof import("../meta")>()),
   sendText: vi.fn().mockResolvedValue({ messageId: "REPLY-MID" }),
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
+  markReadTyping: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock("@/graph/graph", () => ({
@@ -41,11 +42,12 @@ const { enqueueInbound, sweepInbound, processInboundNow, podarTextoDaFila, TEXTO
   "../inbound"
 );
 const { query, db } = await import("../db");
-const { sendText, connectionStatus } = await import("../meta");
+const { sendText, connectionStatus, markReadTyping } = await import("../meta");
 const { MetaHttpError } = await import("../transport/erro");
 const { observeConnection } = await import("../connection");
 const { runTurn } = await import("@/graph/graph");
 
+const typing = markReadTyping as unknown as ReturnType<typeof vi.fn>;
 const sent = sendText as unknown as ReturnType<typeof vi.fn>;
 const turn = runTurn as unknown as ReturnType<typeof vi.fn>;
 const status = connectionStatus as unknown as ReturnType<typeof vi.fn>;
@@ -118,8 +120,13 @@ d("inbound_queue (Postgres real)", () => {
   });
 
   it("processa, responde e fecha o laço", async () => {
-    const r = await enqueueInbound(msg());
+    typing.mockClear();
+    const m = msg();
+    const r = await enqueueInbound(m);
     if (r.status !== "queued") throw new Error("esperava queued");
+    // Enfileirar (inclusive a duplicata) não liga o "digitando…": só o turno.
+    await enqueueInbound(m);
+    expect(typing).not.toHaveBeenCalled();
 
     await processInboundNow(r.id);
 
@@ -127,6 +134,8 @@ d("inbound_queue (Postgres real)", () => {
     expect(row.status).toBe("done");
     expect(row.reply_message_id).toBe("REPLY-MID");
     expect(sent).toHaveBeenCalledTimes(1);
+    expect(typing).toHaveBeenCalledTimes(1);
+    expect(typing).toHaveBeenCalledWith(m.messageId);
   });
 
   /**

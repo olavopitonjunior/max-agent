@@ -89,8 +89,10 @@ describe("newtonBridgeAdapter: capacidades", () => {
       media: false,
       groups: true,
       status: false,
+      typing: false,
     });
     expect(newtonBridgeAdapter.sendTemplate).toBeUndefined();
+    expect(newtonBridgeAdapter.markReadTyping).toBeUndefined();
   });
 
   it("connectionStatus falha aberto e downloadMedia não baixa nada", async () => {

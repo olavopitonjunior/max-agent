@@ -34,7 +34,7 @@ function config(): { url: string; token: string } {
 
 export const newtonBridgeAdapter: TransportAdapter = {
   name: "newton-bridge",
-  capabilities: { templates: false, window24h: false, media: false, groups: true, status: false },
+  capabilities: { templates: false, window24h: false, media: false, groups: true, status: false, typing: false },
   async sendText({ to, body, quoteMessageId }) {
     if (!DESTINO.test(to)) throw new Error("newton_bridge_destino_invalido");
     const { url, token } = config();

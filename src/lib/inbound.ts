@@ -1,13 +1,14 @@
 import { captureDispatchFence, DispatchFenceSchema, withCapturedPrivacy, withDeliveryFence, withTransportFence, TransportAcceptedCommitError, type DispatchFence } from "./runtime/delivery-fence";
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
-import { sendText, connectionStatus, type InboundMessage } from "./transport";
+import { sendText, connectionStatus, markReadTyping, type InboundMessage } from "./transport";
 import { falhaDaMensagemMeta, inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
 import { abrirJanela } from "./janela24h";
 import { log } from "./log";
 import { redigir, CAMPOS_DA_AUDITORIA, redigirCredito } from "./pii";
 import { runTurn } from "@/graph/graph";
+import { remetenteConhecido } from "./identity";
 
 /**
  * Fila de ENTRADA — o espelho do outbox, do outro lado da conversa.
@@ -343,6 +344,13 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
     let afterReply: (() => Promise<void>) | undefined;
 
     if (reply == null) {
+      // "Lida + digitando…" ANTES do modelo (que leva segundos). Fire-and-forget:
+      // não segura o turn, e `markReadTyping` nunca lança. Só na primeira
+      // tentativa (`attempts` já foi incrementado pelo claim): retentativa não
+      // repete, e a linha duplicada nem chega aqui (o INSERT a descarta).
+      // Só para remetente já conhecido (consulta local, fail-closed): número
+      // desconhecido não pode ver "lida" e ficar sem resposta.
+      if (row.attempts <= 1 && await remetenteConhecido(row.from_phone)) void markReadTyping(row.message_id).catch(() => {});
       const turn = await runTurn(toInboundMessage(row),{dispatchFence});
       reply = turn.reply;
       control = turn.control;

@@ -15,9 +15,10 @@ import { currentExecution } from "../runtime/context";
  */
 
 import { deployProfile } from "../deploy-profile";
+import { log } from "../log";
 import { logAdapter } from "./adapters/log";
 import { metaAdapter } from "./adapters/meta";
-import { newtonBridgeAdapter } from "./adapters/newton-bridge";
+import { NEWTON_SYNTHETIC_PREFIX, newtonBridgeAdapter } from "./adapters/newton-bridge";
 import type {
   BotaoEnviado,
   ConnectionState,
@@ -143,4 +144,27 @@ export async function downloadMedia(
   ref: string
 ): Promise<{ data: Buffer; contentType: string | null } | null> {
   return adapter().downloadMedia(ref);
+}
+
+/** Prefixos de id que o código fabrica (não existem na Meta): Newton, playground e handoff. */
+const SINTETICOS = [NEWTON_SYNTHETIC_PREFIX, "playground-", "human-"];
+
+/**
+ * Mark-as-read + "digitando…" para a mensagem que acabou de chegar. Só onde o
+ * provedor sabe fazer (`capabilities.typing`) e só com id real: o do Newton é
+ * sintético (`newton:` e afins) e a Meta devolveria erro. `MAX_TYPING_INDICATOR=off`
+ * desliga (padrão ligado). Nunca lança nem espera quem chama: `false` = não
+ * foi, por qualquer motivo.
+ */
+export async function markReadTyping(messageId: string): Promise<boolean> {
+  try {
+    if ((process.env.MAX_TYPING_INDICATOR ?? "").trim().toLowerCase() === "off") return false;
+    if (!messageId || SINTETICOS.some((p) => messageId.startsWith(p))) return false;
+    const a = adapter();
+    if (!a.capabilities.typing || !a.markReadTyping) return false;
+    return await a.markReadTyping(messageId);
+  } catch (err) {
+    log.warn("transport.typing_falhou", { motivo: err instanceof Error ? err.name : "erro" });
+    return false;
+  }
 }
