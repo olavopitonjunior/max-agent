@@ -32,7 +32,7 @@ export const DESTINO_SEM_LINK = `https://${DOMINIO}/`;
  * 404 (dado ruim não vira redirecionamento).
  */
 export function destinoDaLinha(link: string | null | undefined): URL | null {
-  if (!link) return new URL(DESTINO_SEM_LINK);
+  if (!link?.trim()) return new URL(DESTINO_SEM_LINK);
   return destinoPermitido(link);
 }
 

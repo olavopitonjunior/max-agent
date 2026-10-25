@@ -690,6 +690,12 @@ describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
     expect(parametrosDoCorpo(def!, c.linha)).toEqual(c.params);
   });
 
+  it("nenhum kind de parte (`*_parte`) usa template de família: família é só para a equipe", () => {
+    const familias = new Set(casos.map((c) => c.template));
+    for (const k of Object.keys(CATALOGO).filter((k) => k.endsWith("_parte")))
+      expect(familias.has(templateDoKind(k)!.name), k).toBe(false);
+  });
+
   it("os kinds da mesma família compartilham o MESMO template (um para submeter à Meta)", () => {
     for (const c of casos) for (const k of c.kinds) expect(templateDoKind(k), k).toBe(templateDoKind(c.kinds[0]));
   });

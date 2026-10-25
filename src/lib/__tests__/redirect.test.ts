@@ -44,7 +44,7 @@ describe("ehIdDeOutbox", () => {
 });
 
 describe("destinoDaLinha — linha existente", () => {
-  it.each([null, undefined, ""])("sem link (%s) vai para a home", (link) => {
+  it.each([null, undefined, "", "  "])("sem link (%s) vai para a home", (link) => {
     expect(destinoDaLinha(link)?.toString()).toBe(DESTINO_SEM_LINK);
   });
   it("link válido segue o link", () => {

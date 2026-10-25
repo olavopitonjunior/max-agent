@@ -21,8 +21,8 @@
  * (`fora_da_regua`: 54 de 126 notificações em 30 dias): assinatura de
  * envelope, status de proposta, andamento do negócio, andamento de formulário
  * e certidões (pendência e lote concluído) — ver `FAMILIAS` abaixo. Andamento
- * de atividade (`activity_completed` etc.) continua FORA, pela decisão de 14/10. Nenhum texto cita o nome
- * do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
+ * de atividade (`activity_completed` etc.) continua FORA, pela decisão de 14/10.
+ * Nenhum texto cita o nome do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
  * janela de 24h e, fora dela, não sai pelo WhatsApp (`templateDoKind` devolve
  * `null` e o outbox desiste). Não existe mais template genérico — ele fazia
  * qualquer aviso virar mensagem paga.
@@ -301,7 +301,11 @@ const FAMILIAS = {
     ["Ana", "RE/MAX Trio", "Status do negócio atualizado", "Venda Apto 302"],
     ABRIR_NEGOCIO
   ),
-  /** participant_completed. Título: "<papel> preencheu os dados" (papel = rótulo da categoria, nunca o nome). */
+  /**
+   * participant_completed. Título: "<papel> preencheu os dados". O papel é o
+   * rótulo da categoria que a org configura — NUNCA o nome da pessoa; se o
+   * contractmaker passar a mandar nome aqui, esta família tem de largar o título.
+   */
   formulario: t(
     "max_formulario_andamento",
     "Olá, {{1}}! Andamento de formulário na {{2}}: {{3}}. Os detalhes estão no botão abaixo.",
