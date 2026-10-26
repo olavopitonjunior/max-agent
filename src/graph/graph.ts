@@ -19,7 +19,7 @@ import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
 import { iniciarAssinatura, pedeAssinatura } from "./assinatura";
 import {
-  negaAcao, pedeAcaoForaDoMax, pedeCapacidades, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
+  negaAcao, pedeAcaoForaDoMax, pedeCapacidades, pedeLeituraNaoLiberada, TEXTO_LEITURA_NAO_LIBERADA, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
   textoDoAndamentoDoContrato, textoForaDoMax,
 } from "./capacidades";
 import { pedeConsulta, responderConsulta } from "./consulta";
@@ -1102,6 +1102,14 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const contratoLeitura = featureEnabled("queries",state.identity.orgId) && state.policy.includes("contract.status") &&
     !/\b(quem|signat[aá]ri|falta(?:m)? assinar)/i.test(userText);
   const contratoPergunta = coletando || gestao || assinatura || continuidade || contratoLeitura ? false : perguntaDoContrato(userText);
+  // Leitura que o Max faz mas a política não concede: "não liberado", nunca "foge do que eu faço" (smoke 26/10).
+  const leituraNegada = coletando || gestao || assinatura || continuidade || foraDoMax || contratoPergunta || negada ? null
+    : pedeLeituraNaoLiberada(userText, state.policy, { consultasLigadas: featureEnabled("queries", state.identity.orgId), politicaIndisponivel: state.politicaIndisponivel });
+  if (leituraNegada) {
+    return { reply: TEXTO_LEITURA_NAO_LIBERADA, pendingAction: null,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: TEXTO_LEITURA_NAO_LIBERADA }],
+      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: `leitura_nao_liberada_${leituraNegada}` }] };
+  }
   if (!coletando && !gestao && !assinatura && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
     const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
     const linkDoNegocio = resultado?.match(/Negócio: (\S+)/)?.[1] ?? null;

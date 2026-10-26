@@ -40,6 +40,13 @@ describe("continuidade assinada", () => {
     expect(escolhido.reply).toContain("PROP-2026-0002");
     expect(acao).toHaveBeenCalledTimes(1);
   });
+  it('"(N no total)" não conta a proposta que não serve para continuar (smoke 26/10)', async () => {
+    acao.mockResolvedValue({ status: 200, body: { items: [p, { ...p, id: "p9", codigo: "PROP-2026-0009", status: "rascunho" }, { ...p, id: "p2", codigo: "PROP-2026-0002" }], total: 3 } });
+    const r = await iniciarContinuidade(ctx, deps);
+    expect(r.reply).toContain("2. PROP-2026-0002");
+    expect(r.reply).not.toContain("0009");
+    expect(r.reply).not.toContain("no total");
+  });
   it("não presume unicidade quando a lista está truncada", async () => {
     acao.mockResolvedValue({ status: 200, body: { items: [p], total: 6 } });
     expect((await iniciarContinuidade(ctx, deps)).fluxo).toMatchObject({ etapa: "selecao" });

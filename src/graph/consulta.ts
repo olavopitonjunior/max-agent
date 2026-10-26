@@ -20,7 +20,11 @@ const CONSULTA = /\b(status|situacao|andamento|como (esta|anda|ficou|vai)|ja (fo
 /** Criação nunca é consulta: "faz uma proposta", "nova proposta". */
 const CRIACAO = /\b(nova|novo|outra)\s+proposta\b|\b(fa[zc]\w*|cri\w+|ger\w+|mont\w+|prepar\w+|elabor\w+|abr\w*|inici\w+|comec\w+)\s+(uma\s+|a\s+)?proposta\b|\buma proposta (de|pra|para|pro)\b/;
 
+const ANDAMENTO = "andamento";
 const ESTADOS: [RegExp, string][] = [
+  // "em andamento" = qualquer proposta ainda viva; não confundir com a pergunta
+  // "como está o andamento da proposta…" (26/10, smoke real).
+  [/\bem (andamento|aberto)\b|\b(ativas?|vivas?)\b/, ANDAMENTO],
   [/\brascunhos?\b/, "rascunho"],
   [/\benviadas?\b/, "enviada"],
   [/\bassinadas?\b/, "assinada"],
@@ -56,7 +60,16 @@ function linhaCurta(p: PropostaListada): string {
   return [p.codigo, p.titulo, p.estado ?? p.status].filter(Boolean).join(" — ");
 }
 
-const casaEstado = (p: PropostaListada, estado: string) => normalizar(`${p.estado ?? ""} ${p.status}`).includes(estado);
+/** Encerradas na visão do CM (status-view.ts): o rótulo vale quando o corpo não traz o status cru. */
+const ENCERRADOS = ["convertida", "recusada_proponente", "expirada", "cancelada"];
+const ROTULOS_ENCERRADOS = ["virou negocio", "recusada", "expirada", "cancelada"];
+const encerrada = (p: PropostaListada) =>
+  ENCERRADOS.includes(p.status) || ROTULOS_ENCERRADOS.includes(normalizar(p.estado ?? ""));
+
+const casaEstado = (p: PropostaListada, estado: string) =>
+  estado === ANDAMENTO ? !encerrada(p) : normalizar(`${p.estado ?? ""} ${p.status}`).includes(estado);
+/** "em rascunho", "em andamento" (nunca "em em…"). */
+const emEstado = (estado: string) => `em ${estado === ANDAMENTO ? "andamento" : estado}`;
 
 /**
  * A resposta da consulta. Uma proposta: o detalhe com quem já assinou. Várias:
@@ -74,17 +87,19 @@ export async function responderConsulta(deps: DepsDoFluxo, texto: string): Promi
   // só as mais recentes (nunca "você não tem" sobre o que não viu).
   const total = estado ? itens.length : r.total;
   const parcial = !!estado && r.total > r.itens.length;
-  const sobre = [r.termo ? `"${r.termo}"` : "", estado ? `em ${estado}` : ""].filter(Boolean).join(" ");
+  const sobre = [r.termo ? `"${r.termo}"` : "", estado ? emEstado(estado) : ""].filter(Boolean).join(" ");
 
   if (parcial) {
     return {
       reply: itens.length
-        ? `Entre as suas ${r.itens.length} propostas mais recentes, ${itens.length} ${itens.length === 1 ? "está" : "estão"} em ${estado}:\n${itens.map((p) => `• ${linhaCurta(p)}`).join("\n")}`
-        : `Nenhuma das suas ${r.itens.length} propostas mais recentes está em ${estado}. Para uma mais antiga, diga o nome do cliente ou o código.`,
+        ? `Entre as suas ${r.itens.length} propostas mais recentes, ${itens.length} ${itens.length === 1 ? "está" : "estão"} ${emEstado(estado!)}:\n${itens.map((p) => `• ${linhaCurta(p)}`).join("\n")}`
+        : `Nenhuma das suas ${r.itens.length} propostas mais recentes está ${emEstado(estado!)}. Para uma mais antiga, diga o nome do cliente ou o código.`,
       evento: "consulta_estado_parcial",
     };
   }
   if (!itens.length) {
+    // Sem nenhuma viva (só encerradas, ou nenhuma): diz isso, sem listar a encerrada (26/10).
+    if (estado === ANDAMENTO && !r.termo) return { reply: "Nenhuma proposta em andamento no momento. Para ver uma encerrada, diga o nome do cliente ou o código.", evento: "consulta_vazia" };
     return {
       reply: sobre
         ? `Não achei proposta sua ${r.termo ? `com ${sobre}` : sobre}. Confira o nome, o endereço ou o código (PROP-…).`

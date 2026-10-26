@@ -176,6 +176,11 @@ export type Fluxo =
       /** CPF do proponente recusado no envio de um rascunho retomado. */
       pendenciaCpf?: boolean;
       /**
+       * "O telefone está errado" sem o valor novo (smoke 26/10): o fluxo espera o
+       * dado em vez de entregar a frase ao modelo, que dizia "vou ajustar" sem gravar.
+       */
+      aguardaCampo?: { pessoa: "proponente" | "vendedor"; campo: "telefone" | "cpf" | "email" };
+      /**
        * Edição pedida pelo nome ("muda o valor da proposta da Letícia…"): o
        * termo que ACHOU a proposta. Um nome extraído que é só esse termo é a
        * referência, não um nome novo — nunca vira PATCH do proponente.
@@ -486,11 +491,24 @@ function conferirCampo(
   return candidatos.length === 1 ? candidatos[0] : undefined;
 }
 export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaProposta {
-  const telefones = (texto.match(/(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}(?!\d)/g) ?? []).map((t) => t.trim());
+  // `(?<!\d)`: sem fronteira à esquerda o regex casava DENTRO do CPF ("52998224725"
+  // → telefone "2998224725"; smoke 26/10).
+  const telefones = (texto.match(/(?<!\d)(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}(?!\d)/g) ?? []).map((t) => t.trim());
   // Onze dígitos sem máscara também cabem no regex de CPF. O rótulo escrito
   // pela pessoa resolve a ambiguidade; o extrator sozinho não pode resolvê-la.
-  const telefonesRotulados = new Set([...texto.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)(?:\s+(?:do|da)\s+(?:comprador|compradora|cliente|proponente|vendedor|vendedora|inquilino|inquilina|locatário|locatária))?\s*(?::|=|é|para)?\s*((?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4})(?!\d)/giu)].map(m=>semDdi(so(m[1]))));
-  const cpfs = (texto.match(/(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/g) ?? []).filter(c=>!telefonesRotulados.has(semDdi(so(c))));
+  const telefonesRotulados = new Set([...texto.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)(?:\s+(?:do|da)\s+(?:comprador|compradora|cliente|proponente|vendedor|vendedora|inquilino|inquilina|locatário|locatária))?\s*(?::|=|é|para)?\s*((?<!\d)(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4})(?!\d)/giu)].map(m=>semDdi(so(m[1]))));
+  // Onze dígitos SEM máscara, no formato de celular e que não passam no DV de
+  // CPF são telefone, não CPF ("11999063228" ao lado do CPF real; smoke 26/10)
+  // — a não ser que "CPF" o rotule ou o extrator o tenha posto como CPF: aí é
+  // CPF digitado errado e tem de chegar à validação ("CPF inválido"), não
+  // sumir (review 26/10).
+  const celularSemMascara = (c: string) => /^\d{11}$/.test(c) && /^(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}$/.test(c);
+  const cpfsRotulados = new Set([...texto.matchAll(/\bcpf\b[^\d]{0,30}?((?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2})(?!\d)/giu)].map((m) => so(m[1])));
+  const candidatosCpf = (texto.match(/(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/g) ?? [])
+    .filter(c=>!telefonesRotulados.has(semDdi(so(c))));
+  const cpfsExtraidos = new Set([d.proponente?.cpf, d.vendedor?.cpf].filter((c): c is string => !!c).map(so));
+  const cpfs = candidatosCpf
+    .filter(c=>!(celularSemMascara(c) && !cpfValido(c) && !cpfsRotulados.has(so(c)) && !cpfsExtraidos.has(so(c))));
   const emails = (texto.match(/[^\s@:;,<>()]+@[^\s@:;,<>()]+\.[a-z]{2,}/gi) ?? []).map((e) => e.replace(/[.]+$/, ""));
   const out: DadosDaProposta = { ...d };
   for (const k of ["proponente", "vendedor"] as const) {
@@ -507,6 +525,40 @@ export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaPropos
     else delete out[k];
   }
   return out;
+}
+
+/**
+ * Pede para corrigir um contato mas não traz o valor ("o telefone está errado",
+ * "troca o e-mail"). Só com sinal de correção: "qual o telefone?" é pergunta e
+ * segue para o modelo. Smoke 26/10.
+ */
+const SINAL_DE_CORRECAO = /\b(errad\w*|incorret\w*|incorect\w*|troc\w*|mud\w*|alter\w*|corrig\w*|atualiz\w*|outro|outra|novo|nova)\b/;
+const CAMPOS_DE_CONTATO: [RegExp, "telefone" | "cpf" | "email"][] = [
+  [/\b(telefone|celular|whatsapp|fone|zap)\b/, "telefone"],
+  [/\bcpf\b/, "cpf"],
+  [/\be-?mail\b/, "email"],
+];
+function campoSemValor(texto: string): NonNullable<FluxoProposta["aguardaCampo"]> | null {
+  const t = normalizar(texto);
+  if (!SINAL_DE_CORRECAO.test(t) || /[\d@]/.test(t)) return null;
+  const campo = CAMPOS_DE_CONTATO.find(([re]) => re.test(t))?.[1];
+  if (!campo) return null;
+  return { pessoa: /\b(vendedor\w*|proprietari\w*|locador\w*)\b/.test(t) ? "vendedor" : "proponente", campo };
+}
+const NOME_DO_CAMPO = { telefone: "telefone (com DDD)", cpf: "CPF", email: "e-mail" } as const;
+function pedirValorDoCampo(a: NonNullable<FluxoProposta["aguardaCampo"]>): string {
+  const de = a.pessoa === "vendedor" ? "do vendedor ou proprietário" : "do comprador";
+  return `Me mande o ${NOME_DO_CAMPO[a.campo]} ${de} correto, que eu ajusto o rascunho.`;
+}
+/** A mensagem é SÓ o valor esperado (telefone, CPF ou e-mail)? Devolve como foi escrito. */
+function valorAvulso(texto: string, campo: "telefone" | "cpf" | "email"): string | null {
+  const t = texto.trim();
+  const re = {
+    telefone: /^(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}$/,
+    cpf: /^\d{3}\.?\d{3}\.?\d{3}-?\d{2}$/,
+    email: /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i,
+  }[campo];
+  return re.test(t) ? t : null;
 }
 
 /** Nome extraído que é só o termo que achou a proposta ("…da Letícia Andrade"). */
@@ -1548,6 +1600,11 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     };
   }
 
+  // Campo pendente ("o telefone está errado"): "isso/ok/sim" não é o valor — não
+  // segue para a assinatura com o dado velho (smoke 26/10).
+  if (f.etapa === "ajustes" && f.aguardaCampo && !f.ajustePendente && resposta !== "nenhum") {
+    return { reply: pedirValorDoCampo(f.aguardaCampo), fluxo: { ...f, atualizadoEm: agora }, evento: "ajuste_aguarda_valor" };
+  }
   if (f.etapa === "ajustes" && f.pendenciaCpf && !f.ajustePendente && resposta !== "nenhum") {
     return {
       reply: "Ainda preciso de um CPF válido do proponente. Me mande o CPF correto para ajustar o rascunho.",
@@ -1650,10 +1707,18 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   }
 
   // Coleta, correção no resumo, ou ajuste depois do rascunho: extrai e mescla.
-  const extraido = await deps.extrairProposta(ctx.texto, f.natureza ?? "venda");
+  // Campo pendente + só o valor na mensagem: vale o que foi escrito, sem depender do extrator.
+  const avulso = f.aguardaCampo ? valorAvulso(ctx.texto, f.aguardaCampo.campo) : null;
+  const extraido = f.aguardaCampo && avulso
+    ? ({ [f.aguardaCampo.pessoa]: { [f.aguardaCampo.campo]: avulso } } as DadosDaProposta)
+    : await deps.extrairProposta(ctx.texto, f.natureza ?? "venda");
   if (extraido === null) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: "falha_extracao" };
   const parcial = !!f.propostaId && !f.natureza;
-  const novos = conferirDitado(semReferencia(sanearDados(extraido), f.referencia), ctx.texto);
+  // O valor avulso já é do campo pedido: conferir de novo o reclassificaria
+  // (um telefone que passa no DV de CPF sumiria; review 26/10).
+  const novos = avulso
+    ? semReferencia(sanearDados(extraido), f.referencia)
+    : conferirDitado(semReferencia(sanearDados(extraido), f.referencia), ctx.texto);
   // No ajuste parcial, o canal só muda quando a pessoa fala dele: o extrator
   // devolvia "WhatsApp" para "remove o fiador da proposta da X" (eval 09/10),
   // e o PATCH trocaria o canal sem ninguém pedir.
@@ -1679,6 +1744,12 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
         evento: "ajuste_so_na_tela",
       };
     }
+    // Aponta um contato errado sem dar o valor: espera o valor aqui, em vez de
+    // entregar ao modelo (que dizia "vou ajustar" sem gravar; smoke 26/10).
+    const semValor = f.propostaId && f.etapa === "ajustes" ? campoSemValor(ctx.texto) : null;
+    if (semValor) {
+      return { reply: pedirValorDoCampo(semValor), fluxo: { ...f, aguardaCampo: semValor, atualizadoEm: agora }, evento: "ajuste_aguarda_valor" };
+    }
     // Mensagem sem dado novo: aí sim um pedido de envio vale (com dado novo, o
     // ajuste vem antes — "corrige o e-mail dela e manda" não perde a correção).
     if (pedeEnvio(ctx.texto)) {
@@ -1700,7 +1771,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   }
 
   // Dado mudou: o "sim" anterior (e a chave dele) não vale para o resumo novo.
-  const g: FluxoProposta = { ...f, dados, chave: undefined, atualizadoEm: agora };
+  const g: FluxoProposta = { ...f, dados, chave: undefined, aguardaCampo: undefined, atualizadoEm: agora };
   const falta = parcial ? invalidosNoAjuste(dados) : faltandoNaProposta(dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
   const depoisDoRascunho = !!f.propostaId && (f.etapa === "ajustes" || f.etapa === "revisao_ajuste");
   if (falta.length > 0) {

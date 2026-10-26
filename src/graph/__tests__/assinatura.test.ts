@@ -292,6 +292,31 @@ describe("cancelar: motivo", () => {
     expect(r.reply).toContain("Qual o motivo do cancelamento? (vai no histórico da proposta)");
     expect(acao).toHaveBeenCalledTimes(1);
   });
+  describe('"(N no total)" só conta quem poderia ser escolhido — smoke 26/10', () => {
+    const rascunho = { id: "p2", codigo: "PROP-2026-0002", titulo: "João da Silva", status: "rascunho", estado: "Rascunho" };
+    const convertida = { id: "p0", codigo: "PROP-2026-0001", titulo: "Letícia Gonçalves", status: "convertida", estado: "Virou negócio" };
+    const outraRascunho = { ...rascunho, id: "p3", codigo: "PROP-2026-0003" };
+    it("1 útil + 1 convertida (total 2): lista a útil e NÃO diz '2 no total'", async () => {
+      acao.mockResolvedValueOnce({ status: 200, body: { items: [rascunho, convertida], total: 2 } });
+      const r = await iniciarAssinatura("cancelar", ctx("cancela uma proposta"), deps);
+      expect(r.reply).toContain("1. PROP-2026-0002 — João da Silva (Rascunho)");
+      expect(r.reply).not.toContain("no total");
+      expect(r.reply).not.toContain("Há mais");
+    });
+    it("a página do CM tem mais que o Max trouxe: avisa que há mais, sem número enganoso", async () => {
+      acao.mockResolvedValueOnce({ status: 200, body: { items: [rascunho, outraRascunho], total: 9 } });
+      const r = await iniciarAssinatura("cancelar", ctx("cancela uma proposta"), deps);
+      expect(r.reply).toContain("Há mais propostas; se não estiver aqui, me diga o nome ou o código.");
+      expect(r.reply).not.toContain("no total");
+    });
+    it("mais úteis do que as 5 listadas: diz quantas há no total", async () => {
+      const sete = Array.from({ length: 7 }, (_, i) => ({ ...rascunho, id: `r${i}`, codigo: `PROP-2026-01${i}` }));
+      acao.mockResolvedValueOnce({ status: 200, body: { items: [...sete, convertida], total: 8 } });
+      const r = await iniciarAssinatura("cancelar", ctx("cancela uma proposta"), deps);
+      expect(r.reply).toContain("(7 no total; se não estiver aqui, me diga o nome ou o código.)");
+      expect(r.reply).not.toContain("5. PROP-2026-0014\n6.");
+    });
+  });
   it("motivo na frase: vai direto ao resumo, com o motivo e os signatários", async () => {
     acao.mockResolvedValueOnce(lista(leticia));
     const r = await iniciarAssinatura("cancelar", ctx("pode cancelar a proposta da Letícia porque o cliente desistiu"), deps);
@@ -368,6 +393,18 @@ describe("SIM chama o servidor", () => {
     expect(acao).toHaveBeenCalledWith("proposal.cancel", { proposta_id: "p1", motivo: "o cliente desistiu" }, "m9");
     expect(r.reply).toBe("Proposta PROP-2026-0031 cancelada. A assinatura na ClickSign foi encerrada.");
     expect(r.fluxo).toBeNull();
+  });
+  it("corpo REAL do CM (projetarPropostaCriada: `estado` é o rótulo, sem `status`) confirma o cancelamento — smoke 26/10", async () => {
+    acao.mockResolvedValueOnce({ status: 200, body: { proposta: { id: "p1", codigo: "PROP-2026-0002", titulo: "Proposta — João da Silva", estado: "Cancelada" } } });
+    const r = await conduzirAssinatura(confirmando("cancelar"), ctx("sim", { messageId: "m9" }), deps);
+    expect(r.reply).toBe("Proposta PROP-2026-0031 cancelada. A assinatura na ClickSign foi encerrada.");
+    expect(r.evento).toBe("proposta_cancelada");
+    expect(r.fluxo).toBeNull();
+  });
+  it("`estado` de outra coisa (ex.: 'Enviada') não afirma o cancelamento", async () => {
+    acao.mockResolvedValueOnce({ status: 200, body: { proposta: { id: "p1", estado: "Enviada" } } });
+    const r = await conduzirAssinatura(confirmando("cancelar"), ctx("sim"), deps);
+    expect(r.evento).toBe("assinatura_cancelar_nao_confirmado");
   });
   it("200 que não diz 'cancelada' não afirma o cancelamento", async () => {
     acao.mockResolvedValueOnce({ status: 200, body: { proposta: { status: "enviada" } } });

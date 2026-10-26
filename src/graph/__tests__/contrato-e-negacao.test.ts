@@ -96,6 +96,12 @@ describe("conferirDitado (eval 09/10: '11 98888-7777' virou '119888-7777')", asy
     expect(conferirDitado({proponente:{telefone:'+55 11900000101',cpf:'11900000101'}},'Telefone: +55 11900000101'))
       .toEqual({proponente:{telefone:'+55 11900000101'}});
   });
+  it("CPF digitado errado com formato de celular continua CPF (vai para a validação, não some; review 26/10)", () => {
+    expect(conferirDitado({ proponente: { cpf: "21987654383" } }, "CPF 21987654383")).toEqual({ proponente: { cpf: "21987654383" } });
+    expect(conferirDitado({ proponente: { cpf: "21987654383" } }, "21987654383")).toEqual({ proponente: { cpf: "21987654383" } });
+    // Rotulado como CPF mesmo ao lado de um CPF válido.
+    expect(conferirDitado({ proponente: { cpf: "21987654383" } }, "CPF: 21987654383, o outro é 52998224725").proponente?.cpf).toBe("21987654383");
+  });
   it("telefone com dígito a menos vira o que a pessoa escreveu", () => {
     expect(conferirDitado({ proponente: { telefone: "119888-7777" } }, "troca o telefone do comprador para 11 98888-7777"))
       .toEqual({ proponente: { telefone: "11 98888-7777" } });
@@ -115,6 +121,29 @@ describe("conferirDitado (eval 09/10: '11 98888-7777' virou '119888-7777')", asy
   it("CPF não vira telefone", () => {
     expect(conferirDitado({ proponente: { cpf: "123.456.789-09", telefone: "12345678909" } }, "cpf 123.456.789-09"))
       .toEqual({ proponente: { cpf: "123.456.789-09" } });
+  });
+});
+
+describe("conferirDitado — telefone × CPF sem máscara (smoke real 26/10)", async () => {
+  const { conferirDitado } = await import("../fluxos");
+  const MSG = "João da Silva, 11999063228, 52998224725\nRua Santo Antão, 560\n1.000.000";
+  it("a mensagem real: telefone 11999063228 e CPF 52998224725 (o CPF não vira telefone)", () => {
+    // Extrator ruim de propósito: devolve o telefone como o "pedaço do CPF" do smoke.
+    expect(conferirDitado({ proponente: { nome: "João da Silva", telefone: "2998224725", cpf: "52998224725" } }, MSG))
+      .toEqual({ proponente: { nome: "João da Silva", telefone: "11999063228", cpf: "52998224725" } });
+    expect(conferirDitado({ proponente: { nome: "João da Silva", telefone: "11999063228", cpf: "52998224725" } }, MSG))
+      .toEqual({ proponente: { nome: "João da Silva", telefone: "11999063228", cpf: "52998224725" } });
+  });
+  it("só o telefone de 11 dígitos sem rótulo (DV de CPF falha) vale como telefone", () => {
+    expect(conferirDitado({ proponente: { telefone: "11999063228" } }, "11999063228"))
+      .toEqual({ proponente: { telefone: "11999063228" } });
+  });
+  it("sem rótulo e com DV de CPF válido segue ambíguo como antes: fica como CPF, não como telefone", () => {
+    const ambiguo = "11944477756"; // formato de celular (9 na 3ª posição) E DV de CPF correto
+    expect(conferirDitado({ proponente: { telefone: ambiguo } }, ambiguo)).toEqual({});
+  });
+  it("dígitos do meio de um CPF nunca viram telefone", () => {
+    expect(conferirDitado({ proponente: { telefone: "2998224725" } }, "CPF 52998224725")).toEqual({});
   });
 });
 

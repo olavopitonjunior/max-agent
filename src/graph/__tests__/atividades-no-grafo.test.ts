@@ -45,6 +45,71 @@ beforeEach(() => {
   vi.mocked(searchKnowledge).mockResolvedValue([]);
 });
 
+describe("leitura que o Max faz mas a política não concede (smoke 26/10)", () => {
+  const SEM_LISTA = { byRole: { "*": ["deal.list"] }, byRecipient: {}, brokerDefault: ["deal.list"] };
+  const consultasLigadas = () => {
+    vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [usuario.orgId]: ["queries"] }));
+    vi.stubEnv("MAX_EXTENDED_QUERIES", "true");
+  };
+  const NAO_LIBERADO = "Isso não está liberado para você por aqui; peça a um administrador da imobiliária.";
+
+  it("'Quais minhas atividades para hoje?' sem activity.list: diz que não está liberado, nunca 'foge do que eu faço'; sem modelo e sem leitura", async () => {
+    consultasLigadas();
+    vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: SEM_LISTA } as never);
+    const s = await run("Quais minhas atividades para hoje?");
+    expect(s.reply).toBe(NAO_LIBERADO);
+    expect(s.reply).not.toContain("foge");
+    expect(llm).not.toHaveBeenCalled();
+    expect(leitura).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it("com activity.list a pergunta segue para o modelo/tool como antes", async () => {
+    consultasLigadas();
+    llm.mockResolvedValue({ text: "Você tem 1 atividade hoje.", toolCalls: [], usage: uso });
+    const s = await run("Quais minhas atividades para hoje?");
+    expect(s.reply).not.toBe(NAO_LIBERADO);
+    expect(llm).toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it("consultas desligadas na org: não afirma falta de permissão (o motivo seria outro)", async () => {
+    vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: SEM_LISTA } as never);
+    llm.mockResolvedValue({ text: "ok", toolCalls: [], usage: uso });
+    const s = await run("Quais minhas atividades para hoje?");
+    expect(s.reply).not.toBe(NAO_LIBERADO);
+  });
+
+  it("política indisponível não vira 'não está liberado'", async () => {
+    consultasLigadas();
+    const { pedeLeituraNaoLiberada } = await import("../capacidades");
+    expect(pedeLeituraNaoLiberada("Quais minhas atividades para hoje?", [], { consultasLigadas: true, politicaIndisponivel: true })).toBeNull();
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    ["Quais minhas atividades para hoje?", "atividades"],
+    ["me mostra minhas tarefas", "atividades"],
+    ["tenho alguma atividade atrasada?", "atividades"],
+    ["lista as atividades de hoje", "atividades"],
+  ])("reconhece a leitura: %s", async (texto, area) => {
+    const { pedeLeituraNaoLiberada } = await import("../capacidades");
+    expect(pedeLeituraNaoLiberada(texto, ["deal.list"], { consultasLigadas: true })).toBe(area);
+    expect(pedeLeituraNaoLiberada(texto, ["activity.list"], { consultasLigadas: true })).toBeNull();
+  });
+
+  it.each([
+    "como cadastro uma atividade no sistema?",
+    "o que é uma atividade?",
+    "qual o status da proposta PROP-2026-0001?",
+    "quais meus negócios?",
+    "crie uma atividade para ligar para o João",
+  ])("não captura: %s", async (texto) => {
+    const { pedeLeituraNaoLiberada } = await import("../capacidades");
+    expect(pedeLeituraNaoLiberada(texto, ["deal.list"], { consultasLigadas: true })).toBeNull();
+  });
+});
+
 describe("botão atv: no grafo", () => {
   it("NEGADO: sem activity.write, o toque não lê nem abre fluxo", async () => {
     vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: SEM } as never);

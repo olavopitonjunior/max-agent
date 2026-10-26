@@ -74,6 +74,35 @@ export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: 
 }
 
 /**
+ * Pergunta de LEITURA de algo que o Max faz mas que a política deste usuário não
+ * concede. Smoke 26/10: "Quais minhas atividades para hoje?" sem `activity.list`
+ * caía no modelo, sem tool, e saía "Isso foge do que eu faço por aqui" — falso:
+ * o Max faz, só não está liberado para esta pessoa. Determinístico, como a recusa
+ * de contrato/cobrança. Só vale com as consultas ligadas na org (sem elas a
+ * capability nem é oferecida, e o motivo da recusa seria outro) e com a política
+ * disponível (política indisponível não é "não liberado").
+ */
+const LEITURAS: { area: "atividades"; capability: Capability; assunto: RegExp }[] = [
+  { area: "atividades", capability: "activity.list", assunto: /\b(?:atividades?|tarefas?|agenda)\b/ },
+];
+const PEDIDO_DE_LEITURA =
+  /\b(?:quais|qual|minhas?|meus?|mostr\w*|list\w*|ver|veja|tenho|tem|pendentes?|atrasad\w*|de hoje|para hoje|pra hoje|da semana)\b/;
+const ESCRITA_OU_AJUDA = /^(?:como|por que|porque|o que e|o que sao|quando|onde)\b|\b(?:cri\w+|registr\w+|agend\w+|conclu\w+|coment\w+|recus\w+|apag\w+|exclu\w+|cadastr\w+)\b/;
+
+export function pedeLeituraNaoLiberada(
+  texto: string,
+  policy: readonly Capability[],
+  opts: { consultasLigadas: boolean; politicaIndisponivel?: boolean }
+): "atividades" | null {
+  if (!opts.consultasLigadas || opts.politicaIndisponivel) return null;
+  const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "");
+  if (ESCRITA_OU_AJUDA.test(t) || !PEDIDO_DE_LEITURA.test(t)) return null;
+  return LEITURAS.find((l) => l.assunto.test(t) && !policy.includes(l.capability))?.area ?? null;
+}
+
+export const TEXTO_LEITURA_NAO_LIBERADA = "Isso não está liberado para você por aqui; peça a um administrador da imobiliária.";
+
+/**
  * O verbo age DIRETO sobre o contrato ("manda o contrato", "gera o contrato do
  * João") — review 09/10: verbo solto casava "converte a proposta… pra gerar o
  * contrato" (conversão, que o Max faz), "faz uma proposta, contrato de 30
