@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { conduzirAssinatura, iniciarAssinatura, motivoDaFrase, pedeAssinatura, type FluxoAssinatura } from "../assinatura";
+import { conduzirAssinatura, iniciarAssinatura, motivoDaFrase, pedeAssinatura, pedeTrocaDeSignatario, type FluxoAssinatura } from "../assinatura";
 import { pedeGestao } from "../gestao";
 import { textoDeCapacidades } from "../capacidades";
 import { buscarPropostas } from "../localizar";
@@ -524,5 +524,187 @@ describe("o que o Max anuncia", () => {
     expect(textoDeCapacidades(["proposal.list", "proposal.send"], true)).toContain("lembrar quem falta assinar, cancelar proposta enviada");
     expect(textoDeCapacidades(["proposal.list", "proposal.create"], true)).not.toContain("lembrar quem falta assinar");
     expect(textoDeCapacidades(["proposal.list", "proposal.send"], false)).not.toContain("lembrar quem falta assinar");
+  });
+});
+
+// ─── Trocar o contato de quem assina (Passo 4c, 26/10/2026) ─────────────────
+
+const POS_ENVIO = [
+  "A proposta PROP-2026-0031 (Rua X, 100) já foi enviada para assinatura. Depois do envio não dá para trocar o contato de quem assina no mesmo envio, nem pela tela.",
+  "O caminho:",
+  '1. Na tela da proposta, use "Cancelar envelope". A proposta volta para edição; ela não é cancelada.',
+  "2. Me diga o contato certo que eu corrijo.",
+  "3. Peça para eu enviar de novo.",
+].join("\n");
+const SIGNATARIOS = "\nSignatários:\n• Letícia Andrade — pendente — WhatsApp\n• João Lima — pendente — e-mail\n• Maria Souza — assinou — e-mail";
+const PEDIDO_TROCA = "troca o e-mail da Letícia na proposta PROP-2026-0031";
+const so = (status: string, estado = status) => ({ status: 200, body: { proposta: { ...leticia, status, estado } } });
+
+describe("trocar signatário: NEGADOS primeiro", () => {
+  it("sem proposal.send na política: não lê nem escreve nada; o pedido segue o caminho normal", async () => {
+    const r = await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA, { policy: ["proposal.list", "proposal.create"] }), deps);
+    expect(r).toMatchObject({ liberar: true, fluxo: null });
+    expect(acao).not.toHaveBeenCalled();
+  });
+  it("sem proposal.list, ou política indisponível: idem", async () => {
+    const a = await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA, { policy: ["proposal.send"] }), deps);
+    const b = await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA, { politicaIndisponivel: true }), deps);
+    expect(a).toMatchObject({ liberar: true });
+    expect(b).toMatchObject({ liberar: true });
+    expect(acao).not.toHaveBeenCalled();
+  });
+  it.each([
+    "não troca o e-mail da proposta PROP-2026-0031",
+    "nunca mude o telefone da Letícia na proposta PROP-2026-0031",
+    "não precisa trocar o e-mail do assinante da proposta da Letícia",
+    "não altera o contato da proposta da Letícia",
+  ])("negação não dispara: %s", (t) => {
+    expect(pedeTrocaDeSignatario(t)).toBe(false);
+    expect(pedeAssinatura(t)).toBeNull();
+  });
+  it("nunca chama verbo de escrita, em nenhum desfecho", async () => {
+    for (const status of ["enviada", "rascunho", "cancelada"]) {
+      acao.mockResolvedValueOnce(so(status));
+      await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA), deps);
+    }
+    const verbos = acao.mock.calls.map(([v]) => v);
+    expect(verbos.every((v) => v === "proposal.status" || v === "proposal.list")).toBe(true);
+  });
+});
+
+describe("pedeAssinatura — trocar signatário", () => {
+  it.each([
+    "troca o e-mail da Letícia na proposta PROP-2026-0031",
+    "muda o telefone do assinante da proposta da Letícia",
+    "corrige o whatsapp do João na proposta PROP-2026-0031",
+    "altera o número da Maria na proposta da Letícia",
+    "Max, atualiza o e-mail do signatário da proposta PROP-2026-0031",
+    "quero mudar o contato do assinante da proposta da Letícia",
+    "pode trocar o e-mail da Letícia na proposta PROP-2026-0031?",
+    "dá pra mudar o telefone do assinante da proposta da Letícia?",
+    "da pra trocar o e-mail do assinante da proposta PROP-2026-0031?",
+    "tem como corrigir o celular da Letícia na proposta dela?",
+    "como eu troco o e-mail do assinante da proposta PROP-2026-0031?",
+    "como altero o canal de assinatura da proposta da Letícia?",
+    "na proposta PROP-2026-0031, troca o e-mail da Letícia",
+    "troca o e-mail da Letícia na proposta PROP-2026-0031 porque ela mudou",
+  ])("%s → trocar", (t) => {
+    expect(pedeAssinatura(t)).toBe("trocar");
+  });
+  it.each([
+    "troca o valor da proposta da Letícia para 480 mil",
+    "muda a data de vencimento da proposta PROP-2026-0031",
+    "troca o e-mail da Letícia",
+    "o e-mail do assinante da proposta está certo?",
+    "a proposta da Letícia mudou de e-mail?",
+    "qual o e-mail do assinante da proposta PROP-2026-0031?",
+    "exclui a proposta da Letícia",
+    "manda a proposta da Letícia",
+    "troca de e-mail o assinante",
+  ])("não casa: %s", (t) => {
+    expect(pedeAssinatura(t)).toBeNull();
+  });
+  it("cancelar e lembrar seguem com prioridade; excluir segue na gestão", () => {
+    expect(pedeAssinatura("cancela a proposta da Letícia")).toBe("cancelar");
+    expect(pedeAssinatura("cancela a proposta da Letícia, o cliente não mudou de ideia")).toBe("cancelar");
+    expect(pedeAssinatura("cancela a proposta PROP-2026-0031 e troca o e-mail do assinante")).toBe("cancelar");
+    expect(pedeAssinatura("lembra quem falta assinar a proposta da Letícia")).toBe("lembrar");
+    expect(pedeAssinatura("exclui a proposta da Letícia")).toBeNull();
+    expect(pedeGestao("exclui a proposta da Letícia")).toBe("excluir");
+  });
+});
+
+describe("trocar signatário — depois do envio", () => {
+  it.each(["enviada", "entregue", "visualizada", "assinada_proponente", "aguardando_vendedor"])("%s: resposta fixa com os signatários, só leitura", async (status) => {
+    acao.mockResolvedValueOnce(so(status));
+    const r = await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA), deps);
+    expect(r).toEqual({ fluxo: null, reply: POS_ENVIO + SIGNATARIOS, evento: "assinatura_troca_pos_envio" });
+    expect(acao).toHaveBeenCalledTimes(1);
+    expect(acao).toHaveBeenCalledWith("proposal.status", { codigo: "PROP-2026-0031" });
+  });
+  it("sem signatários na projeção: omite a lista", async () => {
+    acao.mockResolvedValueOnce({ status: 200, body: { proposta: { ...leticia, signatarios: [] } } });
+    const r = await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA), deps);
+    expect(r.reply).toBe(POS_ENVIO);
+  });
+  it("pergunta 'dá pra mudar…?' acha pelo nome e dá a mesma orientação", async () => {
+    acao.mockResolvedValueOnce(lista(leticia));
+    const r = await iniciarAssinatura("trocar", ctx("dá pra mudar o telefone do assinante da proposta da Letícia?"), deps);
+    expect(acao).toHaveBeenCalledWith("proposal.list", { busca: "leticia" });
+    expect(r.reply).toBe(POS_ENVIO + SIGNATARIOS);
+  });
+  it("não oferece cancelar a proposta", async () => {
+    acao.mockResolvedValueOnce(so("enviada"));
+    const r = await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA), deps);
+    expect(r.reply).not.toMatch(/cancelar a proposta|proposal\.cancel|Responda SIM/i);
+  });
+  it("várias propostas: pede o número (sem assumir a mais recente); o número pós-envio dá o texto fixo", async () => {
+    acao.mockResolvedValueOnce(lista(leticia, { ...leticia, id: "p2", codigo: "PROP-2026-0032", titulo: "Rua Y, 7", status: "rascunho", estado: "Rascunho" }));
+    const r = await iniciarAssinatura("trocar", ctx("troca o e-mail do assinante da proposta da Letícia"), deps);
+    expect(r.fluxo).toMatchObject({ kind: "assinatura", operacao: "trocar", etapa: "selecao" });
+    expect(r.reply).toContain("1. PROP-2026-0031");
+    expect(r.reply).toContain("2. PROP-2026-0032");
+    expect(r.reply).toContain("Responda com o número.");
+    const fora = await conduzirAssinatura(r.fluxo as FluxoAssinatura, ctx("9"), deps);
+    expect(fora.reply).toContain("Esse número não está na lista");
+    const um = await conduzirAssinatura(r.fluxo as FluxoAssinatura, ctx("1"), deps);
+    expect(um).toEqual({ fluxo: null, reply: POS_ENVIO + SIGNATARIOS, evento: "assinatura_troca_pos_envio" });
+    expect(acao).toHaveBeenCalledTimes(1);
+  });
+  it("lista: a escolhida ainda não enviada diz que dá para corrigir agora", async () => {
+    acao.mockResolvedValueOnce(lista(leticia, { ...leticia, id: "p2", codigo: "PROP-2026-0032", titulo: "Rua Y, 7", status: "rascunho", estado: "Rascunho" }));
+    const r = await iniciarAssinatura("trocar", ctx("troca o e-mail do assinante da proposta da Letícia"), deps);
+    const dois = await conduzirAssinatura(r.fluxo as FluxoAssinatura, ctx("2"), deps);
+    expect(dois).toMatchObject({ fluxo: null, evento: "assinatura_troca_pre_envio" });
+    expect(dois.reply).toBe(
+      "A proposta PROP-2026-0032 (Rua Y, 7) ainda não foi enviada: dá para corrigir o contato agora. Me diga o dado novo " +
+      "(por exemplo: troca o e-mail da Ana na proposta PROP-2026-0032 para ana@exemplo.com)."
+    );
+  });
+  it("lista: a escolhida terminal diz o estado", async () => {
+    acao.mockResolvedValueOnce(lista(leticia, { ...leticia, id: "p2", codigo: "PROP-2026-0032", status: "cancelada", estado: "Cancelada" }));
+    const r = await iniciarAssinatura("trocar", ctx("troca o e-mail do assinante da proposta da Letícia"), deps);
+    const dois = await conduzirAssinatura(r.fluxo as FluxoAssinatura, ctx("2"), deps);
+    expect(dois.reply).toBe("A proposta PROP-2026-0032 (Rua X, 100) está cancelada; não há assinatura em andamento para corrigir.");
+  });
+  it("'não' / outro assunto na seleção encerram sem chamar o servidor", async () => {
+    const f: FluxoAssinatura = { kind: "assinatura", operacao: "trocar", etapa: "selecao", atualizadoEm: 1, candidatos: [{ id: "p1", codigo: "PROP-2026-0031", status: "enviada" }] };
+    const nao = await conduzirAssinatura(f, ctx("não"), deps);
+    expect(nao).toMatchObject({ fluxo: null, reply: "Parei por aqui. Nada foi alterado." });
+    const outro = await conduzirAssinatura(f, ctx("faz uma proposta pro Carlos"), deps);
+    expect(outro).toMatchObject({ liberar: true, fluxo: null });
+    expect(acao).not.toHaveBeenCalled();
+  });
+});
+
+describe("trocar signatário — antes do envio e terminais", () => {
+  it.each(["rascunho", "aguardando_aprovacao", "falha_envio"])("%s: não é deste fluxo (liberar), para seguir o caminho normal", async (status) => {
+    acao.mockResolvedValueOnce(so(status));
+    const r = await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA), deps);
+    expect(r).toMatchObject({ liberar: true, fluxo: null });
+    expect(acao).toHaveBeenCalledTimes(1);
+  });
+  it("várias achadas e nenhuma enviada: também segue o caminho normal", async () => {
+    acao.mockResolvedValueOnce(lista({ ...leticia, status: "rascunho" }, { ...leticia, id: "p2", codigo: "PROP-2026-0032", status: "falha_envio" }));
+    const r = await iniciarAssinatura("trocar", ctx("troca o e-mail do assinante da proposta da Letícia"), deps);
+    expect(r).toMatchObject({ liberar: true, fluxo: null });
+  });
+  it("nada achado, ou leitura sem resposta: segue o caminho normal", async () => {
+    acao.mockResolvedValueOnce(lista());
+    expect(await iniciarAssinatura("trocar", ctx("troca o e-mail do assinante da proposta da Letícia"), deps)).toMatchObject({ liberar: true });
+    acao.mockResolvedValueOnce(null);
+    expect(await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA), deps)).toMatchObject({ liberar: true });
+  });
+  it.each(["convertida", "recusada_proponente", "recusada_vendedor", "expirada", "cancelada", "completa"])("%s: frase de terminal", async (status) => {
+    acao.mockResolvedValueOnce(so(status, status.replace("_", " ")));
+    const r = await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA), deps);
+    expect(r).toEqual({
+      fluxo: null, evento: "assinatura_troca_terminal",
+      reply: `A proposta PROP-2026-0031 (Rua X, 100) está ${status.replace("_", " ")}; não há assinatura em andamento para corrigir.`,
+    });
+  });
+  it("status que este Max não conhece: não afirma nada, segue o caminho normal", async () => {
+    acao.mockResolvedValueOnce(so("em_analise_juridica", "Em análise"));
+    expect(await iniciarAssinatura("trocar", ctx(PEDIDO_TROCA), deps)).toMatchObject({ liberar: true });
   });
 });

@@ -1075,7 +1075,21 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   }
   // Lembrar quem falta assinar / cancelar a assinatura de uma proposta (Passo 4, 25/10): fluxo próprio.
   // "Cancela a proposta" nunca é "exclui a proposta" (gestão): as duas detecções são disjuntas.
-  const assinatura = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura" ? pedeAssinatura(userText) : null;
+  let assinatura = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura" ? pedeAssinatura(userText) : null;
+  // Trocar o contato de quem assina (Passo 4c): só orienta quando a proposta JÁ foi enviada. Antes do envio
+  // (ou sem proposta achada, sem política, leitura falhando) o pedido não é deste fluxo: `assinatura` volta a
+  // null e TUDO abaixo (gestão/edição, escopo, modelo) roda como se a detecção não tivesse disparado.
+  // Custo aceito: uma leitura a mais nesse caminho. Com escrita em aberto, nem tenta.
+  if (assinatura === "trocar") {
+    const troca = escritaEmAberto ? null : await iniciarAssinatura("trocar", { texto: userText, messageId: state.inbound.messageId,
+      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
+    if (troca && troca.liberar !== true) {
+      return { fluxo: troca.fluxo, reply: troca.reply,
+        messages: [{ role: "user", content: userText }, { role: "assistant", content: troca.reply }],
+        toolLog: [{ name: "fluxo", args: { kind: "assinatura", operacao: "trocar" }, outcome: troca.evento }] };
+    }
+    assinatura = null;
+  }
   const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
   // "Não converte a proposta da X" é o contrário do pedido: a negação vem antes.
   const negada = !atual ? negaAcao(userText) : null;
