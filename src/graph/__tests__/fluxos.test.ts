@@ -296,6 +296,73 @@ describe("fluxo de PROPOSTA", () => {
     expect(d.acao).not.toHaveBeenCalled();
   });
 
+  describe("smoke real 26/10 — telefone errado no rascunho", () => {
+    const DADOS_JOAO: import("../fluxos").DadosDaProposta = {
+      proponente: { nome: "João da Silva", telefone: "2998224725", cpf: "52998224725" },
+      imovel: { endereco: "Rua Santo Antão, 560" },
+      valor: 1_000_000,
+    };
+    const rascunho = (extra: Partial<Extract<Fluxo, { kind: "proposta" }>> = {}): Fluxo =>
+      ({ kind: "proposta", etapa: "ajustes", natureza: "venda", dados: DADOS_JOAO, propostaId: "p1", codigo: "PROP-2026-0002", atualizadoEm: agora, ...extra }) as Fluxo;
+
+    it("só o telefone certo (11 dígitos sem máscara) depois do rascunho é ajuste de telefone, não proposta_liberada", async () => {
+      const d = deps({ extrairProposta: vi.fn().mockResolvedValue({ proponente: { telefone: "11999063228" } }) });
+      const p = await F.conduzirFluxo(rascunho(), ctx("11999063228"), d);
+      expect(p.liberar).toBeUndefined();
+      expect(p.evento).toBe("proposta_revisao_ajuste");
+      expect(p.reply).toContain("João da Silva · 11999063228 · CPF 52998224725");
+      expect(p.fluxo).toMatchObject({ etapa: "revisao_ajuste", dados: { proponente: { telefone: "11999063228", cpf: "52998224725" } } });
+      expect(d.acao).not.toHaveBeenCalled();
+    });
+
+    it("'O telefone está errado' (campo sem valor) NÃO vai ao modelo: o fluxo pede o telefone certo e espera", async () => {
+      const d = deps();
+      const p = await F.conduzirFluxo(rascunho(), ctx("O telefone está errado"), d);
+      expect(p.liberar).toBeUndefined();
+      expect(p.evento).toBe("ajuste_aguarda_valor");
+      expect(p.reply).toContain("telefone");
+      expect(p.reply).toMatch(/me (mande|passe|diga)/i);
+      expect(p.fluxo).toMatchObject({ etapa: "ajustes", aguardaCampo: { pessoa: "proponente", campo: "telefone" } });
+      expect(d.acao).not.toHaveBeenCalled();
+    });
+
+    it("com o campo pendente, 'Isso'/'ok' NÃO segue para a assinatura com o telefone velho", async () => {
+      const d = deps();
+      const f = rascunho({ aguardaCampo: { pessoa: "proponente", campo: "telefone" } });
+      for (const t of ["Isso", "ok", "sim"]) {
+        const p = await F.conduzirFluxo(f, ctx(t), d);
+        expect(p.evento).toBe("ajuste_aguarda_valor");
+        expect(p.fluxo).toMatchObject({ etapa: "ajustes", aguardaCampo: { campo: "telefone" } });
+      }
+      expect(d.acao).not.toHaveBeenCalled();
+    });
+
+    it("com o campo pendente, o valor sozinho é aplicado sem depender do extrator, e a pendência sai", async () => {
+      const d = deps({ extrairProposta: vi.fn().mockResolvedValue({}) });
+      const f = rascunho({ aguardaCampo: { pessoa: "proponente", campo: "telefone" } });
+      const p = await F.conduzirFluxo(f, ctx("(11) 99906-3228"), d);
+      expect(p.evento).toBe("proposta_revisao_ajuste");
+      // Vale o que a pessoa escreveu (regra do conferirDitado), com a máscara dela.
+      expect(p.reply).toContain("(11) 99906-3228");
+      expect(p.fluxo).toMatchObject({ etapa: "revisao_ajuste", dados: { proponente: { telefone: "(11) 99906-3228" } } });
+      expect((p.fluxo as { aguardaCampo?: unknown }).aguardaCampo).toBeUndefined();
+    });
+
+    it("com o campo pendente, telefone que passa no DV de CPF é aplicado como telefone (review 26/10)", async () => {
+      const d = deps({ extrairProposta: vi.fn().mockResolvedValue({}) });
+      const f = rascunho({ aguardaCampo: { pessoa: "proponente", campo: "telefone" } });
+      const p = await F.conduzirFluxo(f, ctx("21987654382"), d);
+      expect(p.evento).toBe("proposta_revisao_ajuste");
+      expect(p.fluxo).toMatchObject({ etapa: "revisao_ajuste", dados: { proponente: { telefone: "21987654382" } } });
+    });
+
+    it("pergunta sobre o telefone (sem sinal de correção) continua liberada ao modelo", async () => {
+      const d = deps();
+      const p = await F.conduzirFluxo(rascunho(), ctx("qual o telefone cadastrado na proposta?"), d);
+      expect(p.liberar).toBe(true);
+    });
+  });
+
   it("B1 — trocar o comprador NÃO herda CPF e telefone do anterior", () => {
     const m = F.mesclarDados(DADOS_OK, F.sanearDados({ proponente: { nome: "Maria Souza Lima" } }));
     expect(m.proponente).toEqual({ nome: "Maria Souza Lima" });

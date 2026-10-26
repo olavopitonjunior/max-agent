@@ -1,7 +1,7 @@
 import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { ContextoDoTurno, DepsDoFluxo, Fluxo, PassoDoFluxo } from "./fluxos";
 import { termoDaEdicao, pedeGestao } from "./gestao";
-import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type CanalDeAssinatura, type PropostaListada } from "./localizar";
+import { avisoDeMais, buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type CanalDeAssinatura, type PropostaListada } from "./localizar";
 import { lerConfirmacao, normalizar } from "./tools";
 import { negaAcao } from "./capacidades";
 
@@ -260,7 +260,7 @@ export async function iniciarAssinatura(
   }
   const candidatos = uteis.slice(0, 5).map(alvoDe);
   const cabeca = r.termo ? `Achei mais de uma proposta com "${r.termo}". Qual devo ${verbo(op)}?` : `Qual proposta devo ${verbo(op)}?`;
-  const resto = r.total > candidatos.length ? `\n(${r.total} no total; se não estiver aqui, me diga o nome ou o código.)` : "";
+  const resto = avisoDeMais(r, uteis.length, candidatos.length); // só conta as úteis (smoke 26/10)
   return resposta({ ...f, candidatos },
     `${cabeca}\n${candidatos.map((p, i) => `${i + 1}. ${rotuloDaProposta(p)}`).join("\n")}${resto}\n\nResponda com o número.`);
 }
@@ -470,8 +470,10 @@ export async function conduzirAssinatura(f: FluxoAssinatura, ctx: ContextoDoTurn
 
   if (f.operacao === "cancelar") {
     const proposta = r.body.proposta && typeof r.body.proposta === "object" ? (r.body.proposta as Record<string, unknown>) : {};
-    // 200 sem "cancelada" no corpo não é prova de cancelamento.
-    if (proposta.status !== "cancelada") {
+    // 200 sem "cancelada" no corpo não é prova de cancelamento. O CM devolve
+    // `estado` (o rótulo "Cancelada", via `projetarPropostaCriada`), não `status` — smoke 26/10.
+    const cancelada = proposta.status === "cancelada" || (typeof proposta.estado === "string" && normalizar(proposta.estado) === "cancelada");
+    if (!cancelada) {
       return resposta(null, `O sistema respondeu, mas não confirmou o cancelamento da proposta ${alvo.codigo}. Confira o status na tela de propostas.`, "assinatura_cancelar_nao_confirmado");
     }
     const clicksign = SEM_ASSINATURA_VIVA.has(alvo.status ?? "") ? "" : " A assinatura na ClickSign foi encerrada.";

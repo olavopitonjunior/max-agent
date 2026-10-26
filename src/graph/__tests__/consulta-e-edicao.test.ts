@@ -60,6 +60,7 @@ describe("pedeConsulta", () => {
     "como está a proposta do Carlos?",
     "tem alguma proposta da Mariana?",
     "quais propostas estão em rascunho?",
+    "Quais propostas estão em andamento?",
     "me mostra a PROP-2026-0013",
     "Max, status da PROP-2026-0013",
   ])("consulta: %s", (t) => expect(pedeConsulta(t)).toBe(true));
@@ -152,6 +153,41 @@ describe("responderConsulta", () => {
     expect(r.reply).toContain("Entre as suas 3 propostas mais recentes, 1 está em rascunho");
     expect(r.reply).toContain("PROP-2026-0012");
     expect(r.reply).not.toContain("PROP-2026-0011");
+  });
+  // Smoke real 26/10 (3228): "Quais propostas estão em andamento?" trouxe só a
+  // PROP-2026-0001 "Virou negócio" — o pedido caía na lista sem filtro.
+  describe("em andamento (smoke real 26/10)", () => {
+    const convertida = { id: "p0", codigo: "PROP-2026-0001", titulo: "Proposta", status: "convertida", estado: "Virou negócio", signatarios: [] };
+    const cancelada = { id: "p9", codigo: "PROP-2026-0009", titulo: "Casa Velha", status: "cancelada", estado: "Cancelada", signatarios: [] };
+    it("só a convertida na org: diz que não há em andamento, sem listá-la como se estivesse", async () => {
+      const r = await responderConsulta(deps([convertida]), "Quais propostas estão em andamento?");
+      expect(r.reply).toContain("Nenhuma proposta em andamento");
+      expect(r.reply).not.toContain("Virou negócio.");
+      expect(r.evento).toBe("consulta_vazia");
+    });
+    it("mistura: lista só as vivas (rascunho, enviada, assinada), nunca as encerradas", async () => {
+      const r = await responderConsulta(deps([convertida, P.andrade, cancelada, P.carlos, P.moraes]), "Quais propostas estão em andamento?");
+      expect(r.reply).toContain("Achei 3 propostas em andamento");
+      for (const c of ["PROP-2026-0012", "PROP-2026-0013", "PROP-2026-0011"]) expect(r.reply).toContain(c);
+      expect(r.reply).not.toContain("PROP-2026-0001");
+      expect(r.reply).not.toContain("PROP-2026-0009");
+    });
+    it("status cru desconhecido, rótulo de encerrada: o rótulo também exclui", async () => {
+      const semStatus = { id: "p0", codigo: "PROP-2026-0001", titulo: "Proposta", status: "status_novo", estado: "Virou negócio" };
+      const r = await responderConsulta(deps([semStatus]), "quais propostas estão em andamento?");
+      expect(r.reply).toContain("Nenhuma proposta em andamento");
+    });
+    it("com mais propostas no servidor: diz que olhou só as recentes", async () => {
+      const r = await responderConsulta(deps([convertida, P.andrade], { total: 30 }), "quais propostas estão em andamento?");
+      expect(r.reply).toContain("Entre as suas 2 propostas mais recentes, 1 está em andamento");
+      expect(r.reply).not.toContain("em em andamento");
+      const vazio = await responderConsulta(deps([convertida], { total: 30 }), "quais propostas estão em andamento?");
+      expect(vazio.reply).toContain("Nenhuma das suas 1 propostas mais recentes está em andamento");
+    });
+    it("'andamento' solto de uma proposta citada continua sendo pergunta de status, não filtro", async () => {
+      const r = await responderConsulta(deps([P.carlos]), "como está o andamento da proposta do Carlos?");
+      expect(r.reply).toContain("PROP-2026-0013");
+    });
   });
   it("lista sem termo: mostra quantas de quantas e como achar outra", async () => {
     const r = await responderConsulta(deps([P.moraes, P.andrade], { total: 14 }), "liste as minhas propostas");

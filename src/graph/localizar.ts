@@ -197,6 +197,19 @@ export async function buscarPropostas(
   return { itens, total, termo };
 }
 
+/**
+ * Rodapé de uma lista de candidatas FILTRADA (só as que servem para a operação).
+ * `r.total` conta todas as propostas, inclusive as que não servem, então não
+ * pode virar "N no total": com 1 útil e 1 convertida dizia "2 no total" sobre 1
+ * item listado (smoke 26/10). Só avisa se há mais candidatas de verdade:
+ * propostas que o Max nem trouxe (página do CM) ou úteis além das listadas.
+ */
+export function avisoDeMais(r: { itens: unknown[]; total: number }, uteis: number, listadas: number): string {
+  if (r.total > r.itens.length) return "\n(Há mais propostas; se não estiver aqui, me diga o nome ou o código.)";
+  if (uteis > listadas) return `\n(${uteis} no total; se não estiver aqui, me diga o nome ou o código.)`;
+  return "";
+}
+
 export function rotuloDaProposta(p: { codigo: string; titulo?: string; estado?: string }): string {
   return [p.codigo, p.titulo].filter(Boolean).join(" — ") + (p.estado ? ` (${p.estado})` : "");
 }
