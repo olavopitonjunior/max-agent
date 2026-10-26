@@ -133,13 +133,28 @@ export async function consultarEscopo(params: {
  * lista, o filtro some e a pessoa recebe todas. O `estado` de negócio é nome
  * de etapa (texto livre por org) e segue intocado.
  */
+/** Chaves que cada verbo de proposta aceita do modelo/despachante. Verbo fora daqui: sem lista (comportamento antigo). */
+const ARGS_DE_PROPOSTA: Partial<Record<ScopeQueryVerb, readonly string[]>> = {
+  "proposal.list": ["estado", "limite"],
+  "proposal.detail": ["proposta_id"],
+};
+
 export function limparArgs(
   args: Record<string, unknown> | undefined,
   verb?: ScopeQueryVerb
 ): Record<string, unknown> {
   const limpos: Record<string, unknown> = {};
+  // Verbos de proposta levam SÓ o que a tool declara. O despacho não impõe o
+  // `additionalProperties:false` do schema da tool, e o `bodySchema` do servidor
+  // recusa (400) valor fora da forma em chaves que ele conhece (`filtro` fora do
+  // enum, `cursor` > 512, `blocos`...): um campo "por preencher" do modelo derrubava a
+  // consulta inteira, que voltava como `falha_na_consulta`.
+  const permitidas = verb ? ARGS_DE_PROPOSTA[verb] : undefined;
   for (const [chave, valor] of Object.entries(args ?? {})) {
+    if (permitidas && !permitidas.includes(chave)) continue;
     if (valor === null || valor === undefined) continue;
+    // `estado` é string no servidor (`z.string().min(1)`); lista/objeto/número do modelo seria 400.
+    if (chave === "estado" && typeof valor !== "string") continue;
     if (chave === "limite") {
       if (Number.isInteger(valor) && (valor as number) > 0) limpos[chave] = valor;
       continue;

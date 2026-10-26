@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { z } from "zod";
 
 /**
  * O cliente do `scope-query` — e a rede de segurança da regra 5.
@@ -208,6 +209,63 @@ describe("limparArgs — filtro vazio do modelo não derruba a leitura", () => {
     });
     const init = vi.mocked(fetch).mock.calls[0]![1] as { body: string };
     expect(JSON.parse(init.body).args).toEqual({ limite: 10 });
+  });
+});
+
+/**
+ * Espelho LITERAL do `bodySchema.args` do `POST /api/agents/scope-query`
+ * (contractmaker `apps/web/src/app/api/agents/scope-query/route.ts`). Literal de
+ * propósito: um fixture derivado do código acompanharia o desvio em silêncio.
+ * Argumento que não passa aqui é 400 no servidor, e 400 vira `null` no cliente =
+ * "a consulta não respondeu agora" (o `falha_na_consulta` de `listar_propostas`).
+ */
+const ARGS_DO_SERVIDOR = z.object({
+  cursor: z.string().min(1).max(512).optional(),
+  imovel_id: z.string().min(1).max(128).optional(),
+  estado: z.string().min(1).optional(),
+  opcoes_etapas: z.boolean().optional(),
+  limite: z.number().int().positive().optional(),
+  negocio_id: z.string().min(1).optional(),
+  proposta_id: z.string().min(1).optional(),
+  atividade_id: z.string().min(1).max(64).optional(),
+  filtro: z.enum(["minhas", "atrasadas", "hoje", "formularios", "propostas", "atividades"]).optional(),
+  blocos: z.array(z.enum(["formularios", "propostas", "atividades"])).max(3).optional(),
+  dealId: z.string().min(1).max(128).optional(),
+});
+
+describe("proposal.list — o que o modelo manda nunca vira 400 no servidor", () => {
+  // Formas que o nano já produziu ou pode produzir para a tool `listar_propostas`
+  // (schema: só `estado` string e `limite` inteiro; `additionalProperties:false` NÃO é imposto no despacho).
+  it.each([
+    ["estado como lista", { estado: ["enviada", "entregue"], limite: 10 }],
+    ["estado numérico", { estado: 2 }],
+    ["estado objeto", { estado: { valor: "enviada" } }],
+    ["estado booleano", { estado: true }],
+    ["filtro inventado", { estado: "enviada", filtro: "abertas" }],
+    ["blocos fora do enum", { blocos: ["tudo"] }],
+    ["cursor gigante", { cursor: "x".repeat(600) }],
+    ["campos de outras tools", { numero: 2, mais: true, atividade_id: "x".repeat(80), imovel_id: "y".repeat(200) }],
+    ["opcoes_etapas em texto", { opcoes_etapas: "sim" }],
+    ["dealId gigante", { dealId: "z".repeat(300) }],
+  ])("%s", async (_nome, args) => {
+    responde({ ok: true, status: 200, body: { items: [], truncated: false } });
+    await consultarEscopo({ orgId: "org1", rawPhone: PHONE, subject: SUJEITO, verb: "proposal.list", args });
+    const init = vi.mocked(fetch).mock.calls[0]![1] as { body: string };
+    const enviado = JSON.parse(init.body).args as Record<string, unknown>;
+    expect(ARGS_DO_SERVIDOR.safeParse(enviado).success).toBe(true);
+    // Só o que a tool declara chega ao servidor.
+    expect(Object.keys(enviado).every((k) => ["estado", "limite"].includes(k))).toBe(true);
+  });
+
+  it("estado válido e limite válido continuam passando", () => {
+    expect(limparArgs({ estado: "Assinada Proponente", limite: 5, filtro: "x" }, "proposal.list")).toEqual({
+      estado: "assinada_proponente",
+      limite: 5,
+    });
+  });
+
+  it("proposal.detail só leva proposta_id", () => {
+    expect(limparArgs({ proposta_id: " p1 ", estado: "enviada", numero: 3 }, "proposal.detail")).toEqual({ proposta_id: "p1" });
   });
 });
 

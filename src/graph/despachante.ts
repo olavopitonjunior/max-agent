@@ -18,6 +18,7 @@ import {
 import { ITENS_POR_LISTA, REFERENCIA_TTL_MS, resolverReferencia, numerarLista, type MapaDeReferencias } from "./referencias";
 import type { StageClarification } from "./query-options";
 import { projetarParaOModelo } from "./preferencias";
+import { projetarNotificacao } from "./notificacao-projecao";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -176,6 +177,20 @@ export async function despacharLeituras(params: {
       }
       args = { [property ? "imovel_id" : "negocio_id"]: selected.item.id };
     }
+    // Detalhe de proposta/negócio: o modelo aponta pelo número da lista; o id nunca passa por ele
+    // e não há "a mais recente" por omissão (sem número válido, recusa).
+    let numeroDoDetalhe: number | null = null;
+    if (entrada.verb === "proposal.detail" || entrada.verb === "deal.detail") {
+      const proposta = entrada.verb === "proposal.detail";
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: proposta ? "proposta" : "negocio" });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      numeroDoDetalhe = selected.item.n;
+      args = { [proposta ? "proposta_id" : "negocio_id"]: selected.item.id };
+    }
     // Sem argumento nenhum: o servidor responde pela org da sessão, o modelo não escolhe nada.
     if (entrada.verb === "template.decisions") args = {};
     if (entrada.verb === "activity.get") {
@@ -234,6 +249,9 @@ export async function despacharLeituras(params: {
       continue;
     }
 
+    // Notificação: só os campos que o Max conhece; título/corpo (CM do Passo 5) entram marcados como dado de terceiros.
+    if (entrada.verb === "notification.list") r.items = r.items.map(projetarNotificacao);
+
     // Negado no servidor volta `{items:[]}` SEM `naoMedidos`; vazio de verdade sempre o traz.
     // Sem ele, o modelo diria "não há pendência" a quem só não tem acesso.
     if (entrada.verb === "template.decisions" && r.naoMedidos === undefined) {
@@ -272,6 +290,14 @@ export async function despacharLeituras(params: {
         truncated: r.truncated || numerada.cortados > 0,
         ...(paginada ? { hasMore: !!r.nextCursor } : {}),
       });
+    } else if (numeroDoDetalhe !== null) {
+      // Detalhe: o `id` do servidor fica fora do prompt; o modelo vê o MESMO número que a pessoa usou.
+      const semId = r.items.map((it) => {
+        if (!it || typeof it !== "object") return it;
+        const { id: _id, ...resto } = it as Record<string, unknown>;
+        return { n: numeroDoDetalhe, ...resto };
+      });
+      resultados.push({ tool: chamada.name, items: semId, truncated: r.truncated });
     } else {
       resultados.push({ tool: chamada.name, items: r.items, truncated: r.truncated, ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) });
     }
