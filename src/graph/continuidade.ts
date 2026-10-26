@@ -3,7 +3,7 @@ import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "./fluxos";
 import { lerConfirmacao, normalizar } from "./tools";
 import { negaAcao } from "./capacidades";
 import { imobproBase } from "@/lib/http";
-import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type PropostaListada } from "./localizar";
+import { avisoDeMais, buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type PropostaListada } from "./localizar";
 
 interface Alvo { id: string; codigo: string; status: string; titulo?: string }
 export interface FluxoContinuidade {
@@ -118,7 +118,7 @@ export async function iniciarContinuidade(ctx: ContextoDoTurno, deps: DepsDoFlux
     }
     const lista = candidatos.slice(0, 5);
     const cabeca = r.termo ? `Achei ${candidatos.length > 1 ? "mais de uma proposta" : "esta proposta"} com "${r.termo}":` : "Qual proposta devo continuar?";
-    const resto = r.total > lista.length ? `\n(${r.total} no total; se não estiver aqui, me diga o nome ou o código.)` : "";
+    const resto = avisoDeMais(r, candidatos.length, lista.length); // só conta as que servem (smoke 26/10)
     return resposta({ ...f, candidatos: lista }, `${cabeca}\n${listaDeAlvos(lista)}${resto}\n\nResponda com o número.`);
   }
   f.alvo = candidatos[0];
