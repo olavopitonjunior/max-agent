@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { Capability } from "./policy";
 import { normalizar } from "./tools";
 import { envioLigado } from "./credito";
@@ -38,12 +39,16 @@ export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: 
   if (tem("proposal.list")) proposta.push("achar pelo nome do cliente ou código e ver o status");
   if (podeEscrever && tem("proposal.create")) proposta.push("duplicar");
   if (podeEscrever && tem("proposal.delete")) proposta.push("excluir");
+  // Lembrar e cancelar a assinatura usam a capability do envio (o servidor ainda confere o papel).
+  if (podeEscrever && tem("proposal.send") && tem("proposal.list")) proposta.push("lembrar quem falta assinar", "cancelar proposta enviada");
   if (proposta.length) linhas.push(`- Propostas: ${proposta.join(", ")}.`);
   if (podeEscrever && tem("proposal.create")) linhas.push("- Converter proposta assinada em negócio, com o link do formulário.");
   const negocio: string[] = [];
   if (podeEscrever && tem("form.create")) negocio.push("criar o formulário");
   if (tem("deal.list") || tem("deal.pending")) negocio.push("consultar negócios e pendências");
   if (negocio.length) linhas.push(`- Negócios: ${negocio.join(", ")}.`);
+  // Preferências de aviso (M3): só usuário da plataforma (`podeEscrever`) e com `prefs.self` na política.
+  if (podeEscrever && tem("prefs.self")) linhas.push("- Avisos: ver e mudar o seu relatório da manhã e o lembrete antes do vencimento.");
   // Crédito só com a flag `MAX_CREDITO` E a política da org.
   if (credito && podeEscrever && tem("credit.request")) {
     // M3: com `MAX_CREDITO_ENVIO`, o envio também é pelo Max (sempre com a confirmação).
@@ -120,7 +125,7 @@ export function pedeAcaoForaDoMax(texto: string): "contrato" | "cobranca" | null
 /** `linkDoNegocio`: o negócio de que a conversa acabou de tratar, quando há. */
 export function textoForaDoMax(tipo: "contrato" | "cobranca", linkDoNegocio?: string | null): string {
   const tela = linkDoNegocio ? `pela tela do negócio: ${linkDoNegocio}` : "pela tela do negócio, no sistema.";
-  if (tipo === "cobranca") return `Cobrança não é feita pelo Max. Se você tiver permissão, faça ${tela}`;
+  if (tipo === "cobranca") return `Cobrança não é feita pelo ${nomeDoAgente()}. Se você tiver permissão, faça ${tela}`;
   return `Contrato eu não gero, não edito nem envio para assinatura. Se você tiver permissão, faça ${tela}\n` +
     "Quando o contrato for assinado por todos, eu te aviso por aqui (se o aviso estiver ligado na sua imobiliária).";
 }

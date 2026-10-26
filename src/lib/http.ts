@@ -1,3 +1,5 @@
+import { withPrivacyFence } from "./runtime/privacy";
+import { currentExecution, bounded, assertExternalAllowed } from "./runtime/context";
 import { semCredencial } from "./redigir";
 
 /**
@@ -15,6 +17,9 @@ import { semCredencial } from "./redigir";
 
 /** Graph API da Meta: API de mensageria, responde em ms; 10s já é generosidade. */
 export const META_TIMEOUT_MS = 10_000;
+
+/** Bridge do Newton: repassa para a Z-API dentro do próprio POST; 15s cobre o salto extra. */
+export const NEWTON_BRIDGE_TIMEOUT_MS = 15_000;
 
 /** ImobPro: consultas de identidade/RAG/escrita. A transcrição é a exceção —
  * sobe até 3 MB em base64 E espera o Gemini transcrever um áudio que pode ter
@@ -79,12 +84,15 @@ export async function fetchWithTimeout(
   init: RequestInit,
   timeoutMs: number
 ): Promise<Response> {
+  assertExternalAllowed();
   try {
     // `no-store` por padrão: no Next 14, GET de rota só-GET (os crons) vai
     // para o Data Cache da Vercel e fica lá entre deploys — um template
     // consultado antes de existir na Meta ficou "ausente" por dias (05/10).
     // Nada deste serviço quer resposta de API em cache.
-    return await fetch(url, { cache: "no-store", ...init, signal: AbortSignal.timeout(timeoutMs) });
+    const send = () => fetch(url, { cache: "no-store", ...init, signal: AbortSignal.timeout(timeoutMs) });
+    const context = currentExecution()?.context;
+    return await bounded(() => context?.personDigest ? withPrivacyFence(context, () => send()) : send());
   } catch (err) {
     if (err instanceof Error && err.name === "TimeoutError") {
       // Sem credencial: a mensagem vai para `last_error` e para o painel, e a

@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "./fluxos";
 import { lerConfirmacao, normalizar } from "./tools";
 import { brl, cpfValido, nomeValido, valoresNoTexto } from "./credito";
@@ -174,7 +175,7 @@ const resposta = (fluxo: FluxoCaptacao | null, reply: string, evento: string): R
 
 // ─── Textos fixos ────────────────────────────────────────────────────────
 
-export const TEXTO_CAPTACAO_SEM_POLITICA = "Captação pelo Max não está liberada para você nesta imobiliária.";
+export const textoCaptacaoSemPolitica = (): string => `Captação pelo ${nomeDoAgente()} não está liberada para você nesta imobiliária.`;
 const TEXTO_POLITICA_INDISPONIVEL = "Não consegui validar sua permissão agora. Nada foi feito; tente de novo em instantes.";
 const TEXTO_SEM_RESPOSTA = "Não consegui falar com o sistema agora. Tente de novo em instantes.";
 const TEXTO_DESLIGADA = "A captação não está ligada para a sua imobiliária. Fale com o administrador.";
@@ -225,7 +226,7 @@ export const TEXTO_POR_CODIGO: Record<CodigoDoEnvio, (p: ParamsDoTexto) => strin
   falha_envio: (p) =>
     `O envio não foi concluído. A captação ficou como "Falha no envio" e pode ser reenviada pela tela: ${p.link}`,
   cota_diaria: (p) =>
-    `Você atingiu o limite de envios de captação pelo Max por hoje${p.limite ? ` (${p.limite})` : ""}. O resto é pela tela: ${p.link}`,
+    `Você atingiu o limite de envios de captação pelo ${nomeDoAgente()} por hoje${p.limite ? ` (${p.limite})` : ""}. O resto é pela tela: ${p.link}`,
   muitas_tentativas: () => "Muitos envios em pouco tempo. Espere um minuto e tente de novo.",
 };
 
@@ -1252,14 +1253,14 @@ type CapacidadeDoFluxo =
   | "captacao.autorizacao.pedir" | "captacao.autorizacao.decidir";
 
 /** "Não está ligada" da fila de autorização do gerente (`MAX_CAPTACAO_AUTORIZACAO` desligada). */
-const TEXTO_AUTORIZACAO_DESLIGADA = "A fila de autorização pelo Max não está ligada para a sua imobiliária. Fale com o administrador.";
+const textoAutorizacaoDesligada = (): string => `A fila de autorização pelo ${nomeDoAgente()} não está ligada para a sua imobiliária. Fale com o administrador.`;
 /** Sem fila para decidir (403 do `captacao.autorizacao.listar`). */
 const TEXTO_SEM_FILA = "Você não tem pedidos de autorização para decidir.";
 
 function gatePolitica(ctx: ContextoDoTurno, podeEscrever: boolean, cap: CapacidadeDoFluxo): Resposta | null {
-  if (!podeEscrever) return resposta(null, TEXTO_CAPTACAO_SEM_POLITICA, "captacao_sem_usuario");
+  if (!podeEscrever) return resposta(null, textoCaptacaoSemPolitica(), "captacao_sem_usuario");
   if (ctx.politicaIndisponivel) return resposta(null, TEXTO_POLITICA_INDISPONIVEL, "captacao_politica_indisponivel");
-  if (!ctx.policy.includes(cap)) return resposta(null, TEXTO_CAPTACAO_SEM_POLITICA, "captacao_sem_politica");
+  if (!ctx.policy.includes(cap)) return resposta(null, textoCaptacaoSemPolitica(), "captacao_sem_politica");
   return null;
 }
 
@@ -1267,7 +1268,7 @@ function gatePolitica(ctx: ContextoDoTurno, podeEscrever: boolean, cap: Capacida
 function textoDeNegado(r: { status: number; body: Record<string, unknown> }): { reply: string; evento: string } {
   const erro = str(r.body.error);
   if (erro === "captacao_desligada") return { reply: TEXTO_DESLIGADA, evento: "captacao_desligada" };
-  return { reply: TEXTO_CAPTACAO_SEM_POLITICA, evento: `captacao_403_${erro ?? "rbac"}` };
+  return { reply: textoCaptacaoSemPolitica(), evento: `captacao_403_${erro ?? "rbac"}` };
 }
 
 const lembrete = (f: FluxoCaptacao) => (f.codigo ? ` ${f.codigo}` : "");
@@ -1440,7 +1441,7 @@ export async function responderListaDeCaptacao(ctx: ContextoDoTurno, deps: DepsD
 export async function iniciarEnvioDeCaptacao(ctx: ContextoDoTurno, deps: DepsDoFluxo, podeEscrever: boolean): Promise<Resposta> {
   const barrado = gatePolitica(ctx, podeEscrever, "captacao.send");
   if (barrado) return barrado;
-  if (!captacaoEnvioLigado()) return resposta(null, "O envio de captação pelo Max ainda não está ligado. Envie pela tela do sistema.", "captacao_envio_desligado");
+  if (!captacaoEnvioLigado()) return resposta(null, `O envio de captação pelo ${nomeDoAgente()} ainda não está ligado. Envie pela tela do sistema.`, "captacao_envio_desligado");
   const busca = buscaDoPedido(ctx.texto);
   const r = await deps.acao("captacao.list", { ...(busca ? { busca } : {}), situacao: "rascunho" });
   if (!r) return resposta(null, TEXTO_SEM_RESPOSTA, "captacao_envio_list_sem_resposta");
@@ -1474,7 +1475,7 @@ export async function iniciarEnvioDeCaptacao(ctx: ContextoDoTurno, deps: DepsDoF
 export async function iniciarFilaDeAutorizacao(ctx: ContextoDoTurno, deps: DepsDoFluxo, podeEscrever: boolean): Promise<Resposta> {
   const barrado = gatePolitica(ctx, podeEscrever, "captacao.autorizacao.decidir");
   if (barrado) return barrado;
-  if (!captacaoAutorizacaoLigada()) return resposta(null, TEXTO_AUTORIZACAO_DESLIGADA, "captacao_autorizacao_fila_desligada");
+  if (!captacaoAutorizacaoLigada()) return resposta(null, textoAutorizacaoDesligada(), "captacao_autorizacao_fila_desligada");
   return listarFilaDeAutorizacao(ctx, deps);
 }
 
@@ -1629,7 +1630,7 @@ export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, d
   // Flag desligada no meio da fila (achado defensivo: o kill-switch de `graph.ts` já cobre a
   // maioria dos casos, mas uma checagem aqui também não deixa a fila seguir sem a flag).
   if (ETAPAS_DA_FILA.has(f.etapa) && !captacaoAutorizacaoLigada()) {
-    return { reply: TEXTO_AUTORIZACAO_DESLIGADA, fluxo: null, evento: "captacao_autorizacao_fila_desligada_no_fluxo" };
+    return { reply: textoAutorizacaoDesligada(), fluxo: null, evento: "captacao_autorizacao_fila_desligada_no_fluxo" };
   }
 
   // Consulta no meio do fluxo: resposta fixa, e o fluxo continua. (Não em `autorizacao_motivo`:
@@ -2446,7 +2447,7 @@ async function conduzirBrancos(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: Dep
  */
 async function enviar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, confirmarBrancos: boolean): Promise<PassoDoFluxo> {
   if (!captacaoEnvioLigado() || !ctx.policy.includes("captacao.send")) {
-    return resposta(null, `O envio pelo Max não está liberado. Envie pela tela: ${linkDe(f.captacaoId)}`, "captacao_envio_nao_liberado");
+    return resposta(null, `O envio pelo ${nomeDoAgente()} não está liberado. Envie pela tela: ${linkDe(f.captacaoId)}`, "captacao_envio_nao_liberado");
   }
   if (typeof f.version !== "number" || !f.captacaoId) return verificar(g(f, ctx, { etapa: "verificar" }), ctx, deps, "");
   const mesmo = f.chave && f.chave.version === f.version && !!f.chave.confirmarBrancos === confirmarBrancos;

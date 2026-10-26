@@ -231,7 +231,8 @@ describe("consulta e edição no grafo", () => {
     const s = await run("corrige o e-mail da proposta da Letícia Andrade para leticia@x.com e manda pra assinatura");
     expect(s.reply).toContain("E-mail do proponente: leticia@x.com");
     expect(s.fluxo).toMatchObject({ kind: "proposta", etapa: "revisao_ajuste" });
-    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.list"]);
+    // 4c: o pedido de trocar contato passa antes pela detecção "trocar signatário" (1 leitura extra, só leitura) e cai fora por ser pré-envio.
+    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.list", "proposal.list"]);
   });
 
   /**
@@ -268,7 +269,7 @@ describe("consulta e edição no grafo", () => {
     // Destokenizado de volta: o resumo mostra o telefone NOVO real, nunca o token.
     expect(s.reply).toContain(`Telefone do proponente: ${TEL_NOVO}`);
     expect(s.reply).not.toContain("⟨TEL");
-    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.list"]);
+    expect(acao.mock.calls.map(([p]) => p.verb)).toEqual(["proposal.list", "proposal.list"]); // 4c: +1 leitura da detecção "trocar signatário"
   });
 
   it("review 09/10 #3: com um rascunho aberto para ajuste, a edição de OUTRA proposta busca a citada", async () => {

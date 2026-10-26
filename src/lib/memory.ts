@@ -1,3 +1,5 @@
+import { currentExecution } from "./runtime/context";
+import { contentDigest } from "./runtime/contracts";
 import { query } from "./db";
 import { conversationKey } from "./phone";
 import { LLM_SHORT_TIMEOUT_MS } from "./http";
@@ -46,15 +48,19 @@ const MAX_KEY_CHARS = 40;
 export type Facts = Record<string, string>;
 
 export async function loadFacts(orgId: string, phone: string): Promise<Facts> {
+  const context = currentExecution()?.context;
+  if (context && (context.mode === "simulation" || context.orgId !== orgId || (context.personDigest && context.personDigest !== contentDigest(conversationKey(phone))))) return {};
   try {
     const rows = await query<{ key: string; value: string }>(
       `SELECT key, value FROM memory_facts
         WHERE org_id = $1 AND phone = $2
+          AND subject_digest IS NOT DISTINCT FROM $4::text
         ORDER BY updated_at DESC
         LIMIT $3`,
-      [orgId, conversationKey(phone), MAX_FACTS_PER_PERSON]
+      [context?.orgId ?? orgId, conversationKey(phone), MAX_FACTS_PER_PERSON, context ? contentDigest(context.subject) : null]
     );
-    return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    const prefix = context ? `subject:${contentDigest(context.subject)}:` : "";
+    return Object.fromEntries(rows.filter((r) => !prefix || r.key.startsWith(prefix)).map((r) => [prefix ? r.key.slice(prefix.length) : r.key, r.value]));
   } catch (err) {
     // Memória é enriquecimento: sem ela o Max responde igual, só menos
     // pessoal. Derrubar o turn por causa disso seria trocar uma conversa por
@@ -136,6 +142,9 @@ export async function saveFacts(
   phone: string,
   facts: Facts
 ): Promise<number> {
+  const context = currentExecution()?.context;
+  if (context && (context.mode === "simulation" || context.orgId !== orgId || (context.personDigest && context.personDigest !== contentDigest(conversationKey(phone))))) return 0;
+  const subjectDigest = context ? contentDigest(context.subject) : null;
   const limpos = Object.entries(facts)
     .map(([k, v]) => limpar(k, v))
     .filter((x): x is [string, string] => x !== null)
@@ -149,12 +158,15 @@ export async function saveFacts(
 
   try {
     for (const [key, value] of limpos) {
+      // Namespace only new runtime preferences; legacy rows keep their original keys.
+      // This preserves the additive PK while preventing one subject overwriting another.
+      const storageKey = subjectDigest ? `subject:${subjectDigest}:${key}` : key;
       await query(
-        `INSERT INTO memory_facts (org_id, phone, key, value, updated_at)
-         VALUES ($1,$2,$3,$4, now())
+        `INSERT INTO memory_facts (org_id, phone, key, value, updated_at, source_task_id, workflow_version, subject_digest)
+         VALUES ($1,$2,$3,$4, now(),$5,$6,$7)
          ON CONFLICT (org_id, phone, key)
-         DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-        [orgId, phone, key, value]
+         DO UPDATE SET value = EXCLUDED.value, updated_at = now(), source_task_id=EXCLUDED.source_task_id, workflow_version=EXCLUDED.workflow_version, subject_digest=EXCLUDED.subject_digest`,
+        [context?.orgId ?? orgId, phone, storageKey, value, context?.taskId ?? null, context?.workflowVersion ?? null, subjectDigest]
       );
     }
 
@@ -163,13 +175,15 @@ export async function saveFacts(
     await query(
       `DELETE FROM memory_facts
         WHERE org_id = $1 AND phone = $2
+          AND subject_digest IS NOT DISTINCT FROM $4::text
           AND key NOT IN (
             SELECT key FROM memory_facts
              WHERE org_id = $1 AND phone = $2
+               AND subject_digest IS NOT DISTINCT FROM $4::text
              ORDER BY updated_at DESC
              LIMIT $3
           )`,
-      [orgId, phone, MAX_FACTS_PER_PERSON]
+      [context?.orgId ?? orgId, phone, MAX_FACTS_PER_PERSON, subjectDigest]
     );
 
     return limpos.length;

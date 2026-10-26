@@ -338,7 +338,7 @@ describe("capability nasce desligada", () => {
   it("sem a policy captacao.create: frase fixa, nada chamado, modelo nem consultado", async () => {
     vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: SEM_CAPTACAO } as never);
     const s = await conversa()("cria uma captação de venda do Apto da Dona Maria");
-    expect(s.reply).toBe(cap.TEXTO_CAPTACAO_SEM_POLITICA);
+    expect(s.reply).toBe(cap.textoCaptacaoSemPolitica());
     expect(chamadas).toEqual([]);
     expect(llm).not.toHaveBeenCalled();
   });
@@ -347,7 +347,7 @@ describe("capability nasce desligada", () => {
     vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: SO_LEITURA } as never);
     const fala = conversa();
     const criar = await fala("cria uma captação de venda do Apto da Dona Maria");
-    expect(criar.reply).toBe(cap.TEXTO_CAPTACAO_SEM_POLITICA);
+    expect(criar.reply).toBe(cap.textoCaptacaoSemPolitica());
     expect(chamadas).toEqual([]);
     const listar = await fala("quais são as minhas captações?");
     expect(verbos("captacao.list")).toHaveLength(1);
@@ -356,7 +356,7 @@ describe("capability nasce desligada", () => {
 
   it("corretor comissionado (sem usuário): não liberada", async () => {
     const s = await conversa(corretor)("cria uma captação de venda do Apto da Dona Maria");
-    expect(s.reply).toBe(cap.TEXTO_CAPTACAO_SEM_POLITICA);
+    expect(s.reply).toBe(cap.textoCaptacaoSemPolitica());
     expect(chamadas).toEqual([]);
   });
 
@@ -1136,7 +1136,7 @@ describe("achado 21: usuário só com captacao.send (sem captacao.create)", () =
     const pedido = await fala("envia a captação da Maria para assinatura");
     expect(pedido.reply).toContain("Matrícula");
     const s = await fala("matrícula 12345");
-    expect(s.reply).not.toBe(cap.TEXTO_CAPTACAO_SEM_POLITICA);
+    expect(s.reply).not.toBe(cap.textoCaptacaoSemPolitica());
     expect(s.reply).toContain("outra permissão");
     expect(s.reply).toContain("/imoveis/captacoes/cap-1");
   });
@@ -1144,7 +1144,7 @@ describe("achado 21: usuário só com captacao.send (sem captacao.create)", () =
   it("fail-closed: sem NENHUMA capability de captação, pedido de envio é recusado", async () => {
     vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: SEM_CAPTACAO } as never);
     const s = await conversa()("envia a captação da Maria para assinatura");
-    expect(s.reply).toBe(cap.TEXTO_CAPTACAO_SEM_POLITICA);
+    expect(s.reply).toBe(cap.textoCaptacaoSemPolitica());
     expect(chamadas).toEqual([]);
   });
 });
@@ -1291,7 +1291,7 @@ describe("achado 2 (revisão opus): 'verificar' é read-only — nunca exige cap
     // repergunta. O que importa pro achado 2: ANTES do fix, send-only (sem
     // `captacao.create`) era recusado aqui com a frase fixa de "não liberada".
     const depois = await fala("1");
-    expect(depois.reply).not.toBe(cap.TEXTO_CAPTACAO_SEM_POLITICA);
+    expect(depois.reply).not.toBe(cap.textoCaptacaoSemPolitica());
     // Sem ids locais, "verificar" -> resumir() nem repergunta o canal (item C
     // — já volta direto pro resumo de envio).
     expect(depois.reply).toContain("Envio para Maria Silva");

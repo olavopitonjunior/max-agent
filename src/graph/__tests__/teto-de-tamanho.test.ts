@@ -37,6 +37,47 @@ describe("limitarTamanho", () => {
     expect(limitarTamanho(t)).toEqual({ texto: t, resto: null });
   });
 
+  it("compacta linhas vazias antes de inventar uma continuação de lista completa", () => {
+    const t = "Negócios da equipe:\n\n1. ALFA — Documentação\n2. BETA — Assinatura\n3. GAMA — Cobrança emitida\n\nQuer detalhar algum pelo número?";
+    const r = limitarTamanho(t);
+    expect(r.resto).toBeNull();
+    expect(r.texto).toBe("Negócios da equipe:\n1. ALFA — Documentação\n2. BETA — Assinatura\n3. GAMA — Cobrança emitida\nQuer detalhar algum pelo número?");
+    expect(dentroDoTeto(r.texto)).toBe(true);
+  });
+
+  it("preserva espaços e opções válidas quando linhas só de espaços estouram o teto", () => {
+    const t = "Carteira:\n  \n1. Ana Maria — Etapa  de revisão\n\t\nPosso detalhar ou consultar outra etapa?\n\nQual prefere?";
+    const r = limitarTamanho(t);
+    expect(r.resto).toBeNull();
+    expect(r.texto).toBe("Carteira:\n1. Ana Maria — Etapa  de revisão\nPosso detalhar ou consultar outra etapa?\nQual prefere?");
+  });
+
+  it("compacta também quando apenas linhas vazias causam excesso de caracteres", () => {
+    const t = `1. ALFA — Documentação${"\n".repeat(510)}2. BETA — Assinatura`;
+    expect(limitarTamanho(t)).toEqual({ texto: "1. ALFA — Documentação\n2. BETA — Assinatura", resto: null });
+  });
+
+  it("mantém formatação original se todas as linhas já cabem", () => {
+    const t = "1. ALFA — Documentação\n\nQuer detalhar?";
+    expect(limitarTamanho(t)).toEqual({ texto: t, resto: null });
+  });
+
+  it("excesso real após compactação preserva todas as palavras entre parte e resto", () => {
+    const itens = Array.from({ length: 9 }, (_, i) => `${i + 1}. Cliente ${i + 1} — Etapa ${i + 1}`);
+    const r = limitarTamanho(itens.join("\n\n"));
+    expect(dentroDoTeto(r.texto)).toBe(true);
+    expect(r.resto).toBe("6. Cliente 6 — Etapa 6\n7. Cliente 7 — Etapa 7\n8. Cliente 8 — Etapa 8\n9. Cliente 9 — Etapa 9");
+    expect(`${r.texto.replace(`\n${SUFIXO_RESTO}`, "")}\n${r.resto}`).toBe(itens.join("\n"));
+  });
+
+  it("texto longo de verdade continua limitado após compactar e conserva palavras no resto", () => {
+    const longo = Array.from({ length: 20 }, (_, i) => frase(i)).join(" ");
+    const r = limitarTamanho(`Carteira:\n\n${longo}`);
+    expect(dentroDoTeto(r.texto)).toBe(true);
+    expect(r.resto).not.toBeNull();
+    expect(`${r.texto.replace(`\n${SUFIXO_RESTO}`, "")} ${r.resto}`).toBe(`Carteira:\n${longo}`);
+  });
+
   it("acima de 500 caracteres: corta em fim de frase e oferece o resto", () => {
     const longo = Array.from({ length: 20 }, (_, i) => frase(i)).join(" ");
     const r = limitarTamanho(longo);
@@ -95,6 +136,15 @@ describe("no grafo", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     profile.mockResolvedValue({ enabled: true, model: "x" } as never);
+  });
+
+  it("lista completa com separadores vazios mantém pares e oferta de detalhamento sem resto", async () => {
+    const resposta = "Negócios:\n\n1. ALFA — Documentação\n2. BETA — Assinatura\n3. GAMA — Cobrança emitida\n\nQuer detalhar algum pelo número?";
+    llm.mockResolvedValue({ text: resposta, toolCalls: [], usage: uso } as never);
+    const r = await turno(buildGraph().compile(), "como estão meus negócios?", "lista-completa");
+    expect(r.reply).toBe("Negócios:\n1. ALFA — Documentação\n2. BETA — Assinatura\n3. GAMA — Cobrança emitida\nQuer detalhar algum pelo número?");
+    expect(r.restoDaResposta).toBeNull();
+    expect(dentroDoTeto(r.reply as string)).toBe(true);
   });
 
   it("resposta longa do modelo sai cortada; 'sim' manda o resto SEM chamar o modelo", async () => {

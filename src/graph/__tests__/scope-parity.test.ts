@@ -1,11 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   CAMPOS_PROIBIDOS_AO_BROKER,
   type DealProjetadoBroker,
   type DealProjetadoUser,
   type ScopeQueryRequest,
   type ScopeQueryResponse,
+  VERBOS_DE_LEITURA,
 } from "../scope-contract";
+import { catalog, executableTool } from "@/lib/runtime/catalog";
 
 /**
  * Vetor fixo do contrato de `POST /api/agents/scope-query` — a metade daqui.
@@ -102,5 +104,63 @@ describe("paridade do contrato de scope-query", () => {
     expect(JSON.stringify(resposta)).toBe(
       `{"items":[${ITEM_BROKER_SERIALIZADO}],"truncated":false}`
     );
+  });
+});
+
+/**
+ * Os verbos de leitura, literal do `VERBOS_DE_LEITURA` do ImobPro
+ * (`contractmaker/apps/web/src/lib/max/`). Literal de propósito: derivar da
+ * constante deste lado acompanharia uma divergência em silêncio. Verbo que o
+ * ImobPro aceita e este lado não conhece nunca é chamado; o contrário volta 400.
+ * `pending.summary` (24/10/2026) é o último.
+ */
+const VERBOS_DE_LEITURA_DO_IMOBPRO = [
+  "deal.list",
+  "deal.detail",
+  "deal.pending",
+  "proposal.list",
+  "proposal.detail",
+  "notification.list",
+  "activity.list",
+  "activity.get",
+  "metrics.get",
+  "property.list",
+  "property.detail",
+  "contract.status",
+  "template.decisions",
+  "pending.summary",
+];
+
+describe("paridade dos verbos de leitura", () => {
+  it("é a mesma lista, na mesma ordem, dos dois lados", () => {
+    expect([...VERBOS_DE_LEITURA]).toEqual(VERBOS_DE_LEITURA_DO_IMOBPRO);
+  });
+
+  it("pending.summary está no catálogo como leitura, SEM flag (o gate é a capability), com a capability de mesmo nome", () => {
+    const t = catalog("org1").tools.find((x) => x.id === "pending.summary");
+    expect(t).toMatchObject({
+      executor: "scope-query",
+      effect: "read",
+      enabled: true,
+      status: "current",
+      permission: "pending.summary",
+      policyCapability: "pending.summary",
+    });
+    expect(t).not.toHaveProperty("flag");
+  });
+
+  it("pending.summary executa com MAX_EXTENDED_QUERIES desligada; activity.list não", () => {
+    vi.stubEnv("MAX_EXTENDED_QUERIES", "false");
+    try {
+      expect(executableTool("pending.summary", "scope-query", "org1")).toBeDefined();
+      expect(executableTool("activity.list", "scope-query", "org1")).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("os outros verbos de consulta nova continuam atrás de MAX_EXTENDED_QUERIES", () => {
+    const t = catalog("org1").tools.find((x) => x.id === "activity.list");
+    expect(t).toMatchObject({ flag: "MAX_EXTENDED_QUERIES" });
   });
 });

@@ -1,3 +1,4 @@
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "./fluxos";
 import { lerConfirmacao, normalizar } from "./tools";
 import { negaAcao } from "./capacidades";
@@ -121,7 +122,7 @@ export async function iniciarContinuidade(ctx: ContextoDoTurno, deps: DepsDoFlux
     return resposta({ ...f, candidatos: lista }, `${cabeca}\n${listaDeAlvos(lista)}${resto}\n\nResponda com o número.`);
   }
   f.alvo = candidatos[0];
-  if (!permitido(f, ctx)) return resposta(null, "Sua permissão atual não permite concluir/converter essa proposta pelo Max. Nenhum formulário novo foi criado.");
+  if (!permitido(f, ctx)) return resposta(null, `Sua permissão atual não permite concluir/converter essa proposta pelo ${nomeDoAgente()}. Nenhum formulário novo foi criado.`);
   if (!f.converter && f.alvo.status !== "assinada_proponente") return resposta(null, `A proposta ${f.alvo.codigo} já foi concluída. Se quiser, peça para convertê-la em negócio.`);
   return resumo(f);
 }

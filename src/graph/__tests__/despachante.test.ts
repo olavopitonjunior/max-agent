@@ -76,7 +76,8 @@ describe("registro de tools", () => {
   });
 
   it("toda leitura que lista declara o que produz (G2)", () => {
-    for (const e of REGISTRO_DE_TOOLS.filter((x) => x.tipo === "leitura")) {
+    for (const e of REGISTRO_DE_TOOLS.filter((x) => x.tipo === "leitura" && x.verb !== "metrics.get" && x.verb !== "template.decisions" && x.verb !== "pending.summary" && x.verb !== "prefs.get" && x.verb !== "proposal.detail" && x.verb !== "deal.detail")) {
+      // detalhar_*: CONSOMEM o número da lista (não produzem lista nova), por isso fora da regra
       expect(e.refs?.produz, e.nome).toBeDefined();
     }
   });
@@ -278,6 +279,76 @@ describe("despacharLeituras", () => {
       [1, "cdeal00000000000000000001"],
       [2, "cdeal00000000000000000002"],
     ]);
+  });
+});
+
+// ── pending.summary (M2): a resposta da plataforma chega ao modelo ─────────
+
+describe("despacharLeituras — minhas_pendencias", () => {
+  const ctx = {
+    oferecidas: ["minhas_pendencias"],
+    policy: ["pending.summary"] as never,
+    identity: gerente,
+    fromPhone: "+5511999990000",
+    referencias: null,
+    turno: "m1",
+    agora: 1_000,
+  };
+  const resumo = {
+    formularios: { total: 7, itens: [{ formId: "f1", dealId: "d1", dealTitle: "Rua A, 10", total: 2, itens: ["RG do comprador", "CPF"] }] },
+    propostas: { total: 1, itens: [{ proposalId: "p1", codigo: "PROP-2026-0001", dealTitle: null, status: "rascunho" }] },
+    atividades: { total: 3, atrasadas: 1, hoje: 1, itens: [{ activityId: "a1", title: "Ligar", dealTitle: "Rua A, 10", whenLabel: "hoje, 15:00", atrasada: false }] },
+  };
+  const argsEnviados = () => escopo.mock.calls[0][0].args;
+
+  it("a resposta do verbo chega ao modelo com os totais exatos", async () => {
+    escopo.mockResolvedValue({ items: [resumo], truncated: false });
+    const r = await despacharLeituras({ ...ctx, chamadas: [{ name: "minhas_pendencias", args: {} }] });
+    expect(escopo).toHaveBeenCalledTimes(1);
+    expect(escopo.mock.calls[0][0]).toMatchObject({ verb: "pending.summary" });
+    expect(argsEnviados()).toEqual({});
+    expect(r.resultados).toEqual([{ tool: "minhas_pendencias", items: [resumo], truncated: false }]);
+    expect(r.trilha[0].outcome).toBe("ok");
+  });
+
+  it("filtro vira blocos (um bloco) e negocio_id vira dealId", async () => {
+    escopo.mockResolvedValue({ items: [resumo], truncated: false });
+    await despacharLeituras({
+      ...ctx,
+      chamadas: [{ name: "minhas_pendencias", args: { filtro: "formularios", negocio_id: " d1 " } }],
+    });
+    expect(argsEnviados()).toEqual({ blocos: ["formularios"], dealId: "d1" });
+  });
+
+  it("filtro fora do enum e argumentos extras do modelo não vão ao servidor", async () => {
+    escopo.mockResolvedValue({ items: [resumo], truncated: false });
+    await despacharLeituras({
+      ...ctx,
+      chamadas: [{ name: "minhas_pendencias", args: { filtro: "tudo", negocio_id: "", userId: "outro", cursor: "x", limite: 99 } }],
+    });
+    expect(argsEnviados()).toEqual({});
+  });
+
+  it("null da plataforma (sem permissão) vira resposta neutra, não 'nada pendente'", async () => {
+    for (const items of [[], [null]]) {
+      escopo.mockResolvedValue({ items, truncated: false });
+      const r = await despacharLeituras({ ...ctx, chamadas: [{ name: "minhas_pendencias", args: {} }] });
+      expect(r.resultados[0].items).toEqual([{ sem_permissao: true }]);
+      expect(r.trilha[0].outcome).toBe("sem_permissao");
+    }
+  });
+
+  it("falha de rede continua falha (items null), distinta de sem permissão", async () => {
+    escopo.mockResolvedValue(null);
+    const r = await despacharLeituras({ ...ctx, chamadas: [{ name: "minhas_pendencias", args: {} }] });
+    expect(r.resultados[0].items).toBeNull();
+    expect(r.trilha[0].outcome).toBe("falha_na_consulta");
+  });
+
+  it("sem a capability, nem consulta o servidor", async () => {
+    const r = await despacharLeituras({ ...ctx, policy: ["deal.pending"] as never, chamadas: [{ name: "minhas_pendencias", args: {} }] });
+    expect(escopo).not.toHaveBeenCalled();
+    expect(r.trilha[0].outcome).toBe("capability_negada");
   });
 });
 

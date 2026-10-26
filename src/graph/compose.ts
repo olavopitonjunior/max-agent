@@ -256,9 +256,16 @@ export const SUFIXO_RESTO = "Quer ver o resto?";
  * = coube inteiro, e aí o texto volta INTACTO (nem o espaço das pontas muda).
  */
 export function limitarTamanho(texto: string): { texto: string; resto: string | null } {
-  const t = texto.trim();
+  let t = texto.trim();
   if (t.length <= TETO_CARACTERES && t.split("\n").length <= TETO_LINHAS) {
     return { texto, resto: null };
+  }
+
+  // Separadores vazios não justificam esconder palavras ou pedir continuação.
+  // Só compacta após exceder o teto; preserva todas as linhas com conteúdo.
+  t = t.split("\n").filter((linha) => linha.trim().length > 0).join("\n");
+  if (t.length <= TETO_CARACTERES && t.split("\n").length <= TETO_LINHAS) {
+    return { texto: t, resto: null };
   }
 
   // O sufixo ocupa uma linha e seus caracteres: o orçamento do corpo desconta.

@@ -1,6 +1,23 @@
+import { deployProfile, nomeDoAgente } from "@/lib/deploy-profile";
+import { featureEnabled, durableRuntimeEnabled } from '@/lib/runtime/rollout';
+import { liveNamespaceFor } from "@/lib/runtime/context";
+import { query } from "@/lib/db";
+import { withDeliveryFence, captureDispatchFence, DispatchFenceSchema, type DispatchFence } from "@/lib/runtime/delivery-fence";
+import { privacyEpoch, protectCheckpoint } from "@/lib/runtime/privacy";
+import { marketingStep, type MarketingPending } from "./marketing";
+import { withExecution, withExistingExecution, currentExecution, withPersonPrivacy } from "@/lib/runtime/context";
+import { WORKFLOW_VERSION, contentDigest, type ExecutionContext } from "@/lib/runtime/contracts";
+import { startTask, finishTask, executeIntent } from "@/lib/runtime/store";
+import { getControl, assertBotWrite } from "@/lib/runtime/handoff";
+import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
+import { rotearBotaoDeAtividade } from "@/lib/atividade-botao";
+import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
+import { iniciarPreferencias, preferenciasPermitidas, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
+import { resolverReferencia } from "./referencias";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
+import { iniciarAssinatura, pedeAssinatura } from "./assinatura";
 import {
   negaAcao, pedeAcaoForaDoMax, pedeCapacidades, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
   textoDoAndamentoDoContrato, textoForaDoMax,
@@ -49,6 +66,7 @@ import {
   TEXTO_INDISPONIVEL_AGORA,
   TEXTO_CANCELADO,
   textoFalhou,
+  MUDAR_MINHAS_NOTIFICACOES,
   type PendingAction,
 } from "./tools";
 import { downloadMedia } from "@/lib/transport";
@@ -67,6 +85,7 @@ import {
   displayName,
   markGreeted,
   avisouPrimeiroAcessoHoje,
+  type Identity,
   type Candidate,
 } from "@/lib/identity";
 import { complete, DEFAULT_MODEL, type LlmUsage,
@@ -97,7 +116,7 @@ import {
   despacharLeituras,
   type ResultadoDeTool,
 } from "./despachante";
-import type { MapaDeReferencias } from "./referencias";
+import { renderizarNegociosSelecionados, type MapaDeReferencias } from "./referencias";
 import {
   conduzirFluxo,
   fluxoExpirou,
@@ -115,8 +134,9 @@ import {
 } from "./fluxos";
 import { executarAcao, type VerboDeAcao } from "@/lib/acao";
 import { OrgSuspensaError, TEXTO_ORG_SUSPENSA } from "@/lib/org-suspensa";
-import { subjectDe } from "@/lib/scope";
-import { chaveDePolitica } from "@/lib/cm";
+import { subjectDe, consultarEscopo } from "@/lib/scope";
+import { explicitStage, queryChoice, renderQueryOptions, nextQueryPage, QUERY_OPTIONS_TTL, type QueryOptions } from "./query-options";
+import { chaveDePolitica, lerPreferencias, atualizarPreferencias } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
 import { SEM_ORG } from "@/lib/sem-org";
 
@@ -233,6 +253,9 @@ function blindarCredito(state: MaxStateType, update: MaxUpdate): MaxUpdate {
 }
 
 export const MaxState = Annotation.Root({
+  queryOptions: Annotation<QueryOptions | null>({ reducer: (_p,n) => n, default: () => null }),
+  selectedDealQuery: Annotation<string | null>({ reducer: (_p,n) => n, default: () => null }),
+  marketingPending: Annotation<MarketingPending | null>({ reducer: (_p,n) => n, default: () => null }),
   inbound: Annotation<InboundMessage>,
   /** Resolvida ANTES do grafo — é ela que determina o `thread_id`. */
   identity: Annotation<Candidate>,
@@ -555,7 +578,7 @@ export type MaxUpdate = typeof MaxState.Update;
  * cada call-site, é o que impede o próximo caminho de entrada de reabrir o bug.
  */
 export function threadIdFor(orgId: string, phone: string): string {
-  return `${orgId}:${conversationKey(phone)}`;
+  return scopedThreadId(orgId, phone);
 }
 
 /**
@@ -575,13 +598,16 @@ export function threadIdFor(orgId: string, phone: string): string {
 export async function seedNotification(
   orgId: string,
   phone: string,
-  texto: string
+  texto: string,
+  delivery?:{id:string;fence:DispatchFence;subject:unknown}
 ): Promise<void> {
-  const app = await getApp();
-  await app.updateState(
-    { configurable: { thread_id: threadIdFor(orgId, phone) } },
-    { messages: [{ role: "assistant", content: texto }] }
-  );
+  const app=await getApp();
+  const threadId=delivery?liveNamespaceFor(orgId,phone,delivery.subject):threadIdFor(orgId,phone);
+  const write=()=>app.updateState({configurable:{thread_id:threadId}},{messages:[{role:"assistant",content:texto}]});
+  if(delivery)await withDeliveryFence({table:'outbox',id:delivery.id,phone,fence:delivery.fence},async(client)=>{
+    await client.query(`INSERT INTO live_conversation_binding(org_id,phone,subject_digest,thread_id) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,phone,subject_digest) DO UPDATE SET bound_at=now()`,[orgId,conversationKey(phone),contentDigest(delivery.subject),threadId]);
+    await write();
+  });else await write();
 }
 
 /**
@@ -643,6 +669,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
   if (orgSuspensa) {
     console.warn(`[gate] org suspensa no ImobPro: ${state.identity.orgId}`);
     return {
+      marketingPending: null,
       halt: "org_suspensa",
       pendingAction: null,
       restoDaResposta: null,
@@ -653,6 +680,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
 
   if (profile && !profile.enabled) {
     return {
+      marketingPending: null,
       halt: "desligado",
       pendingAction: null,
       restoDaResposta: null,
@@ -686,6 +714,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       `[gate] assunto bloqueado (${bloqueado}) em ${state.identity.orgId}`
     );
     return {
+      marketingPending: null,
       halt: `assunto_bloqueado:${bloqueado}`,
       // Ver o descarte no kill switch acima: `halt` desvia do `confirm`, e uma
       // pendência que atravessa o turn vira escrita confirmada por engano.
@@ -798,6 +827,9 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
  * três horas depois responde outra coisa na cabeça da pessoa.
  */
 async function continuar(state: MaxStateType): Promise<MaxUpdate> {
+  // An active creation/confirmation owns its numbers; old read options cannot capture them.
+  if (state.queryOptions && (state.fluxo || state.pendingAction)) return { queryOptions: null };
+  if (state.queryOptions?.numbered !== false && state.queryOptions) return { restoDaResposta: null };
   const guardado = state.restoDaResposta;
   if (!guardado) return {};
 
@@ -868,6 +900,12 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
     extrairCredito: async (texto, campo) => extrair(texto, toolExtrairCredito(campo)),
     // Captação (P9): passa pelo MESMO `extrair`, que tokeniza o texto, destokeniza a saída e reporta o custo (AIUsage).
     extrairCaptacao: async (texto, secao) => extrair(texto, toolExtrairCaptacao(secao)),
+    // Preferências de aviso (M3): SEMPRE da própria pessoa (telefone do turn); só usuário da plataforma tem preferência.
+    preferencias: {
+      ler: async () => (state.identity.kind === "user" ? lerPreferencias({ orgId, rawPhone: state.inbound.fromPhone }) : null),
+      atualizar: async (patch) =>
+        state.identity.kind === "user" ? atualizarPreferencias({ orgId, rawPhone: state.inbound.fromPhone, patch }) : null,
+    },
   };
 }
 
@@ -875,6 +913,13 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
  * Um turn com fluxo de criação em andamento. Responde por template e decide o
  * passo seguinte; sem fluxo (ou vencido), passa adiante sem tocar em nada.
  */
+const OPERACAO_DA_TOOL_DE_ATIVIDADE: Record<string, OperacaoDeAtividade | undefined> = {
+  criar_atividade: "criar",
+  comentar_atividade: "comentar",
+  concluir_atividade: "concluir",
+  recusar_atividade: "recusar",
+};
+
 async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const agora = Date.now();
   const userText = textoDoTurno(state).trim();
@@ -883,7 +928,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
   // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
   // resumo velhos não podem capturar um "2" dias depois (review 09/10).
-  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave);
+  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "assinatura" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave) || (state.fluxo?.kind === "atividade" && !!state.fluxo.chave);
   const atual = vencido ? (sobrevive ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
   const escritaEmAberto = !!(atual && "chave" in atual && atual.chave);
 
@@ -891,7 +936,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // sistema, nunca do modelo (prod 09/10). O fluxo em curso fica como está.
   // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
   const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha" || atual?.kind === "credito" ||
-    atual?.kind === "captacao";
+    atual?.kind === "captacao" || atual?.kind === "atividade" || atual?.kind === "preferencias";
   // Continuidade e gestão vêm antes: "converte a proposta… pra gerar o contrato" é conversão.
   // Rascunho aberto para ajuste (sem escrita pendente) não prende o turno: pedido
   // sobre OUTRA proposta ("muda o valor da proposta do João…"), consulta ou
@@ -900,6 +945,47 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const rascunhoAberto = atual?.kind === "proposta" && !!atual.propostaId && !atual.chave &&
     ["ajustes", "revisao_ajuste", "metodo"].includes(atual.etapa);
   const livre = !coletando || rascunhoAberto;
+
+  // Toque em botão de atividade (`atv:<id>:concluir|comentar|recusar`, M1). Fica aqui, e não no
+  // `interceptar`, porque precisa de identidade e política. Nunca escreve: abre a proposta.
+  const payloadDeAtividade = state.inbound.buttonPayload ?? null;
+  if (payloadDeAtividade?.startsWith("atv:")) {
+    const ocupado = escritaEmAberto || (coletando && atual?.kind !== "atividade");
+    const reply = ocupado
+      ? (atual?.kind === "atividade" && atual.chave ? textoDeOcupado(atual) : "Antes, vamos terminar o pedido em andamento (responda ou diga \"cancelar\"). Depois toque no botão de novo.")
+      : null;
+    const toque = reply === null
+      ? await rotearBotaoDeAtividade({
+          payload: payloadDeAtividade,
+          ctx: { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+            politicaIndisponivel: state.politicaIndisponivel, agora, orgName: state.identity.orgName,
+            thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) },
+          identity: state.identity,
+          ler: (atividadeId) => consultarEscopo({ orgId: state.identity.orgId, rawPhone: state.inbound.fromPhone,
+            subject: subjectDe(state.identity), verb: "activity.get", args: { atividade_id: atividadeId } }),
+        })
+      : { reply: reply as string, fluxo: null, evento: "atividade_botao_ocupado" };
+    // Negado/indisponível não mexe no fluxo aberto (fica rebaixado); aberto, substitui.
+    const fluxo = toque.fluxo ?? (atual ? rebaixarFluxo(atual) : vencido ? null : undefined);
+    return {
+      ...(fluxo !== undefined ? { fluxo } : {}),
+      reply: toque.reply,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: toque.reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "atividade", botao: true }, outcome: toque.evento }],
+    };
+  }
+
+  if (livre && !escritaEmAberto) {
+    const marketing = await marketingStep({ orgId: state.identity.orgId, text: userText, messageId: state.inbound.messageId, now: agora, canWrite: podeEscrever(state.identity), policy: state.policy, pending: state.marketingPending }, async (verb,args,key) => {
+      if (verb === "property.list") {
+        if (!state.policy.includes("property.list")) return null;
+        const result = await consultarEscopo({orgId:state.identity.orgId,rawPhone:state.inbound.fromPhone,subject:subjectDe(state.identity),verb:"property.list",args});
+        return result ? {status:200,body:{...result}} : null;
+      }
+      return depsDoFluxo(state,usage).acao(verb,args,key);
+    });
+    if (marketing) return { reply: marketing.reply, marketingPending: marketing.pending, pendingAction: null, fluxo: rebaixarFluxo(state.fluxo), messages: [{role:"user",content:userText},{role:"assistant",content:marketing.reply}], toolLog: [{name:"marketing",args:{},outcome:marketing.event}] };
+  }
 
   // Crédito (M2): antes da consulta e da criação ("ficha de crédito" não é
   // formulário). Flag desligada = o Max segue como antes, sem citar crédito.
@@ -987,17 +1073,36 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     // Flag desligada no meio da ficha: o fluxo some e o turno segue normal.
     return { fluxo: null, toolLog: [{ name: "fluxo", args: { kind: "credito" }, outcome: "credito_desligado" }] };
   }
-  const gestao = podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
+  // Lembrar quem falta assinar / cancelar a assinatura de uma proposta (Passo 4, 25/10): fluxo próprio.
+  // "Cancela a proposta" nunca é "exclui a proposta" (gestão): as duas detecções são disjuntas.
+  let assinatura = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura" ? pedeAssinatura(userText) : null;
+  // Trocar o contato de quem assina (Passo 4c): só orienta quando a proposta JÁ foi enviada. Antes do envio
+  // (ou sem proposta achada, sem política, leitura falhando) o pedido não é deste fluxo: `assinatura` volta a
+  // null e TUDO abaixo (gestão/edição, escopo, modelo) roda como se a detecção não tivesse disparado.
+  // Custo aceito: uma leitura a mais nesse caminho. Com escrita em aberto, nem tenta.
+  if (assinatura === "trocar") {
+    const troca = escritaEmAberto ? null : await iniciarAssinatura("trocar", { texto: userText, messageId: state.inbound.messageId,
+      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
+    if (troca && troca.liberar !== true) {
+      return { fluxo: troca.fluxo, reply: troca.reply,
+        messages: [{ role: "user", content: userText }, { role: "assistant", content: troca.reply }],
+        toolLog: [{ name: "fluxo", args: { kind: "assinatura", operacao: "trocar" }, outcome: troca.evento }] };
+    }
+    assinatura = null;
+  }
+  const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
   // "Não converte a proposta da X" é o contrário do pedido: a negação vem antes.
   const negada = !atual ? negaAcao(userText) : null;
   const continuidade = podeEscrever(state.identity) && !negada && pedeContinuidade(userText);
-  const foraDoMax = coletando || gestao || continuidade ? null : pedeAcaoForaDoMax(userText);
+  const foraDoMax = coletando || gestao || assinatura || continuidade ? null : pedeAcaoForaDoMax(userText);
   // "O contrato já foi enviado?" e "não exclui a proposta X": respostas do
   // sistema (eval 09/10 — o modelo confundia o contrato com o envio da
   // proposta e dizia "não consigo excluir"). A negação só sem fluxo aberto:
   // dentro de um, o "não" é a resposta ao resumo e o fluxo a trata.
-  const contratoPergunta = coletando || gestao || continuidade ? false : perguntaDoContrato(userText);
-  if (!coletando && !gestao && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
+  const contratoLeitura = featureEnabled("queries",state.identity.orgId) && state.policy.includes("contract.status") &&
+    !/\b(quem|signat[aá]ri|falta(?:m)? assinar)/i.test(userText);
+  const contratoPergunta = coletando || gestao || assinatura || continuidade || contratoLeitura ? false : perguntaDoContrato(userText);
+  if (!coletando && !gestao && !assinatura && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
     const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
     const linkDoNegocio = resultado?.match(/Negócio: (\S+)/)?.[1] ?? null;
     const reply = foraDoMax
@@ -1012,6 +1117,14 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
       toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome }] };
   }
 
+  if (assinatura && !escritaEmAberto) {
+    const passo = await iniciarAssinatura(assinatura, { texto: userText, messageId: state.inbound.messageId,
+      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
+    return { fluxo: passo.fluxo, reply: passo.reply,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "assinatura", operacao: assinatura }, outcome: passo.evento }] };
+  }
+
   // Excluir/duplicar proposta: fluxo próprio, determinístico (decisão 09/10).
   if (gestao && !escritaEmAberto) {
     const passo = await iniciarGestao(gestao, { texto: userText, messageId: state.inbound.messageId,
@@ -1022,7 +1135,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   }
 
   // Continuidade tem precedência sobre o classificador "criar formulário".
-  if (atual?.kind !== "continuidade" && continuidade && !(escritaEmAberto && atual?.kind === "gestao")) {
+  if (atual?.kind !== "continuidade" && continuidade && !(escritaEmAberto && (atual?.kind === "gestao" || atual?.kind === "assinatura"))) {
     const passo = await iniciarContinuidade({ texto: userText, messageId: state.inbound.messageId,
       policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
     return { fluxo: passo.fluxo, reply: passo.reply,
@@ -1034,10 +1147,17 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // com a busca em todas as propostas da pessoa — nunca o modelo filtrando as
   // recentes de cabeça (teste 09/10). Envio vem antes: "envia a da X" é envio.
   // O fluxo aberto fica, rebaixado: um "sim" depois da lista não executa nada.
-  const emSelecao = (atual?.kind === "continuidade" || atual?.kind === "gestao") && atual.etapa === "selecao";
-  if (livre && !emSelecao && podeEscrever(state.identity) && state.policy.includes("proposal.list") &&
+  const emSelecao = (atual?.kind === "continuidade" || atual?.kind === "gestao" || atual?.kind === "assinatura") && atual.etapa === "selecao";
+  if (livre && !emSelecao && podeEscrever(state.identity) &&
       !pedeEnvio(userText) && pedeConsulta(userText)) {
-    const r = await responderConsulta(depsDoFluxo(state, usage), userText);
+    // Reconhecer a consulta independe da permissão: sem leitura, recusa aqui.
+    // Deixar passar ao modelo oferece criação e pode converter o código citado
+    // em continuidade de proposta, mesmo quando a pessoa pediu só o status.
+    const r = state.politicaIndisponivel
+      ? { reply: "Não consegui validar sua permissão para consultar propostas agora. Tente de novo em instantes.", evento: "consulta_politica_indisponivel" }
+      : !state.policy.includes("proposal.list")
+        ? { reply: `Você não tem permissão para consultar propostas pelo ${nomeDoAgente()} nesta imobiliária.`, evento: "consulta_sem_politica" }
+        : await responderConsulta(depsDoFluxo(state, usage), userText);
     return {
       ...(atual ? { fluxo: rebaixarFluxo(atual) } : vencido ? { fluxo: null } : {}),
       reply: r.reply,
@@ -1058,7 +1178,8 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     (atual.kind === "negocio" && atual.etapa === "tipo" && !lerNatureza(userText)) ||
     (atual.kind === "proposta" && atual.etapa === "natureza" && !lerNatureza(userText)) ||
     (atual.kind === "proposta" && atual.etapa === "selecao_envio") ||
-    (atual.kind === "gestao" && !atual.chave);
+    (atual.kind === "gestao" && !atual.chave) ||
+    (atual.kind === "assinatura" && !atual.chave);
   if (naoComecou && podeEscrever(state.identity) && pedeEnvio(userText)) {
     const passo = await retomarEnvio(
       {
@@ -1255,7 +1376,17 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
  * Fora do `confirm` para que aquele nó continue legível como máquina de estado:
  * lá se decide SE executa, aqui O QUE se executa.
  */
-async function executar(
+async function executar(state:MaxStateType,args:PendingAction["args"],idempotencyKey:string):Promise<string>{
+  const execution=currentExecution();
+  if(process.env.MAX_WRITES_KILL==="true")throw new Error("writes_disabled");
+  if(!execution)return executarCriacaoDireta(state,args,idempotencyKey);
+  await assertBotWrite(execution.context,state.inbound.fromPhone);
+  const result=await executeIntent({verb:args.tipo==="proposta"?"proposal.create":"form.create",key:idempotencyKey,args},async()=>({status:200,body:{url:await executarCriacaoDireta(state,args,idempotencyKey)}}));
+  if(!result||result.status!==200||typeof result.body.url!=="string")throw new Error("execution_unknown");
+  return result.body.url;
+}
+
+async function executarCriacaoDireta(
   state: MaxStateType,
   args: PendingAction["args"],
   idempotencyKey: string
@@ -1276,7 +1407,7 @@ async function executar(
     const proposta = await criarRascunhoProposta(orgId, {
       // `title` é obrigatório na rota; sem nome, um rótulo que diz de onde veio
       // é melhor que "Proposta" — quem abrir a lista amanhã sabe a origem.
-      title: nome ? `Proposta — ${nome}` : "Proposta (criada pelo Max)",
+      title: nome ? `Proposta — ${nome}` : `Proposta (criada pelo ${nomeDoAgente()})`,
       schemaType,
       idempotencyKey,
       // O rascunho fica com quem pediu. Só usuário da plataforma tem `userId`;
@@ -1336,6 +1467,53 @@ async function retrieve(state: MaxStateType): Promise<MaxUpdate> {
 }
 
 async function answer(state: MaxStateType): Promise<MaxUpdate> {
+  const stageSubject = JSON.stringify([state.identity.orgId, subjectDe(state.identity)]);
+  const text = textoDoTurno(state).trim();
+  const clarification = state.toolResults.find(r => r.tool === "listar_negocios" && r.clarification)?.clarification;
+  if (state.toolRounds > 0 && clarification && state.toolResults.length === 1) {
+    const pending: QueryOptions = { subjectKey: stageSubject, createdAt: Date.now(), options: clarification.options, offset: 0 };
+    const reply = pending.options.length ? renderQueryOptions(pending) : "Não consegui obter as etapas disponíveis para esta consulta. Tente novamente mais tarde.";
+    return { queryOptions: pending.options.length ? pending : null, selectedDealQuery: null, referencias: null, restoDaResposta: null,
+      reply, messages: [{ role: "assistant", content: reply }] };
+  }
+  const singleDeal = state.toolResults.length === 1 && state.toolResults[0].tool === "listar_negocios" ? state.toolResults[0] : null;
+  const selectedDeal = state.selectedDealQuery === stageSubject;
+  if (state.toolRounds > 0 && singleDeal && !singleDeal.clarification && (selectedDeal || singleDeal.items?.length === 0)) {
+    const completed = [...state.toolLog].reverse().find(entry => entry.name === "listar_negocios" && entry.outcome === "ok");
+    const stage = typeof completed?.args.estado === "string" ? completed.args.estado.trim() : "";
+    const draft = singleDeal.items === null || !completed
+      ? "Não consegui consultar seus negócios agora. Tente novamente mais tarde."
+      : singleDeal.items.length === 0
+        ? `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`
+        : renderizarNegociosSelecionados(singleDeal.items, state.referencias, singleDeal.truncated);
+    return { selectedDealQuery: null, queryOptions: null, restoDaResposta: null, draft };
+  }
+  if (state.toolRounds === 0 && state.queryOptions) {
+    const pending = state.queryOptions;
+    const choice = queryChoice(text, pending);
+    if (choice.kind !== "unrelated") {
+      const respond = (reply: string, queryOptions: QueryOptions | null): MaxUpdate => ({ queryOptions, reply,
+        messages: [{ role: "user", content: text }, { role: "assistant", content: reply }] });
+      if (pending.subjectKey !== stageSubject || Date.now() - pending.createdAt > QUERY_OPTIONS_TTL || pending.createdAt > Date.now())
+        return respond("Essa lista de etapas expirou. Peça uma nova consulta de negócios.", null);
+      if (choice.kind === "cancel") return respond("Consulta cancelada.", null);
+      if (!state.policy.includes("deal.list")) return respond(`Você não tem permissão para consultar negócios pelo ${nomeDoAgente()} nesta imobiliária.`, null);
+      if (choice.kind === "select") return { queryOptions: null, selectedDealQuery: stageSubject, toolsOferecidas: ["listar_negocios"],
+        pendingToolCalls: [{ name: "listar_negocios", args: choice.stage ? { estado: choice.stage } : {} }],
+        messages: [{ role: "user", content: text }] };
+      // Scope may change while the capability remains. Never reveal another cached page.
+      const refresh = await despacharLeituras({ chamadas: [{ name: "listar_negocios", args: { opcoes_etapas: true } }],
+        oferecidas: ["listar_negocios"], policy: state.policy, identity: state.identity,
+        fromPhone: state.inbound.fromPhone, referencias: state.referencias, turno: state.inbound.messageId });
+      const fresh = refresh.resultados[0]?.clarification;
+      if (!fresh?.options.length) return { ...respond("Não consegui atualizar as etapas disponíveis. Peça uma nova consulta de negócios.", null), toolLog: refresh.trilha };
+      const same = JSON.stringify(fresh.options) === JSON.stringify(pending.options);
+      const current = { ...pending, options: fresh.options, offset: same ? pending.offset : 0, numbered: true };
+      const updated = choice.kind === "more" && same ? nextQueryPage(current) : current;
+      return { ...respond(renderQueryOptions(updated), updated), referencias: null, toolLog: refresh.trilha };
+    }
+  }
+
   /**
    * B1 — a seção de criação do prompt e a oferta da tool vêm do MESMO
    * predicado (`modoDeCriacao` → `escritaPermitida`, o que `ferramentasDoTurno`
@@ -1372,6 +1550,8 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     // diz de quem é o caminho. Descrever capacidade que não está no pedido é
     // a forma mais barata de um modelo pequeno prometer o que não entrega.
     criacao,
+    avisos: state.identity.kind === "user" && preferenciasPermitidas({ policy: state.policy, politicaIndisponivel: state.politicaIndisponivel }),
+    pendencias: !state.politicaIndisponivel && state.policy.includes("pending.summary"),
     // Vazio na primeira volta; preenchido quando o `tools` já rodou.
     toolResults: state.toolResults,
     credito: creditoLigado(),
@@ -1379,6 +1559,14 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
 
   const userText = textoDoTurno(state).trim() || "(mensagem sem texto)";
   const history = state.messages.slice(-MAX_HISTORY);
+  // Short follow-ups inherit only read intent; authorization is still checked
+  // by the offering registry and the dispatcher on every turn.
+  const ultimaConsulta = [...history].reverse().find(m => m.role === "user" && /contrat|im[oó]ve[il]/i.test(m.content))?.content ?? "";
+  const continuacao = /^(mais|continue|pr[oó]xima(?: p[aá]gina)?)[.!?\s]*$/i.test(userText)
+    ? state.referencias?.continuacao?.tool ?? "" : "";
+  const selecao = /^\d+[.!?\s]*$/.test(userText) && state.referencias && ultimaConsulta
+    ? /contrat/i.test(ultimaConsulta) ? "contrato" : "imóvel" : "";
+  const contextoLeitura = `${continuacao} ${selecao} ${perguntaDoContrato(userText) ? "negócios" : ""}`;
 
   /**
    * O que entra no prompt deste turn — escrita E leitura pelo MESMO crivo
@@ -1398,7 +1586,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     state.toolRounds === 0
       ? ferramentasDoTurno({
           policy: state.policy,
-          texto: userText,
+          texto: `${userText} ${contextoLeitura}`,
           identity: state.identity,
           textoAnterior: pedidoEmAberto(history),
         })
@@ -1414,7 +1602,9 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   const oferecidas =
     state.toolRounds === 0 ? oferta.entradas.map((e) => e.nome) : state.toolsOferecidas;
   // Só a volta 0 grava: as seguintes herdam a oferta do turn.
-  const daOferta = state.toolRounds === 0 ? { toolsOferecidas: oferecidas } : {};
+  const daOferta = state.toolRounds === 0 ? { toolsOferecidas: oferecidas, queryOptions: null }
+    : clarification?.options.length ? { queryOptions: { subjectKey: stageSubject, createdAt: Date.now(),
+        options: clarification.options, offset: 0, numbered: false } } : {};
   const defs = oferta.entradas.map((e) => e.def);
   const tools = defs.length > 0 ? defs : undefined;
 
@@ -1498,6 +1688,13 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   // ao usuário por causa dela é pior.
   void reportUsage(state.identity.orgId, result.usage);
   const usageDoTurn: LlmUsage[] = [result.usage];
+  // Once the server requests a stage, model-emitted retries cannot drop or
+  // guess its filter. Only a new explicit user choice may resume the read.
+  if (clarification && state.toolRounds > 0 && result.toolCalls.length) {
+    return { ...daOferta, usage: usageDoTurn, piiMap: mapaTurno,
+      draft: result.text.trim() || "Para continuar a consulta de negócios, informe a etapa pelo nome ou diga ETAPAS. Não consegui resumir as demais consultas agora.",
+      toolLog: result.toolCalls.map(c => ({ name: c.name, args: c.args, outcome: "aguardando_etapa" })) };
+  }
 
   /**
    * O modelo pediu para propor uma escrita.
@@ -1527,6 +1724,70 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
       policy: state.policy,
       identity: state.identity,
     });
+
+    // Atividades (M1): fluxo próprio, determinístico (`atividades.ts`). Recusa e resolução da
+    // referência são texto fixo; o modelo nunca vê id nem decide o texto da confirmação.
+    const operacaoDeAtividade = Object.hasOwn(OPERACAO_DA_TOOL_DE_ATIVIDADE, chamada.name) ? OPERACAO_DA_TOOL_DE_ATIVIDADE[chamada.name] : undefined;
+    if (operacaoDeAtividade) {
+      const responder = (texto: string, outcome: string, fluxo?: Fluxo | null): MaxUpdate => ({
+        ...daOferta,
+        ...(fluxo !== undefined ? { fluxo } : {}),
+        messages: [{ role: "user", content: userText }, { role: "assistant", content: texto }],
+        reply: texto,
+        usage: usageDoTurn,
+        toolLog: [...trilha, { name: chamada.name, args: { operacao: operacaoDeAtividade }, outcome }],
+        piiMap: mapaTurno,
+      });
+      if (!auth.ok) return responder(textoAtividadeNaoLiberada(), auth.motivo);
+      if (state.fluxo) {
+        return responder(textoDeOcupado(state.fluxo), "fluxo_em_andamento");
+      }
+      const alvo = resolverReferencia(state.referencias, chamada.args.numero, {
+        agora: Date.now(), tipo: operacaoDeAtividade === "criar" ? "negocio" : "atividade",
+      });
+      if (!alvo.ok) {
+        return responder(
+          operacaoDeAtividade === "criar"
+            ? "Não achei esse negócio na última lista. Peça a lista de negócios de novo e me diga o número."
+            : "Não achei essa atividade na última lista. Peça a lista de atividades de novo e me diga o número.",
+          "referencia_invalida"
+        );
+      }
+      const passo = iniciarAtividade(
+        { operacao: operacaoDeAtividade, alvo: { id: alvo.item.id, rotulo: alvo.item.rotulo },
+          tipo: chamada.args.tipo, titulo: chamada.args.titulo, vencimento: chamada.args.vencimento,
+          notas: chamada.args.notas, texto: chamada.args.texto, motivo: chamada.args.motivo },
+        { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+          politicaIndisponivel: state.politicaIndisponivel, agora: Date.now(), orgName: state.identity.orgName,
+          thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) }
+      );
+      return responder(passo.reply, passo.evento, passo.fluxo);
+    }
+
+    // Preferências de aviso (M3): fluxo próprio, determinístico (`preferencias.ts`). Só da PRÓPRIA pessoa
+    // (telefone do turn); o modelo nunca escolhe usuário. Valor fora das opções do servidor = resposta, sem PATCH.
+    if (chamada.name === MUDAR_MINHAS_NOTIFICACOES.nome) {
+      const responder = (texto: string, outcome: string, fluxo?: Fluxo | null): MaxUpdate => ({
+        ...daOferta,
+        ...(fluxo !== undefined ? { fluxo } : {}),
+        messages: [{ role: "user", content: userText }, { role: "assistant", content: texto }],
+        reply: texto,
+        usage: usageDoTurn,
+        toolLog: [...trilha, { name: chamada.name, args: {}, outcome }],
+        piiMap: mapaTurno,
+      });
+      if (!auth.ok) return responder(TEXTO_PREFS_NAO_LIBERADO, auth.motivo);
+      if (state.fluxo) return responder(textoDeOcupado(state.fluxo), "fluxo_em_andamento");
+      const passo = await iniciarPreferencias(
+        { avisos: chamada.args.avisos, horario_relatorio: chamada.args.horario_relatorio,
+          antecedencia_lembrete_min: chamada.args.antecedencia_lembrete_min },
+        { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+          politicaIndisponivel: state.politicaIndisponivel, agora: Date.now(), orgName: state.identity.orgName,
+          thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) },
+        depsDoFluxo(state, usageDoTurn)
+      );
+      return responder(passo.reply, passo.evento, passo.fluxo);
+    }
 
     if (auth.ok) {
       // `auth.ok` garante tipo válido (`capabilityDaChamada` não foi null).
@@ -1710,6 +1971,13 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
 async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
   const chamadas = state.pendingToolCalls;
   if (chamadas.length === 0) return { pendingToolCalls: [] };
+  const text = textoDoTurno(state);
+  const filterText = text.replace(/\bem\s+(?:(?:um|uma)\s+)?(?:tabela|lista|listagem|formato|detalhes|ordem|texto|resumo|t[oó]picos|json)\b/gi, "");
+  // Affirmative filter phrases exclude projections such as "a etapa atual".
+  const stageHint = /\b(?:na|pela)\s+(?:etapa|fase)\b|\b(?:etapa|fase)\s*:/i.test(text) ||
+    /\bem\s+\S/i.test(filterText);
+  const missing = chamadas.filter(call => stageHint && call.name === "listar_negocios" &&
+    (typeof call.args.estado !== "string" || !call.args.estado.trim()));
 
   /**
    * ⚠️ **A capability é reconferida na EXECUÇÃO, não só na oferta** — agora
@@ -1722,8 +1990,8 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
    * superfície). Mesma classe do `descartarSeVazou`, uma camada acima: lá o
    * campo, aqui o verbo.
    */
-  const { resultados, trilha, referencias } = await despacharLeituras({
-    chamadas,
+  const dispatch = (calls: typeof chamadas) => despacharLeituras({
+    chamadas: calls,
     oferecidas: state.toolsOferecidas,
     policy: state.policy,
     identity: state.identity,
@@ -1731,6 +1999,39 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
     referencias: state.referencias,
     turno: state.inbound.messageId,
   });
+  let prepared = chamadas;
+  const preflightLog: ToolLogEntry[] = [];
+  const blocked: ResultadoDeTool[] = [];
+  if (missing.length) {
+    // One scoped lookup serves all omitted deal filters; sibling reads retain
+    // their original arguments and still pass the dispatcher independently.
+    const refresh = state.toolRounds === 0
+      ? await dispatch([{ name: "listar_negocios", args: { opcoes_etapas: true } }]) : null;
+    const options = refresh?.resultados[0]?.clarification?.options ?? [];
+    const stage = refresh && explicitStage(text, options);
+    preflightLog.push(...(refresh?.trilha ?? missing.map(call => ({ name: call.name, args: call.args, outcome: "aguardando_etapa" }))));
+    prepared = chamadas.flatMap(call => !missing.includes(call) ? [call] : stage
+      ? [{ ...call, args: { ...call.args, estado: stage } }] : []);
+    if (!stage) blocked.push(...missing.map(call => ({ tool: call.name, items: null, truncated: false,
+      clarification: { field: "estado" as const, options } })));
+  }
+  let { resultados, trilha, referencias } = await dispatch(prepared);
+  resultados = [...resultados, ...blocked];
+  trilha = [...preflightLog, ...trilha];
+
+  // One bounded repair using only a stage explicitly present in the request AND
+  // returned by the scoped server. Every retry goes through all dispatcher gates.
+  const clarification = resultados.length === 1 ? resultados[0].clarification : undefined;
+  const namedStage = clarification && explicitStage(textoDoTurno(state), clarification.options);
+  if (!missing.length && state.toolRounds === 0 && chamadas.length === 1 && chamadas[0].name === "listar_negocios" &&
+      namedStage && namedStage !== chamadas[0].args.estado) {
+    const corrected = await despacharLeituras({ chamadas: [{ ...chamadas[0], args: { ...chamadas[0].args, estado: namedStage } }],
+      oferecidas: state.toolsOferecidas, policy: state.policy, identity: state.identity,
+      fromPhone: state.inbound.fromPhone, referencias, turno: state.inbound.messageId });
+    resultados = corrected.resultados;
+    trilha = [...trilha, ...corrected.trilha];
+    referencias = corrected.referencias;
+  }
 
   return {
     pendingToolCalls: [],
@@ -1856,7 +2157,7 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
   const keep = state.messages.slice(-KEEP_AFTER_COMPACT);
   const older = state.messages.slice(0, -KEEP_AFTER_COMPACT);
   const transcript = older
-    .map((m) => `${m.role === "user" ? "Cliente" : "Max"}: ${m.content}`)
+    .map((m) => `${m.role === "user" ? "Cliente" : nomeDoAgente()}: ${m.content}`)
     .join("\n")
     .slice(0, 8000);
 
@@ -1981,7 +2282,11 @@ function cronometrar(
 ): (state: MaxStateType) => Promise<MaxUpdate> {
   return async (state) => {
     const iniciadoEm = Date.now();
+    runEvent("agent.started", no);
     const update = blindarCredito(state, await fn(state));
+    const specialized = (update.fluxo as {kind?:string}|null|undefined)?.kind ?? (no === "conduzir" ? state.fluxo?.kind : undefined);
+    if (specialized) { runEvent("specialist.completed", specialized, { implementation: "deterministic-flow", model: null }); }
+    runEvent("agent.completed", no, { durationMs: Date.now() - iniciadoEm });
     return { ...update, timings: [{ no, ms: Date.now() - iniciadoEm }] };
   };
 }
@@ -2047,6 +2352,10 @@ export async function getCheckpointer(): Promise<PostgresSaver> {
     // Só vira singleton DEPOIS do setup: um saver cujo DDL falhou não pode
     // ficar cacheado, senão a instância inteira fica presa a ele até o próximo
     // cold start (é o que o `getApp` promete ao não cachear falha).
+    const put = saver.put.bind(saver);
+    const putWrites = saver.putWrites.bind(saver);
+    saver.put = ((...args: Parameters<typeof put>) => protectCheckpoint(() => put(...args))) as typeof saver.put;
+    saver.putWrites = ((...args: Parameters<typeof putWrites>) => protectCheckpoint(() => putWrites(...args))) as typeof saver.putWrites;
     checkpointer = saver;
   }
   return checkpointer;
@@ -2078,6 +2387,16 @@ export function getApp(): Promise<AppCompilado> {
   return appCompilado;
 }
 
+/** Playground uses this exact compiled graph while raw text stays out of checkpoints. */
+export async function invokeIsolatedGraph(inbound: InboundMessage, identity: Candidate, threadId: string) {
+  const app = await getApp();
+  TURNO_CRU.set(inbound.messageId, { texto: inbound.text ?? "" });
+  try {
+    const result = await app.invoke({ ...RESET_DO_TURN, identity, facts: {}, inbound: { ...inbound, text: null } }, { configurable: { thread_id: threadId } });
+    return { ...result, reply: TURNO_CRU.get(inbound.messageId)?.reply ?? result.reply };
+  } finally { TURNO_CRU.delete(inbound.messageId); }
+}
+
 /**
  * Um turn completo.
  *
@@ -2087,6 +2406,8 @@ export function getApp(): Promise<AppCompilado> {
  * conversa em duas memórias.
  */
 export interface TurnResult {
+  dispatchFence?: DispatchFence;
+  control?: { orgId: string; controlVersion: number };
   reply: string | null;
   /**
    * Trabalho que só pode acontecer DEPOIS de a resposta sair: o registro de
@@ -2126,6 +2447,7 @@ export interface TurnResult {
  * Qualquer outro campo de `MaxState` pertence aqui.
  */
 export const RESET_DO_TURN = {
+    selectedDealQuery: null,
     reply: null,
     halt: null,
     propostaDescartada: false,
@@ -2163,7 +2485,7 @@ export const RESET_DO_TURN = {
     piiMap: {},
 };
 
-export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
+async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity, enterResolved?:(identity:Extract<Identity,{kind:"resolved"}>)=>Promise<TurnResult>): Promise<TurnResult> {
   // Latência do TURN, não do modelo: inclui identidade, transcrição, RAG e
   // checkpoint. É esse número que a pessoa sente, e é o que o painel mostra.
   const iniciadoEm = Date.now();
@@ -2236,12 +2558,13 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
    * parte do negócio é desconhecida para o Max e é quem mais recebe a
    * mensagem da imobiliária. Sem modelo. Ver `lib/aceite.ts`.
    */
-  const aceite = await comRastro(() => interceptar(inbound));
-  if (aceite) {
-    return sair(aceite.reply, { orgId: aceite.orgId ?? undefined, error: aceite.marca });
+  if(!preparedIdentity){
+    const aceite = await comRastro(() => interceptar(inbound));
+    if (aceite) return sair(aceite.reply, { orgId: aceite.orgId ?? undefined, error: aceite.marca });
   }
 
-  const identity = await comRastro(() => resolveIdentity(inbound.fromPhone));
+  const identity = preparedIdentity ?? await comRastro(() => resolveIdentity(inbound.fromPhone));
+  if(identity.kind==="resolved"&&enterResolved)return enterResolved(identity);
 
   // Desconhecido não abre thread nem gasta modelo. Pode ser cliente que
   // respondeu a um aviso, engano ou spam.
@@ -2261,11 +2584,16 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
       }
       const org = await orgById(orgId).catch(() => null);
       return sair(
-        `Oi! Sou o Max${org ? `, da ${org.orgName}` : ""}. Para eu te atender por aqui, ` +
+        `Oi! Sou o ${nomeDoAgente()}${org ? `, da ${org.orgName}` : ""}. Para eu te atender por aqui, ` +
           "falta concluir o seu primeiro acesso ao ImobPro pelo botão da mensagem de " +
           "boas-vindas. Depois disso é só me chamar de novo.",
         { orgId, error: "primeiro_acesso_pendente" }
       );
+    }
+    // O Newton só fala com usuário interno da Newcore: número desconhecido não
+    // recebe apresentação nem vai para a equipe. Silêncio, sem marcar.
+    if (deployProfile().agentKey === "newton") {
+      return sair(null, { error: "desconhecido_silenciado" });
     }
     // Uma apresentação por ciclo do cache negativo, e depois silêncio:
     // responder cada mensagem de um número estranho consome cota da Z-API e
@@ -2288,7 +2616,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     // derrubar a resposta por isso.
     await markGreeted(inbound.fromPhone).catch(() => undefined);
     return sair(
-      "Oi! Sou o Max, assistente das imobiliárias parceiras. Não reconheci " +
+      `Oi! Sou o ${nomeDoAgente()}, assistente das imobiliárias parceiras. Não reconheci ` +
         "este número — fale com seu corretor para liberar o acesso.",
       { error: "desconhecido_apresentado" }
     );
@@ -2352,7 +2680,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
    * não lida, e o prompt diz ao modelo que ele não lê anexo.
    */
   if (!turnText && (inbound.kind === "image" || inbound.kind === "document")) {
-    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
     return sair(textoSemLeituraDeMidia(null), {
       orgId: identity.candidate.orgId,
       error: `sem_texto_${inbound.kind}`,
@@ -2362,7 +2690,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
   // O que o parse não reconheceu: silêncio é pior, e passar pelo modelo com
   // "(mensagem sem texto)" pagava um turn por uma resposta genérica.
   if (!turnText && inbound.kind === "unknown") {
-    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
     return sair(
       "Não consegui entender esse tipo de mensagem. Pode mandar por escrito?",
       { orgId: identity.candidate.orgId, error: `sem_texto_${inbound.kind}` }
@@ -2378,7 +2706,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     if (!transcrito) {
       // A pessoa pode ter dito "sim" NESTE áudio — e não ouvimos. A pendência
       // não pode sobreviver a um turn que não a confirmou (D3).
-      await descartarPendencias(identity.candidate.orgId, inbound.fromPhone);
+      await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
       // Dizer que não deu, sempre. Silêncio faria a pessoa esperar resposta de
       // uma coisa que o agente nunca recebeu — e no WhatsApp ela não tem como
       // saber a diferença entre "ignorou" e "não chegou".
@@ -2423,7 +2751,7 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
     },
     {
       configurable: {
-        thread_id: threadIdFor(orgId, phone),
+        thread_id: currentExecution()?.context.conversationId ?? liveNamespaceFor(orgId, phone, subjectDe(identity.candidate)),
       },
     }
   ).then((r) => {
@@ -2549,19 +2877,21 @@ export async function runTurn(inbound: InboundMessage): Promise<TurnResult> {
  * não aviso: a pendência sobreviveu, e quem lê o log precisa saber disso. O
  * TTL de 30 min continua sendo o teto.
  */
-async function descartarPendencias(orgId: string, phone: string): Promise<void> {
+async function descartarPendencias(orgId: string, phone: string, identity: Candidate): Promise<void> {
   try {
     const app = await getApp();
-    const config = { configurable: { thread_id: threadIdFor(orgId, phone) } };
+    const config = { configurable: { thread_id: currentExecution()?.context.conversationId ?? liveNamespaceFor(orgId, phone, subjectDe(identity)) } };
     const atual = await app.getState(config);
     const v = atual.values as Partial<MaxStateType> | undefined;
     // Thread sem nada a descartar não ganha checkpoint novo à toa.
     const fluxoRebaixado = rebaixarFluxo(v?.fluxo);
     const fluxoMudou = JSON.stringify(fluxoRebaixado ?? null) !== JSON.stringify(v?.fluxo ?? null);
-    if (!v?.pendingAction && !v?.restoDaResposta && !fluxoMudou) return;
+    const marketingAcionavel = !!v?.marketingPending && v.marketingPending.phase !== "tracking";
+    if (!v?.pendingAction && !v?.restoDaResposta && !fluxoMudou && !marketingAcionavel) return;
     await app.updateState(config, {
       pendingAction: null,
       restoDaResposta: null,
+      ...(marketingAcionavel ? { marketingPending: null } : {}),
       // O fluxo fica, mas fora de qualquer etapa em que o próximo "sim" escreve.
       ...(fluxoMudou ? { fluxo: fluxoRebaixado } : {}),
     });
@@ -2595,4 +2925,45 @@ async function transcreverMidia(
     mimeType,
     data: baixado.data,
   });
+}
+
+/** Opt-in durable execution. Existing deterministic paths stay on the same graph. */
+export async function runTurn(inbound: InboundMessage, options?:{dispatchFence?:DispatchFence}): Promise<TurnResult> {
+ if (process.env.MAX_CHAT_KILL === "true") return { reply: null, dispatchFence:options?.dispatchFence, afterReply: async () => {} };
+ const execution=currentExecution();
+ if(execution){const result=await runTurnCore(inbound);return {...result,afterReply:()=>withExistingExecution(execution,()=>result.afterReply())};}
+ const person=DispatchFenceSchema.parse(options?.dispatchFence??await captureDispatchFence(inbound.fromPhone));
+ if(person.personDigest!==contentDigest(conversationKey(inbound.fromPhone)))throw new Error("execution_revoked");
+ return withPersonPrivacy(person,async()=>{
+  const result=await runTurnCore(inbound,undefined,identity=>runResolvedTurn(inbound,identity,{dispatchFence:person}));
+  return {...result,dispatchFence:result.dispatchFence??person,afterReply:()=>withPersonPrivacy(person,()=>result.afterReply())};
+ });
+}
+/** Set up subject/privacy even for direct callers with durable features OFF.
+ * The preamble above still handles template acceptance before identity lookup. */
+async function runResolvedTurn(inbound:InboundMessage,identity:Extract<Identity,{kind:"resolved"}>,options?:{dispatchFence?:DispatchFence}):Promise<TurnResult>{
+ const orgId = identity.candidate.orgId,subject=subjectDe(identity.candidate);
+ const durable=durableRuntimeEnabled(orgId);
+ const control = await getControl(orgId, inbound.fromPhone);
+ const fence = { orgId, controlVersion: control.controlVersion };
+ const hash = contentDigest({ orgId, messageId: inbound.messageId });
+ const taskId = `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-8${hash.slice(17,20)}-${hash.slice(20,32)}`;
+ const personDigest = contentDigest(conversationKey(inbound.fromPhone));
+ const epoch = options?.dispatchFence?.privacyEpoch ?? await privacyEpoch(personDigest);
+ const conversationId=liveNamespaceFor(orgId,inbound.fromPhone,subject);
+ const dispatchFence:DispatchFence={personDigest,privacyEpoch:epoch,orgId,subjectDigest:contentDigest(subject),controlVersion:control.controlVersion,conversationId};
+ const context: ExecutionContext = { personDigest, privacyEpoch: epoch, orgId, subject, conversationId, controlKey:`${orgId}:${conversationKey(inbound.fromPhone)}`,legacyExecution:!durable,taskId,mode:"live",workflowVersion:WORKFLOW_VERSION,controlVersion:control.controlVersion,deadline:Date.now()+110000,budgetUsd:0.25,maxConcurrency:3 };
+ if (control.state !== "bot") return { reply:null,control:fence,dispatchFence,afterReply:()=>withExecution(context,async()=>{await registrarTurn({orgId,phone:inbound.fromPhone,messageId:inbound.messageId,kind:inbound.kind,inboundText:inbound.text?redigirCredito(inbound.text):null,replyText:null,route:"human",error:"human_control"});}) };
+ if (durable&&!await startTask(context)) throw new Error("execution_already_started");
+ return withExecution(context,async()=>{
+  const execution=currentExecution()!;
+  await query(`INSERT INTO live_conversation_binding(org_id,phone,subject_digest,thread_id) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,phone,subject_digest) DO UPDATE SET bound_at=now()`,[orgId,conversationKey(inbound.fromPhone),contentDigest(subject),conversationId]);
+  const agentKey=deployProfile().agentKey;
+  runEvent("run.started",agentKey);
+  try{
+   const result=await runTurnCore(inbound,identity);runEvent("run.completed",agentKey);
+   if(durable)await finishTask(context,"succeeded",execution.events);
+   return {...result,control:fence,dispatchFence,afterReply:()=>withExistingExecution(execution,async()=>{await result.afterReply();if(durable)await finishTask(context,"succeeded",execution.events);})};
+  }catch(error){runEvent("run.unknown",agentKey);if(durable)await finishTask(context,"unknown",execution.events);throw error;}
+ });
 }

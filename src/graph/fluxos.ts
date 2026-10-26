@@ -35,10 +35,15 @@
  * Este módulo é PURO salvo as dependências injetadas (`DepsDoFluxo`).
  */
 
+import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
+import { conduzirAssinatura, type FluxoAssinatura } from "./assinatura";
+import { conduzirAtividade, rebaixarAtividade, type FluxoAtividade } from "./atividades";
+import { conduzirPreferencias, rebaixarPreferencias, type FluxoPreferencias } from "./preferencias";
+import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-contract";
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
@@ -68,6 +73,8 @@ export interface DadosDaProposta {
   vendedor?: Pessoa;
   imovel?: {
     endereco?: string;
+    /** Interno: achatado em endereco apenas ao enviar ao backend. */
+    complemento?: string;
     numero?: string;
     bairro?: string;
     cidade?: string;
@@ -113,8 +120,11 @@ interface Chave {
 export type Fluxo =
   | FluxoContinuidade
   | FluxoGestao
+  | FluxoAssinatura
   | FluxoCredito
   | FluxoCaptacao
+  | FluxoAtividade
+  | FluxoPreferencias
   | {
       kind: "escolha";
       natureza?: "venda" | "locacao";
@@ -195,6 +205,14 @@ export interface DepsDoFluxo {
   extrairCredito?(texto: string, campo: CampoCredito): Promise<Record<string, unknown> | null>;
   /** Captação (P9): extrator de UMA seção (imóvel, endereço, pessoa). Opcional: sem ele, só o código interpreta. */
   extrairCaptacao?(texto: string, secao: SecaoDeExtracao): Promise<Record<string, unknown> | null>;
+  /**
+   * Preferências de aviso (M3): leitura e PATCH das preferências da PRÓPRIA pessoa (telefone do turn).
+   * `null` = sem resposta utilizável. Opcional: sem ele, o fluxo responde que não conseguiu.
+   */
+  preferencias?: {
+    ler(): Promise<PrefsView | null>;
+    atualizar(patch: PrefsPatch): Promise<PrefsPatchResult | null>;
+  };
 }
 
 export interface ContextoDoTurno {
@@ -241,8 +259,8 @@ const TEXTO_SEM_RESPOSTA = "Não consegui falar com o sistema agora. Tenta de no
 export const TEXTO_ESCRITA_INCERTA =
   "O sistema não respondeu e não sei se deu certo. Responda *SIM* de novo para conferir — não duplica.";
 
-const TEXTO_SEM_PERMISSAO =
-  "Sua conta não tem permissão para isso pelo Max. Fale com o administrador da imobiliária.";
+const textoSemPermissao = (): string =>
+  `Sua conta não tem permissão para isso pelo ${nomeDoAgente()}. Fale com o administrador da imobiliária.`;
 
 /**
  * A imobiliária não tem modelo de proposta ATIVO daquele tipo: sem modelo não
@@ -297,11 +315,47 @@ function linhaPessoa(p: Pessoa): string {
     .join(" · ");
 }
 
+/** Compatibilidade: só separa uma unidade final explicitamente rotulada após vírgula. */
+function imovelEstruturado(im: NonNullable<DadosDaProposta["imovel"]>, extracao = false) {
+  // Estado já estruturado é canônico: não consumir bloco/sala do endereço
+  // numa segunda passagem ao montar payload ou mesclar o próximo turno.
+  if (im.complemento && !extracao) return im;
+  const legado = /^(.*),\s*((?:apartamento|apto\.?|unidade|bloco|sala|casa)\s+[^,]+)$/iu.exec(im.endereco ?? "");
+  if (!legado) return im;
+  // Na extração, um complemento explícito só substitui a unidade do mesmo
+  // tipo já presente no final. Bloco A continua no endereço ao trocar apto.
+  const tipo = (v: string) => normalizar(v).replace(/^apto\.?\b/, "apartamento").split(/\s/)[0];
+  if (im.complemento && tipo(im.complemento) !== tipo(legado[2])) return im;
+  return { ...im, endereco: legado[1], complemento: im.complemento ?? legado[2] };
+}
+
+function imovelSemNumeroDuplicado(im: NonNullable<DadosDaProposta["imovel"]>) {
+  const base = imovelEstruturado(im);
+  if (!base.numero || !base.endereco) return base;
+  // Só segmento inteiro após vírgula: Rua 100, 1000 e apartamento 100
+  // permanecem. Preservar numero também permite PATCH de rascunho existente.
+  const partes = base.endereco.split(",");
+  const endereco = partes.filter((parte, i) => i === 0 || parte.trim() !== base.numero?.trim()).join(",");
+  return { ...base, endereco };
+}
+
+/** O backend conhece um endereço único; o estado conserva unidade separada. */
+function imovelParaPayload(im: DadosDaProposta["imovel"]): DadosDaProposta["imovel"] {
+  if (!im) return undefined;
+  const { complemento, ...base } = imovelSemNumeroDuplicado(im);
+  return { ...base, endereco: base.endereco && complemento ? `${base.endereco}, ${complemento}` : base.endereco };
+}
+
+function enderecoNoResumo(im?: DadosDaProposta["imovel"]): string {
+  const base = im ? imovelSemNumeroDuplicado(im) : {};
+  return [base.endereco, base.numero, base.complemento, base.bairro, base.cidade, base.uf].filter(Boolean).join(", ");
+}
+
 /** O corpo do resumo — montado do estado, nunca pelo modelo. */
 function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string }): string {
   const d = f.dados;
-  const im = d.imovel ?? {};
-  const endereco = [im.endereco, im.numero, im.bairro, im.cidade, im.uf].filter(Boolean).join(", ");
+  const im = imovelParaPayload(d.imovel) ?? {};
+  const endereco = enderecoNoResumo(d.imovel);
   const quem = f.natureza === "locacao" ? "Inquilino" : "Comprador";
   // Ligada ao lead: nome/CPF/aluguel vêm do `proposal.create`, não do estado (M1/pii) — o resumo diz isso em vez de repetir o que o Max não guarda.
   const linhaQuem = f.leaseClientId
@@ -345,8 +399,8 @@ function linhasDoAjuste(d: DadosDaProposta): string[] {
   if (p.cpf) linhas.push(`CPF do proponente: ${p.cpf}`);
   if (p.email) linhas.push(`E-mail do proponente: ${p.email}`);
   if (p.telefone) linhas.push(`Telefone do proponente: ${p.telefone}`);
-  const im = d.imovel ?? {};
-  const endereco = [im.endereco, im.numero, im.bairro, im.cidade, im.uf].filter(Boolean).join(", ");
+  const im = imovelParaPayload(d.imovel) ?? {};
+  const endereco = enderecoNoResumo(d.imovel);
   if (endereco) linhas.push(`Imóvel: ${endereco}`);
   if (im.matricula) linhas.push(`Matrícula: ${im.matricula}`);
   if (d.valor) linhas.push(`Valor: ${real(d.valor)}`);
@@ -433,7 +487,10 @@ function conferirCampo(
 }
 export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaProposta {
   const telefones = (texto.match(/(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}(?!\d)/g) ?? []).map((t) => t.trim());
-  const cpfs = (texto.match(/(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/g) ?? []);
+  // Onze dígitos sem máscara também cabem no regex de CPF. O rótulo escrito
+  // pela pessoa resolve a ambiguidade; o extrator sozinho não pode resolvê-la.
+  const telefonesRotulados = new Set([...texto.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)(?:\s+(?:do|da)\s+(?:comprador|compradora|cliente|proponente|vendedor|vendedora|inquilino|inquilina|locatário|locatária))?\s*(?::|=|é|para)?\s*((?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4})(?!\d)/giu)].map(m=>semDdi(so(m[1]))));
+  const cpfs = (texto.match(/(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/g) ?? []).filter(c=>!telefonesRotulados.has(semDdi(so(c))));
   const emails = (texto.match(/[^\s@:;,<>()]+@[^\s@:;,<>()]+\.[a-z]{2,}/gi) ?? []).map((e) => e.replace(/[.]+$/, ""));
   const out: DadosDaProposta = { ...d };
   for (const k of ["proponente", "vendedor"] as const) {
@@ -550,7 +607,10 @@ export function mesclar<T extends object>(atual: T | undefined, novo: T | undefi
  * (achado B1). Os demais campos seguem `mesclar`.
  */
 export function mesclarDados(atual: DadosDaProposta, novo: DadosDaProposta): DadosDaProposta {
-  const out = mesclar(atual, novo) ?? {};
+  const out = mesclar(
+    { ...atual, ...(atual.imovel ? { imovel: imovelSemNumeroDuplicado(atual.imovel) } : {}) },
+    { ...novo, ...(novo.imovel ? { imovel: imovelSemNumeroDuplicado(novo.imovel) } : {}) },
+  ) ?? {};
   for (const papel of ["proponente", "vendedor"] as const) {
     const nomeNovo = novo[papel]?.nome;
     const nomeAtual = atual[papel]?.nome;
@@ -588,6 +648,16 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
       ? v.replace(/[*_~`]/g, "").replace(/\s+/g, " ").trim().slice(0, 200) || undefined
       : undefined;
   const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
+  // Valores protegidos chegam como texto após destokenizarArgs; só aceitamos
+  // a expressão monetária inteira, nunca um prefixo de texto livre.
+  const dinheiro = (v: unknown): number | undefined => {
+    if (typeof v === "number") return n(v);
+    if (typeof v !== "string") return undefined;
+    const m = /^(?:R\$\s*)?(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{1,2}))?(?:\s*(mil|milhão|milhões))?(?:\s+reais)?$/i.exec(v.trim());
+    if (!m) return undefined;
+    const base = Number(m[1].replace(/\./g, "") + (m[2] ? `.${m[2]}` : ""));
+    return n(base * (m[3] ? (m[3].toLowerCase() === "mil" ? 1000 : 1000000) : 1));
+  };
   const pessoa = (v: unknown): Pessoa | undefined => {
     if (!v || typeof v !== "object") return undefined;
     const p = v as Record<string, unknown>;
@@ -601,17 +671,18 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
   return {
     proponente: pessoa(o.proponente),
     vendedor: pessoa(o.vendedor),
-    imovel: {
+    imovel: imovelEstruturado({
       endereco: s(im.endereco),
+      complemento: s(im.complemento),
       numero: s(im.numero),
       bairro: s(im.bairro),
       cidade: s(im.cidade),
       uf: s(im.uf),
       matricula: s(im.matricula),
-    },
-    valor: n(o.valor),
-    pagamento: { sinal: n(pg.sinal), forma: s(pg.forma) },
-    comissao: { percentual: percentual && percentual <= 100 ? percentual : undefined, valor: n(cm.valor) },
+    }, true),
+    valor: dinheiro(o.valor),
+    pagamento: { sinal: dinheiro(pg.sinal), forma: s(pg.forma) },
+    comissao: { percentual: percentual && percentual <= 100 ? percentual : undefined, valor: dinheiro(cm.valor) },
     canal: o.canal === "email" || o.canal === "whatsapp" ? o.canal : undefined,
     finalidade: o.finalidade === "comercial" || o.finalidade === "residencial" ? o.finalidade : undefined,
   };
@@ -640,7 +711,7 @@ export function argsDaProposta(
     // endereço), verbatim e sem prefixo.
     title: d.proponente?.nome || d.imovel?.endereco || undefined,
     proponente: d.proponente,
-    imovel: d.imovel,
+    imovel: imovelParaPayload(d.imovel),
     valor: d.valor,
     canal: opcoes.atualizacao ? d.canal : (d.canal ?? canalPadrao(d)),
     ...(d.vendedor?.nome ? { vendedor: d.vendedor } : {}),
@@ -655,7 +726,7 @@ export function argsDaProposta(
 export function argsDoAjuste(d: DadosDaProposta): Record<string, unknown> {
   const args: Record<string, unknown> = {};
   if (d.proponente && Object.values(d.proponente).some(Boolean)) args.proponente = d.proponente;
-  if (d.imovel && Object.values(d.imovel).some(Boolean)) args.imovel = d.imovel;
+  if (d.imovel && Object.values(d.imovel).some(Boolean)) args.imovel = imovelParaPayload(d.imovel);
   if (typeof d.valor === "number") args.valor = d.valor;
   if (d.vendedor && Object.values(d.vendedor).some(Boolean)) args.vendedor = d.vendedor;
   if (d.pagamento?.sinal || d.pagamento?.forma) args.pagamento = d.pagamento;
@@ -729,6 +800,11 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (!f) return null;
   if (f.kind === "continuidade") return { ...f, etapa: ["concluida", "selecao"].includes(f.etapa) ? f.etapa : "resumo" };
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
+  if (f.kind === "assinatura") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
+  // Atividade (M1): a confirmação volta ao resumo; com `chave` (escrita incerta) a etapa fica.
+  if (f.kind === "atividade") return rebaixarAtividade(f);
+  // Preferências (M3): a confirmação volta ao resumo; o SIM seguinte só reapresenta.
+  if (f.kind === "preferencias") return rebaixarPreferencias(f);
   // Crédito: a revisão (o SIM que envia, no M3) volta para a coleta; o servidor diz o que falta.
   if (f.kind === "credito") return f.etapa === "revisao" ? { ...f, etapa: "coleta", campoAtual: undefined } : f;
   // Captação: o resumo (o "enviar" que escreve) volta para a conferência; o servidor refaz o resumo.
@@ -921,7 +997,7 @@ export async function retomarEnvio(
     return {
       reply: ctx.politicaIndisponivel
         ? TEXTO_POLITICA_INDISPONIVEL
-        : "O envio para assinatura pelo Max não está liberado para você — envie pelo sistema.",
+        : `O envio para assinatura pelo ${nomeDoAgente()} não está liberado para você — envie pelo sistema.`,
       fluxo: null,
       evento: "envio_sem_politica",
     };
@@ -1007,7 +1083,7 @@ function prepararCpfDaRetomada(retomado: FluxoProposta, texto: string, ctx: Cont
   );
   if (cpfInformado && (normalizado.match(/\bcpf\b/g) ?? []).length === 1) {
     if (!ctx.policy.includes("proposal.create")) {
-      return { reply: TEXTO_SEM_PERMISSAO, fluxo: retomado, evento: "envio_pendencia_cpf_sem_edicao" };
+      return { reply: textoSemPermissao(), fluxo: retomado, evento: "envio_pendencia_cpf_sem_edicao" };
     }
     const cpf = cpfInformado[1].replace(/\D/g, "");
     if (!cpfValido(cpf)) {
@@ -1026,6 +1102,19 @@ function prepararCpfDaRetomada(retomado: FluxoProposta, texto: string, ctx: Cont
 }
 
 // ─── Entrada ──────────────────────────────────────────────────────────────
+
+/** Only explicit labels: an address or a person's name is not inferred as a title. */
+function tituloDeclarado(texto: string | undefined): string | undefined {
+  if (!texto) return undefined;
+  const marcadores=[...texto.matchAll(/\b(?:t[ií]tulo|nome)(?:\s+que\s+j[aá]\s+informei)?\s*(?::|é(?=\s)|(?=["“]))\s*|\bcom\s+o\s+(?:t[ií]tulo|nome)\s+/giu)];
+  if(marcadores.length!==1) return undefined;
+  const m=marcadores[0];
+  const resto=texto.slice(m.index!+m[0].length).trim();
+  const citado=/^["“]([^"”]+)["”](?:[.!?]|\s|$)/u.exec(resto);
+  const valor=citado?.[1]??resto.split(/\.\s+(?:pode|posso|vamos|por favor|prepare)\b/i)[0].replace(/[.!]\s*$/,'');
+  if(!valor||(!citado&&/[?\n]|\s+ou\s+/i.test(valor))) return undefined;
+  return valor.replace(/\s+/g,' ').trim().slice(0,200)||undefined;
+}
 
 /**
  * Pedido de criação reconhecido (a `propor_criacao` do turn). Pedido explícito
@@ -1059,26 +1148,27 @@ export async function iniciarFluxo(
   }
   const podeProposta = params.policy.includes("proposal.create");
   const podeNegocio = params.policy.includes("form.create");
+  const tituloDoPedido = tituloDeclarado(params.pedido) ?? params.nomeCliente;
   if (params.tipo !== "proposta" && podeNegocio) {
-    return carregarCamposDoNegocio(params.tipo, params.agora, deps, params.nomeCliente);
+    return carregarCamposDoNegocio(params.tipo, params.agora, deps, tituloDoPedido);
   }
   if (podeProposta && podeNegocio) {
     return {
       reply: TEXTO_ESCOLHA,
-      fluxo: { kind: "escolha", natureza: params.natureza, pedido: params.pedido, nomeCliente: params.nomeCliente, atualizadoEm: params.agora },
+      fluxo: { kind: "escolha", natureza: params.natureza, pedido: params.pedido, nomeCliente: tituloDoPedido, atualizadoEm: params.agora },
       evento: "fluxo_escolha",
     };
   }
   if (podeProposta) return iniciarProposta(params.natureza, params.pedido, params.agora, deps);
   if (podeNegocio) {
-    if (params.natureza) return carregarCamposDoNegocio(params.natureza, params.agora, deps, params.nomeCliente);
+    if (params.natureza) return carregarCamposDoNegocio(params.natureza, params.agora, deps, tituloDoPedido);
     return {
       reply: TEXTO_VENDA_OU_LOCACAO,
-      fluxo: { kind: "negocio", etapa: "tipo", valores: {}, titulo: params.nomeCliente, atualizadoEm: params.agora },
+      fluxo: { kind: "negocio", etapa: "tipo", valores: {}, titulo: tituloDoPedido, atualizadoEm: params.agora },
       evento: "fluxo_negocio",
     };
   }
-  return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
 }
 
 /**
@@ -1165,6 +1255,9 @@ export async function conduzirFluxo(
 ): Promise<PassoDoFluxo> {
   if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (fluxo.kind === "gestao") return conduzirGestao(fluxo, ctx, deps);
+  if (fluxo.kind === "assinatura") return conduzirAssinatura(fluxo, ctx, deps);
+  if (fluxo.kind === "atividade") return conduzirAtividade(fluxo, ctx, deps);
+  if (fluxo.kind === "preferencias") return conduzirPreferencias(fluxo, ctx, deps);
   if (fluxo.kind === "credito") return conduzirCredito(fluxo, ctx, deps);
   // Achado 20: este caminho nunca é alcançado em produção (graph.ts despacha
   // `captacao` direto pra `conduzirCaptacao`, com `podeEscrever(identity)` — não
@@ -1223,7 +1316,7 @@ async function carregarCamposDoNegocio(
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
   const r = await deps.acao("form.options", { tipo });
   if (!r) return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: "falha_form_options" };
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   if (r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: null, evento: `form_options_${r.status}` };
 
   const gerente = r.body.gerente as { obrigatorio?: boolean } | undefined;
@@ -1310,13 +1403,14 @@ async function conduzirNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: Deps
   if (f.etapa === "nome") {
     // A resposta É o título, como a pessoa escreveu. "sim"/"não" não é nome, e
     // pergunta ("pode ser o endereço?") também não: pergunta de novo.
-    const nome = ctx.texto.replace(/\s+/g, " ").trim().slice(0, 200);
+    const nome = tituloDeclarado(ctx.texto) ?? ctx.texto.replace(/\s+/g, " ").trim().slice(0, 200);
     if (!nome || resposta !== "nenhum" || nome.endsWith("?")) return { reply: TEXTO_NOME_DO_NEGOCIO, fluxo: f, evento: "negocio_nome" };
     return { reply: resumoDoNegocio({ ...f, titulo: nome }), fluxo: { ...f, titulo: nome, etapa: "revisao", chave: undefined, atualizadoEm: agora }, evento: "negocio_revisao" };
   }
   if (f.etapa === "revisao" && resposta === "sim") return criarNegocio(f, ctx, deps);
   // Correção do nome no resumo: "nome: Casa da Praia" (o extrator só conhece as chaves do popup).
-  const novoNome = f.etapa === "revisao" || f.etapa === "campos" ? /^\s*nome\s*[:\-]\s*(.+)$/i.exec(ctx.texto)?.[1]?.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
+  const usaPadrao=(f.campos??[]).some(c=>c.chave.startsWith('titleParts.'));
+  const novoNome = !usaPadrao && (f.etapa === "revisao" || f.etapa === "campos") ? tituloDeclarado(ctx.texto) ?? /^\s*nome\s*[:\-]\s*(.+)$/i.exec(ctx.texto)?.[1]?.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
   if (novoNome) {
     const g: FluxoNegocio = { ...f, titulo: novoNome, forcar: undefined, chave: undefined, atualizadoEm: agora };
     const faltam = (f.campos ?? []).filter((c) => !f.valores[c.chave]);
@@ -1368,7 +1462,7 @@ async function criarNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: DepsDoF
       evento: "negocio_duplicado",
     };
   }
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   const recusa = recusaDoServidor(r);
   if (recusa || r.status === 422 || r.status === 400) {
     return {
@@ -1565,6 +1659,13 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // e o PATCH trocaria o canal sem ninguém pedir.
   if (parcial && novos.canal && !/\b(whats\w*|zap|e-?mail|canal|sms)\b/.test(normalizar(ctx.texto))) delete novos.canal;
   const dados = mesclarDados(f.dados, novos);
+  if (novos.imovel?.complemento && !dados.imovel?.endereco) {
+    return {
+      reply: "Me informe o endereço completo do imóvel, incluindo o novo complemento, para eu atualizar sem perder a rua e o número.",
+      fluxo: f,
+      evento: "proposta_complemento_sem_endereco",
+    };
+  }
   // Nada novo nesta mensagem: não é do fluxo (pergunta, conversa) — libera, e
   // nunca diz "Anotado" sem ter anotado (achado B5). Nenhuma escrita (B1).
   if (igual(dados, f.dados)) {
@@ -1672,7 +1773,7 @@ async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsD
   }
   // 403 é RBAC/política (`POLITICA_NAO_CONCEDE`/`can`), nunca posse — mesmo
   // com leaseClientId, cai aqui e nunca na oferta sem vínculo.
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   const recusa = recusaDoServidor(r);
   if (recusa || r.status === 422 || r.status === 400) {
     // Com leaseClientId, a recusa pode ser porque o lead está sem nome/aluguel
@@ -1726,7 +1827,7 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
   if (!r || (r.status === 409 && r.body.error === "em_andamento")) {
     return { reply: TEXTO_ESCRITA_INCERTA, fluxo: { ...f, chave, atualizadoEm: ctx.agora }, evento: "incerta_proposal_update" };
   }
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
   if (r.status === 409 && r.body.error === "edicao_pela_tela") {
     return {
@@ -1814,14 +1915,14 @@ async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: Dep
   if (!ctx.policy.includes("proposal.send")) {
     if (ctx.politicaIndisponivel) return { reply: TEXTO_POLITICA_INDISPONIVEL, fluxo: f, evento: "politica_indisponivel" };
     return {
-      reply: `Rascunho${f.codigo ? ` ${f.codigo}` : ""} pronto. O envio para assinatura pelo Max não está liberado para você — envie pelo sistema.`,
+      reply: `Rascunho${f.codigo ? ` ${f.codigo}` : ""} pronto. O envio para assinatura pelo ${nomeDoAgente()} não está liberado para você — envie pelo sistema.`,
       fluxo: null,
       evento: "envio_sem_politica",
     };
   }
   const r = await deps.acao("proposal.options", { proposta_id: f.propostaId });
   if (!r) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: "falha_proposal_options" };
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
   if (r.status !== 200) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: `proposal_options_${r.status}` };
   if (r.body.assinaturaConfigurada === false) {
@@ -1903,7 +2004,7 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
       evento: "proposta_enviada",
     };
   }
-  if (r.status === 403) return { reply: TEXTO_SEM_PERMISSAO, fluxo: null, evento: "sem_permissao" };
+  if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
   if (r.status === 404) return { reply: TEXTO_NAO_ENCONTREI, fluxo: null, evento: "proposta_nao_encontrada" };
   if (r.status === 402) {
     return { reply: "O plano de assinaturas da imobiliária esgotou. Fale com o administrador.", fluxo: null, evento: "plano_esgotado" };
@@ -2006,12 +2107,17 @@ const PESSOA_SCHEMA = {
   additionalProperties: false,
 };
 
+const VALOR_DA_PROPOSTA_SCHEMA = {
+  anyOf: [{ type: "number" }, { type: "string", pattern: "^⟨VALOR_[0-9]+⟩$" }],
+  description: "Se houver token ⟨VALOR_N⟩, copie o token literalmente como string, sem estimar seu valor. Caso contrário, informe número.",
+} as const;
+
 export const TOOL_EXTRAIR_PROPOSTA = {
   name: "preencher_proposta",
   description:
     "Registra os dados de proposta que a pessoa informou NESTA mensagem. Preencha só o " +
     "que ela disse; omita o resto. Nunca invente. Números como número (1.500.000 → 1500000; " +
-    "'1,5 milhão' → 1500000; '200 mil' → 200000).",
+    "'1,5 milhão' → 1500000; '200 mil' → 200000). Valores protegidos por ⟨VALOR_N⟩ devem ser copiados literalmente como string.",
   parameters: {
     type: "object",
     properties: {
@@ -2020,7 +2126,8 @@ export const TOOL_EXTRAIR_PROPOSTA = {
       imovel: {
         type: "object",
         properties: {
-          endereco: { type: "string", description: "Rua/avenida e número." },
+          endereco: { type: "string", description: "Rua/avenida e número. Preserve o complemento informado em complemento." },
+          complemento: { type: "string", description: "Apartamento, unidade, bloco, casa ou sala, exatamente como informado. Preencha também em correção isolada (ex.: Corrija o complemento para apartamento 2 → apartamento 2); omita endereco se a rua não foi dita; não copie o complemento anterior." },
           numero: { type: "string" },
           bairro: { type: "string" },
           cidade: { type: "string" },
@@ -2029,18 +2136,18 @@ export const TOOL_EXTRAIR_PROPOSTA = {
         },
         additionalProperties: false,
       },
-      valor: { type: "number", description: "Venda: valor total. Locação: aluguel mensal." },
+      valor: { ...VALOR_DA_PROPOSTA_SCHEMA, description: "Venda: valor total. Locação: aluguel mensal. " + VALOR_DA_PROPOSTA_SCHEMA.description },
       pagamento: {
         type: "object",
         properties: {
-          sinal: { type: "number" },
+          sinal: VALOR_DA_PROPOSTA_SCHEMA,
           forma: { type: "string", description: "Ex.: 'R$ 200 mil financiado, restante à vista'." },
         },
         additionalProperties: false,
       },
       comissao: {
         type: "object",
-        properties: { percentual: { type: "number" }, valor: { type: "number" } },
+        properties: { percentual: { type: "number" }, valor: VALOR_DA_PROPOSTA_SCHEMA },
         additionalProperties: false,
       },
       canal: {

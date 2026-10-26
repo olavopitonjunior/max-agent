@@ -1,186 +1,67 @@
-import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
-import { requireHmac } from "@/lib/auth";
-import { query } from "@/lib/db";
-import { runTurn, threadIdFor } from "@/graph/graph";
-import { resolveIdentity } from "@/lib/identity";
-import { limparThreadDoCheckpointer } from "@/lib/checkpointer-reset";
-import { RASTRO_SELECT_SQL, DEDUPE_SELECT_SQL } from "@/lib/playground-sql";
-import type { InboundMessage } from "@/lib/transport";
-
-export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
-// Um turno de credito encadeia mais de uma chamada de modelo - os 60s que as
-// outras rotas usam (webhook, crons) ficam curtos demais com folga.
-export const maxDuration = 120;
-
-/**
- * POST /api/admin/playground - roda UM turno do Max fora do WhatsApp, pelo
- * admin do ImobPro. Pedido do Olavo (13/10): testar o agente sem depender da
- * Z-API/Cloud API - staging primeiro, escritas REAIS (mesmo runTurn, mesmo
- * afterReply que a fila chama), com a resposta e o rastro interno na tela.
- *
- * Gate de ambiente primeiro, antes da auth: em producao MAX_PLAYGROUND
- * nao existe, e a rota devolve 404 SEM corpo - quem nao tem a flag nao deve
- * nem saber que ela existe. E o mesmo raciocinio do requireHmac nao
- * distinguir "assinatura errada" de "timestamp velho".
- *
- * Auth: requireHmac sem signQuery - como /notify e /admin/forget, o
- * corpo CRU e o que esta assinado (nao ha query relevante aqui).
- *
- * A IDENTIDADE MANDA, nao o orgId do corpo. runTurn resolve a org pelo
- * TELEFONE (resolveIdentity), nao pelo orgId pedido - entao checar a
- * identidade DEPOIS de rodar o turno so documentava um descompasso que ja
- * tinha acontecido: o turno ja escreveu na org errada (ou respondeu por uma
- * identidade pendente/ambigua/desconhecida) antes de alguem notar. Por isso a
- * resolucao vem ANTES de qualquer efeito - inclusive antes do novo, que ja
- * limpa thread de verdade. So segue quem esta resolved E cuja
- * candidate.orgId e EXATAMENTE a orgId pedida; qualquer outro caso (outra
- * org, pending, ambiguous, unknown) devolve 409 sem tocar em nada.
- *
- * novo: true limpa a thread do checkpointer antes de rodar (mesmas tres
- * tabelas que scripts/turn.ts --novo limpa - ver limparThreadDoCheckpointer).
- * Com novo e sem text, a rota so limpa e devolve sem rodar turno.
- *
- * requestId evita turno em dobro. Quem chama pode reenviar (timeout do
- * lado do admin, duplo clique) sem saber se o primeiro POST ja rodou. O
- * messageId do turno e derivado dele (playground-${requestId}), e antes
- * de rodar a rota checa se ja existe conversation_turn com esse
- * message_id - se existir, devolve 409 sem rodar de novo.
- */
-const TELEFONE_E164 = /^\+[1-9]\d{6,14}$/;
-
-const bodySchema = z
-  .object({
-    orgId: z.string().min(1),
-    phone: z.string().regex(TELEFONE_E164, "telefone deve ser E.164"),
-    requestId: z.string().uuid(),
-    text: z.string().min(1).max(2000).optional(),
-    novo: z.boolean().optional(),
-  })
-  .refine((b) => b.novo === true || b.text !== undefined, {
-    message: "text e obrigatorio quando novo nao e true",
-    path: ["text"],
+import { privacyEpoch } from "@/lib/runtime/privacy";
+import {NextRequest,NextResponse} from 'next/server';
+import {z} from 'zod';
+import {requireHmac} from '@/lib/auth';
+import {deployProfile} from '@/lib/deploy-profile';
+import {invokeIsolatedGraph} from '@/graph/graph';
+import {resolveIdentity,type Candidate} from '@/lib/identity';
+import {limparThreadDoCheckpointer} from '@/lib/checkpointer-reset';
+import {conversationKey} from '@/lib/phone';
+import {redigirCredito} from '@/lib/pii';
+import {withExecution,currentExecution,namespaceFor,runEvent} from '@/lib/runtime/context';
+import {CATALOG_VERSION,WORKFLOW_VERSION,contentDigest,type ExecutionContext} from '@/lib/runtime/contracts';
+import {bindPlaygroundSession,startTask,finishTask} from '@/lib/runtime/store';
+import {PlaygroundRequestSchema,stagingIdentityAllowed,savePlaygroundMessage,playgroundHistory} from '@/lib/runtime/playground';
+export const dynamic='force-dynamic';export const runtime='nodejs';export const maxDuration=120;
+/** Same graph and policy/confirmation logic. Only the service adapters and namespace differ. */
+export async function POST(req:NextRequest){
+ if(process.env.MAX_PLAYGROUND!=='true')return new NextResponse(null,{status:404});
+ const auth=await requireHmac(req);if(!auth.ok)return auth.response;
+ let value:unknown;try{value=JSON.parse(auth.rawBody);}catch{return NextResponse.json({error:'invalid_json'},{status:400});}
+ const parsed=PlaygroundRequestSchema.safeParse(value);if(!parsed.success)return NextResponse.json({error:'bad_request',issues:parsed.error.issues},{status:400});
+ const p=parsed.data;
+ const personDigest=contentDigest(conversationKey(p.phone));
+ const epoch=await privacyEpoch(personDigest);
+ let identity:Candidate={kind:'user',userId:`fixture-${p.sessionId}`,userName:'Pessoa sintética',orgId:p.orgId,orgName:'Imobiliária de simulação'};
+ if(p.mode==='staging'){
+  if(!stagingIdentityAllowed(p.orgId,p.phone))return NextResponse.json({error:'synthetic_identity_required'},{status:403});
+  const resolved=await resolveIdentity(p.phone);
+  if(resolved.kind!=='resolved'||resolved.candidate.orgId!==p.orgId)return NextResponse.json({error:'identidade_diverge'},{status:409});
+  identity=resolved.candidate;
+ }
+ const subject=identity.kind==='user'?{kind:'user' as const,userId:identity.userId}:{kind:'broker' as const,splitRecipientId:identity.splitRecipientId};
+ const threadId=namespaceFor(p.mode,p.orgId,p.phone,p.sessionId,contentDigest(subject));
+ const context:ExecutionContext={personDigest,privacyEpoch:epoch,orgId:p.orgId,subject:identity.kind==='user'?{kind:'user',userId:identity.userId}:{kind:'broker',splitRecipientId:identity.splitRecipientId},conversationId:threadId,taskId:p.requestId,mode:p.mode,workflowVersion:WORKFLOW_VERSION,controlVersion:0,deadline:Date.now()+110000,budgetUsd:p.mode==='simulation'?0:0.25,maxConcurrency:3};
+ if(!await bindPlaygroundSession(p.sessionId,p.orgId,conversationKey(p.phone),p.mode,context))return NextResponse.json({error:'session_conflict'},{status:409});
+ if(!await startTask(context))return NextResponse.json({error:'repetido'},{status:409});
+ try{
+  if(p.novo)await limparThreadDoCheckpointer(threadId);
+  if(!p.text){await finishTask(context,'succeeded',[]);return NextResponse.json({reply:null,rastro:null,threadId,sessionId:p.sessionId,mode:p.mode,traces:[],catalogVersion:CATALOG_VERSION,workflowVersion:WORKFLOW_VERSION});}
+  const agentKey=deployProfile().agentKey;
+  const {result,events}=await withExecution(context,async()=>{
+   runEvent('run.started',agentKey);
+   const result=await invokeIsolatedGraph({messageId:`playground-${p.requestId}`,fromPhone:p.phone,kind:'text',text:p.text!,groupId:null,mediaUrl:null,mimeType:null,senderName:null,replyToMessageId:null,timestampMs:Date.now()},identity,threadId);
+   runEvent('run.completed',agentKey);return {result,events:currentExecution()!.events};
   });
-
-interface RastroRow extends Record<string, unknown> {
-  org_id: string;
-  kind: string;
-  inbound_text: string | null;
-  transcript: string | null;
-  reply_text: string | null;
-  route: string | null;
-  intent_json: unknown;
-  tools_json: unknown;
-  usage_json: unknown;
-  timings_json: unknown;
-  signals_json: unknown;
-  degradado: boolean;
-  latency_ms: number | null;
-  error: string | null;
-  created_at: string;
+  // No afterReply: production memory/identity/transport are outside this namespace.
+  await savePlaygroundMessage(p.sessionId,p.requestId,'user',p.text);
+  if(result.reply)await savePlaygroundMessage(p.sessionId,p.requestId,'assistant',result.reply);
+  await finishTask(context,'succeeded',events);
+  const rastro={orgId:p.orgId,route:'graph',inboundText:redigirCredito(p.text),replyText:result.reply?redigirCredito(result.reply):null,tools:(result.toolLog??[]).map(t=>({name:t.name,outcome:t.outcome})),usage:result.usage??[],timings:result.timings??[],identidade:{kind:p.mode==='simulation'?'fixture':'resolved',orgId:p.orgId}};
+  return NextResponse.json({agentKey,reply:result.reply??null,rastro,threadId,sessionId:p.sessionId,mode:p.mode,traces:events,catalogVersion:CATALOG_VERSION,workflowVersion:WORKFLOW_VERSION});
+ }catch(error){await finishTask(context,'unknown',[]);console.error('[playground] execution failed',error instanceof Error?error.name:'unknown');return NextResponse.json({error:'execution_unknown',sessionId:p.sessionId,mode:p.mode},{status:409});}
 }
-
-export async function POST(req: NextRequest) {
-  if (process.env.MAX_PLAYGROUND !== "true") {
-    return new NextResponse(null, { status: 404 });
-  }
-
-  const auth = await requireHmac(req);
-  if (!auth.ok) return auth.response;
-
-  let json: unknown;
-  try {
-    json = JSON.parse(auth.rawBody);
-  } catch {
-    return NextResponse.json({ error: "invalid_json" }, { status: 400 });
-  }
-  const parsed = bodySchema.safeParse(json);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: "bad_request", issues: parsed.error.issues },
-      { status: 400 }
-    );
-  }
-
-  const { orgId, phone, text, novo, requestId } = parsed.data;
-
-  // Identidade primeiro, antes de QUALQUER efeito (inclusive novo). Ver
-  // comentario acima: o telefone e quem decide a org de verdade.
-  const identity = await resolveIdentity(phone);
-  if (identity.kind !== "resolved" || identity.candidate.orgId !== orgId) {
-    return NextResponse.json(
-      {
-        error: "identidade_diverge",
-        identidade: {
-          kind: identity.kind,
-          orgId: identity.kind === "resolved" ? identity.candidate.orgId : null,
-        },
-      },
-      { status: 409 }
-    );
-  }
-  const identidade = { kind: identity.kind, orgId: identity.candidate.orgId };
-
-  const threadId = threadIdFor(orgId, phone);
-
-  if (novo) {
-    await limparThreadDoCheckpointer(threadId);
-  }
-
-  if (!text) {
-    // So limpeza pedida: nada para rodar, nada para auditar.
-    return NextResponse.json({ reply: null, rastro: null, threadId });
-  }
-
-  const messageId = `playground-${requestId}`;
-
-  // Replay: requestId ja usado antes viraria um turno NOVO se nao checarmos -
-  // o admin pode reenviar o mesmo POST sem saber se o primeiro ja rodou.
-  const dedupe = await query<{ ja_existe: number }>(DEDUPE_SELECT_SQL, [messageId]);
-  if (dedupe.length > 0) {
-    return NextResponse.json({ error: "repetido" }, { status: 409 });
-  }
-
-  const inbound: InboundMessage = {
-    messageId,
-    fromPhone: phone,
-    groupId: null,
-    kind: "text",
-    text,
-    mediaUrl: null,
-    mimeType: null,
-    senderName: null,
-    replyToMessageId: null,
-    timestampMs: Date.now(),
-  };
-
-  const resultado = await runTurn(inbound);
-  await resultado.afterReply();
-
-  const rows = await query<RastroRow>(RASTRO_SELECT_SQL, [messageId]);
-  const row = rows[0] ?? null;
-
-  const rastro = row
-    ? {
-        orgId: row.org_id,
-        kind: row.kind,
-        inboundText: row.inbound_text,
-        transcript: row.transcript,
-        replyText: row.reply_text,
-        route: row.route,
-        intent: row.intent_json,
-        tools: row.tools_json,
-        usage: row.usage_json,
-        timings: row.timings_json,
-        signals: row.signals_json,
-        degradado: row.degradado,
-        latencyMs: row.latency_ms,
-        error: row.error,
-        createdAt: row.created_at,
-        identidade,
-      }
-    : null;
-
-  return NextResponse.json({ reply: resultado.reply, rastro, threadId });
+const historySchema=z.object({orgId:z.string().min(1),phone:z.string().regex(/^\+[1-9]\d{6,14}$/),sessionId:z.string().uuid(),mode:z.enum(['simulation','staging'])});
+export async function GET(req:NextRequest){
+ if(process.env.MAX_PLAYGROUND!=='true')return new NextResponse(null,{status:404});
+ const auth=await requireHmac(req,{signQuery:true});if(!auth.ok)return auth.response;
+ const parsed=historySchema.safeParse(Object.fromEntries(req.nextUrl.searchParams));if(!parsed.success)return NextResponse.json({error:'bad_request'},{status:400});
+ if(parsed.data.mode==='staging'&&!stagingIdentityAllowed(parsed.data.orgId,parsed.data.phone))return NextResponse.json({error:'synthetic_identity_required'},{status:403});
+ let subjectDigest=contentDigest({kind:'user',userId:`fixture-${parsed.data.sessionId}`});
+ if(parsed.data.mode==='staging'){
+  const identity=await resolveIdentity(parsed.data.phone);
+  if(identity.kind!=='resolved'||identity.candidate.orgId!==parsed.data.orgId)return NextResponse.json({error:'identidade_diverge'},{status:409});
+  subjectDigest=contentDigest(identity.candidate.kind==='user'?{kind:'user',userId:identity.candidate.userId}:{kind:'broker',splitRecipientId:identity.candidate.splitRecipientId});
+ }
+ const history=await playgroundHistory({...parsed.data,subjectDigest});return history?NextResponse.json(history):NextResponse.json({error:'session_not_found'},{status:404});
 }

@@ -22,6 +22,20 @@ export function destinoPermitido(link: string | null | undefined): URL | null {
   return u;
 }
 
+/** Destino fixo quando a linha não tem link (ex.: aviso de locação sem página própria). */
+export const DESTINO_SEM_LINK = `https://${DOMINIO}/`;
+
+/**
+ * Destino do botão para uma linha EXISTENTE do outbox. Linha sem link vai para
+ * a home (fixa, exige login) em vez de 404: o template aprovado sempre leva o
+ * botão, e nem todo evento tem página. Link presente e fora da regra continua
+ * 404 (dado ruim não vira redirecionamento).
+ */
+export function destinoDaLinha(link: string | null | undefined): URL | null {
+  if (!link?.trim()) return new URL(DESTINO_SEM_LINK);
+  return destinoPermitido(link);
+}
+
 /** O id é o UUID aleatório de uma linha do outbox? */
 export function ehIdDeOutbox(id: string): boolean {
   return UUID_RE.test(id);

@@ -16,8 +16,13 @@
  * pendentes (`activity_assigned`, `activity_due` e `activity_due_soon`, mesmo
  * template, um por janela; `activity_completed` fica fora) e, desde 20/10/2026 (pedido do
  * Olavo), o aviso de novidade no link do cliente do portal do negócio
- * (`portal_notice_parte`). Nenhum texto cita o nome
- * do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
+ * (`portal_notice_parte`) e, desde 25/10/2026, SEIS templates de "família" para
+ * os avisos da equipe que antes morriam em silêncio com a janela fechada
+ * (`fora_da_regua`: 54 de 126 notificações em 30 dias): assinatura de
+ * envelope, status de proposta, andamento do negócio, andamento de formulário
+ * e certidões (pendência e lote concluído) — ver `FAMILIAS` abaixo. Andamento
+ * de atividade (`activity_completed` etc.) continua FORA, pela decisão de 14/10.
+ * Nenhum texto cita o nome do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
  * janela de 24h e, fora dela, não sai pelo WhatsApp (`templateDoKind` devolve
  * `null` e o outbox desiste). Não existe mais template genérico — ele fazia
  * qualquer aviso virar mensagem paga.
@@ -246,6 +251,87 @@ const PORTAL_AVISO_PARTE = t(
 );
 
 /**
+ * ── Famílias de avisos da equipe (25/10/2026) ──────────────────────────────
+ * Antes destes, os kinds abaixo não tinham template: com a janela de 24h
+ * fechada o outbox gravava `fora_da_regua` e o aviso se perdia (54 de 126 no
+ * último mês). Em vez de um template por kind, UM por família — texto fixo de
+ * STATUS (o molde dos v3 que a Meta deu como UTILITY: "Status do negócio…"),
+ * com poucas variáveis e o detalhe no botão. Sem tom de lembrete/convite
+ * ("ainda", "incompleto", "continue"), que é o que levou outros à MARKETING.
+ *
+ * O que cada família consegue usar, porque é só isso que o contractmaker manda:
+ *  · avisos do sino (`Notification.type`, via `user-channels.ts`) chegam SEM
+ *    `params`: só o título (fixo, do sistema), a org, o nome e o link. Por isso
+ *    `proposta`/`quem` NÃO são obrigatórios aqui (ao contrário dos
+ *    `proposal_*` da régua de propostas) — não há de onde tirar;
+ *  · avisos de evento do negócio (`stage_change`, `contract_sent`,
+ *    `portal_comment`) trazem `negocio`;
+ *    sem ele cai no fallback "em andamento".
+ * Nada de dado da parte: o título é texto do sistema ("Contrato assinado",
+ * "Status do negócio atualizado"), nunca o nome do cliente. Certidões NÃO
+ * levam o título de propósito — o rótulo da certidão pode trazer o nome de
+ * alguém.
+ *
+ * O envio continua só depois de `wa_template` dizer APPROVED (o portão do
+ * outbox não mudou). Enquanto a Meta analisa, o aviso fica `template_pendente`
+ * e expira em 72h, como qualquer outro template novo.
+ */
+const FAMILIAS = {
+  /** envelope_signed / envelope_refused / envelope_email_failed. Título: "Contrato assinado", "Assinatura recusada"… */
+  assinatura: t(
+    "max_assinatura_status",
+    "Olá, {{1}}! Status de assinatura na {{2}}: {{3}}. Os detalhes do documento estão no botão abaixo.",
+    [NOME, ORG, "titulo"],
+    ["Ana", "RE/MAX Trio", "Contrato assinado"],
+    ABRIR_NEGOCIO
+  ),
+  /** proposal_accepted_party / send_canceled / aceite_not_delivered / email_failed. Título: "Envio da proposta cancelado"… */
+  proposta: t(
+    "max_proposta_status",
+    "Olá, {{1}}! Status de proposta na {{2}}: {{3}}. Os detalhes estão no botão abaixo.",
+    [NOME, ORG, "titulo"],
+    ["Ana", "RE/MAX Trio", "Envio da proposta cancelado"],
+    { tipo: "url", texto: "Abrir proposta" }
+  ),
+  /** stage_change / contract_sent / portal_comment (+ gêmeos `deal_*`). Título: "Status do negócio atualizado"… */
+  negocio: t(
+    "max_negocio_andamento",
+    "Olá, {{1}}! Andamento de negócio na {{2}}: {{3}}. Negócio: {{4}}. Os detalhes estão no botão abaixo.",
+    [NOME, ORG, "titulo", NEGOCIO],
+    ["Ana", "RE/MAX Trio", "Status do negócio atualizado", "Venda Apto 302"],
+    ABRIR_NEGOCIO
+  ),
+  /**
+   * participant_completed. Título: "<papel> preencheu os dados". O papel é o
+   * rótulo da categoria que a org configura — NUNCA o nome da pessoa; se o
+   * contractmaker passar a mandar nome aqui, esta família tem de largar o título.
+   */
+  formulario: t(
+    "max_formulario_andamento",
+    "Olá, {{1}}! Andamento de formulário na {{2}}: {{3}}. Os detalhes estão no botão abaixo.",
+    [NOME, ORG, "titulo"],
+    ["Ana", "RE/MAX Trio", "Comprador preencheu os dados"],
+    { tipo: "url", texto: "Abrir formulário" }
+  ),
+  /** certidao_problem. Texto fixo: o rótulo da certidão pode trazer nome de pessoa. */
+  certidaoAtencao: t(
+    "max_certidao_atencao",
+    "Olá, {{1}}! Status de certidões na {{2}}: uma certidão do relatório precisa de atenção. Os detalhes estão no botão abaixo.",
+    [NOME, ORG],
+    ["Ana", "RE/MAX Trio"],
+    { tipo: "url", texto: "Abrir relatório" }
+  ),
+  /** certidao_batch_complete. Texto fixo, pelo mesmo motivo. */
+  certidoesConcluidas: t(
+    "max_certidoes_concluidas",
+    "Olá, {{1}}! Status de certidões na {{2}}: o lote de certidões solicitado foi concluído. Os detalhes estão no botão abaixo.",
+    [NOME, ORG],
+    ["Ana", "RE/MAX Trio"],
+    { tipo: "url", texto: "Abrir relatório" }
+  ),
+};
+
+/**
  * `kind` → template. O que não está aqui é FORA DA RÉGUA (ver o topo).
  *
  * Mesma convenção do contractmaker: a versão da PARTE leva `_parte`. Pesquisa
@@ -400,9 +486,40 @@ export const CATALOGO: Record<string, TemplateDef> = {
 // texto (`textoDoAvisoDeCredito`) é entregue no OK, como a mensagem manual.
 CATALOGO.credit_result = MENSAGEM;
 
+// Famílias de avisos da equipe (25/10/2026, ver `FAMILIAS`). Os gêmeos `deal_*`
+// são o mesmo fato pelo caminho do sino (sem `params`); os sem prefixo, pelo
+// motor de eventos do negócio (com `negocio`).
+for (const kind of ["envelope_signed", "envelope_refused", "envelope_email_failed"]) CATALOGO[kind] = FAMILIAS.assinatura;
+for (const kind of [
+  "proposal_accepted_party",
+  "proposal_send_canceled",
+  "proposal_aceite_not_delivered",
+  "proposal_email_failed",
+])
+  CATALOGO[kind] = FAMILIAS.proposta;
+for (const kind of [
+  "stage_change",
+  "deal_stage_change",
+  "contract_sent",
+  "deal_contract_sent",
+  "portal_comment",
+  "deal_portal_comment",
+])
+  CATALOGO[kind] = FAMILIAS.negocio;
+CATALOGO.participant_completed = FAMILIAS.formulario;
+CATALOGO.certidao_problem = FAMILIAS.certidaoAtencao;
+CATALOGO.certidao_batch_complete = FAMILIAS.certidoesConcluidas;
+
 // Sem vendedor cadastrado, a assinatura do proponente NÃO significa que
 // todos assinaram. O mesmo fato usa o template parcial, nunca completed.
 CATALOGO.proposal_awaiting_decision = CATALOGO.proposal_signed_proponente;
+
+// Lembrete de formulário pelo caminho do sino (`deal_form_reminder`, 2 falhas
+// `fora_da_regua` em 30 dias): é o MESMO fato do `form_reminder` — reaproveita
+// todas as versões já aprovadas (v1/v2/v3), sem template novo. Sem `negocio` no
+// sino, o texto cai no fallback "em andamento". As versões de V2/V3 são
+// ligadas logo depois da definição delas.
+CATALOGO.deal_form_reminder = CATALOGO.form_reminder;
 
 /**
  * Kinds cujo texto (`outbox.body`) só é entregue depois do OK — quando saem
@@ -599,6 +716,8 @@ const MENSAGEM_V3 = t(
 V3.manual_message = MENSAGEM_V3;
 V3.manual_message_parte = MENSAGEM_V3;
 V3.credit_result = MENSAGEM_V3;
+V2.deal_form_reminder = V2.form_reminder;
+V3.deal_form_reminder = V3.form_reminder;
 
 /**
  * `proposal_completed` v2 (decisão do Olavo, 06/10/2026): a Meta aprovou o v1

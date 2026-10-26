@@ -515,3 +515,27 @@ export function askWhichOrg(candidates: Candidate[]): string {
     "\n\nResponda com o número ou o nome."
   );
 }
+
+/**
+ * O remetente já é usuário conhecido? Só olha o banco local (escolha de org
+ * salva ou cache positivo vigente) — nenhum fetch à plataforma. Serve para
+ * sinais visíveis ANTES do grafo decidir responder (o "lida + digitando"):
+ * número desconhecido (cliente, spam) não pode ver que o Max leu e ficar sem
+ * resposta. Fail-closed: erro ou número que não normaliza → false.
+ */
+export async function remetenteConhecido(rawPhone: string): Promise<boolean> {
+  const e164 = normalizeBrPhone(rawPhone);
+  if (!e164) return false;
+  try {
+    const rows = await query<{ ok: number }>(
+      `SELECT 1 AS ok FROM phone_org_choice WHERE phone = $1 AND chosen_org_id IS NOT NULL
+       UNION ALL
+       SELECT 1 AS ok FROM identity_cache WHERE phone = $1 AND NOT negative AND expires_at > now()
+       LIMIT 1`,
+      [e164]
+    );
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}

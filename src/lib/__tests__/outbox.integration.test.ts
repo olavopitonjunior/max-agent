@@ -122,6 +122,115 @@ d("outbox (Postgres real)", () => {
     expect(row[0].provider_message_id).toBe("MID");
   });
 
+  /**
+   * Provedor sem janela de 24h (hoje o `log`; amanhã o bridge do Newton):
+   * janela fechada NÃO represa por template — sai texto livre.
+   */
+  it("transporte log com janela fechada sai em texto livre, sem template", async () => {
+    vi.stubEnv("AGENT_TRANSPORT", "log");
+    try {
+      await query(`DELETE FROM conversation_window WHERE phone = '5511987654321'`);
+      await enqueue(args({ dedupeKey: "k-log" }));
+      await query(
+        `UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = 'k-log'`
+      );
+
+      await dispatchDue();
+
+      expect(sent).not.toHaveBeenCalled();
+      const row = await query<{
+        status: string;
+        provider_message_id: string | null;
+        template_name: string | null;
+      }>(
+        `SELECT status, provider_message_id, template_name FROM outbox WHERE dedupe_key = 'k-log'`
+      );
+      expect(row[0].status).toBe("sent");
+      expect(row[0].provider_message_id).toMatch(/^log-/);
+      expect(row[0].template_name).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  /**
+   * Perfil `newton`: o aviso vai ao bridge como texto livre, sem janela e sem
+   * template — atividade, prazo, formulário pendente, proposta e etapa.
+   */
+  it("perfil newton entrega cada família ao bridge em texto livre, com a janela fechada", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    vi.stubEnv("NEWTON_BRIDGE_URL", "https://bridge.test");
+    vi.stubEnv("NEWTON_BRIDGE_TOKEN", "tok-teste");
+    const corpos: Array<{ to: string; body: string }> = [];
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      corpos.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ provider: "zapi", messageId: `Z${corpos.length}` }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await query(`DELETE FROM conversation_window WHERE phone = '5511987654321'`);
+      const familias = [
+        { kind: "activity_assigned", title: "Nova atividade", body: "Ligar para o comprador." },
+        { kind: "activity_due", title: "Atividade vence hoje", body: "Vistoria às 10:00." },
+        { kind: "form_reminder", title: "Formulário pendente", body: "Faltam: CPF do comprador, comprovante de renda." },
+        { kind: "proposal_completed", title: "Proposta assinada", body: "A proposta foi assinada.", audience: "deal_broker" },
+        { kind: "stage_change", title: "Status do negócio atualizado", body: "Avançou para Assinatura.", audience: "deal_broker" },
+      ];
+      for (const f of familias) {
+        await enqueue(args({ ...f, dedupeKey: `k-newton-${f.kind}`, kind: f.kind, params: null }));
+      }
+      await query(
+        `UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key LIKE 'k-newton-%'`
+      );
+
+      await dispatchDue();
+
+      expect(sent).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(familias.length);
+      expect(fetchMock.mock.calls[0][0]).toBe("https://bridge.test/api/send");
+      for (const f of familias) {
+        const corpo = corpos.find((c) => c.body.includes(f.title));
+        expect(corpo, f.kind).toBeDefined();
+        expect(corpo!.to).toBe("5511987654321");
+        expect(corpo!.body).toContain(f.body);
+        expect(corpo!.body).toContain("https://imobpro.ia.br/deals/1");
+      }
+      const rows = await query<{ status: string; template_name: string | null; provider_message_id: string | null }>(
+        `SELECT status, template_name, provider_message_id FROM outbox WHERE dedupe_key LIKE 'k-newton-%'`
+      );
+      expect(rows).toHaveLength(familias.length);
+      for (const r of rows) {
+        expect(r.status).toBe("sent");
+        expect(r.template_name).toBeNull();
+        expect(r.provider_message_id).toMatch(/^Z\d$/);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  /** Transporte mal configurado lança ANTES do claim: nenhuma linha queima tentativa. */
+  it("AGENT_TRANSPORT inválido não reivindica nada", async () => {
+    vi.stubEnv("AGENT_TRANSPORT", "zapi");
+    try {
+      await enqueue(args({ dedupeKey: "k-transporte-ruim" }));
+      await query(
+        `UPDATE outbox SET deliver_after = now() - interval '1 minute' WHERE dedupe_key = 'k-transporte-ruim'`
+      );
+
+      await expect(dispatchDue()).rejects.toThrow("transport_invalido");
+
+      const row = await query<{ status: string; attempts: number }>(
+        `SELECT status, attempts FROM outbox WHERE dedupe_key = 'k-transporte-ruim'`
+      );
+      expect(row[0].status).toBe("pending");
+      expect(row[0].attempts).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   /** O que ainda não venceu não pode sair — é a janela 7h–22h em ação. */
   it("não toca no que está agendado pro futuro", async () => {
     await enqueue(args({ dedupeKey: "k-future" }));

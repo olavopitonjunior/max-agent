@@ -1,3 +1,6 @@
+import { contentDigest } from "./runtime/contracts";
+import { executableTool } from "./runtime/catalog";
+import { currentExecution, runEvent } from "./runtime/context";
 import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import { fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS } from "./http";
@@ -8,6 +11,7 @@ import {
   type ScopeSubject,
 } from "@/graph/scope-contract";
 import type { Candidate } from "./identity";
+import { readStageClarification, type StageClarification } from "@/graph/query-options";
 
 /**
  * Cliente do `POST /api/agents/scope-query` — a leitura de negócio do Max.
@@ -33,6 +37,10 @@ import type { Candidate } from "./identity";
 export interface ResultadoDeLeitura {
   items: unknown[];
   truncated: boolean;
+  nextCursor?: string;
+  clarification?: StageClarification;
+  /** Só `template.decisions`: modelos sem relatório de regras ("não medidos", nunca "sem pendência"). */
+  naoMedidos?: number;
 }
 
 /**
@@ -50,6 +58,11 @@ export async function consultarEscopo(params: {
   verb: ScopeQueryVerb;
   args?: Record<string, unknown>;
 }): Promise<ResultadoDeLeitura | null> {
+  if (!executableTool(params.verb,undefined,params.orgId)) return null;
+  const execution = currentExecution();
+  if (execution && (execution.context.orgId !== params.orgId || contentDigest(execution.context.subject) !== contentDigest(params.subject))) throw new Error("execution_tenant_mismatch");
+  runEvent("tool.started", params.verb);
+  if (currentExecution()?.context.mode === "simulation") { runEvent("tool.simulated", params.verb); return { items: [], truncated: false }; }
   const org = await orgById(params.orgId);
   if (!org) return null;
   const e164 = normalizeBrPhone(params.rawPhone);
@@ -85,9 +98,16 @@ export async function consultarEscopo(params: {
       return null;
     }
 
-    const r = (await res.json()) as { items?: unknown; truncated?: unknown };
+    const r = (await res.json()) as { items?: unknown; truncated?: unknown; nextCursor?: unknown; clarification?: unknown; naoMedidos?: unknown };
+    if (r.clarification !== undefined) {
+      const clarification = readStageClarification(r.clarification);
+      if (params.verb !== "deal.list" || !clarification || !Array.isArray(r.items) || r.items.length !== 0) return null;
+      runEvent("tool.needs_input", params.verb, { field: "estado", optionCount: clarification.options.length });
+      return { items: [], truncated: false, clarification };
+    }
     if (!Array.isArray(r.items)) return null;
-    return { items: r.items, truncated: r.truncated === true };
+    runEvent("tool.completed", params.verb, { count: r.items.length, truncated: r.truncated === true });
+    return { items: descartarSeVazou(r.items, params.subject.kind), truncated: r.truncated === true, ...(typeof r.nextCursor === "string" ? { nextCursor: r.nextCursor } : {}), ...(Number.isInteger(r.naoMedidos) && (r.naoMedidos as number) >= 0 ? { naoMedidos: r.naoMedidos as number } : {}) };
   } catch (err) {
     console.warn(
       `[scope] ${params.verb} falhou na org ${params.orgId}:`,
@@ -113,13 +133,28 @@ export async function consultarEscopo(params: {
  * lista, o filtro some e a pessoa recebe todas. O `estado` de negócio é nome
  * de etapa (texto livre por org) e segue intocado.
  */
+/** Chaves que cada verbo de proposta aceita do modelo/despachante. Verbo fora daqui: sem lista (comportamento antigo). */
+const ARGS_DE_PROPOSTA: Partial<Record<ScopeQueryVerb, readonly string[]>> = {
+  "proposal.list": ["estado", "limite"],
+  "proposal.detail": ["proposta_id"],
+};
+
 export function limparArgs(
   args: Record<string, unknown> | undefined,
   verb?: ScopeQueryVerb
 ): Record<string, unknown> {
   const limpos: Record<string, unknown> = {};
+  // Verbos de proposta levam SÓ o que a tool declara. O despacho não impõe o
+  // `additionalProperties:false` do schema da tool, e o `bodySchema` do servidor
+  // recusa (400) valor fora da forma em chaves que ele conhece (`filtro` fora do
+  // enum, `cursor` > 512, `blocos`...): um campo "por preencher" do modelo derrubava a
+  // consulta inteira, que voltava como `falha_na_consulta`.
+  const permitidas = verb ? ARGS_DE_PROPOSTA[verb] : undefined;
   for (const [chave, valor] of Object.entries(args ?? {})) {
+    if (permitidas && !permitidas.includes(chave)) continue;
     if (valor === null || valor === undefined) continue;
+    // `estado` é string no servidor (`z.string().min(1)`); lista/objeto/número do modelo seria 400.
+    if (chave === "estado" && typeof valor !== "string") continue;
     if (chave === "limite") {
       if (Number.isInteger(valor) && (valor as number) > 0) limpos[chave] = valor;
       continue;

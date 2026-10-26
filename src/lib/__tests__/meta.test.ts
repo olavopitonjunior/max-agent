@@ -4,8 +4,10 @@ import {
   canonicalizarWaId,
   connectionStatus,
   downloadMedia,
+  markReadTyping,
   parseWebhook,
   sendTemplate,
+  sendInteractive,
   sendText,
   verifyChallenge,
   verifySignature,
@@ -145,6 +147,177 @@ describe("parseWebhook — mensagens", () => {
       ["text", "Sim", "SIM"],
       ["text", "Venda", "b1"],
     ]);
+  });
+
+  it("list_reply vira texto com o título e o id como payload", () => {
+    const ev = parseWebhook(
+      webhook({
+        messages: [
+          {
+            from: "5511987654321",
+            id: "wamid.LST",
+            timestamp: "1758549600",
+            type: "interactive",
+            interactive: {
+              type: "list_reply",
+              list_reply: { id: "row_locacao", title: "Locação", description: "Aluguel" },
+            },
+          },
+        ],
+      }),
+      PNID
+    );
+    expect(ev.messages.map((m) => [m.kind, m.text, m.buttonPayload])).toEqual([
+      ["text", "Locação", "row_locacao"],
+    ]);
+  });
+
+  it("opção do Max (op:) vale o texto digitado; o payload op: fica para a checagem de toque antigo", () => {
+    const ev = parseWebhook(
+      webhook({
+        messages: [
+          {
+            from: "5511987654321",
+            id: "wamid.OP1",
+            timestamp: "1758549600",
+            type: "interactive",
+            interactive: { type: "list_reply", list_reply: { id: "op:2", title: "Em contrato" } },
+          },
+          {
+            from: "5511987654321",
+            id: "wamid.OP2",
+            timestamp: "1758549601",
+            type: "interactive",
+            interactive: { type: "button_reply", button_reply: { id: "op:NÃO", title: "NÃO" } },
+          },
+          {
+            from: "5511987654321",
+            id: "wamid.OP3",
+            timestamp: "1758549602",
+            type: "interactive",
+            interactive: { type: "button_reply", button_reply: { id: "atv:abc", title: "Concluir" } },
+          },
+          {
+            from: "5511987654321",
+            id: "wamid.OP4",
+            timestamp: "1758549603",
+            type: "interactive",
+            interactive: { type: "button_reply", button_reply: { id: "op:", title: "Vazio" } },
+          },
+        ],
+      }),
+      PNID
+    );
+    expect(ev.messages.map((m) => [m.kind, m.text, m.buttonPayload])).toEqual([
+      ["text", "2", "op:2"],
+      ["text", "NÃO", "op:NÃO"],
+      ["text", "Concluir", "atv:abc"],
+      ["text", "Vazio", "op:"],
+    ]);
+  });
+
+  describe("nfm_reply (resposta de WhatsApp Flow)", () => {
+    const nfm = (id: string, nfm_reply: unknown) =>
+      webhook({
+        messages: [
+          {
+            from: "5511987654321",
+            id,
+            timestamp: "1758549600",
+            type: "interactive",
+            interactive: { type: "nfm_reply", nfm_reply },
+          },
+        ],
+      });
+
+    it("campos preenchidos: texto legível 'campo: valor' por linha, sem flow_token, objeto bruto guardado", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F1", {
+          name: "flow",
+          body: "Sent",
+          response_json: JSON.stringify({
+            flow_token: "TOKEN-SECRETO",
+            nome: "Ana",
+            vazio: "",
+            ausente: null,
+            interesse: ["venda", "locacao"],
+            quartos: 3,
+          }),
+        }),
+        PNID
+      );
+      expect(ev.messages).toHaveLength(1);
+      const m = ev.messages[0];
+      expect(m.kind).toBe("text");
+      expect(m.text).toBe("nome: Ana\ninteresse: venda, locacao\nquartos: 3");
+      expect(m.text).not.toContain("TOKEN-SECRETO");
+      expect(m.flowResponse).toEqual({ nome: "Ana", interesse: ["venda", "locacao"], quartos: 3 });
+      expect(m.buttonPayload ?? null).toBeNull();
+    });
+
+    it("texto do Flow tem o mesmo teto de 4096 do texto digitado", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F9", { response_json: JSON.stringify({ obs: "x".repeat(5000) }) }),
+        PNID
+      );
+      expect(ev.messages[0].text).toHaveLength(4096);
+      expect(ev.messages[0].text?.startsWith("obs: x")).toBe(true);
+    });
+
+    it("só flow_token: unknown, sem texto", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F2", { response_json: JSON.stringify({ flow_token: "T" }) }),
+        PNID
+      );
+      expect(ev.messages.map((m) => [m.kind, m.text, m.flowResponse])).toEqual([
+        ["unknown", null, undefined],
+      ]);
+    });
+
+    it("campos todos vazios: unknown", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F3", { response_json: JSON.stringify({ flow_token: "T", a: "", b: "  ", c: null }) }),
+        PNID
+      );
+      expect(ev.messages[0].kind).toBe("unknown");
+    });
+
+    it("response_json inválido: unknown, sem lançar", () => {
+      const ev = parseWebhook(nfm("wamid.F4", { response_json: "{nao-e-json" }), PNID);
+      expect(ev.messages.map((m) => [m.kind, m.text])).toEqual([["unknown", null]]);
+    });
+
+    it("response_json que não é objeto (array/string/número): unknown", () => {
+      for (const raw of ["[1,2]", '"texto"', "7", "null"]) {
+        const ev = parseWebhook(nfm("wamid.F5", { response_json: raw }), PNID);
+        expect(ev.messages[0].kind).toBe("unknown");
+      }
+    });
+
+    it("response_json ausente ou não-string: unknown", () => {
+      expect(parseWebhook(nfm("wamid.F6", { name: "flow" }), PNID).messages[0].kind).toBe("unknown");
+      expect(
+        parseWebhook(nfm("wamid.F7", { response_json: { nome: "Ana" } }), PNID).messages[0].kind
+      ).toBe("unknown");
+    });
+
+    it("interativo sem reply nem nfm_reply também é unknown (não vai ao modelo como texto vazio)", () => {
+      const ev = parseWebhook(
+        webhook({
+          messages: [
+            {
+              from: "5511987654321",
+              id: "wamid.I1",
+              timestamp: "1",
+              type: "interactive",
+              interactive: { type: "outro" },
+            },
+          ],
+        }),
+        PNID
+      );
+      expect(ev.messages[0].kind).toBe("unknown");
+    });
   });
 
   it("texto digitado não traz payload — só o toque diz a qual mensagem responde", () => {
@@ -588,6 +761,103 @@ describe("chamadas à Graph API", () => {
     fetchMock.mockResolvedValue(json(200, { messages: [{ id: "w" }] }));
     await sendText({ to: "1", body: "x" });
     expect(fetchMock.mock.calls[0][0]).toContain("/v26.0/");
+  });
+
+  it("sendInteractive botões: type interactive/button, ids e títulos, com citação", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.BTN" }] }));
+    const res = await sendInteractive({
+      to: "5511987654321",
+      quoteMessageId: "wamid.Q",
+      interativo: {
+        tipo: "botoes",
+        corpo: "Posso criar?\n\nResponda SIM para confirmar ou NÃO para parar.",
+        opcoes: [{ id: "op:SIM", titulo: "SIM" }, { id: "op:NÃO", titulo: "NÃO" }],
+      },
+    });
+    expect(res).toEqual({ messageId: "wamid.BTN" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`https://graph.facebook.com/v24.0/${PNID}/messages`);
+    expect(JSON.parse(init.body)).toEqual({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: "5511987654321",
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: "Posso criar?\n\nResponda SIM para confirmar ou NÃO para parar." },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "op:SIM", title: "SIM" } },
+            { type: "reply", reply: { id: "op:NÃO", title: "NÃO" } },
+          ],
+        },
+      },
+      context: { message_id: "wamid.Q" },
+    });
+  });
+
+  it("sendInteractive lista: uma seção, descrição só quando existe, sem citação se não pedida", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.LST" }] }));
+    await sendInteractive({
+      to: "5511987654321",
+      interativo: {
+        tipo: "lista",
+        corpo: "Qual etapa?",
+        botao: "Ver opções",
+        opcoes: [{ id: "op:0", titulo: "Todas as etapas" }, { id: "op:1", titulo: "Em contr…", descricao: "Em contrato longo" }],
+      },
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.context).toBeUndefined();
+    expect(body.interactive).toEqual({
+      type: "list",
+      body: { text: "Qual etapa?" },
+      action: {
+        button: "Ver opções",
+        sections: [{ rows: [{ id: "op:0", title: "Todas as etapas" }, { id: "op:1", title: "Em contr…", description: "Em contrato longo" }] }],
+      },
+    });
+  });
+
+  describe("markReadTyping", () => {
+    it("POST /{pnid}/messages com status=read + typing_indicator e o corpo exato", async () => {
+      fetchMock.mockResolvedValue(json(200, { success: true }));
+      expect(await markReadTyping("wamid.IN1")).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`https://graph.facebook.com/v24.0/${PNID}/messages`);
+      expect(init.method).toBe("POST");
+      expect(init.headers.Authorization).toBe("Bearer TOKEN");
+      expect(init.body).toBe(
+        '{"messaging_product":"whatsapp","status":"read","message_id":"wamid.IN1","typing_indicator":{"type":"text"}}'
+      );
+      expect(init.signal).toBeDefined(); // fetchWithTimeout: mesmo prazo dos outros envios
+    });
+
+    it("erro HTTP da Meta: false, sem lançar, e o log não leva token", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockResolvedValue(json(400, { error: { code: 100, message: "bad" } }));
+      await expect(markReadTyping("wamid.IN2")).resolves.toBe(false);
+      const linha = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(linha).toContain("meta.typing_falhou");
+      expect(linha).not.toContain("TOKEN");
+      warn.mockRestore();
+    });
+
+    it("rede caindo (fetch rejeita): false, sem lançar", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockRejectedValue(new Error("ECONNRESET"));
+      await expect(markReadTyping("wamid.IN3")).resolves.toBe(false);
+      warn.mockRestore();
+    });
+
+    it("env ausente: false, sem lançar e sem chamar a rede", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubEnv("META_ACCESS_TOKEN", "");
+      await expect(markReadTyping("wamid.IN4")).resolves.toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
   });
 
   describe("connectionStatus", () => {

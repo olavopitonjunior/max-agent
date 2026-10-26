@@ -302,6 +302,19 @@ const CATALOGO_DO_IMOBPRO = [
   // fora do padrão. Posições 16 e 17 (0-based), FIXAS.
   "captacao.autorizacao.pedir",
   "captacao.autorizacao.decidir",
+      "notification.list",
+      "activity.list",
+      "metrics.get",
+      "property.list",
+      "property.detail",
+      "contract.status",
+      "marketing.read",
+      "marketing.generate",
+      "activity.write",
+      "template.decisions",
+      // Pendências e avisos (24/10/2026): posições 27 e 28 (0-based), FIXAS.
+      "pending.summary",
+      "prefs.self",
 ];
 
 describe("paridade do catálogo de capabilities", () => {

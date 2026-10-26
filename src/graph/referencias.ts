@@ -48,6 +48,8 @@ export interface MapaDeReferencias {
    */
   turno: string;
   itens: ItemReferenciado[];
+  /** Opaque server continuation; never included in model results. */
+  continuacao?: { tool: string; cursor: string; args: Record<string, unknown>; subjectKey: string; criadoEm: number };
 }
 
 /**
@@ -68,7 +70,7 @@ function rotuloDe(item: Record<string, unknown>, tipo: TipoDeReferencia): string
     const v = item[campo];
     if (typeof v === "string" && v.trim()) return v.trim().slice(0, 80);
   }
-  return tipo === "proposta" ? "Proposta" : "Negócio";
+  return ({proposta:"Proposta",negocio:"Negócio",imovel:"Imóvel",atividade:"Atividade",notificacao:"Notificação",contrato:"Contrato"})[tipo];
 }
 
 /**
@@ -170,4 +172,19 @@ export function renderizarLista(itens: ItemReferenciado[]): string {
     .slice(0, ITENS_POR_LISTA)
     .map((i) => `${i.n}. ${i.rotulo}`)
     .join("\n");
+}
+
+/** Menu selection repeats only projected facts, with the reference map's numbers. */
+export function renderizarNegociosSelecionados(items: unknown[], mapa: MapaDeReferencias | null, truncated: boolean): string {
+  const rows: ItemReferenciado[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const projected = item as Record<string, unknown>;
+    const ref = mapa?.itens.find(entry => entry.tipo === "negocio" && entry.n === projected.n);
+    if (!ref) continue;
+    const stage = typeof projected.etapa === "string" && projected.etapa.trim() ? projected.etapa.trim() : "não informada";
+    rows.push({ ...ref, rotulo: `${ref.rotulo} — Etapa: ${stage}` });
+  }
+  if (rows.length !== items.length) return "Não consegui apresentar os negócios desta consulta. Tente novamente mais tarde.";
+  return renderizarLista(rows) + (truncated ? "\nHá mais negócios nesta consulta." : "");
 }

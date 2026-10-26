@@ -1,12 +1,14 @@
+import {captureDispatchFence,DispatchFenceSchema,withCapturedPrivacy,withDeliveryFence,withTransportFence,TransportAcceptedCommitError,type DispatchFence} from "./runtime/delivery-fence";
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
-import { sendText, sendTemplate, connectionStatus, provider, type ConnectionState } from "./transport";
+import { sendText, sendTemplate, connectionStatus, capabilities, type ConnectionState } from "./transport";
 import { janelaAberta } from "./janela24h";
 import { reservarAvisoNeutro } from "./atividades-pendentes";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
+import { deployProfile } from "./deploy-profile";
 import {
   inoperanciaDoErro,
   falhaDaMensagemMeta,
@@ -154,17 +156,23 @@ export type EnqueueResult =
   | { status: "duplicate"; id: string };
 
 export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
+  // O Newton só fala com usuário interno, e o transporte dele não tem
+  // template nem janela: aviso para parte do negócio sairia como texto livre.
+  if (p.audience === "deal_party" && deployProfile().agentKey === "newton") {
+    throw new Error("audience_nao_permitida_no_perfil");
+  }
   const id = randomUUID();
   const deliverAfter = nextDeliveryTime();
+  const dispatchFence=await captureDispatchFence(p.phone);
 
   // `ON CONFLICT DO NOTHING` + RETURNING: a linha só volta quando FOI inserida
   // agora. Conflito devolve zero linhas, e aí a chave já existia — que é
   // exatamente a definição de duplicata que o ImobPro espera ver como 409.
-  const rows = await query<{ id: string }>(
+  const inserted = await withCapturedPrivacy(dispatchFence,(client)=>client.query<{id:string}>(
     `INSERT INTO outbox
        (id, org_id, dedupe_key, audience, phone, recipient_name,
-        title, body, link_url, deal_id, org_name, deliver_after, kind, params)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        title, body, link_url, deal_id, org_name, deliver_after, kind, params, dispatch_fence)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
      ON CONFLICT (dedupe_key) DO NOTHING
      RETURNING id`,
     [
@@ -182,8 +190,10 @@ export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
       deliverAfter,
       p.kind ?? null,
       p.params ? JSON.stringify(p.params) : null,
+      JSON.stringify(dispatchFence),
     ]
-  );
+  ));
+  const rows=inserted.rows;
 
   if (rows.length === 0) {
     const existing = await query<{ id: string }>(
@@ -221,7 +231,8 @@ export function renderMessage(row: {
   const first = row.recipient_name.trim().split(/\s+/)[0] ?? "";
   const hello = first ? `Oi, ${first}! ` : "";
   const parts = [`${hello}*${row.title}*`, row.body];
-  if (row.link_url) parts.push(row.link_url);
+  // Avisos de proposta já chegam com a URL no corpo; repetir duplicava o link.
+  if (row.link_url && !row.body.includes(row.link_url)) parts.push(row.link_url);
   if (row.org_name) parts.push(`— ${row.org_name}`);
   return parts.filter(Boolean).join("\n\n");
 }
@@ -259,6 +270,7 @@ export interface DispatchTotals {
 
 interface OutboxRow extends Record<string, unknown> {
   id: string;
+  dispatch_fence?:DispatchFence|null;
   org_id: string;
   audience: string;
   phone: string;
@@ -354,6 +366,10 @@ export async function dispatchDue(
   iniciadoEm?: number
 ): Promise<DispatchTotals> {
   const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0, held: 0, expired: 0, coalesced: 0 };
+  if (process.env.MAX_OUTBOUND_KILL === "true") return totals;
+  // Transporte mal configurado lança AQUI, antes do claim: depois dele, cada
+  // linha reivindicada queimaria uma tentativa e ficaria presa em `sending`.
+  const caps = capabilities();
 
   /**
    * ── A checagem que faltava ─────────────────────────────────────────────
@@ -458,7 +474,7 @@ export async function dispatchDue(
       )
       RETURNING id, org_id, audience, phone, title, body, link_url, org_name,
                 recipient_name, attempts, send_started_at, kind, params, last_error,
-                created_at`,
+                created_at, dispatch_fence`,
     [limit, String(SENDING_ORPHAN_MINUTES)]
   );
   totals.claimed = rows.length;
@@ -479,6 +495,7 @@ export async function dispatchDue(
   const seedDeadline = (iniciadoEm ?? Date.now()) + 40_000;
 
   for (const [indice, row] of rows.entries()) {
+    let deliveryFence:DispatchFence|undefined;
     /**
      * O que saiu no WhatsApp vira turno do assistente no thread — para que
      * "o que é isso?" tenha contexto. DEPOIS do envio, com catch próprio, e
@@ -521,7 +538,7 @@ export async function dispatchDue(
         );
         if (emVoo.length > 0) return;
 
-        await seedNotification(row.org_id, row.phone, renderMessage(row));
+        await seedNotification(row.org_id, row.phone, renderMessage(row),{id:row.id,fence:deliveryFence??await captureDispatchFence(row.phone),subject:identity.candidate.kind==='user'?{kind:'user',userId:identity.candidate.userId}:{kind:'broker',splitRecipientId:identity.candidate.splitRecipientId}});
       } catch (err) {
         console.warn(
           `[outbox] thread não semeado (${row.id}) — o envio ficou de pé:`,
@@ -563,11 +580,12 @@ export async function dispatchDue(
      * aprovação em `templates/aprovacao.ts`) — se estiver, sai por ELE; senão
      * represa com a tentativa devolvida e o motivo à vista no painel. Quem
      * libera é a pessoa escrevendo de novo, a Meta aprovando o template, ou
-     * (se nenhum dos dois) o alerta chegando à mão do Olavo. Só vale para a
-     * Meta: a Z-API não tem janela.
+     * (se nenhum dos dois) o alerta chegando à mão do Olavo. Só vale para
+     * provedor com janela (`capabilities().window24h`, hoje só a Meta): sem
+     * janela, sai texto livre sempre.
      */
     let envioTemplate: TemplateDef | null = null;
-    if (provider() === "meta" && !(await janelaAberta(row.phone))) {
+    if (caps.window24h && !(await janelaAberta(row.phone))) {
       const candidatosDoKind = templatesDoKind(row.kind);
       if (candidatosDoKind.length === 0) {
         await query(
@@ -718,15 +736,11 @@ export async function dispatchDue(
         `UPDATE outbox SET send_started_at = now(), template_name = $2 WHERE id = $1`,
         [row.id, envioTemplate?.name ?? null]
       );
-      const res = envioTemplate
-        ? await sendTemplate({
-            to: row.phone,
-            name: envioTemplate.name,
-            lang: envioTemplate.lang,
-            bodyParams: parametrosDoCorpo(envioTemplate, row),
-            botoes: botoesDaLinha(envioTemplate, row.id),
-          })
-        : await sendText({ to: row.phone, body: renderMessage(row) });
+      deliveryFence=row.dispatch_fence?DispatchFenceSchema.parse(row.dispatch_fence):await captureDispatchFence(row.phone);
+      if(!row.dispatch_fence&&deliveryFence.privacyEpoch>0)throw new Error('execution_revoked');
+      const res=await withTransportFence({table:'outbox',id:row.id,phone:row.phone,fence:deliveryFence},()=>envioTemplate
+        ? sendTemplate({to:row.phone,name:envioTemplate.name,lang:envioTemplate.lang,bodyParams:parametrosDoCorpo(envioTemplate,row),botoes:botoesDaLinha(envioTemplate,row.id)})
+        : sendText({to:row.phone,body:renderMessage(row)}));
       log.info(envioTemplate ? "outbox.enviado_template" : "outbox.enviado", {
         rowId: row.id,
         orgId: row.org_id,
@@ -768,6 +782,13 @@ export async function dispatchDue(
       await semear();
       totals.sent += 1;
     } catch (err) {
+      if(err instanceof TransportAcceptedCommitError){
+        // Leave the committed send marker and sending reservation for orphan
+        // recovery; a local COMMIT error cannot turn provider acceptance into retry.
+        await query(`UPDATE outbox SET last_error=$2 WHERE id=$1`,[row.id,err.message]);
+        totals.sent+=1;continue;
+      }
+      if(err instanceof Error&&err.message==='execution_revoked'){totals.blocked+=1;continue;}
       /**
        * ── Corrida rara: a Meta recusou por 131047, ou o TEMPLATE mudou de
        * estado entre a checagem e o `send` ────────────────────────────────

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireHmac } from "@/lib/auth";
+import { deployProfile } from "@/lib/deploy-profile";
 import { enqueue } from "@/lib/outbox";
 import { toE164NoPlus } from "@/lib/phone";
 import { isOrgKnown } from "@/lib/orgs";
@@ -87,6 +88,12 @@ export async function POST(req: NextRequest) {
     );
   }
   const p = parsed.data;
+
+  // O Newton só fala com usuário interno: aviso a parte do negócio é recusado
+  // aqui, antes da fila (o `enqueue` repete a trava).
+  if (p.audience === "deal_party" && deployProfile().agentKey === "newton") {
+    return NextResponse.json({ error: "audience_not_allowed" }, { status: 403 });
+  }
 
   // Org fora da allowlist é 403, não 500: quem chamou tem segredo válido, mas
   // aponta para um tenant que este Max não atende. O ImobPro loga e segue.
