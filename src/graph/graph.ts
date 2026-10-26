@@ -17,6 +17,7 @@ import { iniciarPreferencias, preferenciasPermitidas, TEXTO_PREFS_NAO_LIBERADO }
 import { resolverReferencia } from "./referencias";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
+import { iniciarAssinatura, pedeAssinatura } from "./assinatura";
 import {
   negaAcao, pedeAcaoForaDoMax, pedeCapacidades, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
   textoDoAndamentoDoContrato, textoForaDoMax,
@@ -927,7 +928,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
   // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
   // resumo velhos não podem capturar um "2" dias depois (review 09/10).
-  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave) || (state.fluxo?.kind === "atividade" && !!state.fluxo.chave);
+  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "assinatura" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave) || (state.fluxo?.kind === "atividade" && !!state.fluxo.chave);
   const atual = vencido ? (sobrevive ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
   const escritaEmAberto = !!(atual && "chave" in atual && atual.chave);
 
@@ -1072,19 +1073,22 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     // Flag desligada no meio da ficha: o fluxo some e o turno segue normal.
     return { fluxo: null, toolLog: [{ name: "fluxo", args: { kind: "credito" }, outcome: "credito_desligado" }] };
   }
-  const gestao = podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
+  // Lembrar quem falta assinar / cancelar a assinatura de uma proposta (Passo 4, 25/10): fluxo próprio.
+  // "Cancela a proposta" nunca é "exclui a proposta" (gestão): as duas detecções são disjuntas.
+  const assinatura = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura" ? pedeAssinatura(userText) : null;
+  const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
   // "Não converte a proposta da X" é o contrário do pedido: a negação vem antes.
   const negada = !atual ? negaAcao(userText) : null;
   const continuidade = podeEscrever(state.identity) && !negada && pedeContinuidade(userText);
-  const foraDoMax = coletando || gestao || continuidade ? null : pedeAcaoForaDoMax(userText);
+  const foraDoMax = coletando || gestao || assinatura || continuidade ? null : pedeAcaoForaDoMax(userText);
   // "O contrato já foi enviado?" e "não exclui a proposta X": respostas do
   // sistema (eval 09/10 — o modelo confundia o contrato com o envio da
   // proposta e dizia "não consigo excluir"). A negação só sem fluxo aberto:
   // dentro de um, o "não" é a resposta ao resumo e o fluxo a trata.
   const contratoLeitura = featureEnabled("queries",state.identity.orgId) && state.policy.includes("contract.status") &&
     !/\b(quem|signat[aá]ri|falta(?:m)? assinar)/i.test(userText);
-  const contratoPergunta = coletando || gestao || continuidade || contratoLeitura ? false : perguntaDoContrato(userText);
-  if (!coletando && !gestao && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
+  const contratoPergunta = coletando || gestao || assinatura || continuidade || contratoLeitura ? false : perguntaDoContrato(userText);
+  if (!coletando && !gestao && !assinatura && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
     const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
     const linkDoNegocio = resultado?.match(/Negócio: (\S+)/)?.[1] ?? null;
     const reply = foraDoMax
@@ -1099,6 +1103,14 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
       toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome }] };
   }
 
+  if (assinatura && !escritaEmAberto) {
+    const passo = await iniciarAssinatura(assinatura, { texto: userText, messageId: state.inbound.messageId,
+      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
+    return { fluxo: passo.fluxo, reply: passo.reply,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "assinatura", operacao: assinatura }, outcome: passo.evento }] };
+  }
+
   // Excluir/duplicar proposta: fluxo próprio, determinístico (decisão 09/10).
   if (gestao && !escritaEmAberto) {
     const passo = await iniciarGestao(gestao, { texto: userText, messageId: state.inbound.messageId,
@@ -1109,7 +1121,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   }
 
   // Continuidade tem precedência sobre o classificador "criar formulário".
-  if (atual?.kind !== "continuidade" && continuidade && !(escritaEmAberto && atual?.kind === "gestao")) {
+  if (atual?.kind !== "continuidade" && continuidade && !(escritaEmAberto && (atual?.kind === "gestao" || atual?.kind === "assinatura"))) {
     const passo = await iniciarContinuidade({ texto: userText, messageId: state.inbound.messageId,
       policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
     return { fluxo: passo.fluxo, reply: passo.reply,
@@ -1121,7 +1133,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // com a busca em todas as propostas da pessoa — nunca o modelo filtrando as
   // recentes de cabeça (teste 09/10). Envio vem antes: "envia a da X" é envio.
   // O fluxo aberto fica, rebaixado: um "sim" depois da lista não executa nada.
-  const emSelecao = (atual?.kind === "continuidade" || atual?.kind === "gestao") && atual.etapa === "selecao";
+  const emSelecao = (atual?.kind === "continuidade" || atual?.kind === "gestao" || atual?.kind === "assinatura") && atual.etapa === "selecao";
   if (livre && !emSelecao && podeEscrever(state.identity) &&
       !pedeEnvio(userText) && pedeConsulta(userText)) {
     // Reconhecer a consulta independe da permissão: sem leitura, recusa aqui.
@@ -1152,7 +1164,8 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     (atual.kind === "negocio" && atual.etapa === "tipo" && !lerNatureza(userText)) ||
     (atual.kind === "proposta" && atual.etapa === "natureza" && !lerNatureza(userText)) ||
     (atual.kind === "proposta" && atual.etapa === "selecao_envio") ||
-    (atual.kind === "gestao" && !atual.chave);
+    (atual.kind === "gestao" && !atual.chave) ||
+    (atual.kind === "assinatura" && !atual.chave);
   if (naoComecou && podeEscrever(state.identity) && pedeEnvio(userText)) {
     const passo = await retomarEnvio(
       {

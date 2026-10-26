@@ -24,9 +24,16 @@ export interface PropostaListada {
   status: string;
   estado?: string;
   nomes: string[];
-  /** Quem assina e em que pé está ("assinou", "pendente") — para o detalhe da consulta. */
-  assinaturas?: { nome: string; status: string }[];
+  /**
+   * Quem assina e em que pé está ("assinou", "pendente", "recusou") — para o detalhe da consulta e
+   * para o resumo de lembrar/cancelar. `canal` (Passo 4, 25/10) é por onde o lembrete chega; falta
+   * em servidor antigo ou quando o servidor não sabe: nesse caso é desconhecido, nunca inventado.
+   */
+  assinaturas?: { nome: string; status: string; canal?: CanalDeAssinatura }[];
 }
+
+export type CanalDeAssinatura = "email" | "whatsapp" | "sms";
+const CANAIS = new Set<string>(["email", "whatsapp", "sms"]);
 
 /** Palavras que aparecem perto do nome sem ser nome (verbos, objetos do pedido). */
 const NAO_E_NOME = new Set([
@@ -101,8 +108,10 @@ function paraListada(v: unknown): PropostaListada | null {
   const p = obj(v);
   if (typeof p.id !== "string" || typeof p.status !== "string") return null;
   const assinaturas = (Array.isArray(p.signatarios) ? p.signatarios : [])
-    .map((s) => ({ nome: obj(s).nome, status: obj(s).status }))
-    .filter((s): s is { nome: string; status: string } => typeof s.nome === "string" && typeof s.status === "string");
+    .map((s) => ({ nome: obj(s).nome, status: obj(s).status, canal: obj(s).canal }))
+    .filter((s): s is { nome: string; status: string; canal: unknown } => typeof s.nome === "string" && typeof s.status === "string")
+    // Só os três canais conhecidos; qualquer outro valor (ou ausência) fica sem `canal`.
+    .map(({ nome, status, canal }) => (typeof canal === "string" && CANAIS.has(canal) ? { nome, status, canal: canal as CanalDeAssinatura } : { nome, status }));
   const nomes = (Array.isArray(p.signatarios) ? p.signatarios : [])
     .map((s) => obj(s).nome).filter((n): n is string => typeof n === "string");
   return {

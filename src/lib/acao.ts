@@ -36,6 +36,8 @@ export const VERBOS_DE_ACAO = [
   "proposal.preflight",
   "proposal.send",
   "proposal.cancel",
+  // Lembrar os signatários pendentes (Passo 4, 25/10): capability `proposal.send`, RBAC `PROPOSAL_RESEND`.
+  "proposal.remind",
   "proposal.recreate",
   "proposal.convert",
   "proposal.complete",
@@ -77,7 +79,8 @@ export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
 
 /** Envio de proposta, de análise de crédito e de captação esperam mais; o resto, o teto comum. */
 export function timeoutDoVerbo(verb: VerboDeAcao): number {
-  if (verb === "proposal.send") return IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS;
+  // `proposal.remind` notifica cada signatário na ClickSign: espera como o envio.
+  if (verb === "proposal.send" || verb === "proposal.remind") return IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS;
   if (verb === "captacao.send") return captacaoSendTimeoutMs();
   if (verb === "credit.request") return IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS;
   return IMOBPRO_TIMEOUT_MS;
@@ -128,7 +131,15 @@ async function executarAcaoDireta(params: {
     // em "falha no envio"), não queda de rede: o fluxo o traduz e nunca reenvia sozinho.
     const falhaDeEnvio = params.verb === "captacao.send" && res.status === 502 && !!body && typeof body === "object" &&
       (body as Record<string, unknown>).error === "falha_envio";
-    if (res.status >= 500 && !naoConfigurado && !falhaDeEnvio) {
+    // Desfechos CANÔNICOS do lembrete e do cancelamento (código fixo no corpo, status intocado):
+    // `proposal.remind` 502 `lembrete_recusado` (a ClickSign falhou e ninguém foi lembrado) e
+    // `proposal.cancel` `cancelamento_falhou` (a ClickSign não cancelou, a proposta ficou como estava).
+    // Tratá-los como "sem resposta" prenderia a pessoa num "ainda não confirmei" eterno, porque a
+    // recusa fica no cache de idempotência da chave e o replay devolve o mesmo 5xx.
+    const erroDoCorpo = body && typeof body === "object" ? (body as Record<string, unknown>).error : undefined;
+    const recusaCanonica = (params.verb === "proposal.remind" && erroDoCorpo === "lembrete_recusado") ||
+      (params.verb === "proposal.cancel" && erroDoCorpo === "cancelamento_falhou");
+    if (res.status >= 500 && !naoConfigurado && !falhaDeEnvio && !recusaCanonica) {
       console.warn(`[acao] ${params.verb} ${res.status} na org ${params.orgId}`);
       return null;
     }

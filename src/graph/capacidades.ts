@@ -39,6 +39,8 @@ export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: 
   if (tem("proposal.list")) proposta.push("achar pelo nome do cliente ou código e ver o status");
   if (podeEscrever && tem("proposal.create")) proposta.push("duplicar");
   if (podeEscrever && tem("proposal.delete")) proposta.push("excluir");
+  // Lembrar e cancelar a assinatura usam a capability do envio (o servidor ainda confere o papel).
+  if (podeEscrever && tem("proposal.send") && tem("proposal.list")) proposta.push("lembrar quem falta assinar", "cancelar proposta enviada");
   if (proposta.length) linhas.push(`- Propostas: ${proposta.join(", ")}.`);
   if (podeEscrever && tem("proposal.create")) linhas.push("- Converter proposta assinada em negócio, com o link do formulário.");
   const negocio: string[] = [];
