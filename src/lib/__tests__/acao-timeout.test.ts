@@ -148,3 +148,32 @@ describe("captação (P9): orçamento do envio e idempotência", () => {
     expect(headers[1]).toHaveProperty("x-idempotency-key", "m1");
   });
 });
+
+describe("proposal.remind / proposal.cancel: recusa canônica 5xx chega ao fluxo", () => {
+  const responde = (status: number, body: Record<string, unknown>) =>
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status })));
+
+  it("lembrete_recusado 502 é recusa de negócio (ninguém lembrado), não resultado incerto", async () => {
+    responde(502, { error: "lembrete_recusado", pulados: [{ nome: "A", motivo: "x" }] });
+    expect(await request("proposal.remind")).toEqual({ status: 502, body: { error: "lembrete_recusado", pulados: [{ nome: "A", motivo: "x" }] } });
+  });
+  it("cancelamento_falhou 5xx é recusa canônica; outro 5xx segue incerto", async () => {
+    responde(502, { error: "cancelamento_falhou" });
+    expect(await request("proposal.cancel")).toEqual({ status: 502, body: { error: "cancelamento_falhou" } });
+    responde(500, { error: "boom" });
+    expect(await request("proposal.cancel")).toBeNull();
+    responde(500, { error: "boom" });
+    expect(await request("proposal.remind")).toBeNull();
+  });
+  it("a exceção vale só para o verbo certo (lembrete_recusado em proposal.cancel continua incerto)", async () => {
+    responde(502, { error: "lembrete_recusado" });
+    expect(await request("proposal.cancel")).toBeNull();
+  });
+  it("lembrete usa o orçamento de envio (25s não corta aos 8s)", async () => {
+    const fetch = upstream(25_000);
+    const result = request("proposal.remind");
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(await result).toEqual({ status: 200, body: { enviada: true } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});

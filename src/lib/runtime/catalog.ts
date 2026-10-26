@@ -15,7 +15,7 @@ export interface CatalogTool {
 }
 const POLICY_MAPPING: Record<string, Capability | null> = {
  'proposal.status': null, 'proposal.options': null, 'proposal.preflight': null,
- 'proposal.update': 'proposal.create', 'proposal.cancel': 'proposal.send',
+ 'proposal.update': 'proposal.create', 'proposal.cancel': 'proposal.send', 'proposal.remind': 'proposal.send',
  'proposal.complete': 'proposal.send', 'proposal.recreate': 'proposal.create',
  'proposal.convert': 'proposal.create', 'proposal.duplicate': 'proposal.create',
  'form.options': 'form.create',
@@ -30,6 +30,7 @@ const DOMAIN_SCOPE: Record<string, string> = {
  'proposal.create': 'PROPOSAL_CREATE; tenant + subject permissions.',
  'proposal.update': 'PROPOSAL_CREATE or PROPOSAL_SEND; proposalScopeWhere + creator ownership + editable state.',
  'proposal.cancel': 'PROPOSAL_CANCEL; proposalScopeWhere + envelope state.',
+ 'proposal.remind': 'PROPOSAL_RESEND; proposalScopeWhere + creator ownership + reminder-eligible state.',
  'proposal.complete': 'PROPOSAL_SEND; proposalScopeWhere + proposal state.',
  'proposal.recreate': 'PROPOSAL_CREATE; proposalScopeWhere + proposal state.',
  'proposal.convert': 'PROPOSAL_CONVERT; DEAL_CREATE or LEASE_CREATE; proposalScopeWhere + pipeline scope.',

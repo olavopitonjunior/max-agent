@@ -40,6 +40,7 @@ import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
+import { conduzirAssinatura, type FluxoAssinatura } from "./assinatura";
 import { conduzirAtividade, rebaixarAtividade, type FluxoAtividade } from "./atividades";
 import { conduzirPreferencias, rebaixarPreferencias, type FluxoPreferencias } from "./preferencias";
 import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-contract";
@@ -119,6 +120,7 @@ interface Chave {
 export type Fluxo =
   | FluxoContinuidade
   | FluxoGestao
+  | FluxoAssinatura
   | FluxoCredito
   | FluxoCaptacao
   | FluxoAtividade
@@ -798,6 +800,7 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (!f) return null;
   if (f.kind === "continuidade") return { ...f, etapa: ["concluida", "selecao"].includes(f.etapa) ? f.etapa : "resumo" };
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
+  if (f.kind === "assinatura") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
   // Atividade (M1): a confirmação volta ao resumo; com `chave` (escrita incerta) a etapa fica.
   if (f.kind === "atividade") return rebaixarAtividade(f);
   // Preferências (M3): a confirmação volta ao resumo; o SIM seguinte só reapresenta.
@@ -1252,6 +1255,7 @@ export async function conduzirFluxo(
 ): Promise<PassoDoFluxo> {
   if (fluxo.kind === "continuidade") return conduzirContinuidade(fluxo, ctx, deps);
   if (fluxo.kind === "gestao") return conduzirGestao(fluxo, ctx, deps);
+  if (fluxo.kind === "assinatura") return conduzirAssinatura(fluxo, ctx, deps);
   if (fluxo.kind === "atividade") return conduzirAtividade(fluxo, ctx, deps);
   if (fluxo.kind === "preferencias") return conduzirPreferencias(fluxo, ctx, deps);
   if (fluxo.kind === "credito") return conduzirCredito(fluxo, ctx, deps);

@@ -6,7 +6,7 @@ it('separates canonical Max policy capabilities from authenticated domain scope'
  for(const [id,policyCapability,domainScope] of [
   ['proposal.status',null,'proposalScopeWhere'],['proposal.options',null,'proposalScopeWhere'],
   ['proposal.preflight',null,'organization configuration'],['proposal.update','proposal.create','PROPOSAL_CREATE or PROPOSAL_SEND'],
-  ['form.options','form.create','DEAL_CREATE or LEASE_CREATE'],['proposal.cancel','proposal.send','PROPOSAL_CANCEL'],
+  ['form.options','form.create','DEAL_CREATE or LEASE_CREATE'],['proposal.cancel','proposal.send','PROPOSAL_CANCEL'],['proposal.remind','proposal.send','PROPOSAL_RESEND'],
   ['proposal.complete','proposal.send','PROPOSAL_SEND'],['proposal.convert','proposal.create','PROPOSAL_CONVERT'],
  ]) {expect(tools.find(t=>t.id===id)).toMatchObject({policyCapability,permission:policyCapability,domainScope:expect.stringContaining(domainScope!)});}
  for(const tool of tools)if(tool.permission!==null)expect(CAPABILITIES).toContain(tool.permission);
