@@ -71,6 +71,7 @@ describe("a régua do Olavo (01/10/2026)", () => {
         "contract_sent",
         "contract_signed",
         "contract_signed_parte",
+        "contract_signed_status",
         "credit_result",
         "deal_contract_sent",
         "deal_form_reminder",
@@ -92,6 +93,8 @@ describe("a régua do Olavo (01/10/2026)", () => {
         "proposal_aceite_not_delivered",
         "proposal_accepted_party",
         "proposal_completed",
+        "proposal_created_status",
+        "proposal_decision_status",
         "proposal_delivered",
         "proposal_email_failed",
         "proposal_expired",
@@ -133,6 +136,8 @@ describe("a régua do Olavo (01/10/2026)", () => {
       "charge_created",
       "manual_documentos",
       "qualquer_coisa",
+      // Status por papel (27/10/2026): captação assinada fica fora da régua (texto livre só na janela de 24h).
+      "captacao_signed_status",
     ]) {
       expect(templateDoKind(kind), kind).toBeNull();
     }
@@ -630,14 +635,21 @@ describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
     params: string[];
   }> = [
     {
-      kinds: ["envelope_signed", "envelope_refused", "envelope_email_failed"],
+      kinds: ["envelope_signed", "envelope_refused", "envelope_email_failed", "contract_signed_status"],
       template: "max_assinatura_status",
       botao: "Abrir negócio",
       linha: doSino("Assinatura recusada"),
       params: ["Ana", "RE/MAX Trio", "Assinatura recusada"],
     },
     {
-      kinds: ["proposal_accepted_party", "proposal_send_canceled", "proposal_aceite_not_delivered", "proposal_email_failed"],
+      kinds: [
+        "proposal_accepted_party",
+        "proposal_send_canceled",
+        "proposal_aceite_not_delivered",
+        "proposal_email_failed",
+        "proposal_created_status",
+        "proposal_decision_status",
+      ],
       template: "max_proposta_status",
       botao: "Abrir proposta",
       linha: doSino("Parte aceitou a proposta"),
