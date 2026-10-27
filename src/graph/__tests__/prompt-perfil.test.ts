@@ -74,8 +74,8 @@ describe("prompt do Newton", () => {
 
 /**
  * Pendências e avisos só entram no prompt de quem tem a capability (`pending.summary`, `prefs.self`).
- * Sem nenhuma das duas, o texto é byte a byte o do baseline (os snapshots acima, gravados antes
- * de existirem); cada trecho abaixo só aparece com a sua flag.
+ * Sem nenhuma das duas, nenhum trecho de pendências ou avisos aparece (os snapshots acima já
+ * incluem o bloco fixo "como falar de status"); cada trecho abaixo só aparece com a sua flag.
  */
 describe("trechos condicionais do prompt", () => {
   const entradas = [CORRETOR_SEM_TOOLS, GERENTE_COM_LEITURA, DESCONHECIDO];
@@ -98,6 +98,17 @@ describe("trechos condicionais do prompt", () => {
       expect(p).toContain("Ao listar pendências, diga sempre o total exato");
       expect(p).toContain('o que está pendente com você": formulários, propostas e atividades)');
       expect(p).not.toContain("avisos da própria pessoa");
+    }
+  });
+
+  it("status por papel (27/10/2026): 'como falar de status' vale para todos; o responsável do item, só com pendências", () => {
+    for (const entrada of entradas) {
+      const sem = achatar(buildSystemPrompt(entrada));
+      expect(sem).toContain("Ao falar de negócio, proposta ou captação de outra pessoa da equipe, diga quem é o responsável pelo nome");
+      expect(sem).toContain('Descreva o fato em linguagem simples ("o negócio X avançou para Y"), sem jargão como "mudança de etapa".');
+      expect(sem).not.toContain("Quando o item trouxer responsável");
+      const com = achatar(buildSystemPrompt({ ...entrada, pendencias: true }));
+      expect(com).toContain('Quando o item trouxer responsável, cite junto do item: "· Ana (Equipe Centro · Vendas)".');
     }
   });
 

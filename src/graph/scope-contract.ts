@@ -78,6 +78,14 @@ export const ESTADOS_DE_PROPOSTA = [
   "falha_envio",
 ] as const;
 
+/**
+ * `metrics.get`: períodos e quebras que o ImobPro entende (par do contractmaker,
+ * plano notificações por papel PR6/v3). Receptor inerte: sem `periodo` a resposta
+ * segue sendo os totais de agora.
+ */
+export const PERIODOS_DE_METRICA = ["hoje", "ontem", "7d", "30d", "mes", "mes_passado"] as const;
+export const QUEBRAS_DE_METRICA = ["corretor", "equipe", "departamento"] as const;
+
 export interface ScopeQueryRequest {
   verb: ScopeQueryVerb;
   subject: ScopeSubject;
@@ -101,6 +109,10 @@ export interface ScopeQueryRequest {
     blocos?: ("formularios" | "propostas" | "atividades")[];
     /** `pending.summary`: restringe os formulários a este negócio. */
     dealId?: string;
+    /** `metrics.get`: período pedido (par do contractmaker, plano notificações por papel PR6/v3). */
+    periodo?: (typeof PERIODOS_DE_METRICA)[number];
+    /** `metrics.get`: quebra pedida por gestor (par do contractmaker, plano notificações por papel PR6/v3). */
+    quebra?: (typeof QUEBRAS_DE_METRICA)[number];
   };
 }
 
