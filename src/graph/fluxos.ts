@@ -861,11 +861,11 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (f.kind === "credito") return f.etapa === "revisao" ? { ...f, etapa: "coleta", campoAtual: undefined } : f;
   // Captação: o resumo (o "enviar" que escreve) volta para a conferência; o servidor refaz o resumo.
   // Com `chave` (send sem resposta) a etapa fica: o "enviar" seguinte repete a mesma chave e args.
-  // Achado 17: as etapas em que o próximo "sim" GRAVA (criação do rascunho,
-  // lote de proprietários/extras) também não podem sobreviver a uma
-  // interrupção — senão um "sim" de outro assunto, minutos depois, dispararia
-  // a escrita sem o resumo ter sido mostrado de novo (mesmo risco do N1 que
-  // já valia pra revisão/brancos).
+  // Confirmação única (26/10): o fluxo novo só tem UM "sim" (o do resumo, em
+  // `revisao`), que também não sobrevive a uma interrupção — senão um "sim" de
+  // outro assunto, minutos depois, enviaria sem o resumo ter sido mostrado de
+  // novo (risco N1). As etapas `confirmar_*`/`canal`/`brancos` não são mais
+  // escritas; o mapeamento delas fica só para checkpoint antigo (achado 17).
   if (f.kind === "captacao") {
     if (f.chave) return f.pausado ? { ...f, pausado: false } : f;
     // v2/PR7 (achado de review 19/10, item 2): retry de pedir/decidir sem resposta — a chave
