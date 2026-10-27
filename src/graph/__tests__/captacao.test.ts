@@ -49,7 +49,7 @@ vi.mock("@/lib/identity", async (orig) => ({
   resolveIdentity: vi.fn(),
 }));
 
-const { buildGraph, RESET_DO_TURN, respostaDoTurno, encerrarTurno } = await import("../graph");
+const { buildGraph, RESET_DO_TURN, respostaDoTurno, encerrarTurno, threadIdFor } = await import("../graph");
 type Candidate = import("@/lib/identity").Candidate;
 const cap = await import("../captacao");
 const { fetchProfile, searchKnowledge, reportUsage } = await import("@/lib/cm");
@@ -84,7 +84,20 @@ interface Cap {
 let captacoes: Cap[] = [];
 let chamadas: { verb: string; args: Record<string, unknown>; key?: string }[] = [];
 let respostasPorChave = new Map<string, unknown>();
-let modelos: { id: string; nome: string; resumo?: string }[] = [];
+let modelos: { id: string; nome: string; resumo?: string; exclusiva?: boolean }[] = [];
+/** Confirmação única (26/10): faltantes extras que o Max sabe perguntar. */
+let exigeCep = false;
+let exigeTipo = false;
+let exigeEstadoCivil = false;
+/** Faltantes que só a tela resolve (sem tipo conhecido pelo Max) e bloqueios do preflight. */
+let faltantesDaTela: { path: string; rotulo: string; etapa: string }[] = [];
+let bloqueiosDoPreflight: Record<string, unknown>[] = [];
+/** Quem assina pela imobiliária (papel `imobiliaria` no options). */
+let assinanteImobiliaria: string | null = null;
+/** `campos` do 422 dados_invalidos (o CM real pode mandar vazio). */
+let campos422: string[] = [];
+/** Força o 422 dados_invalidos no próximo complemento (qualquer dado). */
+let complemento422 = false;
 let assinaturaConfigurada = true;
 /** Os campos `envio` que faltam: o fake exige matrícula para forçar a pergunta de faltante. */
 let exigeMatricula = true;
@@ -93,6 +106,8 @@ let emBranco = 0;
 let sendModo: "ok" | "202" | "sem_resposta" | { status: number; body: Record<string, unknown> } = "ok";
 let createSemResposta = false;
 let complementoDesatualizado = 0;
+/** O próximo complemento GRAVA, mas a resposta se perde (o Max recebe null). */
+let complementoSemResposta = false;
 let sendEnvios = 0;
 /** Item A: simula a tela mudando BEM na hora do envio — depois que o canal já
  *  foi aplicado (um `captacao.create`), mas no próprio `captacao.send`. */
@@ -117,15 +132,18 @@ function faltantesDe(c: Cap) {
   const f: { path: string; rotulo: string; etapa: string; proprietarioId?: string }[] = [];
   if (!im.rua || !im.numero) f.push({ path: "imovel.endereco", rotulo: "Endereço do imóvel", etapa: "imovel" });
   if (exigeMatricula && !im.matricula) f.push({ path: "imovel.matricula", rotulo: "Matrícula", etapa: "imovel" });
+  if (exigeCep && !im.cep) f.push({ path: "imovel.cep", rotulo: "CEP do imóvel", etapa: "imovel" });
+  if (exigeTipo && !im.kind) f.push({ path: "imovel.tipo", rotulo: "Tipo do imóvel", etapa: "imovel" });
   for (const p of (d.proprietarios as Record<string, unknown>[] | undefined) ?? []) {
     if (!p.cpf && !p.cnpj) f.push({ path: "proprietarios[].cpf", rotulo: "CPF", etapa: "proprietarios", proprietarioId: String(p.id) });
     if (exigeRg && !p.rg) f.push({ path: "proprietarios[].rg", rotulo: "RG", etapa: "proprietarios", proprietarioId: String(p.id) });
+    if (exigeEstadoCivil && p.tipo_pessoa !== "juridica" && !p.estado_civil) f.push({ path: "proprietarios[].estado_civil", rotulo: "Estado civil", etapa: "proprietarios", proprietarioId: String(p.id) });
   }
   if (!(d.proprietarios as unknown[] | undefined)?.length) f.push({ path: "proprietarios[].nome", rotulo: "Nome completo", etapa: "proprietarios" });
   if (c.tipo === "venda" && co.valor === undefined) f.push({ path: "condicoes.valor", rotulo: "Valor de venda", etapa: "condicoes" });
   if (co.comissao_percent === undefined) f.push({ path: "condicoes.comissao_percent", rotulo: "Comissão", etapa: "condicoes" });
   if (co.prazo_dias === undefined) f.push({ path: "condicoes.prazo_dias", rotulo: "Prazo da autorização (dias)", etapa: "condicoes" });
-  return f;
+  return [...f, ...faltantesDaTela];
 }
 
 async function imobpro(p: { verb: string; args: Record<string, unknown>; idempotencyKey?: string }) {
@@ -151,6 +169,7 @@ async function imobpro(p: { verb: string; args: Record<string, unknown>; idempot
               ...donos.map((d) => ({ nome: d.nome ?? d.razao_social, papel: "proprietario", canal: "email", assina: true })),
               ...testemunhas.map((t) => ({ nome: t.nome, papel: "testemunha", canal: "email", assina: true })),
               ...avulsos.map((v) => ({ nome: v.nome, papel: "avulso", canal: "email", assina: true })),
+              ...(assinanteImobiliaria ? [{ nome: assinanteImobiliaria, papel: "imobiliaria", canal: "email", assina: true }] : []),
             ],
           },
         };
@@ -169,16 +188,30 @@ async function imobpro(p: { verb: string; args: Record<string, unknown>; idempot
         if (complementoDesatualizado > 0) { complementoDesatualizado -= 1; c.version += 1; }
         if (a.version !== c.version) return { status: 409, body: { error: "versao_desatualizada" } };
         const dados = obj(a.dados);
+        // Contrato do CM (26/10): o rascunho MESCLADO que não passa no schema
+        // (ex.: mais de 4 testemunhas) volta 422 dados_invalidos e NADA é gravado.
+        const assinantesNovos = obj(dados.assinantes);
+        const assinantesAtuais = obj(c.dados.assinantes);
+        const testemunhasMescladas = mesclarPorId(assinantesAtuais.testemunhas as never, assinantesNovos.testemunhas as never);
+        if (testemunhasMescladas.length > 4) return { status: 422, body: { error: "dados_invalidos", campos: campos422 } };
+        if (complemento422) { complemento422 = false; return { status: 422, body: { error: "dados_invalidos", campos: campos422 } }; }
         c.dados = {
           ...c.dados,
           ...(dados.imovel ? { imovel: { ...obj(c.dados.imovel), ...obj(dados.imovel) } } : {}),
           ...(dados.condicoes ? { condicoes: { ...obj(c.dados.condicoes), ...obj(dados.condicoes) } } : {}),
           ...(dados.locacao ? { locacao: { ...obj(c.dados.locacao), ...obj(dados.locacao) } } : {}),
           ...(dados.proprietarios ? { proprietarios: mesclarPorId(c.dados.proprietarios as never, dados.proprietarios as never) } : {}),
-          ...(dados.assinantes ? { assinantes: dados.assinantes } : {}),
+          ...(dados.assinantes ? {
+            assinantes: {
+              ...assinantesAtuais,
+              testemunhas: testemunhasMescladas,
+              avulsos: mesclarPorId(assinantesAtuais.avulsos as never, assinantesNovos.avulsos as never),
+            },
+          } : {}),
         };
         c.version += 1;
-        return grava(hash, { status: 200, body: { captacao: { id: c.id, codigo: c.codigo, nome: c.nome, esteira: c.tipo, estado: estadoDe(c), version: c.version } } });
+        const ok = grava(hash, { status: 200, body: { captacao: { id: c.id, codigo: c.codigo, nome: c.nome, esteira: c.tipo, estado: estadoDe(c), version: c.version } } });
+        return complementoSemResposta ? (complementoSemResposta = false, null) : ok;
       }
       if (typeof a.nome !== "string" || !a.nome.trim()) return { status: 400, body: { error: "nome_obrigatorio" } };
       if (a.tipo !== "venda" && a.tipo !== "locacao") return { status: 400, body: { error: "tipo_invalido" } };
@@ -190,7 +223,8 @@ async function imobpro(p: { verb: string; args: Record<string, unknown>; idempot
         modeloId: escolhidos[0]!.id, version: 0, status: "rascunho", dados: obj(a.dados),
       };
       captacoes.push(c);
-      const resp = { status: 201, body: { captacao: { id: c.id, codigo: c.codigo, nome: c.nome, esteira: c.tipo, estado: "Rascunho", version: 0 }, modelo: { id: escolhidos[0]!.id, nome: escolhidos[0]!.nome }, link: `/imoveis/captacoes/${c.id}` } };
+      const m0 = escolhidos[0]!;
+      const resp = { status: 201, body: { captacao: { id: c.id, codigo: c.codigo, nome: c.nome, esteira: c.tipo, estado: "Rascunho", version: 0 }, modelo: { id: m0.id, nome: m0.nome, ...(typeof m0.exclusiva === "boolean" ? { exclusiva: m0.exclusiva } : {}) }, link: `/imoveis/captacoes/${c.id}` } };
       grava(hash, resp);
       return createSemResposta ? (createSemResposta = false, null) : resp;
     }
@@ -199,7 +233,7 @@ async function imobpro(p: { verb: string; args: Record<string, unknown>; idempot
       if (!c) return { status: 404, body: { error: "nao_encontrada" } };
       if (c.status !== "rascunho") return { status: 409, body: { error: "nao_e_rascunho", estado: estadoDe(c) } };
       const faltantes = faltantesDe(c);
-      return { status: 200, body: { captacaoId: c.id, version: c.version, modelo: { id: c.modeloId, nome: "Modelo" }, pronto: faltantes.length === 0, faltantes, bloqueios: [], emBranco } };
+      return { status: 200, body: { captacaoId: c.id, version: c.version, modelo: { id: c.modeloId, nome: "Modelo" }, pronto: faltantes.length === 0 && !bloqueiosDoPreflight.length, faltantes, bloqueios: bloqueiosDoPreflight, emBranco } };
     }
     case "captacao.send": {
       if (!p.idempotencyKey) return { status: 400, body: { error: "idempotency_key_obrigatoria" } };
@@ -244,7 +278,8 @@ beforeEach(() => {
   captacoes = []; chamadas = []; respostasPorChave = new Map();
   modelos = [{ id: "t1", nome: "Modelo de venda", resumo: "Pede 18 campos" }];
   assinaturaConfigurada = true; exigeMatricula = true; exigeRg = false; emBranco = 0;
-  sendModo = "ok"; createSemResposta = false; complementoDesatualizado = 0; sendEnvios = 0; sendVersaoDesatualizada = 0;
+  exigeCep = false; exigeTipo = false; exigeEstadoCivil = false; faltantesDaTela = []; bloqueiosDoPreflight = []; assinanteImobiliaria = null; campos422 = []; complemento422 = false;
+  sendModo = "ok"; createSemResposta = false; complementoDesatualizado = 0; complementoSemResposta = false; sendEnvios = 0; sendVersaoDesatualizada = 0;
   falhaFecharCofre.proximaFalha = false;
   extracao = null;
   vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: COM_CAPTACAO } as never);
@@ -291,28 +326,19 @@ const semDadosPessoais = (x: unknown) => {
 };
 
 /**
- * Conversa até o resumo do envio (proprietária Maria já gravada, canal e-mail
- * escolhido). Achado 17: o rascunho e os proprietários só são gravados depois
- * do "sim" — por isso os dois "sim" no meio (confirma a criação, confirma a
- * gravação dos proprietários/extras). Item B: a resposta ao faltante (a
- * matrícula) também só acumula — precisa de mais um "sim" pra gravar.
+ * Conversa até o resumo final (confirmação única, 26/10): o rascunho nasce
+ * com imóvel + condições, a proprietária e a matrícula são gravadas no turno
+ * em que chegam — nenhum "sim" no meio. Devolve o resumo (o único "sim").
  */
 async function ateOResumo(fala: ReturnType<typeof conversa>) {
   extracao = IMOVEL_EXTRAIDO;
   await fala("cria uma captação de venda do Apto da Dona Maria");
   await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
   await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
-  await fala("sim");
   await fala(`Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada`);
   await fala("FIM");
-  await fala("não");
-  await fala("sim");
-  let r = await fala("matrícula 12345");
-  // Item B: a resposta ao faltante só acumula no cofre — precisa do "sim" pra gravar.
-  if (r.reply?.includes("Posso gravar estes dados")) r = await fala("sim");
-  // Sem envio liberado (flag ou política), o resumo já sai sem perguntar o canal.
-  if (r.reply?.includes("Por qual canal envio")) r = await fala("1");
-  return r;
+  const r = await fala("não");
+  return exigeMatricula ? fala("matrícula 12345") : r;
 }
 
 // ─── NEGADO antes do permitido (capability fail-closed) ─────────────────────
@@ -544,7 +570,7 @@ describe("leitura de dados", () => {
 // ─── O fluxo inteiro ────────────────────────────────────────────────────────
 
 describe("fluxo feliz: da conversa ao envio", () => {
-  it("natureza → modelo → imóvel → condições → confirma → cria → proprietário → confirma → faltante → canal → resumo → enviar", async () => {
+  it("natureza → modelo → imóvel → condições → cria → proprietário → faltante → resumo → um 'sim' envia", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
 
@@ -557,84 +583,60 @@ describe("fluxo feliz: da conversa ao envio", () => {
     expect(imovel.reply).toContain("Anotei o imóvel");
     expect(verbos("captacao.create")).toEqual([]);
 
-    // Achado 17: condições colhidas só pedem CONFIRMAÇÃO — nada é criado ainda.
+    // Confirmação única (26/10): imóvel + condições bastam — o rascunho nasce já, sem "Posso criar?".
     const cond = await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
-    expect(verbos("captacao.create")).toEqual([]);
-    expect(cond.reply).toContain("Imóvel: Rua Augusta, 1250, Bela Vista, São Paulo/SP");
-    expect(cond.reply).toContain("Condições:");
-    expect(cond.reply).toContain("Posso criar o rascunho");
-
-    const sim = await fala("sim");
     const criacao = verbos("captacao.create")[0]!;
-    expect(criacao.key).toBe(sim.messageId);
+    expect(criacao.key).toBe(cond.messageId);
     expect(criacao.args).toMatchObject({ tipo: "venda", nome: "Apto da Dona Maria", modeloId: "t1" });
     expect(criacao.args.dados).toMatchObject({
       imovel: { rua: "Rua Augusta", numero: "1250", cidade: "São Paulo", uf: "SP" },
       condicoes: { valor: 850000, comissao_percent: 6, prazo_dias: 180, exclusiva: true },
     });
-    expect(sim.reply).toContain("Criei o rascunho CAP-2026-0001");
-    expect(sim.reply).toContain("FIM");
+    expect(cond.reply).toContain("Criei o rascunho CAP-2026-0001");
+    expect(cond.reply).not.toContain("Posso criar");
+    expect(cond.reply).toContain("FIM");
 
-    // Achado 17: a proprietária é lida e ECOADA, mas NADA é gravado antes do "sim" do lote.
+    // A proprietária é GRAVADA no turno em que chega (chave = messageId); nada de PII no estado.
     const dono = await fala(`Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada`);
-    expect(verbos("captacao.create")).toHaveLength(1);
+    const compl = verbos("captacao.create")[1]!;
+    expect(compl.args).toMatchObject({ captacaoId: "cap-1", version: 0 });
+    expect(compl.args.dados).toMatchObject({ proprietarios: [{ id: "p1", papel: "proprietario", tipo_pessoa: "fisica", nome: "Maria Silva", cpf: CPF_D, telefone1: `+55${FONE_D}`, email: EMAIL, estado_civil: "casada" }] });
+    expect(compl.key).toBe(dono.messageId);
+    expect(dono.reply).toContain("Anotei Maria Silva");
+    expect(dono.reply).not.toContain("Vou gravar");
     // `inbound` leva o texto cru só nos testes que chamam `buildGraph` direto (o `runTurn` o entra sem texto).
     const vazou = Object.entries(dono).filter(([k, v]) => k !== "inbound" && !semDadosPessoais(v)).map(([k]) => k);
     expect(vazou).toEqual([]);
 
     const fim = await fala("FIM");
     expect(fim.reply).toContain("testemunha");
-    const resumoPessoas = await fala("não");
-    expect(resumoPessoas.reply).toContain("Maria Silva");
-    expect(resumoPessoas.reply).toContain("Posso gravar estes dados");
-    expect(verbos("captacao.create")).toHaveLength(1);
-
-    const simPessoas = await fala("sim");
-    const compl = verbos("captacao.create")[1]!;
-    expect(compl.args).toMatchObject({ captacaoId: "cap-1", version: 0 });
-    expect(compl.args.dados).toMatchObject({ proprietarios: [{ id: "p1", papel: "proprietario", tipo_pessoa: "fisica", nome: "Maria Silva", cpf: CPF_D, telefone1: `+55${FONE_D}`, email: EMAIL, estado_civil: "casada" }] });
-    expect(compl.key).toBe(simPessoas.messageId);
-    // Preflight: só pergunta o que falta.
+    const faltante = await fala("não");
     expect(verbos("captacao.preflight")).toHaveLength(1);
-    expect(simPessoas.reply).toContain("Matrícula");
-    expect(simPessoas.reply).toContain("Matrícula do imóvel?");
+    expect(faltante.reply).toContain("Matrícula do imóvel?");
 
-    // Item B: a resposta ao faltante só ACUMULA — nada é gravado ainda.
-    const confirmaFaltante = await fala("matrícula 12345");
-    expect(verbos("captacao.create")).toHaveLength(2);
-    // Nit 1 (revisão opus, round 3): a confirmação final lista o RÓTULO, nunca o valor.
-    expect(confirmaFaltante.reply).toContain("Vou gravar: Matrícula.");
-    expect(confirmaFaltante.reply).not.toContain("12345");
-    expect(confirmaFaltante.reply).toContain("Posso gravar estes dados");
-    expect(verbos("captacao.preflight")).toHaveLength(1);
-
-    const canal = await fala("sim");
-    const faltanteGravado = ultimo("captacao.create")!;
-    expect(faltanteGravado.args.dados).toEqual({ imovel: { matricula: "12345" } });
-    expect(faltanteGravado.key).toBe(canal.messageId);
+    const resumo = await fala("matrícula 12345");
+    const gravado = ultimo("captacao.create")!;
+    expect(gravado.args.dados).toEqual({ imovel: { matricula: "12345" } });
+    expect(gravado.key).toBe(resumo.messageId);
     expect(verbos("captacao.preflight")).toHaveLength(2);
-    expect(canal.reply).toContain("Por qual canal envio?");
-
-    // Item A: escolher o canal (1/2/3) só GUARDA — nenhum `captacao.create`
-    // novo aqui (o "1" não é "sim"/"enviar").
-    const antesDoCanal = verbos("captacao.create").length;
-    const resumo = await fala("1");
-    expect(verbos("captacao.create")).toHaveLength(antesDoCanal);
-    expect(resumo.reply).toContain("Pronta a captação CAP-2026-0001");
-    expect(resumo.reply).toContain("Envio para Maria Silva por e-mail?");
-    expect(resumo.reply).toContain("*enviar*");
+    expect(resumo.reply).toContain("Pronta a captação CAP-2026-0001 — Apto da Dona Maria.");
+    expect(resumo.reply).toContain("Imóvel: Rua Augusta, 1250, Bela Vista, São Paulo/SP.");
+    expect(resumo.reply).toContain("Condições:");
+    expect(resumo.reply).toContain("Proprietário: Maria Silva.");
+    expect(resumo.reply).toContain("Envio: Maria Silva por e-mail.");
+    expect(resumo.reply).toContain("Responda *sim* para enviar");
+    expect(semDadosPessoais(resumo.reply)).toBe(true);
     expect(verbos("captacao.options").at(-1)!.args).toEqual({ captacaoId: "cap-1" });
     expect(verbos("captacao.send")).toEqual([]);
 
-    const enviado = await fala("enviar");
-    // Item A: o "enviar" aplica o canal (um `captacao.create` com a chave
-    // própria `:canal`) ANTES do `captacao.send`.
-    const canalAplicado = ultimo("captacao.create")!;
-    expect(canalAplicado.args.dados).toMatchObject({ proprietarios: [{ id: "p1", canal: "email" }] });
-    expect(canalAplicado.key).toBe(`${enviado.messageId}:canal`);
+    const enviado = await fala("sim");
+    // Nenhum canal dito: nada a regravar — o "sim" vai direto ao send (o canal que está no rascunho vale).
+    expect(verbos("captacao.create")).toHaveLength(3);
     const envio = verbos("captacao.send")[0]!;
     expect(envio.args).toEqual({ captacaoId: "cap-1", version: captacoes[0]!.version });
     expect(envio.key).toBe(enviado.messageId);
+    expect(verbos("captacao.send")).toHaveLength(1);
+    expect(sendEnvios).toBe(1);
     expect(enviado.reply).toContain("Enviado");
     expect(enviado.reply).toContain("Em assinatura");
     expect(enviado.fluxo ?? null).toBeNull();
@@ -643,16 +645,38 @@ describe("fluxo feliz: da conversa ao envio", () => {
     expect(vazouNoFim).toEqual([]);
   });
 
-  it("'sim' solto no resumo NÃO envia; só 'enviar'", async () => {
+  it("'sim, por WhatsApp' no resumo: regrava o canal (chave :canal) e envia na mesma resposta", async () => {
+    const fala = conversa();
+    const resumo = await ateOResumo(fala);
+    expect(resumo.reply).toContain('"sim, por WhatsApp"');
+    const antes = verbos("captacao.create").length;
+    const s = await fala("sim, por WhatsApp");
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    const canal = ultimo("captacao.create")!;
+    expect(canal.args.dados).toEqual({ proprietarios: [{ id: "p1", canal: "whatsapp" }] });
+    expect(canal.key).toBe(`${s.messageId}:canal`);
+    expect(verbos("captacao.send")).toHaveLength(1);
+    expect(verbos("captacao.send")[0]!.key).toBe(s.messageId);
+    expect(s.reply).toContain("Enviado");
+  });
+
+  it("resposta que não é 'sim' no resumo NÃO envia (vai pro atendimento normal)", async () => {
     const fala = conversa();
     await ateOResumo(fala);
-    const sim = await fala("sim");
+    const outra = await fala("qual o horário de vocês?");
     expect(verbos("captacao.send")).toEqual([]);
-    expect(sim.reply).toBeTruthy();
-    await fala("enviar");
+    expect(outra.reply).toContain("O horário é das 9h às 18h.");
+    await fala("sim");
     expect(verbos("captacao.send")).toHaveLength(1);
   });
 
+  it("'enviar' continua valendo como o 'sim' do resumo", async () => {
+    const fala = conversa();
+    await ateOResumo(fala);
+    const s = await fala("enviar");
+    expect(verbos("captacao.send")).toHaveLength(1);
+    expect(s.reply).toContain("Enviado");
+  });
   it("vários modelos: pergunta qual e usa o escolhido", async () => {
     modelos = [{ id: "t1", nome: "Modelo A" }, { id: "t2", nome: "Modelo B", resumo: "2 testemunhas" }];
     const fala = conversa();
@@ -663,7 +687,6 @@ describe("fluxo feliz: da conversa ao envio", () => {
     await fala("2");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     expect(verbos("captacao.create")[0]!.args.modeloId).toBe("t2");
   });
 
@@ -675,7 +698,6 @@ describe("fluxo feliz: da conversa ao envio", () => {
     await fala("Casa da Dona Rosa — Moema");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("pular");
-    await fala("sim");
     expect(verbos("captacao.create")[0]!.args.nome).toBe("Casa da Dona Rosa — Moema");
   });
 
@@ -703,59 +725,57 @@ describe("fluxo feliz: da conversa ao envio", () => {
     expect(s.reply).toContain("Qual o imóvel?");
   });
 
-  it("extras: testemunha vira testemunhas[], avulso vira avulsos[] — gravados juntos no 'sim' do lote", async () => {
+  it("extras: testemunha vira testemunhas[], avulso vira avulsos[] — cada um gravado no turno em que chega", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
     await fala("FIM");
     const t = await fala(`testemunha Carlos Pereira, ${EMAIL.replace("maria", "carlos")}`);
     expect(t.reply).toContain("como testemunha");
-    // Achado 17: ainda não gravou — só depois do "sim" do resumo de pessoas.
-    expect(verbos("captacao.create")).toHaveLength(1);
-    await fala(`Pedro Alves, tel ${FONE}`);
-    const resumoPessoas = await fala("não");
-    expect(resumoPessoas.reply).toContain("Posso gravar estes dados");
-    await fala("sim");
-    const dados = ultimo("captacao.create")!.args.dados as { assinantes: { testemunhas: unknown[]; avulsos: unknown[] } };
-    expect(dados.assinantes.testemunhas).toHaveLength(1);
-    expect(dados.assinantes.avulsos).toHaveLength(1);
+    const gT = ultimo("captacao.create")!;
+    expect(gT.key).toBe(t.messageId);
+    expect((gT.args.dados as { assinantes: { testemunhas: unknown[] } }).assinantes.testemunhas).toHaveLength(1);
+    const a = await fala(`Pedro Alves, tel ${FONE}`);
+    expect(a.reply).toContain("como assinante");
+    const gA = ultimo("captacao.create")!;
+    expect(gA.key).toBe(a.messageId);
+    expect((gA.args.dados as { assinantes: { avulsos: unknown[] } }).assinantes.avulsos).toHaveLength(1);
+    const noServidor = obj(captacoes[0]!.dados.assinantes);
+    expect(noServidor.testemunhas).toHaveLength(1);
+    expect(noServidor.avulsos).toHaveLength(1);
+    const vazou = Object.entries(a).filter(([k, v]) => k !== "inbound" && !semDadosPessoais(v)).map(([k]) => k);
+    expect(vazou).toEqual([]);
   });
-
   it("FIM sem nenhum proprietário não avança", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const s = await fala("FIM");
     expect(s.reply).toContain("pelo menos um proprietário");
     expect(verbos("captacao.preflight")).toEqual([]);
   });
 
-  it("cancelar ANTES do 'sim': nada foi criado (achado 17)", async () => {
+  it("cancelar antes das condições: nada foi criado", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil");
     const antes = chamadas.length;
     const s = await fala("cancelar");
     expect(s.reply).toContain("Nada foi criado");
     expect(chamadas).toHaveLength(antes);
   });
-
-  it("cancelar depois do 'sim': o rascunho fica salvo e nada mais é chamado", async () => {
+  it("cancelar depois de criado: o rascunho fica salvo e nada mais é chamado", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const antes = chamadas.length;
     const s = await fala("cancelar");
     expect(s.reply).toContain("fica salvo na tela");
@@ -772,8 +792,7 @@ describe("criação sem resposta", () => {
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil"); // só pede confirmação — ainda não tenta criar (achado 17)
-    const incerto = await fala("sim");
+    const incerto = await fala("valor 850 mil"); // cria já (confirmação única) — e fica sem resposta
     expect(incerto.reply).toContain("não sei se deu certo");
     const outra = await fala("conversa fiada");
     expect(verbos("captacao.create")).toHaveLength(1);
@@ -781,39 +800,33 @@ describe("criação sem resposta", () => {
     const ok = await fala("sim");
     const [primeira, segunda] = verbos("captacao.create");
     expect(segunda!.key).toBe(primeira!.key);
+    expect(segunda!.key).toBe(incerto.messageId);
     expect(segunda!.args).toEqual(primeira!.args);
     expect(captacoes).toHaveLength(1);
     expect(ok.reply).toContain("Criei o rascunho");
   });
 });
-
 describe("versão desatualizada no complemento", () => {
   it("diz que alguém mexeu na tela, confere de novo (preflight) e refaz UMA vez com a versão nova", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil");
-    await fala("sim"); // cria o rascunho, version 0
-    // Achado 17: o proprietário fica pendente; o complemento de verdade só
-    // acontece no "sim" do lote — é aí que a versão desatualizada aparece.
-    await fala(`Maria Silva, CPF ${CPF}`);
-    await fala("FIM");
-    await fala("não");
+    await fala("valor 850 mil"); // cria o rascunho, version 0
+    // O proprietário é gravado no turno em que chega — é aí que a versão desatualizada aparece.
     complementoDesatualizado = 1;
-    const s = await fala("sim");
+    const s = await fala(`Maria Silva, CPF ${CPF}, casada`);
     expect(s.reply).toContain("Alguém mudou a captação na tela; vou conferir de novo.");
-    // 1 do retry de versão dentro do `complementar` + 1 do `verificar` que
-    // segue a gravação em lote (achado 17: confirmar_pessoas já confere depois).
-    expect(verbos("captacao.preflight")).toHaveLength(2);
+    expect(s.reply).toContain("Anotei Maria Silva");
+    expect(verbos("captacao.preflight")).toHaveLength(1);
     const [tentativa1, tentativa2] = verbos("captacao.create").slice(1);
     expect(tentativa1!.args.version).toBe(0);
     expect(tentativa2!.args.version).toBe(1);
     expect(tentativa2!.key).not.toBe(tentativa1!.key);
+    expect(verbos("captacao.create")).toHaveLength(3);
     expect(captacoes[0]!.dados.proprietarios).toHaveLength(1);
   });
 });
-
 describe("achados da rodada P9 (revisão)", () => {
   it("send sem resposta -> halt (leitura de anexo) -> 'enviar' reusa a MESMA chave e args", async () => {
     sendModo = "sem_resposta";
@@ -862,29 +875,23 @@ describe("achados da rodada P9 (revisão)", () => {
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
-    await fala("sim");
     await fala(`Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada`);
     await fala("FIM");
-    await fala("não");
-    const perg = await fala("sim");
+    const perg = await fala("não");
     expect(perg.reply).toContain("RG");
     const r = await fala("RG 12.345.678-9");
+    // Gravado no mesmo turno — o valor vai pro servidor, nunca pro texto nem pro estado.
+    const grava = ultimo("captacao.create")!;
+    expect(JSON.stringify(grava.args)).toContain("12.345.678-9");
+    expect(grava.key).toBe(r.messageId);
+    expect(r.reply).toContain("RG anotado");
     expect(JSON.stringify(r.reply)).not.toContain("12.345.678");
     expect(JSON.stringify(r.reply)).not.toContain("12345678");
-    // Nit 1 (revisão opus, round 3): a confirmação final lista o RÓTULO ("RG"), nunca o valor.
-    expect(r.reply).toContain("Vou gravar: RG.");
     expect(JSON.stringify(r.fluxo ?? null)).not.toContain("12.345.678");
     expect(JSON.stringify(r.replyNoState ?? "")).not.toContain("12.345.678");
-    // Item B: ainda não foi gravado — só confirmado o "sim" é que grava.
-    expect(r.reply).toContain("Posso gravar estes dados");
-    const ok = await fala("sim");
-    // o dado foi pro servidor
-    expect(JSON.stringify(ultimo("captacao.create")!.args)).toContain("12.345.678-9");
-    expect(JSON.stringify(ok.fluxo ?? null)).not.toContain("12.345.678");
-    expect(JSON.stringify(ok.replyNoState ?? "")).not.toContain("12.345.678");
+    expect(r.reply).toContain("Pronta a captação");
   });
 });
-
 describe("envio", () => {
   it("202: confere com captacao.list{captacaoId} e NUNCA dispara outro send", async () => {
     sendModo = "202";
@@ -933,60 +940,66 @@ describe("envio", () => {
     expect(ok.reply).toContain("Enviado");
   });
 
-  it("servidor acusa confirmar_brancos de surpresa (preflight desatualizado): ainda pede 'enviar assim mesmo'", async () => {
+  it("servidor acusa confirmar_brancos de surpresa (a tela mudou depois do resumo): diz os brancos e pede o 'sim' de novo", async () => {
     const fala = conversa();
     const resumo = await ateOResumo(fala);
     expect(resumo.reply).not.toContain("em branco");
     emBranco = 2; // só o SEND vê o branco — o preflight não tinha avisado
-    const pergunta = await fala("enviar");
-    expect(pergunta.reply).toContain("2 campo(s) vão em branco no contrato. Envio assim mesmo?");
+    const pergunta = await fala("sim");
+    expect(pergunta.reply).toContain("2 campo(s) vão em branco no contrato");
+    expect(pergunta.reply).toContain("Responda *sim* para enviar assim mesmo");
     expect(verbos("captacao.send")[0]!.args).not.toHaveProperty("confirmarBrancos");
-    const ok = await fala("enviar assim mesmo");
+    const ok = await fala("sim");
     const [primeira, segunda] = verbos("captacao.send");
     expect(segunda!.args).toMatchObject({ confirmarBrancos: true });
     expect(segunda!.key).not.toBe(primeira!.key);
+    expect(sendEnvios).toBe(1);
     expect(ok.reply).toContain("Enviado");
   });
 
-  it("item 1 (revisão opus, round 3): versao_desatualizada ao aplicar o canal NÃO reenvia sozinho — mostra o resumo de novo, só o próximo 'enviar' confirma", async () => {
+  it("'enviar assim mesmo' ainda vale como o 'sim' depois do aviso de brancos", async () => {
     const fala = conversa();
     await ateOResumo(fala);
-    // A tela mudou ENTRE o resumo mostrado e este "enviar" — simula o 409 no
-    // complemento que aplica o canal (o que `confirmarEEnviar` manda ANTES do
-    // `captacao.send`). Antes da correção, `complementar` corrigia sozinho e
-    // mandava o send com conteúdo que o usuário nunca viu.
+    emBranco = 1;
+    await fala("sim");
+    const ok = await fala("enviar assim mesmo");
+    expect(verbos("captacao.send").at(-1)!.args).toMatchObject({ confirmarBrancos: true });
+    expect(ok.reply).toContain("Enviado");
+  });
+
+  it("item 1 (revisão opus, round 3): versao_desatualizada ao aplicar o canal NÃO reenvia sozinho — mostra o resumo de novo, só o próximo 'sim' confirma", async () => {
+    const fala = conversa();
+    await ateOResumo(fala);
+    // A tela mudou ENTRE o resumo mostrado e este "sim, por WhatsApp" — o 409
+    // vem no complemento que aplica o canal (antes do `captacao.send`).
     complementoDesatualizado = 1;
     const antesDoPreflight = verbos("captacao.preflight").length;
-    const s = await fala("enviar");
+    const s = await fala("sim, por WhatsApp");
     expect(sendEnvios).toBe(0);
     expect(verbos("captacao.send")).toHaveLength(0);
     expect(s.reply).toContain("Alguém mudou a captação na tela; vou conferir de novo.");
-    // novo resumo (não o texto genérico de erro) — a confirmação antiga não vale.
-    expect(s.reply).toContain("Envio para Maria Silva por e-mail?");
+    // novo resumo (não o texto genérico de erro), já com o canal pedido — a confirmação antiga não vale.
+    expect(s.reply).toContain("Envio: Maria Silva por WhatsApp.");
     expect(verbos("captacao.preflight")).toHaveLength(antesDoPreflight + 1);
-    const ok = await fala("enviar");
+    const ok = await fala("sim");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ proprietarios: [{ id: "p1", canal: "whatsapp" }] });
     expect(sendEnvios).toBe(1);
     expect(ok.reply).toContain("Enviado");
   });
 
-  it("versao_desatualizada no próprio send (canal já aplicado antes): texto combinado, novo preflight e novo resumo", async () => {
+  it("versao_desatualizada no próprio send: texto combinado, novo preflight e novo resumo", async () => {
     const fala = conversa();
     await ateOResumo(fala);
-    // Item A: o "enviar" aplica o canal (um `captacao.create`) ANTES do send —
-    // esse complemento já corrige sozinho uma versão que mudou antes dele.
-    // Pra provar que o SEND ainda detecta "a tela mudou", simula a mudança
-    // bem na hora do envio (depois do canal já aplicado), não antes.
     sendVersaoDesatualizada = 1;
     const antes = verbos("captacao.preflight").length;
-    const s = await fala("enviar");
+    const s = await fala("sim");
     expect(s.reply).toContain("Alguém mudou a captação na tela; vou conferir de novo.");
     expect(verbos("captacao.preflight")).toHaveLength(antes + 1);
-    expect(s.reply).toContain("*enviar*");
+    expect(s.reply).toContain("Responda *sim* para enviar");
     expect(sendEnvios).toBe(0);
-    await fala("enviar");
+    await fala("sim");
     expect(sendEnvios).toBe(1);
   });
-
   it.each([
     [{ status: 429, body: { error: "cota_diaria", limite: 10 } }, "limite de envios de captação pelo Max por hoje (10)"],
     [{ status: 429, body: { error: "muitas_tentativas" } }, "Muitos envios em pouco tempo"],
@@ -1007,27 +1020,32 @@ describe("envio", () => {
     expect(s.fluxo ?? null).toBeNull();
   });
 
-  it("nit 2 (revisão opus, round 3): 'Envio para...?' inclui testemunha/outro assinante, não só os proprietários locais", async () => {
+  it("resumo lista testemunha e quem assina pela imobiliária; 'por WhatsApp' sozinho troca o canal e refaz o resumo, sem enviar", async () => {
+    assinanteImobiliaria = "Ana Gerente";
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
-    await fala("sim");
     await fala(`Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada`);
     await fala("FIM");
     await fala(`Carlos Pereira, testemunha, tel ${FONE}`);
     await fala("não"); // fecha extras
-    await fala("sim"); // grava proprietário + testemunha
-    let r = await fala("matrícula 12345");
-    if (r.reply?.includes("Posso gravar estes dados")) r = await fala("sim");
-    if (r.reply?.includes("Por qual canal envio")) r = await fala("2"); // WhatsApp
-    expect(r.reply).toContain("Maria Silva");
-    expect(r.reply).toContain("Carlos Pereira"); // testemunha aparece no resumo, não só a proprietária
-    expect(r.reply).toContain("WhatsApp"); // canal escolhido aplicado à proprietária local
+    const r = await fala("matrícula 12345");
+    expect(r.reply).toContain("Proprietário: Maria Silva.");
+    expect(r.reply).toContain("Testemunha: Carlos Pereira.");
+    expect(r.reply).toContain("Pela imobiliária assina: Ana Gerente.");
+    // quem assina pela imobiliária tem linha própria — não entra na lista do envio
+    expect(r.reply).toContain("Envio: Maria Silva e Carlos Pereira por e-mail.");
+    const troca = await fala("por WhatsApp");
+    expect(verbos("captacao.send")).toEqual([]);
+    expect(troca.reply).toContain("Certo, por WhatsApp.");
+    expect(troca.reply).toContain("Envio: Maria Silva (WhatsApp) e Carlos Pereira (e-mail).");
+    await fala("sim");
+    expect(verbos("captacao.send")).toHaveLength(1);
+    expect(sendEnvios).toBe(1);
   });
 });
-
 describe("envio de rascunho existente e consulta", () => {
   it("'envia a captação da Maria': acha o rascunho, confere e pede o 'enviar'", async () => {
     captacoes.push({ id: "cap-1", codigo: "CAP-2026-0001", nome: "Apto da Dona Maria", tipo: "venda", modeloId: "t1", version: 4, status: "rascunho",
@@ -1040,7 +1058,7 @@ describe("envio de rascunho existente e consulta", () => {
     // perguntar seria pergunta inútil. Vai direto ao resumo com o canal que já
     // está no servidor.
     expect(s.reply).not.toContain("Por qual canal envio?");
-    expect(s.reply).toContain("Envio para Maria Silva por e-mail?");
+    expect(s.reply).toContain("Envio: Maria Silva por e-mail.");
     await fala("enviar");
     expect(verbos("captacao.send")[0]!.args).toEqual({ captacaoId: "cap-1", version: 4 });
   });
@@ -1051,7 +1069,7 @@ describe("envio de rascunho existente e consulta", () => {
     const fala = conversa();
     const s = await fala("envia a captação da Maria, para mandar por aceite no whatsapp");
     expect(s.reply).not.toContain("Por qual canal envio?");
-    expect(s.reply).toContain("Envio para Maria Silva");
+    expect(s.reply).toContain("Envio: Maria Silva");
     // Achado 3 (revisão opus): sem ids locais (rascunho carregado pelo envio,
     // não pela criação), o Max NUNCA manda `{proprietarios:[{id,canal}]}` pro
     // servidor — então nenhuma chamada pode mencionar o canal pedido, e o
@@ -1081,7 +1099,6 @@ describe("achado 18: conversa solta não vira proprietário", () => {
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const s = await fala("Bom dia Roberto");
     expect(s.reply).toContain("CPF");
     expect((s.fluxo as { proprietarios?: unknown[] } | null)?.proprietarios ?? []).toEqual([]);
@@ -1093,7 +1110,6 @@ describe("achado 18: conversa solta não vira proprietário", () => {
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const s = await fala(`Maria Silva, CPF ${CPF}`);
     expect(s.reply).toContain("Anotei Maria Silva");
     expect((s.fluxo as { proprietarios?: unknown[] } | null)?.proprietarios).toHaveLength(1);
@@ -1105,7 +1121,6 @@ describe("achado 18: conversa solta não vira proprietário", () => {
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const s = await fala("proprietário: Maria Silva");
     expect(s.reply).toContain("Anotei Maria Silva");
   });
@@ -1240,7 +1255,10 @@ describe("achado 1 (revisão opus): o 1º pedido nunca fica em claro", () => {
     const s = await fala(
       `cria uma captação de venda do Apto da Dona Maria, CPF ${CPF}, tel ${FONE}, Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP, sem exclusividade`
     );
-    expect(s.reply).toContain("Posso criar o rascunho");
+    // Confirmação única: com imóvel + condição (exclusividade) já cria — e nada do CPF/telefone vai junto.
+    expect(s.reply).toContain("Criei o rascunho");
+    expect(JSON.stringify(verbos("captacao.create"))).not.toContain(CPF_D);
+    expect(JSON.stringify(verbos("captacao.create"))).not.toContain(FONE_D);
     const vazou = Object.entries(s).filter(([k, v]) => k !== "inbound" && !semDadosPessoais(v)).map(([k]) => k);
     expect(vazou).toEqual([]);
     expect(JSON.stringify(llm.mock.calls)).not.toContain(CPF_D);
@@ -1294,7 +1312,7 @@ describe("achado 2 (revisão opus): 'verificar' é read-only — nunca exige cap
     expect(depois.reply).not.toBe(cap.textoCaptacaoSemPolitica());
     // Sem ids locais, "verificar" -> resumir() nem repergunta o canal (item C
     // — já volta direto pro resumo de envio).
-    expect(depois.reply).toContain("Envio para Maria Silva");
+    expect(depois.reply).toContain("Envio: Maria Silva");
     await fala("enviar");
     expect(verbos("captacao.send")).toHaveLength(1);
   });
@@ -1303,32 +1321,18 @@ describe("achado 2 (revisão opus): 'verificar' é read-only — nunca exige cap
 describe("achado 4 (revisão opus): a escrita do canal exige captacao.create de verdade", () => {
   it("permissão de criação perdida no meio do fluxo nega a gravação do canal, sem tentar escrever", async () => {
     const fala = conversa();
-    extracao = IMOVEL_EXTRAIDO;
-    await fala("cria uma captação de venda do Apto da Dona Maria");
-    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
-    await fala("FIM");
-    await fala("não");
-    await fala("sim");
-    await fala("matrícula 12345"); // item B: só acumula
-    const canal = await fala("sim"); // grava o faltante, segue pro canal
-    expect(canal.reply).toContain("Por qual canal envio?");
-    // Item A: escolher o canal só GUARDA — nada é gravado aqui ainda.
-    const resumo = await fala("2");
-    expect(resumo.reply).toContain("Envio para Maria Silva por WhatsApp?");
-    // a política é relida a cada turno — perde `captacao.create` no meio,
-    // justo antes do "enviar" que tentaria aplicar o canal escolhido.
+    const resumo = await ateOResumo(fala);
+    expect(resumo.reply).toContain("Pronta a captação");
+    // a política é relida a cada turno — perde `captacao.create` justo antes
+    // do "sim, por WhatsApp" que tentaria aplicar o canal.
     vi.mocked(fetchProfile).mockResolvedValue({ enabled: true, model: "x", instructions: null, maxPolicy: POLITICA(["captacao.list", "captacao.send"]) } as never);
     const antes = verbos("captacao.create").length;
-    const s = await fala("enviar");
+    const s = await fala("sim, por WhatsApp");
     expect(verbos("captacao.create")).toHaveLength(antes);
     expect(verbos("captacao.send")).toEqual([]);
     expect(s.reply).toContain("permissão");
   });
 });
-
 describe("achado 5 (revisão opus): cofre falha fechado, nunca lança nem perde em silêncio", () => {
   it("cifrar/decifrar: roundtrip ok; thread errada, tag adulterada, payload malformado e chave ausente todos LANÇAM (nunca devolvem lixo)", () => {
     const thread = "thread-de-teste-1";
@@ -1350,50 +1354,71 @@ describe("achado 5 (revisão opus): cofre falha fechado, nunca lança nem perde 
     }
   });
 
-  it("cofre de OUTRA thread (chave rotacionada/thread trocada) no meio do fluxo: avisa e NÃO grava o lote de pessoas", async () => {
+  it("checkpoint antigo (confirmar_pessoas) com cofre de OUTRA thread: avisa e NÃO grava nada", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
-    await fala("FIM");
-    const resumoPessoas = await fala("não");
-    expect(resumoPessoas.reply).toContain("Vou gravar: Maria Silva");
     const app = (fala as unknown as { app: { getState: Function; updateState: Function } }).app;
     const thread = (fala as unknown as { thread: string }).thread;
     const estado = await app.getState({ configurable: { thread_id: thread } });
     const atual = (estado as { values: { fluxo: Record<string, unknown> } }).values.fluxo;
     const cofreDeOutraThread = cap.cifrarCofreCaptacao(JSON.stringify({ proprietarios: [{ id: "p1", nome: "Maria" }] }), "thread-que-nao-e-esta");
-    await app.updateState({ configurable: { thread_id: thread } }, { fluxo: { ...atual, cofre: cofreDeOutraThread } });
+    await app.updateState({ configurable: { thread_id: thread } }, { fluxo: { ...atual, etapa: "confirmar_pessoas", cofre: cofreDeOutraThread } });
     const antesDeEscritas = verbos("captacao.create").length;
     const s = await fala("sim");
     expect(s.reply).toContain("Não consegui");
-    expect(verbos("captacao.create")).toHaveLength(antesDeEscritas); // nada do lote foi gravado
+    expect(verbos("captacao.create")).toHaveLength(antesDeEscritas);
   });
 
-  it("MAX_ENCRYPTION_KEY ausente ao tentar guardar um proprietário pendente: avisa, não lança, não grava", async () => {
+  it("checkpoint antigo (confirmar_pessoas) com o cofre desta thread: grava o que ficou lá (chave :legado) e segue sem pedir outro 'sim'", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    const app = (fala as unknown as { app: { getState: Function; updateState: Function } }).app;
+    const thread = (fala as unknown as { thread: string }).thread;
+    const estado = await app.getState({ configurable: { thread_id: thread } });
+    const atual = (estado as { values: { fluxo: Record<string, unknown> } }).values.fluxo;
+    const pendentes = { proprietarios: [{ id: "p1", papel: "proprietario", tipo_pessoa: "fisica", nome: "Maria Silva", cpf: CPF_D, estado_civil: "casada" }], testemunhas: [], avulsos: [] };
+    const cofre = cap.cifrarCofreCaptacao(JSON.stringify(pendentes), threadIdFor("org1", "5511987654321"));
+    await app.updateState({ configurable: { thread_id: thread } }, {
+      fluxo: { ...atual, etapa: "confirmar_pessoas", cofre, proprietarios: [{ id: "p1", nome: "Maria Silva" }] },
+    });
+    const s = await fala("sim");
+    const grava = verbos("captacao.create")[1]!;
+    expect(grava.key).toBe(`${s.messageId}:legado`);
+    expect(grava.args.dados).toMatchObject({ proprietarios: [{ id: "p1", cpf: CPF_D }] });
+    expect(captacoes[0]!.dados.proprietarios).toHaveLength(1);
+    // seguiu sozinho para a conferência (a matrícula é o faltante), sem pedir outro "sim"
+    expect(s.reply).toContain("Matrícula do imóvel?");
+    expect((s.fluxo as { cofre?: string } | null)?.cofre).toBeUndefined();
+    expect(semDadosPessoais(s.fluxo)).toBe(true);
+  });
+
+  it("o fluxo novo não usa o cofre: sem MAX_ENCRYPTION_KEY o proprietário é gravado e nada de PII fica no estado", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const antiga = process.env.MAX_ENCRYPTION_KEY;
     const antesDeEscritas = verbos("captacao.create").length;
     let s: Awaited<ReturnType<typeof fala>>;
     try {
       delete process.env.MAX_ENCRYPTION_KEY;
-      s = await fala(`Maria Silva, CPF ${CPF}`);
+      s = await fala(`Maria Silva, CPF ${CPF}, casada`);
     } finally {
       process.env.MAX_ENCRYPTION_KEY = antiga;
     }
-    expect(s.reply).not.toContain("Anotei Maria Silva");
-    expect(verbos("captacao.create")).toHaveLength(antesDeEscritas);
+    expect(s.reply).toContain("Anotei Maria Silva");
+    expect(verbos("captacao.create")).toHaveLength(antesDeEscritas + 1);
+    expect((s.fluxo as { cofre?: string } | null)?.cofre).toBeUndefined();
+    expect(semDadosPessoais(s.fluxo)).toBe(true);
   });
 });
-
 describe("achado 6 (revisão opus): resposta com CPF que termina em '?' não escapa pro atendimento normal", () => {
   it("'Maria, CPF ..., casada?' é lida como proprietário — não pausa, e nada vaza", async () => {
     const fala = conversa();
@@ -1401,7 +1426,6 @@ describe("achado 6 (revisão opus): resposta com CPF que termina em '?' não esc
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const dono = await fala(`Maria Silva, CPF ${CPF}, casada?`);
     expect(dono.reply).toContain("Anotei Maria Silva");
     expect(dono.reply).not.toBe("O horário é das 9h às 18h.");
@@ -1416,7 +1440,6 @@ describe("achado 6 (revisão opus): resposta com CPF que termina em '?' não esc
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const s = await fala("qual o horário de vocês?");
     // `pausar` marca `pausado:true`, mas o `compose` já tira a marca no mesmo
     // turno (ela só serve pra ele colar o "Continuando..." na resposta do
@@ -1432,7 +1455,6 @@ describe("achado 6 (revisão opus): resposta com CPF que termina em '?' não esc
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     await fala(`Maria Silva, CPF ${CPF}`);
     await fala("FIM");
     const extra = await fala(`testemunha Carlos Pereira, ${EMAIL.replace("maria", "carlos")}, ele confirma?`);
@@ -1442,7 +1464,7 @@ describe("achado 6 (revisão opus): resposta com CPF que termina em '?' não esc
 });
 
 describe("achado 22: 1ª mensagem completa (natureza+nome+endereço+condições+canal) não repergunta nada disso", () => {
-  it("cria direto do pedido inicial e vai pra confirmação de criação", async () => {
+  it("cria direto do pedido inicial, sem pedir confirmação", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     const s = await fala(
@@ -1451,18 +1473,17 @@ describe("achado 22: 1ª mensagem completa (natureza+nome+endereço+condições+
     );
     expect(s.reply).not.toContain("Qual o imóvel?");
     expect(s.reply).not.toContain("Condições da captação");
-    expect(s.reply).toContain("Posso criar o rascunho");
-    const sim = await fala("sim");
+    expect(s.reply).not.toContain("Posso criar");
     const criado = verbos("captacao.create")[0]!;
+    expect(criado.key).toBe(s.messageId);
     expect(criado.args).toMatchObject({ tipo: "venda", nome: "Apto da Dona Maria" });
     expect(criado.args.dados).toMatchObject({
       imovel: { rua: "Rua Augusta", numero: "1250" },
       condicoes: { valor: 850000, comissao_percent: 6, prazo_dias: 180, exclusiva: false },
     });
-    expect(sim.reply).toContain("Criei o rascunho");
+    expect(s.reply).toContain("Criei o rascunho");
   });
 });
-
 describe("achado 26: o extrator corta o fim do logradouro como complemento", () => {
   it("'Rua TESTE Max Aceite, 88' sem número/palavra de complemento: junta de volta na rua", async () => {
     const extrairFake: import("../captacao").ExtratorDeSecao = async () => ({
@@ -1483,14 +1504,37 @@ describe("achado 26: o extrator corta o fim do logradouro como complemento", () 
   });
 });
 
-describe("nit: replay EXATO da mesma messageId numa confirmação não duplica", () => {
-  it("webhook reentrega a MESMA messageId do 'sim' (não um novo 'sim'): mesma chave, cria uma vez só", async () => {
+describe("nit: replay EXATO da mesma messageId não duplica", () => {
+  it("webhook reentrega a MESMA messageId da mensagem que cria: mesma chave, cria uma vez só", async () => {
     createSemResposta = true; // 1ª tentativa fica sem resposta — a etapa NÃO avança.
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil");
+    const app = (fala as unknown as { app: { invoke: Function } }).app;
+    const thread = (fala as unknown as { thread: string }).thread;
+    const invocar = (messageId: string, text: string) => app.invoke(
+      { inbound: { messageId, fromPhone: "5511987654321", groupId: null, kind: "text" as const, text, mediaUrl: null, mimeType: null, timestampMs: null, senderName: "Olavo", replyToMessageId: null },
+        identity: usuario, ...RESET_DO_TURN },
+      { configurable: { thread_id: thread } },
+    );
+    // createSemResposta simula o servidor TENDO gravado mas a resposta se
+    // perdendo antes de chegar no Max — por isso `captacoes` já tem 1 aqui.
+    await invocar("replay-1", "valor 850 mil");
+    expect(captacoes).toHaveLength(1);
+    await invocar("replay-1", "valor 850 mil"); // replay EXATO da mesma messageId
+    expect(captacoes).toHaveLength(1);
+    await invocar("m-sim", "sim"); // o "sim" de conferir repete a chave guardada
+    expect(captacoes).toHaveLength(1);
+    const creates = verbos("captacao.create");
+    expect(creates.length).toBeGreaterThanOrEqual(2);
+    for (const c of creates) expect(c.key).toBe("replay-1");
+    expect(creates.at(-1)!.args).toEqual(creates[0]!.args);
+  });
+
+  it("webhook reentrega o MESMO 'sim' do resumo depois do envio: não envia de novo", async () => {
+    const fala = conversa();
+    await ateOResumo(fala);
     const app = (fala as unknown as { app: { invoke: Function } }).app;
     const thread = (fala as unknown as { thread: string }).thread;
     const invocar = (messageId: string) => app.invoke(
@@ -1498,20 +1542,12 @@ describe("nit: replay EXATO da mesma messageId numa confirmação não duplica",
         identity: usuario, ...RESET_DO_TURN },
       { configurable: { thread_id: thread } },
     );
-    // createSemResposta simula o servidor TENDO gravado mas a resposta se
-    // perdendo antes de chegar no Max — por isso `captacoes` já tem 1 aqui,
-    // mesmo sem o Max saber (é exatamente esse "não sei se deu certo" que o
-    // replay seguinte precisa resolver sem duplicar).
-    await invocar("replay-1");
-    expect(captacoes).toHaveLength(1);
-    await invocar("replay-1"); // replay EXATO da mesma messageId, não uma nova mensagem
-    expect(captacoes).toHaveLength(1); // não duplicou
-    const chaves = verbos("captacao.create").filter((c) => c.key === "replay-1");
-    expect(chaves).toHaveLength(2); // a função rodou 2x, mas com a MESMA chave
-    expect(chaves[0]!.args).toEqual(chaves[1]!.args);
+    await invocar("sim-1");
+    await invocar("sim-1");
+    expect(sendEnvios).toBe(1);
+    expect(verbos("captacao.send")).toHaveLength(1);
   });
 });
-
 describe("nit: rebaixarFluxo (captação) nunca deixa a próxima mensagem escrever sem resumo novo", () => {
   it("confirmar_criacao, confirmar_pessoas, confirmar_faltantes, canal, revisão e brancos são todos rebaixados pra etapas que não gravam por si", async () => {
     const { rebaixarFluxo } = await import("../fluxos");
@@ -1529,194 +1565,379 @@ describe("nit: rebaixarFluxo (captação) nunca deixa a próxima mensagem escrev
   });
 });
 
-describe("item B (revisão opus, round 2): faltante só grava depois do 'sim'", () => {
-  it("'matrícula 12345' na etapa faltantes só acumula; o 'sim' grava com a messageId da confirmação", async () => {
+/** Até a primeira pergunta de faltante: rascunho criado, Maria gravada, extras fechados. */
+async function ateOFaltante(fala: ReturnType<typeof conversa>) {
+  extracao = IMOVEL_EXTRAIDO;
+  await fala("cria uma captação de venda do Apto da Dona Maria");
+  await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+  await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+  await fala(`Maria Silva, CPF ${CPF}, casada`);
+  await fala("FIM");
+  return fala("não");
+}
+const PEDE_CONFIRMACAO = /Posso (criar|gravar)|Vou gravar|Responda \*sim\*/;
+
+describe("confirmação única (26/10): faltantes gravados no turno em que chegam", () => {
+  it("'matrícula 12345' grava já, com a messageId da própria resposta, e segue pro resumo", async () => {
     const fala = conversa();
-    extracao = IMOVEL_EXTRAIDO;
-    await fala("cria uma captação de venda do Apto da Dona Maria");
-    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    // Comissão e prazo também ditos: a matrícula fica como o ÚNICO faltante.
-    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
-    await fala("FIM");
-    await fala("não");
-    const faltante = await fala("sim");
-    expect(faltante.reply).toContain("Matrícula");
-    const antes = verbos("captacao.create").length;
-    const confirma = await fala("matrícula 12345");
-    expect(verbos("captacao.create")).toHaveLength(antes); // nada gravado ainda
-    expect(confirma.reply).toContain("Posso gravar estes dados");
-    const ok = await fala("sim");
+    const faltante = await ateOFaltante(fala);
+    expect(faltante.reply).toContain("Matrícula do imóvel?");
+    const r = await fala("matrícula 12345");
     const grava = ultimo("captacao.create")!;
     expect(grava.args.dados).toEqual({ imovel: { matricula: "12345" } });
-    expect(grava.key).toBe(ok.messageId);
-    expect(ok.reply).toContain("Gravado");
+    expect(grava.key).toBe(r.messageId);
+    expect(r.reply).toContain("Anotei: Matrícula: 12345.");
+    expect(r.reply).not.toContain("Vou gravar");
+    expect(r.reply).not.toContain("Posso gravar");
+    expect(r.reply).toContain("Pronta a captação");
   });
 
-  it("nit 1 (revisão opus, round 3): a confirmação final lista TODOS os rótulos pendentes (nunca o valor)", async () => {
-    exigeRg = true; // matrícula já é exigida por padrão (exigeMatricula=true)
+  it("dois faltantes (matrícula e RG): cada resposta é gravada no seu turno, sem confirmação no fim", async () => {
+    exigeRg = true;
     const fala = conversa();
-    extracao = IMOVEL_EXTRAIDO;
-    await fala("cria uma captação de venda do Apto da Dona Maria");
-    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
-    await fala("FIM");
-    await fala("não");
-    const primeiro = await fala("sim"); // matrícula é o 1º faltante
+    const primeiro = await ateOFaltante(fala);
     expect(primeiro.reply).toContain("Matrícula");
-    const segundo = await fala("matrícula 12345"); // acumula, pergunta o 2º (RG)
+    const segundo = await fala("matrícula 12345");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { matricula: "12345" } });
     expect(segundo.reply).toContain("RG");
-    const confirma = await fala("RG 12.345.678-9"); // acumula o 2º -> confirmação final
-    expect(confirma.reply).toContain("Posso gravar estes dados");
-    expect(confirma.reply).toContain("Matrícula"); // rótulo do 1º, não só o último
-    expect(confirma.reply).toContain("RG");
-    expect(confirma.reply).not.toContain("12345"); // nenhum valor na confirmação
-    expect(confirma.reply).not.toContain("12.345.678-9");
-    const ok = await fala("sim");
-    const grava = ultimo("captacao.create")!;
-    expect(JSON.stringify(grava.args.dados)).toContain("12345");
-    expect(JSON.stringify(grava.args.dados)).toContain("12.345.678-9");
-    expect(ok.reply).toContain("Gravado");
+    expect(segundo.reply).not.toMatch(PEDE_CONFIRMACAO);
+    const r = await fala("RG 12.345.678-9");
+    expect(JSON.stringify(ultimo("captacao.create")!.args.dados)).toContain("12.345.678-9");
+    expect(ultimo("captacao.create")!.key).toBe(r.messageId);
+    expect(r.reply).toContain("Pronta a captação");
+    expect(r.reply).not.toContain("12.345.678-9");
   });
 
-  it("CANCELAR depois da resposta ao faltante não grava nada", async () => {
+  it("CANCELAR na pergunta do faltante não grava nada; o que já foi gravado fica no rascunho", async () => {
     const fala = conversa();
-    extracao = IMOVEL_EXTRAIDO;
-    await fala("cria uma captação de venda do Apto da Dona Maria");
-    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil");
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
-    await fala("FIM");
-    await fala("não");
-    await fala("sim");
-    await fala("matrícula 12345");
+    await ateOFaltante(fala);
     const antes = verbos("captacao.create").length;
     const s = await fala("cancelar");
     expect(verbos("captacao.create")).toHaveLength(antes);
+    expect(s.reply).toContain("fica salvo na tela");
     expect(s.fluxo ?? null).toBeNull();
   });
 
-  it("item 2 (revisão opus, round 3): PULAR com resposta pendente pede confirmação — não grava sozinho", async () => {
-    exigeRg = true; exigeMatricula = false;
+  it("PULAR deixa para a tela: nada gravado, fluxo encerrado, sem pedir confirmação", async () => {
     const fala = conversa();
-    extracao = IMOVEL_EXTRAIDO;
-    await fala("cria uma captação de venda do Apto da Dona Maria");
-    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil"); // sem comissão/prazo: ficam faltantes também, além do RG
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
-    await fala("FIM");
-    await fala("não");
-    const faltante = await fala("sim"); // grava proprietários -> verificar -> faltantes (RG é o 1º)
-    expect(faltante.reply).toContain("RG");
-    // ainda há "Comissão" e "Prazo" na fila local — a próxima pergunta não é a confirmação ainda.
-    await fala("RG 12.345.678-9");
-    const antes = verbos("captacao.create").length;
-    const s = await fala("pular"); // responde à pergunta seguinte (Comissão) desistindo
-    // Toda escrita exige resumo + "sim" explícito — "pular" não é exceção:
-    // nada é gravado até a confirmação, mesmo tendo algo pendente no cofre.
-    expect(verbos("captacao.create")).toHaveLength(antes);
-    expect(s.reply).toContain("Posso gravar estes dados");
-    expect(s.reply).toContain("RG"); // rótulo do que ficou pendente
-    expect(s.reply).not.toContain("12.345.678-9"); // nunca o valor na confirmação
-    const ok = await fala("sim");
-    const grava = ultimo("captacao.create")!;
-    expect(JSON.stringify(grava.args.dados)).toContain("12.345.678-9");
-    expect(grava.key).toBe(ok.messageId);
-    expect(ok.reply).toContain("Gravado");
-  });
-
-  it("item 2: PULAR com resposta pendente, seguido de 'não', descarta — nada é gravado", async () => {
-    exigeRg = true; exigeMatricula = false;
-    const fala = conversa();
-    extracao = IMOVEL_EXTRAIDO;
-    await fala("cria uma captação de venda do Apto da Dona Maria");
-    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil");
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
-    await fala("FIM");
-    await fala("não");
-    await fala("sim");
-    await fala("RG 12.345.678-9");
+    await ateOFaltante(fala);
     const antes = verbos("captacao.create").length;
     const s = await fala("pular");
-    expect(s.reply).toContain("Posso gravar estes dados");
-    const naoConfirma = await fala("não");
     expect(verbos("captacao.create")).toHaveLength(antes);
-    expect(naoConfirma.fluxo ?? null).toBeNull();
+    expect(s.reply).toContain("complete pela tela");
+    expect(s.reply).not.toMatch(PEDE_CONFIRMACAO);
+    expect(s.fluxo ?? null).toBeNull();
   });
 
-  it("nit 3 (revisão opus, round 3): se o cofre não puder ser reescrito depois de gravar, não reenvia o que já foi gravado", async () => {
-    exigeRg = true; exigeMatricula = false;
+  it("CEP sozinho: grava como 00000-000 e pergunta o próximo; a pergunta nunca diz 'do imóvel do imóvel'", async () => {
+    exigeMatricula = false; exigeCep = true; exigeTipo = true;
+    const fala = conversa();
+    const perg = await ateOFaltante(fala);
+    expect(perg.reply).toContain("CEP do imóvel");
+    expect(perg.reply).not.toContain("do imóvel do imóvel");
+    const r = await fala("01310100");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { cep: "01310-100" } });
+    expect(r.reply).toContain("Tipo do imóvel");
+    expect(r.reply).not.toContain("do imóvel do imóvel");
+    const fim = await fala("casa");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { kind: "casa" } });
+    expect(fim.reply).toContain("Imóvel: Rua Augusta, 1250, Bela Vista, São Paulo/SP (casa, CEP 01310-100).");
+  });
+
+  it("'01310-100, Casa' preenche CEP e tipo numa resposta só (uma escrita)", async () => {
+    exigeMatricula = false; exigeCep = true; exigeTipo = true;
+    const fala = conversa();
+    await ateOFaltante(fala);
+    const antes = verbos("captacao.create").length;
+    const r = await fala("01310-100, Casa");
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { cep: "01310-100", kind: "casa" } });
+    expect(ultimo("captacao.create")!.key).toBe(r.messageId);
+    expect(r.reply).toContain("Pronta a captação");
+    expect(r.reply).toContain("(casa, CEP 01310-100)");
+  });
+
+  it("CEP inválido é perguntado de novo, sem gravar", async () => {
+    exigeMatricula = false; exigeCep = true;
+    const fala = conversa();
+    await ateOFaltante(fala);
+    const antes = verbos("captacao.create").length;
+    const r = await fala("0131");
+    expect(verbos("captacao.create")).toHaveLength(antes);
+    expect(r.reply).toContain("8 dígitos");
+  });
+
+  it("CPF que não confere é perguntado de novo, sem gravar; o certo grava", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
-    await fala("FIM");
-    await fala("não");
-    await fala("sim");
-    await fala("RG 12.345.678-9");
-    const sim = await fala("pular"); // mostra a confirmação (cofre ainda abre normalmente)
-    expect(sim.reply).toContain("Posso gravar estes dados");
     const antes = verbos("captacao.create").length;
-    // A gravação em si funciona (abrir o cofre pra ler os pendentes está OK);
-    // só o FECHAMENTO seguinte (reescrever o cofre sem os faltantes já
-    // gravados) falha — ex.: chave rotacionada no meio do turno.
-    falhaFecharCofre.proximaFalha = true;
-    const ok = await fala("sim");
-    expect(verbos("captacao.create")).toHaveLength(antes + 1); // gravou UMA vez
-    expect(ok.reply).toContain("Gravado");
-    // Fail-closed: o cofre inteiro foi descartado (não ficou com o RG já
-    // gravado dentro) — nada pendente sobra pra um PULAR seguinte reenviar.
-    const depois = await fala("pular");
+    const errado = await fala("Maria Silva, CPF 111.444.777-00, casada");
+    expect(errado.reply).toContain("não confere");
+    expect(verbos("captacao.create")).toHaveLength(antes);
+    const certo = await fala(`Maria Silva, CPF ${CPF}, casada`);
     expect(verbos("captacao.create")).toHaveLength(antes + 1);
-    expect(depois.reply).not.toContain("Posso gravar estes dados");
+    expect(certo.reply).toContain("Anotei Maria Silva");
   });
 });
 
-describe("item E (revisão opus, round 2): gravarPessoasChave não sobrevive à mudança do cofre", () => {
-  it("'sim' com a chave de uma confirmação anterior incerta, depois de somar mais gente, usa chave NOVA (não reusa a velha)", async () => {
+describe("confirmação única (26/10): o resumo final e o único 'sim'", () => {
+  it("nenhum 'sim' intermediário: nada antes do resumo pede confirmação, e o send é chamado uma vez", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    const respostas = [
+      await fala("cria uma captação de venda do Apto da Dona Maria"),
+      await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP"),
+      await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade"),
+      await fala(`Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada`),
+      await fala("FIM"),
+      await fala(`testemunha Carlos Pereira, ${EMAIL.replace("maria", "carlos")}`),
+      await fala("não"),
+    ];
+    for (const r of respostas) expect(r.reply).not.toMatch(PEDE_CONFIRMACAO);
+    const resumo = await fala("matrícula 12345");
+    expect(resumo.reply).toContain("Responda *sim* para enviar");
+    expect(verbos("captacao.send")).toEqual([]);
+    await fala("sim");
+    expect(verbos("captacao.send")).toHaveLength(1);
+    expect(sendEnvios).toBe(1);
+  });
+
+  it("resumo mostra imóvel (tipo, CEP), condições, nomes sem documento, testemunhas, quem assina pela imobiliária, canal e brancos — o 'sim' manda confirmarBrancos", async () => {
+    exigeMatricula = false; exigeCep = true; exigeTipo = true; emBranco = 3; assinanteImobiliaria = "Ana Gerente";
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
-    await fala("valor 850 mil");
-    await fala("sim");
-    await fala(`Maria Silva, CPF ${CPF}`);
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    await fala(`Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada`);
     await fala("FIM");
-    const resumoA = await fala("não");
-    expect(resumoA.reply).toContain("Vou gravar: Maria Silva");
-    // Simula um "sim" incerto (servidor pode ter processado, o Max não soube):
-    // a chave do PRIMEIRO "sim" fica guardada, SEM limpar o cofre — é
-    // exatamente o que `complementar` faz numa falha sem resposta.
-    const app = (fala as unknown as { app: { getState: Function; updateState: Function } }).app;
-    const thread = (fala as unknown as { thread: string }).thread;
-    const estado = await app.getState({ configurable: { thread_id: thread } });
-    const atual = (estado as { values: { fluxo: Record<string, unknown> } }).values.fluxo;
-    const chaveVelha = "m-velha-incerta";
-    await app.updateState({ configurable: { thread_id: thread } }, { fluxo: { ...atual, etapa: "extras", gravarPessoasChave: chaveVelha } });
-    // Mais uma pessoa entra no cofre DEPOIS da chave velha ser guardada.
-    await fala(`Carlos Pereira, tel ${FONE}`);
-    const resumoB = await fala("não");
-    expect(resumoB.reply).toContain("Carlos Pereira");
-    const ok = await fala("sim");
+    await fala(`testemunha Carlos Pereira, ${EMAIL.replace("maria", "carlos")}`);
+    await fala("não");
+    const resumo = await fala("01310-100, casa");
+    expect(resumo.reply).toContain("Imóvel: Rua Augusta, 1250, Bela Vista, São Paulo/SP (casa, CEP 01310-100).");
+    expect(resumo.reply).toContain("Condições:");
+    expect(resumo.reply).toContain("Proprietário: Maria Silva.");
+    expect(resumo.reply).toContain("Testemunha: Carlos Pereira.");
+    expect(resumo.reply).toContain("Pela imobiliária assina: Ana Gerente.");
+    expect(resumo.reply).toContain("Envio: Maria Silva e Carlos Pereira por e-mail.");
+    expect(resumo.reply).toContain("3 campo(s) vão em branco");
+    expect(semDadosPessoais(resumo.reply)).toBe(true);
+    expect(resumo.reply).not.toContain("carlos@ex.com");
+    const s = await fala("sim");
+    expect(verbos("captacao.send")).toHaveLength(1);
+    expect(verbos("captacao.send")[0]!.args).toMatchObject({ confirmarBrancos: true });
+    expect(s.reply).toContain("Enviado");
+  });
+
+  it("'sim' repetido depois de um envio sem resposta não envia de novo (mesma chave)", async () => {
+    sendModo = "sem_resposta";
+    const fala = conversa();
+    await ateOResumo(fala);
+    const incerto = await fala("sim");
+    expect(incerto.reply).toContain("Responda *sim* de novo");
+    sendModo = "ok";
+    await fala("sim");
+    const [a, b] = verbos("captacao.send");
+    expect(b!.key).toBe(a!.key);
+    expect(b!.args).toEqual(a!.args);
+    expect(sendEnvios).toBe(1);
+  });
+
+  it("CANCELAR no resumo não envia e o rascunho fica salvo", async () => {
+    const fala = conversa();
+    await ateOResumo(fala);
+    const s = await fala("cancelar");
+    expect(verbos("captacao.send")).toEqual([]);
+    expect(s.reply).toContain("fica salvo na tela");
+    expect(s.fluxo ?? null).toBeNull();
+  });
+
+  it("'não' no resumo também para, sem enviar", async () => {
+    const fala = conversa();
+    await ateOResumo(fala);
+    const s = await fala("não");
+    expect(verbos("captacao.send")).toEqual([]);
+    expect(s.fluxo ?? null).toBeNull();
+  });
+});
+
+describe("confirmação única (26/10): pendências só da tela", () => {
+  it("ditas UMA vez, com o link e sem pedir 'sim'; 'pronto' sem resolver ganha resposta curta e encerra", async () => {
+    exigeMatricula = false;
+    faltantesDaTela = [{ path: "campos.cor_fachada", rotulo: "Cor da fachada", etapa: "campos" }];
+    const fala = conversa();
+    const r = await ateOFaltante(fala);
+    expect(r.reply).toContain("Cor da fachada");
+    expect(r.reply).toContain("/imoveis/captacoes/cap-1");
+    expect(r.reply).toContain("*pronto*");
+    expect(r.reply).not.toMatch(/Responda \*sim\*/);
+    const preflights = verbos("captacao.preflight").length;
+    const solta = await fala("qual o horário de vocês?");
+    expect(solta.reply).toContain("O horário é das 9h às 18h.");
+    expect(verbos("captacao.preflight")).toHaveLength(preflights);
+    const pronto = await fala("pronto");
+    expect(verbos("captacao.preflight")).toHaveLength(preflights + 1);
+    expect(pronto.reply).toContain("Continua pendente");
+    expect(pronto.reply).not.toContain("Cor da fachada");
+    expect(pronto.fluxo ?? null).toBeNull();
+  });
+
+  it("'ajustei' depois de resolver na tela: confere e vai pro resumo", async () => {
+    exigeMatricula = false;
+    faltantesDaTela = [{ path: "campos.cor_fachada", rotulo: "Cor da fachada", etapa: "campos" }];
+    const fala = conversa();
+    await ateOFaltante(fala);
+    faltantesDaTela = [];
+    const r = await fala("ajustei");
+    expect(r.reply).toContain("Pronta a captação");
+  });
+});
+
+describe("confirmação única (26/10): exclusividade do modelo × a dita", () => {
+  it("modelo SEM exclusividade e a pessoa disse COM: avisa uma vez e pergunta; 'sem' grava como no modelo", async () => {
+    modelos = [{ id: "t1", nome: "Modelo de venda", exclusiva: false }];
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    const c = await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    expect(c.reply).toContain("Criei o rascunho");
+    expect(c.reply).toContain("o modelo escolhido é sem exclusividade, mas você disse com");
+    expect(c.reply).toContain("*COM* ou *SEM*");
+    const s = await fala("sem");
     const grava = ultimo("captacao.create")!;
-    // Se a chave velha tivesse sobrevivido, um servidor que faz replay por
-    // idempotency key (não por conteúdo) devolveria a resposta do PRIMEIRO
-    // lote (sem o Carlos) — e "Gravado" mentiria.
-    expect(grava.key).not.toBe(chaveVelha);
-    expect(grava.key).toBe(ok.messageId);
-    const dados = grava.args.dados as { assinantes?: { avulsos?: unknown[] } };
-    expect(dados.assinantes?.avulsos).toHaveLength(1);
-    expect(ok.reply).toContain("Gravado");
+    expect(grava.args.dados).toEqual({ condicoes: { exclusiva: false } });
+    expect(grava.key).toBe(s.messageId);
+    expect(s.reply).toContain("como no modelo");
+    expect((s.fluxo as { etapa?: string } | null)?.etapa).toBe("proprietarios");
+    const dono = await fala(`Maria Silva, CPF ${CPF}, casada`);
+    expect(dono.reply).not.toContain("exclusividade");
+  });
+
+  it("mantendo o que disse ('com'): não grava nada e avisa que o modelo se troca na tela", async () => {
+    modelos = [{ id: "t1", nome: "Modelo de venda", exclusiva: false }];
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    const antes = verbos("captacao.create").length;
+    const s = await fala("com exclusividade");
+    expect(verbos("captacao.create")).toHaveLength(antes);
+    expect(s.reply).toContain("troque o modelo na tela");
+    expect(s.reply).toContain("/imoveis/captacoes/cap-1");
+    expect((s.fluxo as { etapa?: string } | null)?.etapa).toBe("proprietarios");
+  });
+
+  it("modelo sem a informação (o CM ainda não manda `exclusiva`): nenhum aviso", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    const c = await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    expect(c.reply).not.toContain("Atenção");
+    expect((c.fluxo as { etapa?: string } | null)?.etapa).toBe("proprietarios");
+  });
+});
+
+describe("confirmação única (26/10): estado civil do proprietário PF", () => {
+  async function ateOProprietario(fala: ReturnType<typeof conversa>) {
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+  }
+
+  it("PF sem estado civil: pergunta uma vez; a resposta grava estado_civil", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const d = await fala(`Maria Silva, CPF ${CPF}`);
+    expect(d.reply).toContain("Anotei Maria Silva");
+    expect(d.reply).toContain("Qual o estado civil de Maria Silva?");
+    const e = await fala("casada");
+    const grava = ultimo("captacao.create")!;
+    expect(grava.args.dados).toEqual({ proprietarios: [{ id: "p1", papel: "proprietario", tipo_pessoa: "fisica", estado_civil: "casada" }] });
+    expect(grava.key).toBe(e.messageId);
+    expect(e.reply).toContain("Anotei: Maria Silva, casada.");
+    expect(e.reply).toContain("próximo proprietário");
+  });
+
+  it("PULAR é aceito: não grava, e a conferência não pergunta de novo (vira pendência da tela)", async () => {
+    exigeMatricula = false; exigeEstadoCivil = true;
+    const fala = conversa();
+    await ateOProprietario(fala);
+    await fala(`Maria Silva, CPF ${CPF}`);
+    const antes = verbos("captacao.create").length;
+    const p = await fala("pular");
+    expect(verbos("captacao.create")).toHaveLength(antes);
+    expect(p.reply).toContain("fica para a tela");
+    await fala("FIM");
+    const v = await fala("não");
+    expect(v.reply).not.toContain("Qual o estado civil");
+    expect(v.reply).toContain("Estado civil");
+    expect(v.reply).toContain("/imoveis/captacoes/cap-1");
+  });
+
+  it("já mandou o próximo proprietário: o estado civil do anterior fica para a tela e o novo é gravado", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    await fala(`Maria Silva, CPF ${CPF}`);
+    const j = await fala("João Souza, CPF 529.982.247-25, casado");
+    expect(j.reply).toContain("Anotei João Souza");
+    expect(ultimo("captacao.create")!.args.dados).toMatchObject({ proprietarios: [{ id: "p2", nome: "João Souza" }] });
+  });
+});
+
+describe("contrato do CM (26/10): complemento 422 dados_invalidos", () => {
+  const NOMES = ["Ana Souza", "Bruno Lima", "Carla Dias", "Davi Rocha"];
+  async function comQuatroTestemunhas(fala: ReturnType<typeof conversa>) {
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
+    await fala("FIM");
+    for (const [i, n] of NOMES.entries()) await fala(`testemunha ${n}, t${i}@ex.com`);
+    expect(obj(captacoes[0]!.dados.assinantes).testemunhas).toHaveLength(4);
+  }
+
+  it("5ª testemunha: o CM recusa, o Max diz que são no máximo 4, não retenta e a etapa continua aberta", async () => {
+    const fala = conversa();
+    await comQuatroTestemunhas(fala);
+    const antes = verbos("captacao.create").length;
+    const s = await fala("testemunha Eva Nunes, eva@ex.com");
+    expect(verbos("captacao.create")).toHaveLength(antes + 1); // sem retentativa
+    expect(s.reply).toContain("no máximo 4 testemunhas");
+    expect(s.reply).toContain("/imoveis/captacoes/cap-1");
+    expect(s.reply).not.toContain("eva@ex.com");
+    expect((s.fluxo as { etapa?: string } | null)?.etapa).toBe("extras");
+    expect(obj(captacoes[0]!.dados.assinantes).testemunhas).toHaveLength(4);
+    const segue = await fala("não");
+    expect(segue.reply).toContain("Matrícula do imóvel?");
+  });
+
+  it("422 com `campos` de testemunha: a mesma mensagem do limite de 4", async () => {
+    campos422 = ["assinantes.testemunhas"];
+    const fala = conversa();
+    await comQuatroTestemunhas(fala);
+    const s = await fala("testemunha Eva Nunes, eva@ex.com");
+    expect(s.reply).toContain("Não gravei: a captação aceita no máximo 4 testemunhas");
+  });
+
+  it("422 em outro dado: diz que não coube, aponta a tela, não retenta e repergunta o mesmo campo", async () => {
+    const fala = conversa();
+    await ateOFaltante(fala);
+    complemento422 = true; campos422 = ["imovel.matricula"];
+    const antes = verbos("captacao.create").length;
+    const s = await fala("matrícula 12345");
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    expect(s.reply).toContain("Não gravei: algo não coube no rascunho (imovel.matricula)");
+    expect(s.reply).toContain("/imoveis/captacoes/cap-1");
+    expect(s.reply).toContain("Matrícula do imóvel?");
+    expect((s.fluxo as { etapa?: string } | null)?.etapa).toBe("faltantes");
   });
 });
 
@@ -1727,7 +1948,6 @@ describe("item D (revisão opus, round 2): 'liberado' só quando o texto não te
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const s = await fala("Maria, 11 98765-4321, maria@x.com?");
     const tool = (s.toolLog as { name: string; args: Record<string, unknown> }[]).find((x) => x.name === "fluxo");
     expect(tool?.args.liberado).not.toBe(true);
@@ -1743,11 +1963,9 @@ describe("item D (revisão opus, round 2): 'liberado' só quando o texto não te
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     await fala(`Maria Silva, CPF ${CPF}`);
     await fala("FIM");
-    await fala("não");
-    const faltante = await fala("sim"); // grava proprietários -> verificar -> pede a matrícula
+    const faltante = await fala("não"); // fecha os extras -> confere -> pergunta o faltante
     expect(faltante.reply).toContain("Matrícula");
     const s = await fala("o telefone é 11987654321?");
     const tool = (s.toolLog as { name: string; args: Record<string, unknown> }[]).find((x) => x.name === "fluxo");
@@ -1762,9 +1980,142 @@ describe("item D (revisão opus, round 2): 'liberado' só quando o texto não te
     await fala("cria uma captação de venda do Apto da Dona Maria");
     await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
     await fala("valor 850 mil");
-    await fala("sim");
     const s = await fala("qual o horário de vocês?");
     const tool = (s.toolLog as { name: string; args: Record<string, unknown> }[]).find((x) => x.name === "fluxo");
     expect(tool?.args.liberado).toBe(true);
+  });
+});
+
+describe("revisão opus (26/10, rodada de correções)", () => {
+  it("'sim, mas troca o CPF 111…' no resumo NÃO envia, não ecoa o número e aponta a tela; o 'sim' seguinte envia", async () => {
+    const fala = conversa();
+    await ateOResumo(fala);
+    const s = await fala("sim, mas troca o CPF 111.444.777-35");
+    expect(verbos("captacao.send")).toEqual([]);
+    expect(s.reply).toContain("Não enviei");
+    expect(s.reply).toContain("/imoveis/captacoes/cap-1");
+    expect(s.reply).not.toContain("111");
+    expect(JSON.stringify(s.fluxo ?? null)).not.toContain("111.444");
+    expect((s.fluxo as { etapa?: string } | null)?.etapa).toBe("revisao");
+    const ok = await fala("sim");
+    expect(verbos("captacao.send")).toHaveLength(1);
+    expect(ok.reply).toContain("Enviado");
+  });
+
+  it("e-mail ou telefone no resumo também não envia (nem vai cru pro atendimento normal)", async () => {
+    const fala = conversa();
+    await ateOResumo(fala);
+    const s = await fala(`o e-mail certo é ${EMAIL.replace("maria", "m2")}`);
+    expect(verbos("captacao.send")).toEqual([]);
+    expect(s.reply).toContain("pela tela");
+    expect(s.reply).not.toContain("m2@");
+  });
+
+  it("409 versao_desatualizada no meio dos faltantes: grava com a versão nova e o resumo NÃO mostra imóvel/condições locais como se fossem o rascunho", async () => {
+    const fala = conversa();
+    await ateOFaltante(fala);
+    complementoDesatualizado = 1;
+    const r = await fala("matrícula 12345");
+    expect(r.reply).toContain("Alguém mudou a captação na tela; vou conferir de novo.");
+    const [t1, t2] = verbos("captacao.create").slice(-2);
+    expect(t2!.args.version).toBe((t1!.args.version as number) + 1);
+    expect(r.reply).toContain("Pronta a captação");
+    expect(r.reply).not.toContain("Imóvel: Rua Augusta");
+    expect(r.reply).not.toContain("Condições: valor");
+    expect(r.reply).toContain("alterada na tela");
+    await fala("sim");
+    expect(verbos("captacao.send")[0]!.args.version).toBe(captacoes[0]!.version);
+    expect(sendEnvios).toBe(1);
+  });
+
+  it("409 no meio dos proprietários: o resumo também avisa que a tela mudou", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    complementoDesatualizado = 1;
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
+    await fala("FIM");
+    await fala("não");
+    const r = await fala("matrícula 12345");
+    expect(r.reply).not.toContain("Imóvel: Rua Augusta");
+    expect(r.reply).toContain("alterada na tela");
+  });
+
+  it("tela mexida sem 409 (versão do preflight ≠ a que o Max gravou): resumo não mostra os valores locais", async () => {
+    const fala = conversa();
+    await ateOFaltante(fala);
+    await fala("matrícula 12345");
+    // alguém edita na tela depois da última escrita do Max, e o resumo é refeito
+    captacoes[0]!.version += 1;
+    const r = await fala("por WhatsApp");
+    expect(r.reply).not.toContain("Imóvel: Rua Augusta");
+    expect(r.reply).toContain("alterada na tela");
+  });
+
+  it("sem mudança na tela o resumo mostra imóvel e condições", async () => {
+    const fala = conversa();
+    const r = await ateOResumo(fala);
+    expect(r.reply).toContain("Imóvel: Rua Augusta");
+    expect(r.reply).not.toContain("alterada na tela");
+  });
+
+  it("testemunha reenviada depois de uma escrita sem resposta não duplica (id determinístico, estado não avança)", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil");
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
+    await fala("FIM");
+    complementoSemResposta = true;
+    const incerto = await fala("testemunha Carlos Pereira, carlos@ex.com");
+    expect(incerto.reply).toContain("Mande de novo");
+    expect(obj(captacoes[0]!.dados.assinantes).testemunhas).toHaveLength(1); // o servidor gravou
+    const de_novo = await fala("testemunha Carlos Pereira, carlos@ex.com");
+    expect(de_novo.reply).toContain("Anotei Carlos Pereira como testemunha");
+    const [a, b] = verbos("captacao.create").slice(-2);
+    const idDe = (c: typeof a) => (obj(obj(c!.args.dados).assinantes).testemunhas as { id: string }[])[0]!.id;
+    expect(idDe(b)).toBe(idDe(a));
+    expect(obj(captacoes[0]!.dados.assinantes).testemunhas).toHaveLength(1);
+    // a próxima pessoa ganha outro id
+    await fala("testemunha Ana Souza, ana@ex.com");
+    expect(obj(captacoes[0]!.dados.assinantes).testemunhas).toHaveLength(2);
+  });
+
+  it("'não é testemunha' vira assinante, não testemunha", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil");
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
+    await fala("FIM");
+    const s = await fala("Pedro Alves, pedro@ex.com, não é testemunha");
+    expect(s.reply).toContain("como assinante");
+    const dados = obj(ultimo("captacao.create")!.args.dados);
+    expect(obj(dados.assinantes).avulsos).toHaveLength(1);
+    expect(obj(dados.assinantes).testemunhas).toBeUndefined();
+  });
+
+  it("checkpoint antigo em confirmar_criacao: pergunta de outro assunto NÃO cria; o 'sim' cria", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    const app = (fala as unknown as { app: { getState: Function; updateState: Function } }).app;
+    const thread = (fala as unknown as { thread: string }).thread;
+    const estado = await app.getState({ configurable: { thread_id: thread } });
+    const atual = (estado as { values: { fluxo: Record<string, unknown> } }).values.fluxo;
+    await app.updateState({ configurable: { thread_id: thread } }, {
+      fluxo: { ...atual, etapa: "confirmar_criacao", criacao: { chave: "legado-1", dados: { imovel: { rua: "Rua Augusta", numero: "1250" }, condicoes: { valor: 850000 } } } },
+    });
+    const outra = await fala("qual o horário de vocês?");
+    expect(verbos("captacao.create")).toEqual([]);
+    expect(outra.reply).toContain("O horário é das 9h às 18h.");
+    const ok = await fala("sim");
+    expect(verbos("captacao.create")).toHaveLength(1);
+    expect(ok.reply).toContain("Criei o rascunho");
   });
 });
