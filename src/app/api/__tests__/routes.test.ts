@@ -245,6 +245,26 @@ describe("POST /api/notify", () => {
     }
   });
 
+  /** Status por papel (27/10/2026): `responsavel` e `equipe` (strings) passam; o Newton recebe o mesmo corpo (texto livre). */
+  it("avisos de status: responsavel e equipe chegam à fila, no Max e no Newton", async () => {
+    const base = JSON.parse(CORPO_DO_CM);
+    const params = { negocio: "Venda Apto 302", responsavel: "Ana Souza", equipe: "Equipe Centro", ignorado: 7 };
+    for (const perfil of ["max", "newton"]) {
+      vi.stubEnv("AGENT_DEPLOY_PROFILE", perfil);
+      for (const [i, kind] of ["contract_signed_status", "proposal_created_status", "proposal_decision_status", "captacao_signed_status"].entries()) {
+        enfileiraOut.mockClear();
+        const res = await postar(JSON.stringify({ ...base, audience: "platform_user", kind, params, dedupeKey: `status-${perfil}-${i}` }));
+        expect(res.status, `${perfil}/${kind}`).toBe(202);
+        expect(enfileiraOut).toHaveBeenCalledWith(expect.objectContaining({
+          kind,
+          params: { negocio: "Venda Apto 302", responsavel: "Ana Souza", equipe: "Equipe Centro" },
+          title: base.title,
+          body: base.body,
+        }));
+      }
+    }
+  });
+
   it("credit_result (M3): o corpo vira o texto fixo do aviso, com o link", async () => {
     const base = JSON.parse(CORPO_DO_CM);
     await postar(JSON.stringify({ ...base, kind: "credit_result", linkUrl: "https://fincasa.imobpro.ia.br/locacao/pessoas/clientes/lc1",

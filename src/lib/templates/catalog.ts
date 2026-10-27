@@ -489,12 +489,18 @@ CATALOGO.credit_result = MENSAGEM;
 // Famílias de avisos da equipe (25/10/2026, ver `FAMILIAS`). Os gêmeos `deal_*`
 // são o mesmo fato pelo caminho do sino (sem `params`); os sem prefixo, pelo
 // motor de eventos do negócio (com `negocio`).
-for (const kind of ["envelope_signed", "envelope_refused", "envelope_email_failed"]) CATALOGO[kind] = FAMILIAS.assinatura;
+// Status por papel (27/10/2026): o responsável vai no título que o CM manda;
+// template próprio `_status` só depois da aprovação do Olavo/Meta. O
+// `captacao_signed_status` NÃO é mapeado: fica fora da régua (texto livre só
+// dentro da janela de 24h).
+for (const kind of ["envelope_signed", "envelope_refused", "envelope_email_failed", "contract_signed_status"]) CATALOGO[kind] = FAMILIAS.assinatura;
 for (const kind of [
   "proposal_accepted_party",
   "proposal_send_canceled",
   "proposal_aceite_not_delivered",
   "proposal_email_failed",
+  "proposal_created_status",
+  "proposal_decision_status",
 ])
   CATALOGO[kind] = FAMILIAS.proposta;
 for (const kind of [
