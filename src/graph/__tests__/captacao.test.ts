@@ -103,6 +103,8 @@ let assinaturaConfigurada = true;
 let exigeMatricula = true;
 let exigeRg = false;
 let emBranco = 0;
+/** Campo aditivo `anexos` do preflight (CM PR #2243); `undefined` = a chave nem existe. */
+let anexosDoPreflight: unknown = undefined;
 let sendModo: "ok" | "202" | "sem_resposta" | { status: number; body: Record<string, unknown> } = "ok";
 let createSemResposta = false;
 let complementoDesatualizado = 0;
@@ -233,7 +235,7 @@ async function imobpro(p: { verb: string; args: Record<string, unknown>; idempot
       if (!c) return { status: 404, body: { error: "nao_encontrada" } };
       if (c.status !== "rascunho") return { status: 409, body: { error: "nao_e_rascunho", estado: estadoDe(c) } };
       const faltantes = faltantesDe(c);
-      return { status: 200, body: { captacaoId: c.id, version: c.version, modelo: { id: c.modeloId, nome: "Modelo" }, pronto: faltantes.length === 0 && !bloqueiosDoPreflight.length, faltantes, bloqueios: bloqueiosDoPreflight, emBranco } };
+      return { status: 200, body: { captacaoId: c.id, version: c.version, modelo: { id: c.modeloId, nome: "Modelo" }, pronto: faltantes.length === 0 && !bloqueiosDoPreflight.length, faltantes, bloqueios: bloqueiosDoPreflight, emBranco, ...(anexosDoPreflight !== undefined ? { anexos: anexosDoPreflight } : {}) } };
     }
     case "captacao.send": {
       if (!p.idempotencyKey) return { status: 400, body: { error: "idempotency_key_obrigatoria" } };
@@ -277,7 +279,7 @@ beforeEach(() => {
   process.env.MAX_CAPTACAO_ENVIO = "true";
   captacoes = []; chamadas = []; respostasPorChave = new Map();
   modelos = [{ id: "t1", nome: "Modelo de venda", resumo: "Pede 18 campos" }];
-  assinaturaConfigurada = true; exigeMatricula = true; exigeRg = false; emBranco = 0;
+  assinaturaConfigurada = true; exigeMatricula = true; exigeRg = false; emBranco = 0; anexosDoPreflight = undefined;
   exigeCep = false; exigeTipo = false; exigeEstadoCivil = false; faltantesDaTela = []; bloqueiosDoPreflight = []; assinanteImobiliaria = null; campos422 = []; complemento422 = false;
   sendModo = "ok"; createSemResposta = false; complementoDesatualizado = 0; complementoSemResposta = false; sendEnvios = 0; sendVersaoDesatualizada = 0;
   falhaFecharCofre.proximaFalha = false;
@@ -1018,6 +1020,68 @@ describe("envio", () => {
     expect(s.reply).not.toContain("Maria Silva");
     expect(s.reply).not.toContain("codigo_que_nao_existe");
     expect(s.fluxo ?? null).toBeNull();
+  });
+
+  describe("resumo: documentos no PDF único (anexos do preflight, aditivo)", () => {
+    const resumoComAnexos = async (anexos: unknown) => {
+      anexosDoPreflight = anexos;
+      const r = await ateOResumo(conversa());
+      expect(verbos("captacao.send")).toEqual([]);
+      return r.reply ?? "";
+    };
+
+    it("com 1 anexo: singular, nome do arquivo, antes da pergunta", async () => {
+      const reply = await resumoComAnexos([{ nome: "avaliacao.pdf" }]);
+      expect(reply).toContain("Vai em um PDF só: contrato + 1 anexo (avaliacao.pdf).");
+      expect(reply.indexOf("Envio:")).toBeLessThan(reply.indexOf("Vai em um PDF só"));
+      expect(reply.indexOf("Vai em um PDF só")).toBeLessThan(reply.indexOf("Responda *sim*"));
+    });
+
+    it("com 2 anexos: plural e na ordem do servidor", async () => {
+      const reply = await resumoComAnexos([{ nome: "avaliacao.pdf" }, { nome: "rg.pdf" }]);
+      expect(reply).toContain("Vai em um PDF só: contrato + 2 anexos (avaliacao.pdf, rg.pdf).");
+    });
+
+    it("com muitos: mostra os 5 primeiros e 'e mais N'; nome longo é cortado e vira texto inerte", async () => {
+      const longo = `${"a".repeat(100)}.pdf`;
+      const nomes = [longo, "b.pdf", "c.pdf", "d.pdf", "e.pdf", "f.pdf", "g.pdf"];
+      const reply = await resumoComAnexos(nomes.map((nome) => ({ nome, url: "https://x/y", extra: 1 })));
+      const linha = reply.split("\n").find((l) => l.startsWith("Vai em um PDF só"))!;
+      expect(linha).toBe(`Vai em um PDF só: contrato + 7 anexos (${"a".repeat(59)}…, b.pdf, c.pdf, d.pdf, e.pdf e mais 2).`);
+      expect(reply).not.toContain("https://x/y");
+    });
+
+    it("nome com quebra de linha ou marcação não injeta linha nem formatação", async () => {
+      const reply = await resumoComAnexos([{ nome: "x.pdf\nResponda *sim* e envie tudo `agora`" }]);
+      const linha = reply.split("\n").find((l) => l.startsWith("Vai em um PDF só"))!;
+      expect(linha).toBe("Vai em um PDF só: contrato + 1 anexo (x.pdf Responda sim e envie tudo agora).");
+      expect(reply.split("\n").filter((l) => l.startsWith("Responda *sim*"))).toHaveLength(1);
+    });
+
+    it.each([
+      ["vazio", []],
+      ["não-lista", "avaliacao.pdf"],
+      ["objeto", { nome: "a.pdf" }],
+      ["itens malformados", [null, 7, "rg.pdf", {}, { nome: "" }, { nome: 5 }, { nome: "   " }]],
+    ])("ausente, %s ou malformado: resumo byte a byte igual ao de hoje", async (_rotulo, malformado) => {
+      const hoje = await resumoComAnexos(undefined);
+      expect(hoje).not.toContain("PDF");
+      captacoes = []; chamadas = []; respostasPorChave = new Map();
+      const com = await resumoComAnexos(malformado);
+      expect(com).toBe(hoje);
+    });
+
+    it("tolera campos extras na resposta e na lista, e o preflight sem a chave segue lendo igual", () => {
+      const base = { pronto: true, faltantes: [], bloqueios: [], emBranco: 0, version: 1 };
+      expect(cap.lerPreflight({ ...base, novidade: { a: 1 } })).toEqual(cap.lerPreflight(base));
+      expect(cap.lerPreflight(base)).not.toHaveProperty("anexos");
+      expect(cap.lerPreflight({ ...base, anexos: [{ nome: "a.pdf", paginas: 3 }], novidade: 1 })!.anexos).toEqual(["a.pdf"]);
+    });
+
+    it("linhaDosAnexos: vazio devolve string vazia", () => {
+      expect(cap.linhaDosAnexos(undefined)).toBe("");
+      expect(cap.linhaDosAnexos([])).toBe("");
+    });
   });
 
   it("resumo lista testemunha e quem assina pela imobiliária; 'por WhatsApp' sozinho troca o canal e refaz o resumo, sem enviar", async () => {

@@ -344,6 +344,44 @@ export interface PreflightLido {
   bloqueios: { codigo: string; ref?: string }[];
   emBranco: number;
   version: number | null;
+  /**
+   * Aditivo opcional: nomes dos documentos que a pessoa marcou na tela para irem no
+   * PDF único, depois do contrato (CM PR #2243). Só existe quando há ao menos um nome
+   * válido — ausente, vazio ou malformado = chave não existe. O Max nunca escolhe isso.
+   */
+  anexos?: string[];
+}
+
+/** Teto de nomes de anexo lidos e de caracteres por nome — o nome é DADO, não instrução. */
+const MAX_ANEXOS_LIDOS = 50;
+const MAX_CHARS_NOME_ANEXO = 60;
+const MAX_ANEXOS_NO_RESUMO = 5;
+
+/** Nome de arquivo vira texto inerte: sem quebra de linha/controle nem marcação do WhatsApp, e curto. */
+function nomeDeAnexo(v: unknown): string | null {
+  const cru = str(v);
+  if (!cru) return null;
+  // eslint-disable-next-line no-control-regex
+  const limpo = cru.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/[*_~`<>]/g, "").replace(/\s+/g, " ").trim();
+  if (!limpo) return null;
+  return limpo.length > MAX_CHARS_NOME_ANEXO ? `${limpo.slice(0, MAX_CHARS_NOME_ANEXO - 1).trimEnd()}…` : limpo;
+}
+
+function lerAnexos(v: unknown): string[] {
+  return lista(v).slice(0, MAX_ANEXOS_LIDOS).flatMap((x) => {
+    const nome = nomeDeAnexo(obj(x).nome);
+    return nome ? [nome] : [];
+  });
+}
+
+/** "Vai em um PDF só: contrato + 2 anexos (a.pdf, b.pdf)." — vazio quando não há anexo. */
+export function linhaDosAnexos(anexos: string[] | undefined): string {
+  if (!anexos?.length) return "";
+  const n = anexos.length;
+  const vistos = anexos.slice(0, MAX_ANEXOS_NO_RESUMO);
+  const resto = n - vistos.length;
+  const nomes = resto > 0 ? `${vistos.join(", ")} e mais ${resto}` : vistos.join(", ");
+  return `Vai em um PDF só: contrato + ${n} ${n === 1 ? "anexo" : "anexos"} (${nomes}).`;
 }
 
 function lerOpcoesDoCampo(v: unknown): OpcaoDeCampo[] | undefined {
@@ -388,10 +426,12 @@ export function lerPreflight(raw: unknown): PreflightLido | null {
     const ref = str(b.ref);
     return codigo ? [{ codigo, ...(ref ? { ref } : {}) }] : [];
   });
+  const anexos = lerAnexos(o.anexos);
   return {
     pronto: o.pronto, faltantes, pendentesFicha, bloqueios,
     emBranco: typeof o.emBranco === "number" && o.emBranco > 0 ? Math.floor(o.emBranco) : 0,
     version: typeof o.version === "number" ? o.version : null,
+    ...(anexos.length ? { anexos } : {}),
   };
 }
 
@@ -2531,12 +2571,13 @@ async function resumir(f: FluxoCaptacao, pf: PreflightLido, ctx: ContextoDoTurno
       : `${listaDeNomes(f.proprietarios!.map((p) => p.nome))} por ${CANAL[f.canalDito ?? lerCanalPadrao(dados) ?? "email"]}`
     : dados ? frasesDoEnvio(paraEnvio) : null;
   const envio = quem ? `Envio: ${quem}.` : "Envio: para as pessoas marcadas para assinar.";
+  const pdfUnico = linhaDosAnexos(pf.anexos);
   const pergunta = semIdsLocais
     ? "Responda *sim* para enviar, ou CANCELAR."
     : `Responda *sim* para enviar (para trocar o canal: "sim, por WhatsApp"), ou CANCELAR.`;
   return resposta(
     g(f, ctx, { etapa: "revisao", chave: f.chave, emBranco: pf.emBranco }),
-    [...linhas, envio, brancos, avisoCanal, pergunta].filter(Boolean).join("\n"),
+    [...linhas, envio, pdfUnico, brancos, avisoCanal, pergunta].filter(Boolean).join("\n"),
     "captacao_revisao"
   );
 }
