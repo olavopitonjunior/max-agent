@@ -2,6 +2,7 @@ import type { LlmToolCall } from "@/lib/llm";
 import type { Candidate } from "@/lib/identity";
 import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
 import { lerPreferencias } from "@/lib/cm";
+import { PERIODOS_DE_METRICA, QUEBRAS_DE_METRICA } from "./scope-contract";
 import type { ToolLogEntry } from "@/lib/turnlog";
 import type { Capability } from "./policy";
 import {
@@ -210,6 +211,10 @@ export async function despacharLeituras(params: {
       const dealId = typeof args.negocio_id === "string" ? args.negocio_id.trim().slice(0, 64) : "";
       args = { ...(filtro ? { blocos: [filtro] } : {}), ...(dealId ? { dealId } : {}) };
     }
+    if (entrada.verb === "metrics.get") {
+      // Só `periodo` e `quebra`, ambos dentro do enum: `estado`, `numero`, `mais` e o resto do modelo somem.
+      args = lerArgsDeMetrica(args);
+    }
     if (paginada) {
       const continuation = referencias?.continuacao;
       if (args.mais === true) {
@@ -310,6 +315,16 @@ export async function despacharLeituras(params: {
 /** Blocos que o servidor aceita em `pending.summary`. Valor fora da lista some (todos os blocos). */
 export function lerBlocoDePendencia(v: unknown): "formularios" | "propostas" | "atividades" | null {
   return v === "formularios" || v === "propostas" || v === "atividades" ? v : null;
+}
+
+/**
+ * Os argumentos que o servidor entende em `metrics.get`: `periodo` e `quebra`, cada um dentro do
+ * seu enum. Valor fora da lista (ou outra chave) some; sem nada válido, `{}` (totais de agora).
+ */
+export function lerArgsDeMetrica(args: Record<string, unknown> | undefined): { periodo?: (typeof PERIODOS_DE_METRICA)[number]; quebra?: (typeof QUEBRAS_DE_METRICA)[number] } {
+  const periodo = PERIODOS_DE_METRICA.find((p) => p === args?.periodo);
+  const quebra = QUEBRAS_DE_METRICA.find((q) => q === args?.quebra);
+  return { ...(periodo ? { periodo } : {}), ...(quebra ? { quebra } : {}) };
 }
 
 /** O item de `pending.summary` é o resumo (objeto), e não o `null` de "sem permissão". */

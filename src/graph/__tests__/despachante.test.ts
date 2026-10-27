@@ -26,7 +26,7 @@ vi.mock("@/lib/acao", () => ({
   executarAcao: vi.fn().mockResolvedValue({ status: 200, body: { campos: [], gerente: { obrigatorio: false } } }),
 }));
 
-const { autorizarChamada, autorizarPendencia, despacharLeituras, argsDaCriacao } = await import(
+const { autorizarChamada, autorizarPendencia, despacharLeituras, argsDaCriacao, lerArgsDeMetrica } = await import(
   "../despachante"
 );
 const {
@@ -349,6 +349,89 @@ describe("despacharLeituras — minhas_pendencias", () => {
     const r = await despacharLeituras({ ...ctx, policy: ["deal.pending"] as never, chamadas: [{ name: "minhas_pendencias", args: {} }] });
     expect(escopo).not.toHaveBeenCalled();
     expect(r.trilha[0].outcome).toBe("capability_negada");
+  });
+});
+
+// ── metrics.get (status por papel, 27/10/2026): período e quebra ──────────
+
+describe("despacharLeituras — resumo_carteira", () => {
+  const ctx = {
+    oferecidas: ["resumo_carteira"],
+    policy: ["metrics.get"] as never,
+    identity: gerente,
+    fromPhone: "+5511999990000",
+    referencias: null,
+    turno: "m1",
+    agora: 1_000,
+  };
+  const argsEnviados = () => escopo.mock.calls[0][0].args;
+  const antiga = { negocios: 4, propostas: 2, contratos: 1 };
+  const nova = {
+    periodo: "7d",
+    totais: { negociosNovos: 3, negociosGanhos: 1, porEtapa: [{ etapa: "Assinatura", total: 2 }], propostasEnviadas: 5, propostasAceitas: 2, propostasRecusadas: 1, captacoesNovas: 2, captacoesAssinadas: 1 },
+    linhas: [{ nome: "Ana", equipe: "Equipe Centro", negociosNovos: 2 }],
+    quebraNegada: false,
+  };
+
+  it("periodo e quebra válidos passam ao executor", async () => {
+    escopo.mockResolvedValue({ items: [nova], truncated: false });
+    await despacharLeituras({ ...ctx, chamadas: [{ name: "resumo_carteira", args: { periodo: "7d", quebra: "equipe" } }] });
+    expect(escopo.mock.calls[0][0]).toMatchObject({ verb: "metrics.get" });
+    expect(argsEnviados()).toEqual({ periodo: "7d", quebra: "equipe" });
+  });
+
+  it("inválidos e extras do modelo somem; sem nada válido, {}", async () => {
+    escopo.mockResolvedValue({ items: [antiga], truncated: false });
+    await despacharLeituras({
+      ...ctx,
+      chamadas: [{ name: "resumo_carteira", args: { periodo: "ano", quebra: "gerente", estado: "ganho", numero: 3, mais: true, userId: "outro", cursor: "x" } }],
+    });
+    expect(argsEnviados()).toEqual({});
+    escopo.mockClear();
+    await despacharLeituras({ ...ctx, chamadas: [{ name: "resumo_carteira", args: { periodo: "hoje", estado: "x", numero: 1, mais: true } }] });
+    expect(argsEnviados()).toEqual({ periodo: "hoje" });
+  });
+
+  it("lerArgsDeMetrica: só valores dos enums, de qualquer tipo", () => {
+    expect(lerArgsDeMetrica({ periodo: "mes_passado", quebra: "departamento" })).toEqual({ periodo: "mes_passado", quebra: "departamento" });
+    expect(lerArgsDeMetrica({ periodo: ["7d"], quebra: 1 })).toEqual({});
+    expect(lerArgsDeMetrica({ periodo: " 7d" })).toEqual({});
+    expect(lerArgsDeMetrica(undefined)).toEqual({});
+  });
+
+  it("a resposta antiga e a nova chegam ao modelo como vieram", async () => {
+    for (const item of [antiga, nova]) {
+      escopo.mockResolvedValue({ items: [item], truncated: false });
+      const r = await despacharLeituras({ ...ctx, chamadas: [{ name: "resumo_carteira", args: {} }] });
+      expect(r.resultados).toEqual([{ tool: "resumo_carteira", items: [item], truncated: false }]);
+      expect(r.trilha[0].outcome).toBe("ok");
+    }
+  });
+
+  it("quebraNegada chega intacto (a pessoa vê só os próprios números)", async () => {
+    escopo.mockResolvedValue({ items: [{ ...antiga, quebraNegada: true }], truncated: false });
+    const r = await despacharLeituras({ ...ctx, chamadas: [{ name: "resumo_carteira", args: { quebra: "corretor" } }] });
+    expect(r.resultados[0].items).toEqual([{ ...antiga, quebraNegada: true }]);
+  });
+});
+
+// ── pending.summary do gestor: o responsável do item passa como veio ───────
+
+describe("despacharLeituras — minhas_pendencias com responsavel (gerente/admin)", () => {
+  it("responsavel dentro de formularios e propostas chega ao modelo (sem projeção: passa como vem)", async () => {
+    const responsavel = { nome: "Ana Souza", equipe: "Equipe Centro", departamento: "Vendas" };
+    const resumo = {
+      formularios: { total: 1, itens: [{ formId: "f1", dealId: "d1", dealTitle: "Rua A, 10", total: 1, itens: ["CPF"], responsavel }] },
+      propostas: { total: 1, itens: [{ proposalId: "p1", codigo: "PROP-2026-0001", dealTitle: null, status: "rascunho", responsavel }] },
+      atividades: { total: 0, atrasadas: 0, hoje: 0, itens: [] },
+    };
+    escopo.mockResolvedValue({ items: [resumo], truncated: false });
+    const r = await despacharLeituras({
+      oferecidas: ["minhas_pendencias"], policy: ["pending.summary"] as never, identity: gerente,
+      fromPhone: "+5511999990000", referencias: null, turno: "m1", agora: 1_000,
+      chamadas: [{ name: "minhas_pendencias", args: {} }],
+    });
+    expect(r.resultados[0].items).toEqual([resumo]);
   });
 });
 
