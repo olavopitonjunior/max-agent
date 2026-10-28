@@ -611,7 +611,7 @@ describe("renderMessage: link no texto livre", () => {
 
   it("corpo sem link: o link_url vai em parágrafo próprio (controle)", () => {
     expect(renderMessage({ ...base, body: "A proposta chegou ao destinatário." })).toBe(
-      "Oi, Olavo! *Proposta entregue*\n\nA proposta chegou ao destinatário.\n\nhttps://x.test/pipeline/propostas/p1\n\n— Newcore");
+      "Oi, Olavo! *Proposta entregue*\n\nA proposta chegou ao destinatário.\n\nhttps://x.test/pipeline/propostas/p1\n\n_Newcore_");
   });
 });
 
