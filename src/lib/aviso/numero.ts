@@ -34,6 +34,12 @@ export interface UltimoAviso {
   audience: string;
   sent_at: Date;
   aviso: Aviso | null;
+  /**
+   * A linha saiu dentro de um resumo de rajada (M8): outras linhas dividem o
+   * mesmo `provider_message_id`. O resumo não tem bloco "Responda:", então o
+   * "1" digitado depois dele não é resposta a aviso nenhum.
+   */
+  resumo?: boolean;
 }
 
 export interface DadosDoNumero {
@@ -45,10 +51,15 @@ export interface DadosDoNumero {
 
 export const dadosDoNumero: DadosDoNumero = {
   async ultimoEnviado(phone) {
-    const rows = await query<{ id: string; audience: string; sent_at: Date; aviso: Aviso | null }>(
-      `SELECT id, audience, sent_at, aviso FROM outbox
-        WHERE phone = $1 AND status = 'sent' AND sent_at IS NOT NULL
-        ORDER BY sent_at DESC LIMIT 1`,
+    const rows = await query<{ id: string; audience: string; sent_at: Date; aviso: Aviso | null; resumo: boolean }>(
+      `SELECT o.id, o.audience, o.sent_at, o.aviso,
+              (o.provider_message_id IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM outbox x
+                  WHERE x.provider_message_id = o.provider_message_id AND x.id <> o.id
+              )) AS resumo
+         FROM outbox o
+        WHERE o.phone = $1 AND o.status = 'sent' AND o.sent_at IS NOT NULL
+        ORDER BY o.sent_at DESC LIMIT 1`,
       [phone]
     );
     return rows[0] ?? null;
@@ -79,6 +90,7 @@ export async function payloadDoNumero(
   const fone = conversationKey(phone);
   const ultimo = await dados.ultimoEnviado(fone);
   if (!ultimo || !ultimo.aviso || ultimo.audience === "deal_party") return null;
+  if (ultimo.resumo) return null;
 
   const enviadoEm = new Date(ultimo.sent_at);
   if (!(agora.getTime() - enviadoEm.getTime() <= NUMERO_VALIDADE_MS)) return null;
