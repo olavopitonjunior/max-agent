@@ -13,6 +13,7 @@ import {
   TEXTO_AVISO_INDISPONIVEL,
   TEXTO_AVISO_JA_FEITO,
   TEXTO_AVISO_SEM_PERMISSAO,
+  TEXTO_FORMULARIO_CONCLUIDO,
   type DadosDoAviso,
   type LinhaDoAviso,
 } from "../aviso-botao";
@@ -214,7 +215,7 @@ describe("abrir / ver_*", () => {
 });
 
 describe("reenviar_link", () => {
-  it("2xx: executa form.remind com a messageId como chave, responde e reage ✅", async () => {
+  it("2xx: executa form.remind com a chave fixa do aviso, responde e reage ✅", async () => {
     const r = await rodar();
     expect(executar).toHaveBeenCalledTimes(1);
     expect(executar).toHaveBeenCalledWith({
@@ -223,7 +224,7 @@ describe("reenviar_link", () => {
       subject: { kind: "user", userId: "u1" },
       verb: "form.remind",
       args: { deal_id: "deal1", form_id: "f1" },
-      idempotencyKey: "wamid.T1",
+      idempotencyKey: "av:row1:reenviar_link",
     });
     expect(r.reply).toBe("Pronto! Reenviei o link para quem ainda falta preencher. 👍");
     expect(reagir).toHaveBeenCalledWith({ to: FONE, messageId: "wamid.T1", emoji: "✅" });
@@ -246,7 +247,7 @@ describe("reenviar_link", () => {
     const de_novo = await rodar({ banco });
     expect(de_novo.reply).toContain("Reenviei");
     expect(executar).toHaveBeenCalledTimes(2);
-    expect(executar.mock.calls.map((c) => c[0].idempotencyKey)).toEqual(["wamid.T1", "wamid.T1"]);
+    expect(executar.mock.calls.map((c) => c[0].idempotencyKey)).toEqual(["av:row1:reenviar_link", "av:row1:reenviar_link"]);
   });
 
   it("403: frase de erro, sem reação, e libera a trava para tentar de novo", async () => {
@@ -259,6 +260,46 @@ describe("reenviar_link", () => {
 
     const outra = await rodar({ banco, inb: { messageId: "wamid.T2" }, c: { messageId: "wamid.T2" } });
     expect(outra.reply).toContain("Reenviei");
+  });
+
+  it("erro incerto (5xx, null, exceção) no meio: o toque seguinte tenta de novo com a MESMA chave", async () => {
+    executar.mockResolvedValueOnce({ status: 503, body: {} });
+    const banco = dados(linha());
+    const a = await rodar({ banco });
+    const b = await rodar({ banco, inb: { messageId: "wamid.T2" }, c: { messageId: "wamid.T2" } });
+    expect(a.reply).toBe(TEXTO_AVISO_ERRO);
+    expect(b.reply).toContain("Reenviei");
+    expect(executar).toHaveBeenCalledTimes(2);
+    expect(executar.mock.calls.map((c) => c[0].idempotencyKey)).toEqual(["av:row1:reenviar_link", "av:row1:reenviar_link"]);
+  });
+
+  it("adiar_1d: erro e nova tentativa também usam a mesma chave", async () => {
+    executar.mockResolvedValueOnce(null);
+    const banco = dados(linha());
+    await rodar({ payload: "av:row1:adiar_1d", banco });
+    await rodar({ payload: "av:row1:adiar_1d", banco, inb: { messageId: "wamid.T2" }, c: { messageId: "wamid.T2" } });
+    expect(executar.mock.calls.map((c) => c[0].idempotencyKey)).toEqual(["av:row1:adiar_1d", "av:row1:adiar_1d"]);
+  });
+
+  it("409 concluido: formulário já preenchido, mantém a trava e não reage", async () => {
+    executar.mockResolvedValueOnce({ status: 409, body: { error: "Conflict", reason: "concluido" } });
+    const banco = dados(linha());
+    const r = await rodar({ banco });
+    expect(r.reply).toBe("Esse formulário já foi preenchido. Nada foi alterado.");
+    expect(r.reply).toBe(TEXTO_FORMULARIO_CONCLUIDO);
+    expect(reagir).not.toHaveBeenCalled();
+    expect(banco.travas.size).toBe(1);
+    // Outro toque não repete a chamada: a trava segura.
+    const outra = await rodar({ banco, inb: { messageId: "wamid.T2" }, c: { messageId: "wamid.T2" } });
+    expect(outra.reply).toBe(TEXTO_AVISO_JA_FEITO);
+    expect(executar).toHaveBeenCalledTimes(1);
+  });
+
+  it("409 com outro motivo continua sendo erro genérico, com a trava liberada", async () => {
+    executar.mockResolvedValueOnce({ status: 409, body: { error: "Conflict", reason: "outro" } });
+    const banco = dados(linha());
+    expect((await rodar({ banco })).reply).toBe(TEXTO_AVISO_ERRO);
+    expect(banco.travas.size).toBe(0);
   });
 
   it("null (sem resposta) e exceção: mesma frase de erro", async () => {
@@ -288,7 +329,7 @@ describe("adiar_1d", () => {
   it("activity.postpone com a atividade e 1 dia", async () => {
     const r = await rodar({ payload: "av:row1:adiar_1d" });
     expect(executar).toHaveBeenCalledWith(
-      expect.objectContaining({ verb: "activity.postpone", args: { atividade_id: "atv_9", dias: 1 }, idempotencyKey: "wamid.T1" })
+      expect.objectContaining({ verb: "activity.postpone", args: { atividade_id: "atv_9", dias: 1 }, idempotencyKey: "av:row1:adiar_1d" })
     );
     expect(r.reply).toBe("Pronto! Adiei para amanhã. 📅");
     expect(reagir).toHaveBeenCalledTimes(1);
@@ -347,7 +388,7 @@ describe("lembrar_amanha", () => {
   });
 });
 
-describe("concluir / criar_atividade", () => {
+describe("concluir / criar_atividade (próximo passo)", () => {
   it("delega ao roteador de atividade com atv:<alvoId>:concluir, sem reação nem trava", async () => {
     const banco = dados(linha());
     const r = await rodar({ payload: "av:row1:concluir", banco });
@@ -359,10 +400,25 @@ describe("concluir / criar_atividade", () => {
     expect(executar).not.toHaveBeenCalled();
   });
 
-  it("criar_atividade segue o mesmo caminho (literal do plano)", async () => {
+  it("criar_atividade não escreve: devolve o link do negócio, sem executar, sem roteador, sem reação, sem trava", async () => {
     const row = linha({ aviso: { ...AVISO, acoes: [{ id: "criar_atividade", alvoId: "n1" }] } });
-    await rodar({ payload: "av:row1:criar_atividade", row });
-    expect(rotearAtividade.mock.calls[0]![0].payload).toBe("atv:n1:concluir");
+    const banco = dados(row);
+    const r = await rodar({ payload: "av:row1:criar_atividade", banco });
+    expect(r.reply).toBe("Para criar o próximo passo, abra o negócio no sistema.\n👉 Abrir negócio: https://trio.imobpro.ia.br/deals/cmx1");
+    expect(executar).not.toHaveBeenCalled();
+    expect(rotearAtividade).not.toHaveBeenCalled();
+    expect(reagir).not.toHaveBeenCalled();
+    expect(banco.reivindicar).not.toHaveBeenCalled();
+  });
+
+  it("criar_atividade vale sem alvoId, sem política e com escrita em aberto; sem link, indisponível", async () => {
+    const row = linha({ aviso: { ...AVISO, acoes: [{ id: "criar_atividade" }] } });
+    const sem = await rodar({ payload: "av:row1:criar_atividade", row, identity: corretor, c: { policy: [] }, ocupado: "Antes, termine." });
+    expect(sem.reply).toContain("Para criar o próximo passo");
+    const semLink = linha({ link_url: null, aviso: { ...AVISO, link: null, acoes: [{ id: "criar_atividade" }] } });
+    expect((await rodar({ payload: "av:row1:criar_atividade", row: semLink })).reply).toBe(TEXTO_AVISO_INDISPONIVEL);
+    expect(executar).not.toHaveBeenCalled();
+    expect(rotearAtividade).not.toHaveBeenCalled();
   });
 
   it("com escrita em aberto: responde o 'termine o pedido' e não delega", async () => {

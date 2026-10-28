@@ -96,7 +96,7 @@ d("toque em botão de aviso (Postgres real)", () => {
     expect(a.reply).toContain("Reenviei");
     expect(b.reply).toBe("Isso já foi feito. 👍");
     expect(executar).toHaveBeenCalledTimes(1);
-    expect(executar.mock.calls[0]![0]).toMatchObject({ verb: "form.remind", idempotencyKey: "wamid.A1" });
+    expect(executar.mock.calls[0]![0]).toMatchObject({ verb: "form.remind", idempotencyKey: `av:${id}:reenviar_link` });
   });
 
   it("a mesma messageId de novo (reentrega) passa pela trava; outra mensagem não", async () => {

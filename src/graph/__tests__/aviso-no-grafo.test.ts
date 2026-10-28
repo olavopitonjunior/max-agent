@@ -83,11 +83,11 @@ beforeEach(() => {
 });
 
 describe("botão av: no grafo", () => {
-  it("reenviar_link: executa form.remind com a messageId do toque, reage ✅ e não chama o modelo", async () => {
+  it("reenviar_link: executa form.remind com a chave fixa do aviso, reage ✅ e não chama o modelo", async () => {
     acao.mockResolvedValue({ status: 200, body: { ok: true } });
     const s = await run("📨 Reenviar link", {}, "wamid.T1", "av:row1:reenviar_link");
     expect(acao).toHaveBeenCalledWith(
-      expect.objectContaining({ verb: "form.remind", args: { deal_id: "deal1", form_id: "f1" }, idempotencyKey: "wamid.T1" })
+      expect.objectContaining({ verb: "form.remind", args: { deal_id: "deal1", form_id: "f1" }, idempotencyKey: "av:row1:reenviar_link" })
     );
     expect(s.reply).toContain("Reenviei o link");
     expect(reacao).toHaveBeenCalledWith({ to: FONE, messageId: "wamid.T1", emoji: "✅" });
@@ -162,7 +162,7 @@ describe("resposta numérica ao aviso no grafo (M7)", () => {
     acao.mockResolvedValue({ status: 200, body: { ok: true } });
     const s = await run("1", {}, "wamid.N1");
     expect(acao).toHaveBeenCalledWith(
-      expect.objectContaining({ verb: "form.remind", args: { deal_id: "deal1", form_id: "f1" }, idempotencyKey: "wamid.N1" })
+      expect.objectContaining({ verb: "form.remind", args: { deal_id: "deal1", form_id: "f1" }, idempotencyKey: "av:row1:reenviar_link" })
     );
     expect(s.reply).toContain("Reenviei o link");
     expect(reacao).toHaveBeenCalledWith({ to: FONE, messageId: "wamid.N1", emoji: "✅" });
@@ -199,6 +199,24 @@ describe("resposta numérica ao aviso no grafo (M7)", () => {
     await run("2", {}, "wamid.N5").catch(() => undefined);
     expect(acao).not.toHaveBeenCalled();
     expect(reacao).not.toHaveBeenCalled();
+  });
+
+  it("'1' num aviso cujo 1º item é o próximo passo: devolve o link, sem escrever nem abrir fluxo", async () => {
+    const comProximoPasso: Aviso = { ...AVISO, acoes: [{ id: "criar_atividade", alvoId: "n1" }, { id: "lembrar_amanha" }] };
+    ultimoEnviado().mockResolvedValue({
+      id: "row1", audience: "platform_user", sent_at: new Date(Date.now() - 60 * 60_000), aviso: comProximoPasso,
+    });
+    vi.spyOn(dadosDoAviso, "carregar").mockResolvedValue({
+      id: "row1", org_id: "org1", phone: FONE, audience: "platform_user", status: "sent", deal_id: "deal1",
+      sent_at: new Date(Date.now() - 60 * 60_000), aviso: comProximoPasso, recipient_name: "Olavo", title: "t", body: "b",
+      link_url: AVISO.link!.url, org_name: "FINCasa", kind: "form_reminder", params: null,
+    });
+    const s = await run("1", {}, "wamid.N8");
+    expect(s.reply).toBe("Para criar o próximo passo, abra o negócio no sistema.\n👉 Abrir negócio: https://trio.imobpro.ia.br/deals/cmx1");
+    expect(acao).not.toHaveBeenCalled();
+    expect(leitura).not.toHaveBeenCalled();
+    expect(reacao).not.toHaveBeenCalled();
+    expect(s.fluxo ?? null).toBeNull();
   });
 
   it("texto que não é um dígito 1–3 nem consulta o banco", async () => {

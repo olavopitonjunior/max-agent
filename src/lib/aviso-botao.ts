@@ -34,14 +34,22 @@ import { ACOES_AVISO, type AcaoAviso, type Aviso } from "@/lib/aviso/schema";
  * As ações com efeito próprio (`reenviar_link`, `adiar_1d`, `lembrar_amanha`)
  * reivindicam `(rowId, ação)` na tabela `aviso_toque` (migration 028). O
  * segundo toque, de outra mensagem, responde `TEXTO_AVISO_JA_FEITO` sem repetir
- * o efeito; a mesma `messageId` de novo (reentrega do webhook) passa, e quem
- * garante que não duplica é a `x-idempotency-key` (a própria `messageId`) ou a
- * `dedupeKey` do lembrete. Erro libera a reivindicação, para o toque seguinte
- * poder tentar de novo.
+ * o efeito; a mesma `messageId` de novo (reentrega do webhook) passa. Quem
+ * garante que não duplica é a `x-idempotency-key`, FIXA por aviso e ação
+ * (`av:<rowId>:<ação>`, e não a `messageId` do toque) ou a `dedupeKey` do
+ * lembrete. Erro libera a reivindicação, para o toque seguinte poder tentar de
+ * novo; se o erro foi incerto (`null`, 5xx, rede) a tentativa pode ter chegado
+ * ao servidor, e a mesma chave faz a plataforma deduplicar o reenvio. A trava
+ * não guarda "incerto" (a 028 só tem a linha), então a chave fixa é o que impede
+ * o efeito duplo.
  *
- * As ações de link (`abrir`, `ver_*`) não escrevem nada e não reivindicam; as de
- * atividade (`concluir`, `criar_atividade`) seguem o fluxo de hoje (resumo, SIM,
- * chave do SIM) e a trava delas é o próprio fluxo.
+ * Exceção: o 409 `concluido` do `form.remind` (o formulário já foi preenchido) é
+ * definitivo e MANTÉM a trava: repetir o toque só repetiria a mesma resposta.
+ *
+ * As ações de link (`abrir`, `ver_*`) não escrevem nada e não reivindicam;
+ * `concluir` segue o fluxo de atividades de hoje (resumo, SIM, chave do SIM) e a
+ * trava dela é o próprio fluxo. `criar_atividade` ("próximo passo") NÃO escreve:
+ * devolve o link do negócio (criar atividade exige campos que o botão não tem).
  *
  * ── Sucesso e erro ──────────────────────────────────────────────────────────
  *
@@ -58,6 +66,8 @@ export const TEXTO_AVISO_SEM_PERMISSAO = "Você não tem essa permissão por aqu
 const TEXTO_LEMBRETE = "Combinado! Te lembro amanhã às 9h. ⏰";
 const TEXTO_REENVIO = "Pronto! Reenviei o link para quem ainda falta preencher. 👍";
 const TEXTO_ADIAMENTO = "Pronto! Adiei para amanhã. 📅";
+export const TEXTO_FORMULARIO_CONCLUIDO = "Esse formulário já foi preenchido. Nada foi alterado.";
+const TEXTO_PROXIMO_PASSO = "Para criar o próximo passo, abra o negócio no sistema.";
 
 /** Depois disso o aviso expira (o negócio já pode ter mudado). */
 export const AVISO_VALIDADE_MS = 72 * 60 * 60 * 1000;
@@ -214,8 +224,15 @@ export async function rotearBotaoDeAviso(params: {
     return resposta(`👉 ${aviso.link?.rotulo ?? "Abrir"}: ${url}`, "link");
   }
 
-  // Concluir / próximo passo: o fluxo de atividades de hoje (resumo, SIM, chave do SIM).
-  if (acao === "concluir" || acao === "criar_atividade") {
+  // Próximo passo: nunca escreve (nem política, nem reação). Só leva ao negócio.
+  if (acao === "criar_atividade") {
+    const url = aviso.link?.url ?? row.link_url;
+    if (!url) return resposta(TEXTO_AVISO_INDISPONIVEL, "sem_link");
+    return resposta(`${TEXTO_PROXIMO_PASSO}\n👉 Abrir negócio: ${url}`, "proximo_passo");
+  }
+
+  // Concluir: o fluxo de atividades de hoje (resumo, SIM, chave do SIM).
+  if (acao === "concluir") {
     if (!alvoId) return resposta(TEXTO_AVISO_INDISPONIVEL, "sem_alvo");
     if (params.ocupado) return resposta(params.ocupado, "ocupado");
     return deps.rotearAtividade({
@@ -276,8 +293,13 @@ export async function rotearBotaoDeAviso(params: {
         subject: subjectDe(identity),
         verb: direta.verb,
         args: direta.args,
-        idempotencyKey: inbound.messageId,
+        // Fixa por aviso e ação: o toque repetido depois de um erro incerto não duplica o efeito.
+        idempotencyKey: `${PREFIXO_AVISO}${row.id}:${acao}`,
       });
+      if (acao === "reenviar_link" && res?.status === 409 && (res.body as { reason?: unknown } | null)?.reason === "concluido") {
+        // Definitivo: mantém a trava e não reage.
+        return resposta(TEXTO_FORMULARIO_CONCLUIDO, "reenviar_link_concluido");
+      }
       ok = !!res && res.status >= 200 && res.status < 300;
       reply = ok ? direta.texto : TEXTO_AVISO_ERRO;
     }
