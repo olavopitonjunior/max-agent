@@ -6,6 +6,7 @@ import { enqueue } from "@/lib/outbox";
 import { toE164NoPlus } from "@/lib/phone";
 import { isOrgKnown } from "@/lib/orgs";
 import { textoDoAvisoDeCredito } from "@/lib/templates/catalog";
+import { avisoSchema, avisoParaAudiencia } from "@/lib/aviso/schema";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -56,6 +57,12 @@ const bodySchema = z.object({
     .optional()
     .catch(undefined)
     .transform(limparParams),
+  /**
+   * Contrato `aviso` v1 (M1). Tolerante como `kind`/`params`: inválido, de
+   * versão futura ou lixo vira ausente e sai o `title/body` de hoje — o aviso
+   * é enfeite e nunca derruba a notificação.
+   */
+  aviso: avisoSchema.optional().catch(undefined),
 });
 
 /**
@@ -125,6 +132,8 @@ export async function POST(req: NextRequest) {
     orgName: p.orgName,
     kind: p.kind ?? null,
     params: p.params,
+    // Parte do negócio nunca ganha ação nem imagem (o texto fica).
+    aviso: avisoParaAudiencia(p.audience, p.aviso),
   });
 
   if (result.status === "duplicate") {
