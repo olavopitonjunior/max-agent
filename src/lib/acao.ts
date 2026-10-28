@@ -74,6 +74,11 @@ export const VERBOS_DE_ACAO = [
   "activity.comment",
   "activity.complete",
   "activity.refuse",
+  // Botões do aviso (M6, par do contractmaker P4): reenviar o link do formulário
+  // (capability `form.create`) e adiar a atividade em 1 dia (`activity.write`).
+  // Escritas: levam `x-idempotency-key` (a `messageId` do toque).
+  "form.remind",
+  "activity.postpone",
 ] as const;
 export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
 

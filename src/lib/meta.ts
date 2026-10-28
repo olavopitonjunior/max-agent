@@ -149,8 +149,34 @@ export async function sendInteractive(params: {
       recipient_type: "individual",
       to: params.to,
       type: "interactive",
-      interactive,
+      interactive: i.tipo === "botoes" && i.imagemUrl
+        ? { ...interactive, header: { type: "image", image: { link: i.imagemUrl } } }
+        : interactive,
       ...(params.quoteMessageId ? { context: { message_id: params.quoteMessageId } } : {}),
+    }),
+  });
+  return { messageId: res.messages?.[0]?.id ?? null };
+}
+
+/**
+ * Reação com emoji a uma mensagem RECEBIDA (o toque do botão, por exemplo).
+ * Como o texto livre, só vale dentro da janela de 24h. Lança `MetaHttpError`
+ * em erro; quem chama (`transport/index.ts`) trata como cortesia e devolve
+ * `false`.
+ */
+export async function sendReaction(params: {
+  to: string;
+  messageId: string;
+  emoji: string;
+}): Promise<{ messageId: string | null }> {
+  const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
+    method: "POST",
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: params.to,
+      type: "reaction",
+      reaction: { message_id: params.messageId, emoji: params.emoji },
     }),
   });
   return { messageId: res.messages?.[0]?.id ?? null };
