@@ -132,6 +132,25 @@ d("resposta numérica ao aviso (Postgres real)", () => {
     expect(await payloadDoNumero(FONE, "1", new Date())).toBeNull();
   });
 
+  it("linha liquidada dentro de um resumo (mesmo provider_message_id): o '1' não vale", async () => {
+    const a = await enviada("n-resumo-a", 1);
+    const b = await enviada("n-resumo-b", 1);
+    await query(`UPDATE outbox SET provider_message_id = 'MID-RESUMO' WHERE id = ANY($1::text[])`, [[a, b]]);
+    expect(await payloadDoNumero(FONE, "1", new Date())).toBeNull();
+  });
+
+  it("marca 'resumo:' (Newton sem messageId, envio incerto): o '1' não vale mesmo com uma linha só", async () => {
+    const a = await enviada("n-resumo-marca", 1);
+    await query(`UPDATE outbox SET provider_message_id = $2 WHERE id = $1`, [a, `resumo:${a}`]);
+    expect(await payloadDoNumero(FONE, "1", new Date())).toBeNull();
+  });
+
+  it("provider_message_id único (envio normal) continua valendo", async () => {
+    const a = await enviada("n-unico", 1);
+    await query(`UPDATE outbox SET provider_message_id = 'MID-UNICO' WHERE id = $1`, [a]);
+    expect(await payloadDoNumero(FONE, "1", new Date())).toBe(`av:${a}:reenviar_link`);
+  });
+
   it("lista: a escolha vai por item:<alvoId>", async () => {
     const lista: Aviso = {
       ...AVISO,
