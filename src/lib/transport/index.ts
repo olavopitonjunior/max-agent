@@ -130,7 +130,7 @@ export async function sendText(params: {
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
   const { interativo, ...texto } = params;
   const a = adapter();
-  if (interativo && a.capabilities.interactive && a.sendInteractive && interativoLigado()) {
+  if (interativo && a.sendInteractive && interativoDisponivel()) {
     try {
       return await a.sendInteractive({ to: texto.to, interativo, quoteMessageId: texto.quoteMessageId });
     } catch (err) {
@@ -146,6 +146,16 @@ export async function sendText(params: {
 
 function interativoLigado(): boolean {
   return (process.env.MAX_INTERACTIVE ?? "").trim().toLowerCase() !== "off";
+}
+
+/**
+ * Botões/lista de fato disponíveis agora: o provedor sabe (`capabilities.interactive`)
+ * E o kill switch `MAX_INTERACTIVE` não está em `off`. Fonte única para quem
+ * envia (`sendText`) e para quem monta o texto (`renderMessage`: sem botão, o
+ * texto precisa trazer o bloco numerado).
+ */
+export function interativoDisponivel(): boolean {
+  return adapter().capabilities.interactive && interativoLigado();
 }
 
 /**

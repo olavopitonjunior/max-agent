@@ -2,13 +2,15 @@ import {captureDispatchFence,DispatchFenceSchema,withCapturedPrivacy,withDeliver
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
-import { sendText, sendTemplate, connectionStatus, capabilities, type ConnectionState } from "./transport";
+import { sendText, sendTemplate, connectionStatus, capabilities, interativoDisponivel, type ConnectionState } from "./transport";
 import { janelaAberta } from "./janela24h";
 import { reservarAvisoNeutro } from "./atividades-pendentes";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
 import { deployProfile } from "./deploy-profile";
+import { escaparMarkdownWa } from "./aviso/escapar";
+import { renderAvisoTexto } from "./aviso/render";
 import { avisoParaAudiencia, groupKeyDoAviso, type Aviso } from "./aviso/schema";
 import {
   inoperanciaDoErro,
@@ -232,7 +234,18 @@ export function renderMessage(row: {
   recipient_name: string;
   kind?: string | null;
   params?: Record<string, string> | null;
+  /** Contrato `aviso` v1: quando existe, o texto é todo dele (title/body ficam de reserva). */
+  aviso?: Aviso | null;
 }): string {
+  if (row.aviso) {
+    return renderAvisoTexto(row.aviso, {
+      recipientName: row.recipient_name,
+      orgName: row.org_name,
+      modo: interativoDisponivel() ? "interativo" : "numerado",
+      // Botões só chegam em tarefa posterior; sem eles o link precisa ficar no texto.
+      linkNoBotao: false,
+    });
+  }
   // Aviso de crédito (M3): texto fixo com o link; sem os params, o formato genérico.
   if (row.kind === "credit_result") {
     const aviso = textoDoAvisoDeCredito(row.params, row.link_url);
@@ -243,7 +256,7 @@ export function renderMessage(row: {
   const parts = [`${hello}*${row.title}*`, row.body];
   // Avisos de proposta já chegam com a URL no corpo; repetir duplicava o link.
   if (row.link_url && !row.body.includes(row.link_url)) parts.push(row.link_url);
-  if (row.org_name) parts.push(`— ${row.org_name}`);
+  if (row.org_name) parts.push(`_${escaparMarkdownWa(row.org_name)}_`);
   return parts.filter(Boolean).join("\n\n");
 }
 
