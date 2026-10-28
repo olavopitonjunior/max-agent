@@ -12,6 +12,8 @@ import { getControl, assertBotWrite } from "@/lib/runtime/handoff";
 import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { rotearBotaoDeAtividade } from "@/lib/atividade-botao";
+import { ehPayloadDeAviso, rotearBotaoDeAviso } from "@/lib/aviso-botao";
+import { payloadDoNumero } from "@/lib/aviso/numero";
 import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
 import { iniciarPreferencias, preferenciasPermitidas, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
 import { resolverReferencia } from "./referencias";
@@ -69,7 +71,7 @@ import {
   MUDAR_MINHAS_NOTIFICACOES,
   type PendingAction,
 } from "./tools";
-import { downloadMedia } from "@/lib/transport";
+import { downloadMedia, sendReaction, interativoDisponivel } from "@/lib/transport";
 import {
   loadFacts,
   saveFacts,
@@ -945,6 +947,52 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   const rascunhoAberto = atual?.kind === "proposta" && !!atual.propostaId && !atual.chave &&
     ["ajustes", "revisao_ajuste", "metodo"].includes(atual.etapa);
   const livre = !coletando || rascunhoAberto;
+
+  // Toque em botão/lista de AVISO (`av:<linha>:<ação>`, M6). Sem modelo. As ações diretas
+  // (lembrar, reenviar link, adiar) não mexem no fluxo aberto; só `concluir`/`criar_atividade`
+  // abrem fluxo e por isso respeitam a escrita em aberto.
+  //
+  // Sem botão (Newton; Meta com MAX_INTERACTIVE=off) o aviso pede "Responda: *1* · …" e o "2" digitado
+  // vira o mesmo payload (M7, `aviso/numero.ts`). Só com o transporte SEM interativo (o mesmo critério
+  // que decide o texto do aviso), texto puro "1"–"3", sem fluxo nem confirmação em aberto: um "2" no
+  // meio de uma coleta é resposta da coleta. Qualquer dúvida do `payloadDoNumero` devolve null e o
+  // número segue como mensagem normal.
+  let payloadDeAviso: string | null = ehPayloadDeAviso(state.inbound.buttonPayload) ? (state.inbound.buttonPayload as string) : null;
+  if (!payloadDeAviso && !state.inbound.buttonPayload && !state.inbound.groupId && state.inbound.kind === "text" &&
+      !atual && !state.pendingAction && /^[1-3]$/.test(userText) && !interativoDisponivel()) {
+    payloadDeAviso = await payloadDoNumero(state.inbound.fromPhone, userText, new Date(agora));
+  }
+  if (payloadDeAviso) {
+    const ocupado = escritaEmAberto || (coletando && atual?.kind !== "atividade");
+    const toque = await rotearBotaoDeAviso({
+      payload: payloadDeAviso,
+      inbound: state.inbound,
+      identity: state.identity,
+      ctx: { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+        politicaIndisponivel: state.politicaIndisponivel, agora, orgName: state.identity.orgName,
+        thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) },
+      ocupado: ocupado
+        ? (atual?.kind === "atividade" && atual.chave ? textoDeOcupado(atual) : "Antes, vamos terminar o pedido em andamento (responda ou diga \"cancelar\"). Depois toque no botão de novo.")
+        : undefined,
+      ler: (atividadeId) => consultarEscopo({ orgId: state.identity.orgId, rawPhone: state.inbound.fromPhone,
+        subject: subjectDe(state.identity), verb: "activity.get", args: { atividade_id: atividadeId } }),
+      deps: {
+        executar: executarAcao,
+        // Import tardio: `outbox` importa este grafo (seedNotification), então o ciclo só existe se for estático.
+        enfileirar: async (p) => (await import("@/lib/outbox")).enqueue(p),
+        reagir: sendReaction,
+        rotearAtividade: rotearBotaoDeAtividade,
+      },
+    });
+    // Fluxo novo (atividade) substitui; senão só fecha o que venceu e deixa o resto como está.
+    const fluxo = toque.fluxo ?? (vencido ? atual : undefined);
+    return {
+      ...(fluxo !== undefined ? { fluxo } : {}),
+      reply: toque.reply,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: toque.reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "aviso", ...(state.inbound.buttonPayload ? { botao: true } : { numero: true }) }, outcome: toque.evento }],
+    };
+  }
 
   // Toque em botão de atividade (`atv:<id>:concluir|comentar|recusar`, M1). Fica aqui, e não no
   // `interceptar`, porque precisa de identidade e política. Nunca escreve: abre a proposta.

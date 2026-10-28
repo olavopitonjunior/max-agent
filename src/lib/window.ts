@@ -81,3 +81,22 @@ export function nextDeliveryTime(from: Date = new Date()): Date {
   // melhor que travar numa fila para sempre.
   return from;
 }
+
+/**
+ * Amanhã às `hora` (0-23) de São Paulo, como instante absoluto. "Amanhã" é o dia
+ * de SP seguinte ao de `from`, não 24h depois. Mesma técnica de varredura do
+ * `nextDeliveryTime`: quem decide o offset é o `Intl`, não uma conta fixa.
+ */
+export function amanhaAs(hora: number, from: Date = new Date()): Date {
+  const hoje = partsInSaoPaulo(from);
+  const base = new Date(Date.UTC(hoje.year, hoje.month - 1, hoje.day, 12, 0, 0));
+  base.setUTCDate(base.getUTCDate() + 1);
+  const alvo = { year: base.getUTCFullYear(), month: base.getUTCMonth() + 1, day: base.getUTCDate() };
+  for (let i = 0; i < 48; i++) {
+    const probe = new Date(Date.UTC(alvo.year, alvo.month - 1, alvo.day, i, 0, 0));
+    const p = partsInSaoPaulo(probe);
+    if (p.year === alvo.year && p.month === alvo.month && p.day === alvo.day && p.hour === hora) return probe;
+  }
+  // Inalcançável na prática: cai para 24h depois, melhor que perder o lembrete.
+  return new Date(from.getTime() + 24 * 60 * 60_000);
+}

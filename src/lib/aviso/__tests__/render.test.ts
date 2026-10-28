@@ -21,12 +21,15 @@ const BASE: Aviso = {
 const CTX = { recipientName: "Ana Souza", orgName: "RE/MAX Trio", modo: "interativo" as const };
 
 describe("escaparMarkdownWa", () => {
-  it("quebra a sequência de marcação com U+2063 e não usa barra invertida", () => {
+  it("troca as marcas por caracteres parecidos, sem barra invertida", () => {
     const out = escaparMarkdownWa("Apto *302*_A ~x~ `c`");
-    expect(out).not.toContain("*302*");
-    expect(out).not.toContain("\\");
-    expect(out).toContain("*⁣302*⁣_⁣A");
-    expect(out.replace(/⁣/g, "")).toBe("Apto *302*_A ~x~ `c`");
+    expect(out).toBe("Apto ∗302∗＿A ∼x∼ ˋcˋ");
+    expect(out).not.toMatch(/[*_~`\\]/);
+  });
+
+  it("é idempotente", () => {
+    const uma = escaparMarkdownWa("Apto *302*_A ~x~ `c`");
+    expect(escaparMarkdownWa(uma)).toBe(uma);
   });
 
   it("texto sem marcação passa intacto", () => {
@@ -63,14 +66,14 @@ describe("renderAvisoTexto", () => {
       { ...BASE, titulo: "Etapa *nova*" },
       { ...CTX, recipientName: "A*na", orgName: "Imob_Sul" }
     );
-    expect(out).toContain("Oi, A*⁣na!");
-    expect(out).toContain("*Etapa *⁣nova*⁣*");
-    expect(out).toContain("_Imob_⁣Sul_");
+    expect(out).toContain("Oi, A∗na!");
+    expect(out).toContain("*Etapa ∗nova∗*");
+    expect(out).toContain("_Imob＿Sul_");
   });
 
   it("escapa os itens mas não a frase", () => {
     const out = renderAvisoTexto({ ...BASE, itens: ["Apto *302*"], frase: "Veja *Apto 302*." }, CTX);
-    expect(out).toContain("• Apto *⁣302*⁣");
+    expect(out).toContain("• Apto ∗302∗");
     expect(out).toContain("Veja *Apto 302*.");
   });
 

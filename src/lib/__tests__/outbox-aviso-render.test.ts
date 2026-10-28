@@ -45,11 +45,11 @@ describe("renderMessage com aviso", () => {
     expect(out).not.toContain("Responda:");
   });
 
-  it("Meta (interativo) com MAX_INTERACTIVE=off: modo numerado, mas sem Responda até existir o roteador", () => {
+  it("Meta (interativo) com MAX_INTERACTIVE=off: modo numerado, com Responda (o roteador do número existe)", () => {
     vi.stubEnv("MAX_INTERACTIVE", "off");
     const out = renderMessage({ ...LINHA, aviso: AVISO });
-    // Sem roteador das respostas numeradas ainda, o bloco "Responda" não sai.
-    expect(out).not.toContain("Responda:");
+    expect(out).toContain("Responda:\n*1* · reenviar link\n*2* · lembrar amanhã");
+    expect(out).not.toContain("*3*");
     expect(out).toContain("👉 Abrir negócio:");
   });
 
@@ -57,11 +57,10 @@ describe("renderMessage com aviso", () => {
     expect(renderMessage({ ...LINHA, aviso: AVISO })).not.toContain("Responda:");
   });
 
-  it("transporte sem interativo (log): modo numerado, sem Responda", () => {
+  it("transporte sem interativo (log): modo numerado, com Responda", () => {
     vi.stubEnv("AGENT_TRANSPORT", "log");
     const out = renderMessage({ ...LINHA, aviso: AVISO });
-    // Sem roteador das respostas numeradas ainda, o bloco "Responda" não sai.
-    expect(out).not.toContain("Responda:");
+    expect(out).toContain("Responda:\n*1* · reenviar link\n*2* · lembrar amanhã");
     expect(out).toContain("👉 Abrir negócio:");
   });
 
