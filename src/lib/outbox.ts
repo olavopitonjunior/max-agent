@@ -155,6 +155,11 @@ export interface EnqueueParams {
   params?: Record<string, string> | null;
   /** Contrato `aviso` v1 (migration 027). Para `deal_party` é regravado sem ações/imagem. */
   aviso?: Aviso | null;
+  /**
+   * Quando pode sair, no lugar do próximo horário de janela (`nextDeliveryTime`).
+   * Para agendar de propósito, como o "me lembra amanhã" do botão do aviso (M6).
+   */
+  deliverAfter?: Date;
 }
 
 export type EnqueueResult =
@@ -168,7 +173,7 @@ export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
     throw new Error("audience_nao_permitida_no_perfil");
   }
   const id = randomUUID();
-  const deliverAfter = nextDeliveryTime();
+  const deliverAfter = p.deliverAfter ?? nextDeliveryTime();
   const dispatchFence=await captureDispatchFence(p.phone);
   // Segunda trava (a primeira é o /notify): quem enfileirar direto também não
   // leva ação nem imagem para parte do negócio.

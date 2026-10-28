@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isWithinWindow, nextDeliveryTime } from "../window";
+import { amanhaAs, isWithinWindow, nextDeliveryTime } from "../window";
 
 /**
  * A janela de cortesia é a regra que o ImobPro DELEGOU a este serviço: os
@@ -73,6 +73,36 @@ describe("nextDeliveryTime", () => {
       expect(nextDeliveryTime(from).getTime()).toBeGreaterThanOrEqual(
         from.getTime()
       );
+    }
+  });
+});
+
+describe("amanhaAs", () => {
+  it("amanhã às 9h de SP: 15h SP de 28/10 vira 29/10 12:00 UTC", () => {
+    expect(amanhaAs(9, at("2026-10-28T18:00:00Z")).toISOString()).toBe("2026-10-29T12:00:00.000Z");
+  });
+
+  it("amanhã é o DIA seguinte em SP, não 24h depois: 23h SP de 28/10 (02h UTC de 29/10) vira 29/10 9h SP", () => {
+    // 02:00Z de 29/10 ainda é 28/10 em SP (23h): amanhã é 29/10.
+    expect(amanhaAs(9, at("2026-10-29T02:00:00Z")).toISOString()).toBe("2026-10-29T12:00:00.000Z");
+  });
+
+  it("madrugada de SP (1h de 29/10) ainda conta 'amanhã' como 30/10", () => {
+    expect(amanhaAs(9, at("2026-10-29T04:00:00Z")).toISOString()).toBe("2026-10-30T12:00:00.000Z");
+  });
+
+  it("vira mês e ano", () => {
+    expect(amanhaAs(9, at("2026-12-31T15:00:00Z")).toISOString()).toBe("2027-01-01T12:00:00.000Z");
+  });
+
+  it("a hora devolvida é sempre 9h em SP e dentro da janela de envio", () => {
+    for (const iso of ["2026-08-02T02:00:00Z", "2026-10-28T18:00:00Z", "2027-02-28T23:30:00Z"]) {
+      const out = amanhaAs(9, at(iso));
+      expect(isWithinWindow(out)).toBe(true);
+      const hora = Number(
+        new Intl.DateTimeFormat("en-GB", { timeZone: "America/Sao_Paulo", hour: "2-digit", hour12: false }).format(out)
+      );
+      expect(hora).toBe(9);
     }
   });
 });
