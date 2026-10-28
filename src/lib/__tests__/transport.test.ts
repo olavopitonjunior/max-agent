@@ -166,6 +166,7 @@ describe("adapter pelo perfil", () => {
       status: true,
       typing: true,
       interactive: true,
+      reactions: true,
     });
   });
 

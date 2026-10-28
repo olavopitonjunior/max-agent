@@ -7,10 +7,11 @@ import type { TransportAdapter } from "../types";
  */
 export const metaAdapter: TransportAdapter = {
   name: "meta",
-  capabilities: { templates: true, window24h: true, media: true, groups: false, status: true, typing: true, interactive: true },
+  capabilities: { templates: true, window24h: true, media: true, groups: false, status: true, typing: true, interactive: true, reactions: true },
   sendText: (params) => meta.sendText(params),
   sendTemplate: (params) => meta.sendTemplate(params),
   sendInteractive: (params) => meta.sendInteractive(params),
+  sendReaction: (params) => meta.sendReaction(params),
   markReadTyping: (messageId) => meta.markReadTyping(messageId),
   connectionStatus: () => meta.connectionStatus(),
   downloadMedia: (ref) => meta.downloadMedia(ref),

@@ -8,6 +8,7 @@ import {
   parseWebhook,
   sendTemplate,
   sendInteractive,
+  sendReaction,
   sendText,
   verifyChallenge,
   verifySignature,
@@ -816,6 +817,49 @@ describe("chamadas à Graph API", () => {
         button: "Ver opções",
         sections: [{ rows: [{ id: "op:0", title: "Todas as etapas" }, { id: "op:1", title: "Em contr…", description: "Em contrato longo" }] }],
       },
+    });
+  });
+
+  it("sendInteractive botões com imagemUrl: header image com o link", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.IMG" }] }));
+    await sendInteractive({
+      to: "5511987654321",
+      interativo: {
+        tipo: "botoes",
+        corpo: "Contrato assinado",
+        imagemUrl: "https://app.exemplo.com/og/marco?t=abc",
+        opcoes: [{ id: "av:r1:abrir", titulo: "Abrir negócio" }],
+      },
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.interactive.header).toEqual({
+      type: "image",
+      image: { link: "https://app.exemplo.com/og/marco?t=abc" },
+    });
+    expect(body.interactive.type).toBe("button");
+  });
+
+  it("sendInteractive botões sem imagemUrl: nenhum header", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.NOIMG" }] }));
+    await sendInteractive({
+      to: "5511987654321",
+      interativo: { tipo: "botoes", corpo: "x", opcoes: [{ id: "op:SIM", titulo: "SIM" }] },
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.interactive.header).toBeUndefined();
+  });
+
+  it("sendReaction: type reaction com message_id e emoji", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.REA" }] }));
+    await sendReaction({ to: "5511987654321", messageId: "wamid.IN9", emoji: "✅" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`https://graph.facebook.com/v24.0/${PNID}/messages`);
+    expect(JSON.parse(init.body)).toEqual({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: "5511987654321",
+      type: "reaction",
+      reaction: { message_id: "wamid.IN9", emoji: "✅" },
     });
   });
 
