@@ -11,6 +11,7 @@ import { resolveIdentity } from "./identity";
 import { deployProfile } from "./deploy-profile";
 import { escaparMarkdownWa } from "./aviso/escapar";
 import { renderAvisoTexto } from "./aviso/render";
+import { interativoDoAviso } from "./aviso/interativo";
 import { avisoParaAudiencia, groupKeyDoAviso, type Aviso } from "./aviso/schema";
 import {
   inoperanciaDoErro,
@@ -28,7 +29,7 @@ import {
   parametrosDoCorpo,
   type TemplateDef,
 } from "./templates/catalog";
-import type { BotaoEnviado } from "./transport";
+import type { BotaoEnviado, Interativo } from "./transport";
 import { templatesAprovados } from "./templates/aprovacao";
 
 /**
@@ -242,7 +243,9 @@ export function renderMessage(row: {
       recipientName: row.recipient_name,
       orgName: row.org_name,
       modo: interativoDisponivel() ? "interativo" : "numerado",
-      // Botões só chegam em tarefa posterior; sem eles o link precisa ficar no texto.
+      // Este é o texto inteiro (Newton, MAX_INTERACTIVE=off) e também a reserva
+      // do interativo recusado: o link precisa ficar nele. O corpo dos botões é
+      // montado em `interativoDaLinha`, com o link no botão.
       linkNoBotao: false,
       // Sem roteador das respostas numeradas ainda: o bloco "Responda" fica fora.
       respondaNumerado: false,
@@ -260,6 +263,32 @@ export function renderMessage(row: {
   if (row.link_url && !row.body.includes(row.link_url)) parts.push(row.link_url);
   if (row.org_name) parts.push(`_${escaparMarkdownWa(row.org_name)}_`);
   return parts.filter(Boolean).join("\n\n");
+}
+
+/**
+ * Botões/lista do aviso (M5) para esta linha, ou `null` = só texto. Só onde o
+ * provedor sabe e `MAX_INTERACTIVE` não está `off`, e NUNCA para `deal_party`
+ * (parte do negócio não ganha botão nem imagem).
+ *
+ * O corpo interativo dispensa a linha 👉 quando o link vem num botão; o `body`
+ * de `renderMessage` (com o link) segue como texto de reserva se a Meta recusar
+ * a forma.
+ */
+export function interativoDaLinha(row: {
+  id: string;
+  audience: string;
+  org_name: string;
+  recipient_name: string;
+  aviso?: Aviso | null;
+}): Interativo | null {
+  if (!row.aviso || row.audience === "deal_party" || !interativoDisponivel()) return null;
+  const corpo = renderAvisoTexto(row.aviso, {
+    recipientName: row.recipient_name,
+    orgName: row.org_name,
+    modo: "interativo",
+    linkNoBotao: true,
+  });
+  return interativoDoAviso(row.aviso, row.id, corpo);
 }
 
 export interface DispatchTotals {
@@ -769,7 +798,7 @@ export async function dispatchDue(
       if(!row.dispatch_fence&&deliveryFence.privacyEpoch>0)throw new Error('execution_revoked');
       const res=await withTransportFence({table:'outbox',id:row.id,phone:row.phone,fence:deliveryFence},()=>envioTemplate
         ? sendTemplate({to:row.phone,name:envioTemplate.name,lang:envioTemplate.lang,bodyParams:parametrosDoCorpo(envioTemplate,row),botoes:botoesDaLinha(envioTemplate,row.id)})
-        : sendText({to:row.phone,body:renderMessage(row)}));
+        : sendText({to:row.phone,body:renderMessage(row),interativo:interativoDaLinha(row)}));
       log.info(envioTemplate ? "outbox.enviado_template" : "outbox.enviado", {
         rowId: row.id,
         orgId: row.org_id,
