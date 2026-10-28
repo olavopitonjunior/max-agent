@@ -122,6 +122,17 @@ describe("buildSystemPrompt", () => {
     expect(p).toContain("RE/MAX Trio");
     expect(p).toContain("Marcia");
   });
+
+  /**
+   * Persona: emoji contido (no máximo 1 por bloco), negrito só no essencial e
+   * listas curtas. A regra antiga "sem emoji" foi substituída de propósito.
+   */
+  it("persona: emoji contido, negrito no essencial, sem a regra antiga de 'sem emoji'", () => {
+    const p = buildSystemPrompt(base);
+    expect(p).toMatch(/no máximo 1 emoji por bloco/i);
+    expect(p).toContain("negrito no essencial");
+    expect(p).not.toContain("sem emoji");
+  });
 });
 
 describe("shouldSearch", () => {
