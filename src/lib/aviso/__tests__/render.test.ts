@@ -118,7 +118,7 @@ describe("renderAvisoTexto", () => {
         ...BASE,
         acoes: [{ id: "reenviar_link" }, { id: "lembrar_amanha" }, { id: "ver_formulario" }],
       },
-      { ...CTX, modo: "numerado" }
+      { ...CTX, modo: "numerado", respondaNumerado: true }
     );
     expect(out).toContain("Responda:\n*1* · reenviar link\n*2* · lembrar amanhã\n\n_RE/MAX Trio_");
     expect(out).not.toContain("*3*");
@@ -128,15 +128,21 @@ describe("renderAvisoTexto", () => {
   it("rótulos fixos de concluir, adiar e próximo passo", () => {
     const out = renderAvisoTexto(
       { ...BASE, acoes: [{ id: "concluir" }, { id: "adiar_1d" }, { id: "criar_atividade" }, { id: "abrir" }] },
-      { ...CTX, modo: "numerado" }
+      { ...CTX, modo: "numerado", respondaNumerado: true }
     );
     expect(out).toContain("*1* · concluir\n*2* · adiar 1 dia\n*3* · próximo passo");
     expect(out).not.toContain("*4*");
   });
 
   it("modo numerado só com ações de link: sem bloco Responda", () => {
-    const out = renderAvisoTexto({ ...BASE, acoes: [{ id: "abrir" }, { id: "ver_proposta" }] }, { ...CTX, modo: "numerado" });
+    const out = renderAvisoTexto({ ...BASE, acoes: [{ id: "abrir" }, { id: "ver_proposta" }] }, { ...CTX, modo: "numerado", respondaNumerado: true });
     expect(out).not.toContain("Responda:");
+  });
+
+  it("modo numerado sem roteador (padrão): sem bloco Responda", () => {
+    const out = renderAvisoTexto({ ...BASE, acoes: [{ id: "reenviar_link" }] }, { ...CTX, modo: "numerado" });
+    expect(out).not.toContain("Responda:");
+    expect(out).toContain("👉 Abrir negócio:");
   });
 
   it("modo interativo não numera nada", () => {

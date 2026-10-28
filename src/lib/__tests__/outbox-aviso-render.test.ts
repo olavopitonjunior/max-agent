@@ -45,20 +45,24 @@ describe("renderMessage com aviso", () => {
     expect(out).not.toContain("Responda:");
   });
 
-  it("Meta (interativo) com MAX_INTERACTIVE=off: modo numerado, pois nenhum botão sai", () => {
+  it("Meta (interativo) com MAX_INTERACTIVE=off: modo numerado, mas sem Responda até existir o roteador", () => {
     vi.stubEnv("MAX_INTERACTIVE", "off");
     const out = renderMessage({ ...LINHA, aviso: AVISO });
-    expect(out).toContain("Responda:\n*1* · reenviar link\n*2* · lembrar amanhã");
+    // Sem roteador das respostas numeradas ainda, o bloco "Responda" não sai.
+    expect(out).not.toContain("Responda:");
+    expect(out).toContain("👉 Abrir negócio:");
   });
 
   it("Meta com MAX_INTERACTIVE ligado: modo interativo, sem bloco Responda", () => {
     expect(renderMessage({ ...LINHA, aviso: AVISO })).not.toContain("Responda:");
   });
 
-  it("transporte sem interativo (log): modo numerado", () => {
+  it("transporte sem interativo (log): modo numerado, sem Responda", () => {
     vi.stubEnv("AGENT_TRANSPORT", "log");
     const out = renderMessage({ ...LINHA, aviso: AVISO });
-    expect(out).toContain("Responda:\n*1* · reenviar link\n*2* · lembrar amanhã");
+    // Sem roteador das respostas numeradas ainda, o bloco "Responda" não sai.
+    expect(out).not.toContain("Responda:");
+    expect(out).toContain("👉 Abrir negócio:");
   });
 
   it("aviso nulo: formato de hoje, com a assinatura em itálico escapado", () => {

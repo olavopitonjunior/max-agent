@@ -42,6 +42,13 @@ describe("avisoSchema", () => {
     expect(avisoSchema.safeParse({ ...VALIDO, forma: "lista", acoes: acoes(11) }).success).toBe(false);
   });
 
+  it("recusa URL do link acima de 900 chars (cabe inteira no teto de 1500)", () => {
+    const url = (n: number) => "https://x.test/" + "a".repeat(n - 15);
+    const comLink = (u: string) => ({ ...VALIDO, link: { rotulo: "Abrir", url: u } });
+    expect(avisoSchema.safeParse(comLink(url(900))).success).toBe(true);
+    expect(avisoSchema.safeParse(comLink(url(901))).success).toBe(false);
+  });
+
   it("recusa titulo com 121 chars e aceita 120", () => {
     expect(avisoSchema.safeParse({ ...VALIDO, titulo: "a".repeat(121) }).success).toBe(false);
     expect(avisoSchema.safeParse({ ...VALIDO, titulo: "a".repeat(120) }).success).toBe(true);

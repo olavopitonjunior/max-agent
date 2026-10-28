@@ -59,7 +59,8 @@ export const avisoSchema = z
     link: z
       .object({
         rotulo: umaLinha(AVISO_TEXTO_MAX),
-        url: z.string().url().max(2048),
+        // ≤900: a URL vai inteira no texto (teto 1500); maior que isso o link sairia cortado.
+        url: z.string().url().max(900),
       })
       .nullable(),
     acoes: z

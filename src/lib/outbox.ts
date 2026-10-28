@@ -244,6 +244,8 @@ export function renderMessage(row: {
       modo: interativoDisponivel() ? "interativo" : "numerado",
       // Botões só chegam em tarefa posterior; sem eles o link precisa ficar no texto.
       linkNoBotao: false,
+      // Sem roteador das respostas numeradas ainda: o bloco "Responda" fica fora.
+      respondaNumerado: false,
     });
   }
   // Aviso de crédito (M3): texto fixo com o link; sem os params, o formato genérico.

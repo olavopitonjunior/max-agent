@@ -14,6 +14,12 @@ export interface AvisoRenderCtx {
    * sai. Padrão `false`: sem botão, o link precisa estar no texto.
    */
   linkNoBotao?: boolean;
+  /**
+   * `true` só quando existe o roteador das respostas numeradas (Newton e Meta
+   * sem botões). Sem ele, "*1* · …" não tem quem trate e o "1" pode cair num
+   * fluxo numerado já aberto (ex.: escolha de proposta). Padrão `false`.
+   */
+  respondaNumerado?: boolean;
 }
 
 /** Ações que abrem uma URL: o botão/linha 👉 cumpre, nunca entram na lista numerada. */
@@ -80,7 +86,7 @@ export function renderAvisoTexto(aviso: Aviso, ctx: AvisoRenderCtx): string {
   const linkNaLinha = aviso.link && !(ctx.linkNoBotao === true && temAcaoDeLink);
 
   let responda: string | null = null;
-  if (ctx.modo === "numerado") {
+  if (ctx.modo === "numerado" && ctx.respondaNumerado === true) {
     const opcoes = aviso.acoes
       .map((a) => ROTULO_NUMERADO[a.id])
       .filter((r): r is string => !!r);
