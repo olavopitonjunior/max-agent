@@ -155,7 +155,7 @@ export function interativoDoResumo(corpo: string, alvo: { rowId: string; acao: A
   return {
     tipo: "botoes",
     corpo,
-    opcoes: [{ id: `${PREFIXO_AVISO}${alvo.rowId}:${alvo.acao}`, titulo: ROTULOS_BOTAO.abrir }],
+    opcoes: [{ id: `${PREFIXO_AVISO}${alvo.rowId}:${alvo.acao}`, titulo: ROTULOS_BOTAO[alvo.acao] }],
   };
 }
 

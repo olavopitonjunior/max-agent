@@ -137,6 +137,16 @@ export const MARCA_ENVIO_INCERTO =
   "envio_incerto: timeout no envio do template — não reenviado para não duplicar";
 
 /**
+ * Resumo de rajada cujo envio foi revogado (privacidade/identidade mudou entre
+ * o claim e o envio). Nada saiu: as linhas vão a `dropped`, nunca a `sent`.
+ */
+export const MARCA_ENVIO_REVOGADO =
+  "envio_revogado: privacidade ou identidade mudou antes do envio — resumo não enviado";
+
+/** Marca do resumo na linha: o `provider_message_id` quando a transportadora não devolve um. */
+const marcaDoResumo = (primeiraLinhaId: string) => `resumo:${primeiraLinhaId}`;
+
+/**
  * Fila de saída das notificações proativas.
  *
  * Existe porque o ImobPro passou a entregar a qualquer hora: os call-sites de
@@ -536,7 +546,7 @@ async function montarLotes(
     const refFence = DispatchFenceSchema.parse(ref.dispatch_fence);
     const lote = [...membros, ...irmaos.filter(podeAgrupar)]
       .filter((r) => mesmaFence(DispatchFenceSchema.parse(r.dispatch_fence), refFence))
-      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime() || a.id.localeCompare(b.id));
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()); // estável: empate no ms mantém a ordem do claim
     if (lote.length < 2) continue;
 
     const ids = new Set(lote.map((r) => r.id));
@@ -573,6 +583,8 @@ async function despacharResumo(p: {
   const avisos = lote.map((r) => r.aviso as Aviso);
   const link = avisos.find((a) => a.link)?.link?.url ?? lote.find((r) => r.link_url)?.link_url ?? null;
 
+  const marca = marcaDoResumo(ref.id);
+
   // Texto de reserva (e do transporte sem botão): com a linha 👉 e sem bloco "Responda:".
   const texto = resumoDaRajada(avisos, { orgName: ref.org_name, link });
   // Meta com botões: o link vai no botão, e o corpo cabe em 1024.
@@ -588,7 +600,15 @@ async function despacharResumo(p: {
     : null;
 
   try {
-    await query(`UPDATE outbox SET send_started_at = now(), template_name = NULL WHERE id = ANY($1::text[])`, [ids]);
+    // O marcador do resumo entra JUNTO com `send_started_at`, antes do envio: a
+    // retomada de órfã e o envio incerto liquidam sem mexer em `provider_message_id`,
+    // e o `numero.ts` precisa reconhecer um resumo mesmo quando o Newton não devolve
+    // `messageId` (null) ou quando a liquidação final não chegou a gravar.
+    await query(
+      `UPDATE outbox SET send_started_at = now(), template_name = NULL, provider_message_id = $2
+        WHERE id = ANY($1::text[])`,
+      [ids, marca]
+    );
     const res = await withTransportFence({ table: "outbox", id: ref.id, phone: ref.phone, fence }, () =>
       sendText({ to: ref.phone, body: texto, interativo })
     );
@@ -606,7 +626,7 @@ async function despacharResumo(p: {
             SET status = 'sent', sent_at = now(), provider_message_id = $2,
                 template_name = NULL, last_error = NULL
           WHERE id = ANY($1::text[])`,
-        [ids, res.messageId]
+        [ids, res.messageId ?? marca]
       );
     await settle().catch(async () => {
       await new Promise((r) => setTimeout(r, 500));
@@ -629,6 +649,20 @@ async function despacharResumo(p: {
       return "seguir";
     }
     if (err instanceof Error && err.message === "execution_revoked") {
+      // Nada foi enviado: limpa o marcador (senão a retomada de órfã liquidaria como
+      // `sent` um aviso que nunca saiu) e encerra as linhas em `dropped`.
+      await query(
+        `UPDATE outbox
+            SET status = 'dropped', last_error = $2, send_started_at = NULL, provider_message_id = NULL
+          WHERE id = ANY($1::text[]) AND status = 'sending'`,
+        [ids, MARCA_ENVIO_REVOGADO]
+      ).catch((e) =>
+        console.error(
+          `[outbox] revogação do resumo ${ids.join(",")} NÃO registrada — linhas em 'sending'; intervenção manual necessária:`,
+          e instanceof Error ? e.message : String(e)
+        )
+      );
+      log.warn("outbox.resumo_revogado", { rowIds: ids, orgId: ref.org_id });
       totals.blocked += ids.length;
       return "seguir";
     }
@@ -639,6 +673,7 @@ async function despacharResumo(p: {
       await query(
         `UPDATE outbox
             SET status = 'pending', attempts = GREATEST(attempts - 1, 0), send_started_at = NULL,
+                provider_message_id = NULL,
                 deliver_after = now() + interval '5 minutes', last_error = $2
           WHERE id = ANY($1::text[]) AND status = 'sending'`,
         [ids, MARCA_REQUER_TEMPLATE]
@@ -657,7 +692,8 @@ async function despacharResumo(p: {
     if (inop) {
       await query(
         `UPDATE outbox
-            SET status = 'pending', attempts = GREATEST(attempts - 1, 0), send_started_at = NULL, last_error = $2
+            SET status = 'pending', attempts = GREATEST(attempts - 1, 0), send_started_at = NULL,
+                provider_message_id = NULL, last_error = $2
           WHERE id = ANY($1::text[]) AND status = 'sending'`,
         [p.restantes, `${MARCA_CANAL_INOPERANTE} (${inop.motivo}) — envio recusado, tentativa não contada`]
       ).catch((e) =>
@@ -680,7 +716,8 @@ async function despacharResumo(p: {
       const detalhe = err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
       await query(
         `UPDATE outbox
-            SET status = 'failed', error_code = $2, last_error = $3, send_started_at = NULL, reported_at = NULL
+            SET status = 'failed', error_code = $2, last_error = $3, send_started_at = NULL,
+                provider_message_id = NULL, reported_at = NULL
           WHERE id = ANY($1::text[]) AND status = 'sending'`,
         [ids, codigo, detalhe]
       ).catch((e) =>
@@ -695,12 +732,40 @@ async function despacharResumo(p: {
 
     // Qualquer outro erro: cada linha trata como se fosse dela (backoff por tentativa; esgotou, `failed`).
     const message = err instanceof Error ? err.message : String(err);
+
+    // Timeout: o resumo pode ter saído. Devolver as N linhas ao backoff individual
+    // reenviaria os N avisos (a pessoa já pode ter recebido o resumo). Liquida como
+    // envio incerto, como o template (ver MARCA_ENVIO_INCERTO); a marca do resumo fica.
+    if (/^timeout de \d+ms em /.test(message)) {
+      const incerto = () =>
+        query(
+          `UPDATE outbox
+              SET status = 'sent', sent_at = now(), provider_message_id = $3,
+                  last_error = $2, send_started_at = NULL
+            WHERE id = ANY($1::text[])`,
+          [ids, MARCA_ENVIO_INCERTO, marca]
+        );
+      await incerto().catch(async () => {
+        await new Promise((r) => setTimeout(r, 500));
+        await incerto().catch((e) =>
+          console.error(
+            `[outbox] envio incerto do resumo NÃO registrado (${ids.join(",")}) — a retomada de órfã ` +
+              `liquida como 'sent' sem reenviar:`,
+            e instanceof Error ? e.message : String(e)
+          )
+        );
+      });
+      log.warn("outbox.envio_incerto_resumo", { rowIds: ids, orgId: ref.org_id });
+      totals.sent += ids.length;
+      return "seguir";
+    }
     const falhar = () =>
       query(
         `UPDATE outbox
             SET status = CASE WHEN attempts >= $3 THEN 'failed' ELSE 'pending' END,
                 last_error = $2,
                 send_started_at = NULL,
+                provider_message_id = NULL,
                 deliver_after = CASE WHEN attempts >= $3 THEN deliver_after
                                      ELSE now() + ((attempts * 5)::text || ' minutes')::interval END
           WHERE id = ANY($1::text[])`,

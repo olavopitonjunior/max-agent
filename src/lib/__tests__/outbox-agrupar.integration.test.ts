@@ -23,7 +23,8 @@ vi.mock("../meta", async (orig) => ({
   connectionStatus: vi.fn().mockResolvedValue({ connected: true, raw: {} }),
 }));
 
-const { enqueue, dispatchDue } = await import("../outbox");
+const { enqueue, dispatchDue, MARCA_ENVIO_INCERTO, MARCA_ENVIO_REVOGADO } = await import("../outbox");
+const { payloadDoNumero } = await import("../aviso/numero");
 const { MetaHttpError } = await import("../transport/erro");
 const { atrasoDeAgrupamento } = await import("../aviso/agrupar");
 const { nextDeliveryTime } = await import("../window");
@@ -544,6 +545,98 @@ d("agrupar rajadas por negócio (Postgres real)", () => {
       expect(resumo?.texto).toContain("Dois");
       expect(resumo?.texto).not.toContain("Três");
       expect(s.find((x) => x.texto.includes("*Três*"))).toBeDefined();
+    });
+
+    it("Newton sem messageId: o lote sai marcado como resumo e o '1' depois não escolhe linha nenhuma", async () => {
+      vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+      vi.stubEnv("NEWTON_BRIDGE_URL", "https://bridge.test");
+      vi.stubEnv("NEWTON_BRIDGE_TOKEN", "tok-teste");
+      const fetchMock = vi.fn(
+        async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ provider: "zapi" }), { status: 200 })
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      try {
+        await query(`DELETE FROM conversation_window WHERE phone = $1`, [FONE]);
+        const b1 = await enfileirar(aviso(AVISO_B, "B um"));
+        const b2 = await enfileirar(aviso(AVISO_B, "B dois"));
+        const b3 = await enfileirar(aviso(AVISO_B, "B três"));
+        await vencer(b1.id, b2.id, b3.id);
+        const totals = await dispatchDue();
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(totals.sent).toBe(3);
+        for (const id of [b1.id, b2.id, b3.id]) {
+          const r = await linha(id);
+          expect(r.status).toBe("sent");
+          expect(r.provider_message_id).toBe((await linha(b1.id)).provider_message_id);
+          expect([b1.id, b2.id, b3.id].map((x) => `resumo:${x}`)).toContain(r.provider_message_id);
+        }
+        // resumo nunca é resposta numérica: nenhum payload `av:` sai, então nenhuma ação roda
+        expect(await payloadDoNumero(FONE, "1", new Date())).toBeNull();
+        expect(await payloadDoNumero(FONE, "2", new Date())).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("execution_revoked no lote: nada sai, as N linhas vão a dropped sem marcador e nunca a sent", async () => {
+      sendInteractive.mockRejectedValueOnce(new Error("execution_revoked"));
+      const a1 = await enfileirar(aviso(AVISO_A, "Um"));
+      const a2 = await enfileirar(aviso(AVISO_A, "Dois"));
+      const a3 = await enfileirar(aviso(AVISO_A, "Três"));
+      await vencer(a1.id, a2.id, a3.id);
+      const t1 = await dispatchDue();
+      expect(t1.blocked).toBe(3);
+      expect(t1.sent).toBe(0);
+      for (const id of [a1.id, a2.id, a3.id]) {
+        const r = await linha(id);
+        expect(r.status).toBe("dropped");
+        expect(r.send_started_at).toBeNull();
+        expect(r.provider_message_id).toBeNull();
+        expect(r.last_error).toBe(MARCA_ENVIO_REVOGADO);
+      }
+      // não é reivindicada de novo, nem liquidada como enviada pela retomada de órfã
+      vi.clearAllMocks();
+      sendText.mockResolvedValue({ messageId: "MID-T" });
+      sendInteractive.mockResolvedValue({ messageId: "MID-I" });
+      const t2 = await dispatchDue();
+      expect(t2.claimed).toBe(0);
+      expect(saidas()).toHaveLength(0);
+      expect((await linha(a1.id)).status).toBe("dropped");
+    });
+
+    it("timeout no envio do resumo: envio incerto, as N linhas ficam sent com a marca e NÃO são reenviadas", async () => {
+      sendInteractive.mockRejectedValueOnce(new Error("timeout de 15000ms em /x/messages"));
+      const a1 = await enfileirar(aviso(AVISO_A, "Um"));
+      const a2 = await enfileirar(aviso(AVISO_A, "Dois"));
+      await vencer(a1.id, a2.id);
+      const t1 = await dispatchDue();
+      expect(t1.sent).toBe(2);
+      expect(t1.failed).toBe(0);
+      for (const id of [a1.id, a2.id]) {
+        const r = await linha(id);
+        expect(r.status).toBe("sent");
+        expect(r.last_error).toBe(MARCA_ENVIO_INCERTO);
+        expect(r.send_started_at).toBeNull();
+        expect(r.provider_message_id).toBe((await linha(a1.id)).provider_message_id);
+        expect([a1.id, a2.id].map((x) => `resumo:${x}`)).toContain(r.provider_message_id);
+      }
+      vi.clearAllMocks();
+      sendText.mockResolvedValue({ messageId: "MID-T" });
+      sendInteractive.mockResolvedValue({ messageId: "MID-I" });
+      await dispatchDue();
+      expect(saidas()).toHaveLength(0);
+      expect(await payloadDoNumero(FONE, "1", new Date())).toBeNull();
+    });
+
+    it("falha comum do resumo não deixa a marca do resumo nas linhas devolvidas a pending", async () => {
+      sendInteractive.mockRejectedValueOnce(new Error("boom"));
+      const a1 = await enfileirar(aviso(AVISO_A, "Um"));
+      const a2 = await enfileirar(aviso(AVISO_A, "Dois"));
+      await vencer(a1.id, a2.id);
+      await dispatchDue();
+      for (const id of [a1.id, a2.id]) expect((await linha(id)).provider_message_id).toBeNull();
     });
 
     it("falha no envio do resumo: nenhuma linha se perde; cada uma volta com backoff e sai sozinha depois", async () => {

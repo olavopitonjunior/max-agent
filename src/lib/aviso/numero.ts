@@ -35,8 +35,9 @@ export interface UltimoAviso {
   sent_at: Date;
   aviso: Aviso | null;
   /**
-   * A linha saiu dentro de um resumo de rajada (M8): outras linhas dividem o
-   * mesmo `provider_message_id`. O resumo não tem bloco "Responda:", então o
+   * A linha saiu dentro de um resumo de rajada (M8): o `provider_message_id`
+   * começa com `resumo:` (marca gravada pelo despacho, que cobre transporte sem
+   * `messageId`, envio incerto e órfã) ou outras linhas dividem o mesmo id. O resumo não tem bloco "Responda:", então o
    * "1" digitado depois dele não é resposta a aviso nenhum.
    */
   resumo?: boolean;
@@ -53,10 +54,11 @@ export const dadosDoNumero: DadosDoNumero = {
   async ultimoEnviado(phone) {
     const rows = await query<{ id: string; audience: string; sent_at: Date; aviso: Aviso | null; resumo: boolean }>(
       `SELECT o.id, o.audience, o.sent_at, o.aviso,
-              (o.provider_message_id IS NOT NULL AND EXISTS (
-                 SELECT 1 FROM outbox x
-                  WHERE x.provider_message_id = o.provider_message_id AND x.id <> o.id
-              )) AS resumo
+              (o.provider_message_id LIKE 'resumo:%'
+               OR (o.provider_message_id IS NOT NULL AND EXISTS (
+                     SELECT 1 FROM outbox x
+                      WHERE x.provider_message_id = o.provider_message_id AND x.id <> o.id
+                  ))) AS resumo
          FROM outbox o
         WHERE o.phone = $1 AND o.status = 'sent' AND o.sent_at IS NOT NULL
         ORDER BY o.sent_at DESC LIMIT 1`,

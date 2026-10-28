@@ -133,6 +133,12 @@ describe("interativoDoResumo", () => {
     });
   });
 
+  it("o rótulo segue a ação do alvo (ver_formulario não diz 'Abrir negócio')", () => {
+    expect(interativoDoResumo("corpo", { rowId: "r1", acao: "ver_formulario" })?.opcoes).toEqual([
+      { id: "av:r1:ver_formulario", titulo: "🔗 Ver formulário" },
+    ]);
+  });
+
   it("corpo acima de 1024 não vira interativo", () => {
     expect(interativoDoResumo("x".repeat(1025), { rowId: "r1", acao: "abrir" })).toBeNull();
   });

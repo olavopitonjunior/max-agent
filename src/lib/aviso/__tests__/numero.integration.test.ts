@@ -139,6 +139,12 @@ d("resposta numérica ao aviso (Postgres real)", () => {
     expect(await payloadDoNumero(FONE, "1", new Date())).toBeNull();
   });
 
+  it("marca 'resumo:' (Newton sem messageId, envio incerto): o '1' não vale mesmo com uma linha só", async () => {
+    const a = await enviada("n-resumo-marca", 1);
+    await query(`UPDATE outbox SET provider_message_id = $2 WHERE id = $1`, [a, `resumo:${a}`]);
+    expect(await payloadDoNumero(FONE, "1", new Date())).toBeNull();
+  });
+
   it("provider_message_id único (envio normal) continua valendo", async () => {
     const a = await enviada("n-unico", 1);
     await query(`UPDATE outbox SET provider_message_id = 'MID-UNICO' WHERE id = $1`, [a]);
