@@ -2,13 +2,16 @@ import {captureDispatchFence,DispatchFenceSchema,withCapturedPrivacy,withDeliver
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { nextDeliveryTime } from "./window";
-import { sendText, sendTemplate, connectionStatus, capabilities, type ConnectionState } from "./transport";
+import { sendText, sendTemplate, connectionStatus, capabilities, interativoDisponivel, type ConnectionState } from "./transport";
 import { janelaAberta } from "./janela24h";
 import { reservarAvisoNeutro } from "./atividades-pendentes";
 import { seedNotification } from "@/graph/graph";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
 import { deployProfile } from "./deploy-profile";
+import { escaparMarkdownWa } from "./aviso/escapar";
+import { renderAvisoTexto } from "./aviso/render";
+import { avisoParaAudiencia, groupKeyDoAviso, type Aviso } from "./aviso/schema";
 import {
   inoperanciaDoErro,
   falhaDaMensagemMeta,
@@ -149,6 +152,8 @@ export interface EnqueueParams {
   kind?: string | null;
   /** Variáveis do template, já limpas pelo /notify. */
   params?: Record<string, string> | null;
+  /** Contrato `aviso` v1 (migration 027). Para `deal_party` é regravado sem ações/imagem. */
+  aviso?: Aviso | null;
 }
 
 export type EnqueueResult =
@@ -164,6 +169,10 @@ export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
   const id = randomUUID();
   const deliverAfter = nextDeliveryTime();
   const dispatchFence=await captureDispatchFence(p.phone);
+  // Segunda trava (a primeira é o /notify): quem enfileirar direto também não
+  // leva ação nem imagem para parte do negócio.
+  const aviso = avisoParaAudiencia(p.audience, p.aviso);
+  const groupKey = groupKeyDoAviso(p.dealId, aviso);
 
   // `ON CONFLICT DO NOTHING` + RETURNING: a linha só volta quando FOI inserida
   // agora. Conflito devolve zero linhas, e aí a chave já existia — que é
@@ -171,8 +180,9 @@ export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
   const inserted = await withCapturedPrivacy(dispatchFence,(client)=>client.query<{id:string}>(
     `INSERT INTO outbox
        (id, org_id, dedupe_key, audience, phone, recipient_name,
-        title, body, link_url, deal_id, org_name, deliver_after, kind, params, dispatch_fence)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        title, body, link_url, deal_id, org_name, deliver_after, kind, params, dispatch_fence,
+        aviso, group_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
      ON CONFLICT (dedupe_key) DO NOTHING
      RETURNING id`,
     [
@@ -191,6 +201,8 @@ export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
       p.kind ?? null,
       p.params ? JSON.stringify(p.params) : null,
       JSON.stringify(dispatchFence),
+      aviso ? JSON.stringify(aviso) : null,
+      groupKey,
     ]
   ));
   const rows=inserted.rows;
@@ -222,7 +234,20 @@ export function renderMessage(row: {
   recipient_name: string;
   kind?: string | null;
   params?: Record<string, string> | null;
+  /** Contrato `aviso` v1: quando existe, o texto é todo dele (title/body ficam de reserva). */
+  aviso?: Aviso | null;
 }): string {
+  if (row.aviso) {
+    return renderAvisoTexto(row.aviso, {
+      recipientName: row.recipient_name,
+      orgName: row.org_name,
+      modo: interativoDisponivel() ? "interativo" : "numerado",
+      // Botões só chegam em tarefa posterior; sem eles o link precisa ficar no texto.
+      linkNoBotao: false,
+      // Sem roteador das respostas numeradas ainda: o bloco "Responda" fica fora.
+      respondaNumerado: false,
+    });
+  }
   // Aviso de crédito (M3): texto fixo com o link; sem os params, o formato genérico.
   if (row.kind === "credit_result") {
     const aviso = textoDoAvisoDeCredito(row.params, row.link_url);
@@ -233,7 +258,7 @@ export function renderMessage(row: {
   const parts = [`${hello}*${row.title}*`, row.body];
   // Avisos de proposta já chegam com a URL no corpo; repetir duplicava o link.
   if (row.link_url && !row.body.includes(row.link_url)) parts.push(row.link_url);
-  if (row.org_name) parts.push(`— ${row.org_name}`);
+  if (row.org_name) parts.push(`_${escaparMarkdownWa(row.org_name)}_`);
   return parts.filter(Boolean).join("\n\n");
 }
 
@@ -286,6 +311,10 @@ interface OutboxRow extends Record<string, unknown> {
   kind: string | null;
   /** Variáveis do fato, já limpas pelo /notify — jsonb, o driver devolve objeto. */
   params: Record<string, string> | null;
+  /** Contrato `aviso` v1 (migration 027) — jsonb, o driver devolve objeto. */
+  aviso: Aviso | null;
+  /** `dealId` quando o aviso agrupa por negócio (nível ≠ C); `null` caso contrário. */
+  group_key: string | null;
   /** Desfecho da tentativa anterior — diz qual template a Meta acabou de recusar. */
   last_error: string | null;
   /** Quando o aviso nasceu — conta o prazo do represado (`HORAS_PARA_EXPIRAR`). */
@@ -474,7 +503,7 @@ export async function dispatchDue(
       )
       RETURNING id, org_id, audience, phone, title, body, link_url, org_name,
                 recipient_name, attempts, send_started_at, kind, params, last_error,
-                created_at, dispatch_fence`,
+                created_at, dispatch_fence, aviso, group_key`,
     [limit, String(SENDING_ORPHAN_MINUTES)]
   );
   totals.claimed = rows.length;

@@ -369,7 +369,7 @@ describe("renderMessage", () => {
     expect(out).toContain("Oi, Marcia!");
     expect(out).toContain("*Contrato assinado*");
     expect(out).toContain("https://imobpro.ia.br/deals/1");
-    expect(out).toContain("— RE/MAX Trio");
+    expect(out).toContain("_RE/MAX Trio_");
   });
 
   it("sem nome do destinatário não vira 'Oi, !'", () => {
