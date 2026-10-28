@@ -215,6 +215,8 @@ d("despacho do aviso (Postgres real)", () => {
       expect(sendText).not.toHaveBeenCalled();
       expect(corpos).toHaveLength(1);
       expect(corpos[0].body).toContain("Oi, Ana! ⏳ *Formulário aguardando*");
+      // Sem botão, o Newton recebe o bloco numerado (a resposta "2" é tratada por `aviso/numero.ts`).
+      expect(corpos[0].body).toContain("Responda:\n*1* · reenviar link\n*2* · lembrar amanhã");
       expect(Object.keys(corpos[0])).not.toContain("interactive");
     } finally {
       vi.unstubAllGlobals();

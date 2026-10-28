@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Aviso } from "@/lib/aviso/schema";
 
 /**
@@ -30,6 +30,7 @@ const { executarAcao } = await import("@/lib/acao");
 const { consultarEscopo } = await import("@/lib/scope");
 const { sendReaction } = await import("@/lib/transport");
 const { dadosDoAviso } = await import("@/lib/aviso-botao");
+const { dadosDoNumero } = await import("@/lib/aviso/numero");
 
 const llm = complete as unknown as ReturnType<typeof vi.fn>;
 const acao = executarAcao as unknown as ReturnType<typeof vi.fn>;
@@ -140,5 +141,71 @@ describe("botão av: no grafo", () => {
     acao.mockResolvedValue({ status: 200, body: { ok: true } });
     const s = await run("📨 Reenviar link", {}, "m1", "av:row1:reenviar_link");
     expect(s.reply).not.toMatch(/d[úu]vida/i);
+  });
+});
+
+describe("resposta numérica ao aviso no grafo (M7)", () => {
+  const ultimoEnviado = () => vi.spyOn(dadosDoNumero, "ultimoEnviado");
+  const houveResposta = () => vi.spyOn(dadosDoNumero, "houveRespostaDepois");
+
+  beforeEach(() => {
+    // Sem botão: Meta com o kill switch desligado (o mesmo critério do texto do aviso).
+    vi.stubEnv("MAX_INTERACTIVE", "off");
+    ultimoEnviado().mockResolvedValue({
+      id: "row1", audience: "platform_user", sent_at: new Date(Date.now() - 60 * 60_000), aviso: AVISO,
+    });
+    houveResposta().mockResolvedValue(false);
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("'1' vira a 1ª ação numerada e roda como o toque do botão (sem modelo)", async () => {
+    acao.mockResolvedValue({ status: 200, body: { ok: true } });
+    const s = await run("1", {}, "wamid.N1");
+    expect(acao).toHaveBeenCalledWith(
+      expect.objectContaining({ verb: "form.remind", args: { deal_id: "deal1", form_id: "f1" }, idempotencyKey: "wamid.N1" })
+    );
+    expect(s.reply).toContain("Reenviei o link");
+    expect(reacao).toHaveBeenCalledWith({ to: FONE, messageId: "wamid.N1", emoji: "✅" });
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("'2' é a 2ª da lista numerada (concluir), e abre o fluxo de atividade", async () => {
+    leitura.mockResolvedValue({ items: [{ id: "atv_1", titulo: "Ligar para o João" }], truncated: false });
+    const s = await run("2", {}, "wamid.N2");
+    expect(s.fluxo).toMatchObject({ kind: "atividade", operacao: "concluir", etapa: "confirmacao" });
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("com botões disponíveis (Meta interativa) o '1' NÃO é interceptado", async () => {
+    vi.stubEnv("MAX_INTERACTIVE", "");
+    llm.mockResolvedValue({ text: "ok", toolCalls: [], usage: {} });
+    const spy = ultimoEnviado();
+    await run("1", {}, "wamid.N3").catch(() => undefined);
+    expect(spy).not.toHaveBeenCalled();
+    expect(acao).not.toHaveBeenCalled();
+    expect(reacao).not.toHaveBeenCalled();
+  });
+
+  it("fluxo em coleta aberto: o '1' é da coleta, não do aviso", async () => {
+    const fluxo = { kind: "escolha", etapa: "escolher", opcoes: [], expiraEm: Date.now() + 60_000 };
+    await run("1", { fluxo }, "wamid.N4").catch(() => undefined);
+    expect(acao).not.toHaveBeenCalled();
+    expect(reacao).not.toHaveBeenCalled();
+  });
+
+  it("sem aviso recente (payloadDoNumero null): segue a conversa normal", async () => {
+    ultimoEnviado().mockResolvedValue(null);
+    llm.mockResolvedValue({ text: "ok", toolCalls: [], usage: {} });
+    await run("2", {}, "wamid.N5").catch(() => undefined);
+    expect(acao).not.toHaveBeenCalled();
+    expect(reacao).not.toHaveBeenCalled();
+  });
+
+  it("texto que não é um dígito 1–3 nem consulta o banco", async () => {
+    llm.mockResolvedValue({ text: "ok", toolCalls: [], usage: {} });
+    const spy = ultimoEnviado();
+    await run("4", {}, "wamid.N6").catch(() => undefined);
+    await run("oi 1", {}, "wamid.N7").catch(() => undefined);
+    expect(spy).not.toHaveBeenCalled();
   });
 });

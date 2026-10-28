@@ -13,6 +13,7 @@ import { scopedThreadId, runEvent } from "@/lib/runtime/context";
 import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { rotearBotaoDeAtividade } from "@/lib/atividade-botao";
 import { ehPayloadDeAviso, rotearBotaoDeAviso } from "@/lib/aviso-botao";
+import { payloadDoNumero } from "@/lib/aviso/numero";
 import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
 import { iniciarPreferencias, preferenciasPermitidas, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
 import { resolverReferencia } from "./referencias";
@@ -70,7 +71,7 @@ import {
   MUDAR_MINHAS_NOTIFICACOES,
   type PendingAction,
 } from "./tools";
-import { downloadMedia, sendReaction } from "@/lib/transport";
+import { downloadMedia, sendReaction, interativoDisponivel } from "@/lib/transport";
 import {
   loadFacts,
   saveFacts,
@@ -950,10 +951,21 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
   // Toque em botão/lista de AVISO (`av:<linha>:<ação>`, M6). Sem modelo. As ações diretas
   // (lembrar, reenviar link, adiar) não mexem no fluxo aberto; só `concluir`/`criar_atividade`
   // abrem fluxo e por isso respeitam a escrita em aberto.
-  if (ehPayloadDeAviso(state.inbound.buttonPayload)) {
+  //
+  // Sem botão (Newton; Meta com MAX_INTERACTIVE=off) o aviso pede "Responda: *1* · …" e o "2" digitado
+  // vira o mesmo payload (M7, `aviso/numero.ts`). Só com o transporte SEM interativo (o mesmo critério
+  // que decide o texto do aviso), texto puro "1"–"3", sem fluxo nem confirmação em aberto: um "2" no
+  // meio de uma coleta é resposta da coleta. Qualquer dúvida do `payloadDoNumero` devolve null e o
+  // número segue como mensagem normal.
+  let payloadDeAviso: string | null = ehPayloadDeAviso(state.inbound.buttonPayload) ? (state.inbound.buttonPayload as string) : null;
+  if (!payloadDeAviso && !state.inbound.buttonPayload && !state.inbound.groupId && state.inbound.kind === "text" &&
+      !atual && !state.pendingAction && /^[1-3]$/.test(userText) && !interativoDisponivel()) {
+    payloadDeAviso = await payloadDoNumero(state.inbound.fromPhone, userText, new Date(agora));
+  }
+  if (payloadDeAviso) {
     const ocupado = escritaEmAberto || (coletando && atual?.kind !== "atividade");
     const toque = await rotearBotaoDeAviso({
-      payload: state.inbound.buttonPayload as string,
+      payload: payloadDeAviso,
       inbound: state.inbound,
       identity: state.identity,
       ctx: { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
@@ -978,7 +990,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
       ...(fluxo !== undefined ? { fluxo } : {}),
       reply: toque.reply,
       messages: [{ role: "user", content: userText }, { role: "assistant", content: toque.reply }],
-      toolLog: [{ name: "fluxo", args: { kind: "aviso", botao: true }, outcome: toque.evento }],
+      toolLog: [{ name: "fluxo", args: { kind: "aviso", ...(state.inbound.buttonPayload ? { botao: true } : { numero: true }) }, outcome: toque.evento }],
     };
   }
 

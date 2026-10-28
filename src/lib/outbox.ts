@@ -252,8 +252,9 @@ export function renderMessage(row: {
       // do interativo recusado: o link precisa ficar nele. O corpo dos botões é
       // montado em `interativoDaLinha`, com o link no botão.
       linkNoBotao: false,
-      // Sem roteador das respostas numeradas ainda: o bloco "Responda" fica fora.
-      respondaNumerado: false,
+      // O roteador do número existe (M7, `aviso/numero.ts`), e usa o MESMO critério
+      // de modo (`interativoDisponivel`): o texto só pede "Responda" onde o número é tratado.
+      respondaNumerado: true,
     });
   }
   // Aviso de crédito (M3): texto fixo com o link; sem os params, o formato genérico.
