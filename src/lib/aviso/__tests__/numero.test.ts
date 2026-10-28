@@ -83,6 +83,10 @@ describe("payloadDoNumero", () => {
     expect(await payloadDoNumero(FONE, "1", AGORA, dados(ultimo({ audience: "deal_party" })))).toBeNull();
   });
 
+  it("último envio foi um resumo de rajada (M8): o '1' não é resposta a aviso nenhum", async () => {
+    expect(await payloadDoNumero(FONE, "1", AGORA, dados(ultimo({ resumo: true })))).toBeNull();
+  });
+
   it("o número segue o que o TEXTO oferece: ações de link não entram na contagem", async () => {
     const aviso: Aviso = {
       ...BASE,
