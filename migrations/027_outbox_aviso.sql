@@ -11,8 +11,17 @@
 --
 -- Colunas anuláveis e sem DEFAULT: ADD COLUMN assim não reescreve a tabela, e
 -- as linhas antigas seguem como estão.
+--
+-- RODA ANTES DO DEPLOY: o INSERT do enqueue grava `aviso, group_key` sempre;
+-- código novo sem esta migration derruba todo /notify.
+--
+-- Sem índice aqui: nada no PR1 lê `group_key`. O índice de agrupamento entra na
+-- migration do agrupamento (M8), medindo antes o tamanho da outbox em prod — o
+-- runner roda em transação e CREATE INDEX sem CONCURRENTLY trava escrita.
+--
+-- `lock_timeout`: o ALTER pede ACCESS EXCLUSIVE na outbox viva; se houver uma
+-- transação longa na frente (dispatchDue no meio de um lote), falha em 5s em
+-- vez de enfileirar todo enqueue atrás dele.
+SET LOCAL lock_timeout = '5s';
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS aviso jsonb;
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS group_key text;
-
-CREATE INDEX IF NOT EXISTS outbox_phone_group_key_sent_idx
-  ON outbox (phone, group_key, sent_at);
