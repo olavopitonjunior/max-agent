@@ -24,7 +24,7 @@ import { lerConfirmacao } from "./tools";
 
 export type OperacaoDeAtividade = "criar" | "comentar" | "concluir" | "recusar";
 
-export const TIPOS_DE_ATIVIDADE = ["ligacao", "visita", "reuniao", "documento", "pendencia", "outro"] as const;
+export const TIPOS_DE_ATIVIDADE = ["ligacao", "visita", "reuniao", "documento", "pendencia", "outro", "vistoria", "assinatura", "contato", "prazo_documental"] as const;
 export type TipoDeAtividade = (typeof TIPOS_DE_ATIVIDADE)[number];
 
 const ROTULO_DO_TIPO: Record<TipoDeAtividade, string> = {
@@ -34,6 +34,10 @@ const ROTULO_DO_TIPO: Record<TipoDeAtividade, string> = {
   documento: "documento",
   pendencia: "pendência",
   outro: "outro",
+  vistoria: "vistoria",
+  assinatura: "assinatura",
+  contato: "contato",
+  prazo_documental: "prazo documental",
 };
 
 /** Limites do servidor (`scope-action-atividade.ts`): validar aqui evita ida e volta, mas o servidor reconfere. */
@@ -193,7 +197,7 @@ export function iniciarAtividade(pedido: PedidoDeAtividade, ctx: ContextoDoTurno
     const titulo = textoOpcional(pedido.titulo);
     const vencimento = lerVencimento(pedido.vencimento);
     const notas = textoOpcional(pedido.notas);
-    if (!tipo) return resposta(null, `Que tipo de atividade? Escolha entre ligação, visita, reunião, documento, pendência ou outro. Nada foi criado.`, "atividade_dado_invalido");
+    if (!tipo) return resposta(null, `Que tipo de atividade? Escolha entre ligação, visita, reunião, documento, pendência, vistoria, assinatura, contato, prazo documental ou outro. Nada foi criado.`, "atividade_dado_invalido");
     if (!titulo) return resposta(null, "Qual o título da atividade? Nada foi criado.", "atividade_dado_invalido");
     if (titulo.length > LIMITES.titulo) return resposta(null, `O título passou de ${LIMITES.titulo} caracteres. Encurte e peça de novo; nada foi criado.`, "atividade_dado_invalido");
     if (!vencimento) {

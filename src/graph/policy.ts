@@ -171,6 +171,9 @@ export const CAPABILITIES = [
    */
   "pending.summary",
   "prefs.self",
+  "google.calendar.read",
+  "google.calendar.write",
+  "google.tasks.write",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
