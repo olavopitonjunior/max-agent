@@ -11,7 +11,7 @@ import { resolveIdentity } from "./identity";
 import { deployProfile } from "./deploy-profile";
 import { escaparMarkdownWa } from "./aviso/escapar";
 import { renderAvisoTexto } from "./aviso/render";
-import { interativoDoAviso } from "./aviso/interativo";
+import { interativoDoAviso, PREFIXO_AVISO } from "./aviso/interativo";
 import { avisoParaAudiencia, groupKeyDoAviso, type Aviso } from "./aviso/schema";
 import {
   acaoDeLinkDoResumo,
@@ -99,10 +99,25 @@ export function botoesDaLinha(def: TemplateDef, rowId: string): BotaoEnviado[] {
   return botoesEmOrdem(def.botao).map((b) => {
     if (b.tipo === "url") return { tipo: "url", param: rowId };
     if (b.tipo === "quick_reply") return { tipo: "quick_reply", payload: `${b.prefixo}:${rowId}` };
+    // Família V5 (M9): o toque volta como `av:<id>:<ação>` e vai ao roteador do M6.
+    if (b.tipo === "quick_reply_aviso") return { tipo: "quick_reply", payload: `${PREFIXO_AVISO}${rowId}:${b.acao}` };
     // `quick_reply_acao`: o payload que o toque devolve no webhook
     // (`acao:<id>:<ação>`, interceptado em `lib/aceite.ts`).
     return { tipo: "quick_reply", payload: `acao:${rowId}:${b.acao}` };
   });
+}
+
+/**
+ * Link do cabeçalho de imagem do template (M9), ou `undefined` quando o
+ * template não tem cabeçalho. `templateUsavel` já garantiu o `imagemUrl` https
+ * antes de o template ser escolhido.
+ */
+export function imagemCabecalhoDaLinha(
+  def: TemplateDef,
+  row: { aviso?: Aviso | null }
+): string | undefined {
+  if (def.cabecalho?.tipo !== "imagem") return undefined;
+  return row.aviso?.imagemUrl || undefined;
 }
 
 /** A Meta recusou o template na hora do envio (132xxx: parâmetro, pausa…). */
@@ -373,6 +388,8 @@ interface OutboxRow extends Record<string, unknown> {
   params: Record<string, string> | null;
   /** Contrato `aviso` v1 (migration 027) — jsonb, o driver devolve objeto. */
   aviso: Aviso | null;
+  /** Negócio da linha — o `reenviar_link` dos templates V5 precisa dele (`templateUsavel`). */
+  deal_id: string | null;
   /** `dealId` quando o aviso agrupa por negócio (nível ≠ C); `null` caso contrário. */
   group_key: string | null;
   /** Desfecho da tentativa anterior — diz qual template a Meta acabou de recusar. */
@@ -446,7 +463,7 @@ export async function contarVencidas(): Promise<number> {
 /** Colunas que o despacho lê de cada linha reivindicada. */
 const COLUNAS_OUTBOX = `id, org_id, audience, phone, title, body, link_url, org_name,
                 recipient_name, attempts, send_started_at, kind, params, last_error,
-                created_at, dispatch_fence, aviso, group_key`;
+                created_at, dispatch_fence, aviso, group_key, deal_id`;
 
 /** Teto de irmãos puxados por rajada; o resto da fila segue no próximo despacho. */
 const IRMAOS_MAX = 50;
@@ -1061,7 +1078,9 @@ export async function dispatchDue(
       // aprovado", e NUNCA sai com um fallback genérico (ver `catalog.ts`).
       const candidatos = candidatosDoKind.filter((c) => templateUsavel(c, row));
       if (candidatos.length === 0) {
-        const faltando = parametroObrigatorioFaltando(candidatosDoKind[0], row) ?? "?";
+        // Qualquer versão pode ser a que não coube (o V5 sai por falta de `aviso`, não de
+        // parâmetro): procura o parâmetro faltante em TODAS, não só na primeira.
+        const faltando = candidatosDoKind.map((c) => parametroObrigatorioFaltando(c, row)).find((p) => !!p) ?? "?";
         const marca = marcaParametroAusente(faltando);
         await query(
           `UPDATE outbox
@@ -1196,7 +1215,7 @@ export async function dispatchDue(
       deliveryFence=row.dispatch_fence?DispatchFenceSchema.parse(row.dispatch_fence):await captureDispatchFence(row.phone);
       if(!row.dispatch_fence&&deliveryFence.privacyEpoch>0)throw new Error('execution_revoked');
       const res=await withTransportFence({table:'outbox',id:row.id,phone:row.phone,fence:deliveryFence},()=>envioTemplate
-        ? sendTemplate({to:row.phone,name:envioTemplate.name,lang:envioTemplate.lang,bodyParams:parametrosDoCorpo(envioTemplate,row),botoes:botoesDaLinha(envioTemplate,row.id)})
+        ? sendTemplate({to:row.phone,name:envioTemplate.name,lang:envioTemplate.lang,bodyParams:parametrosDoCorpo(envioTemplate,row),botoes:botoesDaLinha(envioTemplate,row.id),imagemCabecalho:imagemCabecalhoDaLinha(envioTemplate,row)})
         : sendText({to:row.phone,body:renderMessage(row),interativo:interativoDaLinha(row)}));
       log.info(envioTemplate ? "outbox.enviado_template" : "outbox.enviado", {
         rowId: row.id,

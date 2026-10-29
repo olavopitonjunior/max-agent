@@ -6,15 +6,26 @@ import {
   entregaPorAceite,
   templatesDeAtividadeComAceite,
   textoDoAvisoDeCredito,
-  templatesDoKind,
+  templatesDoKind as templatesDoKindComV5,
   botoesEmOrdem,
   parametroObrigatorioFaltando,
   parametrosDoCorpo,
-  templateDoKind,
   templateUsavel,
   todosOsTemplates,
+  type TemplateDef,
 } from "../templates/catalog";
 import { botoesDaLinha, renderMessage } from "../outbox";
+
+/**
+ * Estes testes modelam a régua v1–v4 (ordem, versões, famílias). A família V5
+ * (M9, fora da janela com `aviso`) tem prioridade máxima e é coberta em
+ * `templates-v5.test.ts`; aqui ela sai da lista para as regras antigas
+ * continuarem afirmando o que afirmavam. As regras de CORPO (topo do arquivo)
+ * usam `todosOsTemplates()` e valem para o V5 também.
+ */
+const templatesDoKind = (kind: string | null | undefined): TemplateDef[] =>
+  templatesDoKindComV5(kind).filter((d) => !d.name.endsWith("_v5"));
+const templateDoKind = (kind: string | null | undefined): TemplateDef | null => templatesDoKind(kind)[0] ?? null;
 
 /**
  * As regras que a Meta aplica na análise de template, travadas aqui para que
@@ -299,7 +310,6 @@ describe("parametrosDoCorpo", () => {
   });
 
   it("v3 do lembrete: segue a ordem DELE — negócio antes da org", async () => {
-    const { templatesDoKind } = await import("../templates/catalog");
     const [v3] = templatesDoKind("form_reminder");
     expect(v3.name).toBe("max_formulario_pendente_v3");
     expect(parametrosDoCorpo(v3, linha)).toEqual(["Ana", "Venda Apto 302", "RE/MAX Trio"]);
@@ -350,7 +360,6 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
   const comV4 = ["welcome"];
 
   it("ordem de preferência: versão mais nova primeiro; os outros só v1", async () => {
-    const { templatesDoKind } = await import("../templates/catalog");
     const comV3 = ["form_reminder", "form_reminder_parte", "onboarding_pending", "manual_message", "manual_message_parte"];
     for (const k of comV2) {
       const lista = templatesDoKind(k);
@@ -369,8 +378,7 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
     "toda versão tem as MESMAS variáveis (em qualquer ordem); botões iguais ao v1 — " +
       "exceto o TEXTO do botão no v4 do welcome (\"Criar senha\", decisão do Olavo, 05/10/2026)",
     async () => {
-      const { templatesDoKind } = await import("../templates/catalog");
-      for (const k of comV2) {
+        for (const k of comV2) {
         const lista = templatesDoKind(k);
         const v1 = lista[lista.length - 1];
         for (const d of lista) {
@@ -384,7 +392,6 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
   );
 
   it("v3 sem lembrete nem suspense — o que manteve os v2 em MARKETING", async () => {
-    const { templatesDoKind } = await import("../templates/catalog");
     for (const k of comV2) {
       const d = templatesDoKind(k)[0];
       if (!d.name.endsWith("_v3")) continue;
@@ -393,7 +400,6 @@ describe("v2 transacional (Meta reclassificou 7 como MARKETING em 03/10/2026)", 
   });
 
   it("v2 sem apresentação, convite ou suspense — o que levou ao MARKETING", async () => {
-    const { templatesDoKind } = await import("../templates/catalog");
     for (const k of comV2) {
       for (const d of templatesDoKind(k).slice(0, -1))
         expect(d.body, d.name).not.toMatch(/Eu sou o Max|Se quiser saber|é só perguntar|avisa:|tem uma mensagem para você/i);
@@ -565,11 +571,12 @@ describe("atividades pendentes (2026-10-14)", () => {
     expect(parametroObrigatorioFaltando(CATALOGO.activity_assigned, { ...linha, params: null })).toBeNull();
   });
 
-  it("só este template é 'um por janela'", () => {
+  it("só os templates de atividade (v1, v2 e v5) são 'um por janela'", () => {
     expect(CATALOGO.activity_assigned.umPorJanela).toBe(true);
     expect(todosOsTemplates().filter((d) => d.umPorJanela).map((d) => d.name).sort()).toEqual([
       "max_atividades_pendentes",
       "max_atividades_pendentes_v2",
+      "max_atividades_v5",
     ]);
   });
 

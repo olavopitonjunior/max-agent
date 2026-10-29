@@ -31,6 +31,13 @@
  * para botão de URL em template. `META_TEMPLATE_REDIRECT_BASE` (opcional)
  * antecipa a troca de domínio sem editar o script; o exemplo enviado à Meta é
  * um id de outbox que nunca é resolvido de verdade, só ilustra o formato.
+ *
+ * ── Família V5 (M9) ───────────────────────────────────────────────────────
+ * Os botões `respostas` saem como QUICK_REPLY (o payload `av:<id>:<ação>` só
+ * existe no envio). Template com CABEÇALHO DE IMAGEM NÃO é submetido por aqui:
+ * a Meta exige `example.header_handle` (upload de uma imagem de exemplo, que
+ * este script não faz). O sync PULA e aponta para
+ * `docs/templates-v5-para-submeter.md` (submissão pelo Gerenciador do WhatsApp).
  */
 
 import { config as loadEnv } from "dotenv";
@@ -38,7 +45,7 @@ import { config as loadEnv } from "dotenv";
 loadEnv({ path: process.env.OUTBOX_ENV ?? ".env.local" });
 
 import { query, db } from "../src/lib/db";
-import { botoesEmOrdem, todosOsTemplates, type TemplateDef } from "../src/lib/templates/catalog";
+import { botoesEmOrdem, submeteSoPeloGerenciador, todosOsTemplates, type TemplateDef } from "../src/lib/templates/catalog";
 import { refreshTemplates } from "../src/lib/templates/refresh";
 import { fetchWithTimeout, META_TIMEOUT_MS } from "../src/lib/http";
 import { filtrarPorNomes, lerOnly } from "../src/lib/templates/only";
@@ -108,7 +115,17 @@ function botoesDaSubmissao(def: TemplateDef) {
   );
 }
 
+/** Mensagem do sync para o template que só se submete pelo Gerenciador. */
+function motivoDePular(def: TemplateDef): string | null {
+  return submeteSoPeloGerenciador(def)
+    ? "PULADO — cabeçalho de imagem: submeter pelo Gerenciador do WhatsApp com imagem de exemplo; ver docs/templates-v5-para-submeter.md"
+    : null;
+}
+
 function corpoDaSubmissao(def: TemplateDef) {
+  // Trava de segurança: sem o `header_handle` a Meta recusaria (e, pior, um
+  // template sem o cabeçalho aprovado divergiria do que o envio manda).
+  if (submeteSoPeloGerenciador(def)) throw new Error(`${def.name}: template com cabeçalho não se submete por este script`);
   const botoes = botoesDaSubmissao(def);
   return {
     name: def.name,
@@ -215,6 +232,11 @@ async function main() {
   let novos = 0;
   for (const def of catalogo) {
     const existente = atual.get(def.name);
+    const pular = motivoDePular(def);
+    if (!existente && pular) {
+      console.log(def.name.padEnd(34) + "—".padEnd(16) + pular);
+      continue;
+    }
     if (!existente) {
       console.log(
         def.name.padEnd(34) + "—".padEnd(16) + (APPLY ? "submetendo…" : "NOVO — seria submetido")

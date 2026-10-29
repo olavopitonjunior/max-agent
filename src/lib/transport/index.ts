@@ -168,6 +168,7 @@ export async function sendTemplate(params: {
   lang: string;
   bodyParams: string[];
   botoes: BotaoEnviado[];
+  imagemCabecalho?: string;
 }): Promise<SendResult> {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
