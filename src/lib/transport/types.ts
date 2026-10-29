@@ -142,6 +142,8 @@ export interface TransportAdapter {
     lang: string;
     bodyParams: string[];
     botoes: BotaoEnviado[];
+    /** Link https da imagem do cabeçalho (templates com `cabecalho: imagem`). */
+    imagemCabecalho?: string;
   }): Promise<SendResult>;
   /** Ausente quando `capabilities.interactive` é `false`. */
   sendInteractive?(params: { to: string; interativo: Interativo; quoteMessageId?: string }): Promise<SendResult>;

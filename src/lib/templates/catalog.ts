@@ -42,6 +42,8 @@
  *  - parâmetro nunca vazio, nunca com quebra de linha.
  */
 
+import type { AcaoAviso, Aviso } from "../aviso/schema";
+
 export type FonteDeVariavel =
   /** Primeiro nome de quem recebe. */
   | "nome"
@@ -88,7 +90,20 @@ export type Botao =
   | { tipo: "ok"; texto: string }
   | { tipo: "url_e_ok"; texto: string; ok: string }
   | { tipo: "acoes"; acoes: [AcaoItem, AcaoItem] }
-  | { tipo: "acao_e_url"; acao: AcaoItem; urlTexto: string };
+  | { tipo: "acao_e_url"; acao: AcaoItem; urlTexto: string }
+  | { tipo: "respostas"; respostas: RespostaAviso[] };
+
+/**
+ * Uma resposta rápida do AVISO (M9, família V5): texto visível + a ação do
+ * contrato `aviso`. O toque volta como `av:<id da linha>:<ação>` e é tratado
+ * por `lib/aviso-botao.ts` (M6), o mesmo roteador dos botões dentro da janela.
+ * O texto de botão de template não leva emoji e fica em até 20 caracteres
+ * (`catalog.test.ts` e `templates-v5.test.ts` travam as duas regras).
+ */
+export interface RespostaAviso {
+  texto: string;
+  acao: AcaoAviso;
+}
 
 /**
  * Os botões do template NA ORDEM em que a Meta os indexa (0, 1…). Fonte
@@ -99,7 +114,8 @@ export type Botao =
 export type BotaoOrdenado =
   | { tipo: "url"; texto: string }
   | { tipo: "quick_reply"; texto: string; prefixo: "ok" | "duvida" }
-  | { tipo: "quick_reply_acao"; texto: string; acao: AcaoBotao };
+  | { tipo: "quick_reply_acao"; texto: string; acao: AcaoBotao }
+  | { tipo: "quick_reply_aviso"; texto: string; acao: AcaoAviso };
 
 export function botoesEmOrdem(botao: Botao | null): BotaoOrdenado[] {
   if (!botao) return [];
@@ -112,6 +128,8 @@ export function botoesEmOrdem(botao: Botao | null): BotaoOrdenado[] {
     ];
   if (botao.tipo === "acoes")
     return botao.acoes.map((a) => ({ tipo: "quick_reply_acao", texto: a.texto, acao: a.acao }));
+  if (botao.tipo === "respostas")
+    return botao.respostas.map((r) => ({ tipo: "quick_reply_aviso", texto: r.texto, acao: r.acao }));
   // `acao_e_url`: URL primeiro, ação (resposta rápida) depois — mesma regra
   // da Meta que o `url_e_ok` já segue (call-to-action antes de quick reply;
   // misturar na ordem errada é recusado na submissão).
@@ -133,6 +151,14 @@ export interface TemplateDef {
   /** Exemplo por variável — a Meta exige na submissão. */
   exemplos: string[];
   botao: Botao | null;
+  /**
+   * Cabeçalho do template (M9). Só `imagem`: o link vem de `aviso.imagemUrl`
+   * na hora do envio (`outbox.ts`) e o template só é usável com ele
+   * (`templateUsavel`). A Meta pede uma imagem de EXEMPLO na submissão
+   * (`header_handle`, upload), por isso o `templates-sync` PULA estes templates
+   * e quem submete é o Gerenciador (`docs/templates-v5-para-submeter.md`).
+   */
+  cabecalho?: { tipo: "imagem" };
   /**
    * Params (chaves de `linha.params`) que precisam estar presentes e NÃO
    * vazios para este template poder ser usado (ver `templateUsavel`).
@@ -758,27 +784,151 @@ const V4: Record<string, TemplateDef> = {
   ),
 };
 
+/**
+ * Versão 5 — a família do AVISO (M9, 28/10/2026): o que sai fora da janela de
+ * 24h casa com o que sai dentro dela. Cinco templates de resposta rápida cujo
+ * toque volta como `av:<id da linha>:<ação>` e cai no MESMO roteador dos
+ * botões da janela aberta (`lib/aviso-botao.ts`, M6). O emoji fixo do evento
+ * abre o corpo; o botão não leva emoji e fica em até 20 caracteres.
+ *
+ * ── Quando um V5 pode sair (`templateUsavel`) ─────────────────────────────
+ *  · só a linha com `aviso` v1 (emissor antigo cai no V4/V3/V2/v1);
+ *  · TODA ação dos botões precisa estar em `aviso.acoes` — é o que o roteador
+ *    confere no toque (`acao_fora_do_aviso`), e `aviso.acoes` já vem filtrada
+ *    pela política pelo emissor, como os botões da janela aberta. O template
+ *    tem botões FIXOS (a Meta recusa mandar menos, 132000): faltou uma ação,
+ *    o V5 sai da disputa e o aviso vai pelo template anterior;
+ *  · `max_marco_v5` exige `aviso.imagemUrl` https (cabeçalho de imagem).
+ * Nenhum V5 oferece `concluir` nem `adiar_1d` (dependem de `activity.write`,
+ * OFF) e nenhum kind de PARTE tem V5: a parte não conversa com o Max.
+ *
+ * Enquanto a Meta não aprova cada nome (`wa_template`), o envio segue pela
+ * versão anterior — nada fica mudo (`outbox.ts`).
+ */
+const V5: Record<string, TemplateDef> = {};
+
+const v5 = (
+  name: string,
+  body: string,
+  vars: FonteDeVariavel[],
+  exemplos: string[],
+  respostas: RespostaAviso[],
+  extra: Pick<TemplateDef, "cabecalho" | "umPorJanela"> = {}
+): TemplateDef => {
+  if (respostas.length < 1 || respostas.length > 3) throw new Error(`${name}: 1 a 3 respostas`);
+  return { ...t(name, body, vars, exemplos, { tipo: "respostas", respostas }), ...extra };
+};
+
+/** Nível A — andamento do negócio (`stage_change` e o gêmeo do sino). */
+const ANDAMENTO_V5 = v5(
+  "max_negocio_andamento_v5",
+  "📌 Olá, {{1}}! Andamento na {{2}}: *{{3}}*. Negócio: *{{4}}*. Os detalhes estão no botão abaixo.",
+  [NOME, ORG, "titulo", NEGOCIO],
+  ["Ana", "RE/MAX Trio", "Status do negócio atualizado", "Venda Apto 302"],
+  [{ texto: "Abrir negócio", acao: "abrir" }]
+);
+V5.stage_change = ANDAMENTO_V5;
+V5.deal_stage_change = ANDAMENTO_V5;
+
+/** Nível B — formulário com respostas pendentes (`form_reminder` e o gêmeo do sino). */
+const FORMULARIO_V5 = v5(
+  "max_formulario_pendente_v5",
+  "⏳ Olá, {{1}}! Status do negócio *{{2}}* na {{3}}: formulário com respostas pendentes das partes. Os botões abaixo reenviam o link ou abrem o formulário.",
+  [NOME, NEGOCIO, ORG],
+  ["Ana", "Venda Apto 302", "RE/MAX Trio"],
+  [
+    { texto: "Reenviar link", acao: "reenviar_link" },
+    { texto: "Me lembra amanhã", acao: "lembrar_amanha" },
+    { texto: "Ver formulário", acao: "ver_formulario" },
+  ]
+);
+V5.form_reminder = FORMULARIO_V5;
+V5.deal_form_reminder = FORMULARIO_V5;
+
+/** Nível B — status de proposta (título do sistema, nunca o nome da parte). */
+const PROPOSTA_V5 = v5(
+  "max_proposta_v5",
+  "📝 Olá, {{1}}! Status de proposta na {{2}}: *{{3}}*. Veja os detalhes nos botões abaixo.",
+  [NOME, ORG, "titulo"],
+  ["Ana", "RE/MAX Trio", "Proposta enviada para assinatura"],
+  [
+    { texto: "Ver proposta", acao: "ver_proposta" },
+    { texto: "Abrir negócio", acao: "abrir" },
+  ]
+);
+V5.proposal_created_status = PROPOSTA_V5;
+V5.proposal_sent = PROPOSTA_V5;
+V5.proposal_delivered = PROPOSTA_V5;
+
+/**
+ * Nível B — atividades pendentes, o mesmo aviso NEUTRO do v1/v2 (sem dado da
+ * atividade) e o mesmo "um por janela". "Ver atividades" é a ação `abrir`: o
+ * toque devolve o link do aviso (a lista fica no negócio). Um botão só: o
+ * contractmaker manda, na atividade, `abrir` e (só com `activity.write`, hoje OFF)
+ * `concluir`/`adiar_1d`. Não manda `lembrar_amanha`, e um botão que a linha não
+ * traz deixaria o template inutilizável para sempre.
+ */
+const ATIVIDADES_V5 = v5(
+  "max_atividades_v5",
+  "📋 Olá, {{1}}! Você tem *atividades pendentes* na {{2}}. Toque no botão abaixo para ver as atividades.",
+  [NOME, ORG],
+  ["Ana", "RE/MAX Trio"],
+  [
+    { texto: "Ver atividades", acao: "abrir" },
+  ],
+  { umPorJanela: true }
+);
+V5.activity_assigned = ATIVIDADES_V5;
+V5.activity_due = ATIVIDADES_V5;
+V5.activity_due_soon = ATIVIDADES_V5;
+
+/**
+ * Nível C — marco, com cabeçalho de IMAGEM (`aviso.imagemUrl`). UM template
+ * neutro para os três marcos: o emoji fixo é 🎉 e o que diferencia o fato é o
+ * título (variável) e a imagem. Um por marco (✅/🎉/🏠) seriam três análises da
+ * Meta e três imagens de exemplo para um ganho de enfeite. `proposal_completed`
+ * NÃO tem V5: não é de um negócio (um "Abrir negócio" mentiria) e o v2 oferece o
+ * "Converter" em negócio pelo `acao:`, que o V5 perderia. `captacao_signed_status`
+ * também não: não está no `CATALOGO` (fora da régua, só texto livre na janela).
+ */
+const MARCO_V5 = v5(
+  "max_marco_v5",
+  "🎉 Olá, {{1}}! Marco na {{2}}: *{{3}}*. Os detalhes estão nos botões abaixo.",
+  [NOME, ORG, "titulo"],
+  ["Ana", "RE/MAX Trio", "Contrato assinado"],
+  [
+    { texto: "Abrir negócio", acao: "abrir" },
+    { texto: "Próximo passo", acao: "criar_atividade" },
+  ],
+  { cabecalho: { tipo: "imagem" } }
+);
+V5.contract_signed = MARCO_V5;
+V5.contract_signed_status = MARCO_V5;
+
 /** Todos os templates (sem repetição, todas as versões), para a submissão, o refresh e os testes de regra. */
 export function todosOsTemplates(): TemplateDef[] {
   return [
     ...new Map(
-      [...Object.values(CATALOGO), ...Object.values(V2), ...Object.values(V3), ...Object.values(V4)].map((d) => [
-        d.name,
-        d,
-      ])
+      [
+        ...Object.values(CATALOGO),
+        ...Object.values(V2),
+        ...Object.values(V3),
+        ...Object.values(V4),
+        ...Object.values(V5),
+      ].map((d) => [d.name, d])
     ).values(),
   ];
 }
 
 /**
  * Os templates do `kind` em ordem de preferência — a versão mais nova primeiro
- * ([v4, v3, v2, v1], pulando as versões que esse `kind` não tem) —, ou `[]`
+ * ([v5, v4, v3, v2, v1], pulando as versões que esse `kind` não tem) —, ou `[]`
  * quando o tipo está FORA DA RÉGUA. O envio usa o aprovado, de preferência
  * não MARKETING (`outbox.ts`).
  */
 export function templatesDoKind(kind: string | null | undefined): TemplateDef[] {
   if (!kind || !CATALOGO[kind]) return [];
-  return [V4[kind], V3[kind], V2[kind], CATALOGO[kind]].filter((d): d is TemplateDef => !!d);
+  return [V5[kind], V4[kind], V3[kind], V2[kind], CATALOGO[kind]].filter((d): d is TemplateDef => !!d);
 }
 
 /** O template preferido do `kind`, ou `null` quando o tipo está FORA DA RÉGUA. */
@@ -792,6 +942,14 @@ export interface LinhaParaTemplate {
   org_name: string;
   title: string;
   params: Record<string, string> | null;
+  /**
+   * Contrato `aviso` v1 da linha (M9). Os templates V5 só são usáveis com ele
+   * (ver `templateUsavel`); os demais ignoram estes quatro campos.
+   */
+  aviso?: Aviso | null;
+  audience?: string;
+  link_url?: string | null;
+  deal_id?: string | null;
 }
 
 /** Uma linha, curta, nunca vazia — a Meta recusa as três coisas. */
@@ -809,13 +967,59 @@ function parametro(valor: string | null | undefined, fallback: string): string {
  * entra na disputa por "o aprovado", mesmo que esteja `APPROVED`.
  */
 export function templateUsavel(def: TemplateDef, linha: LinhaParaTemplate): boolean {
-  if (!def.paramsObrigatorios || def.paramsObrigatorios.length === 0) return true;
-  return def.paramsObrigatorios.every((chave) => !!linha.params?.[chave]?.trim());
+  if (def.paramsObrigatorios && def.paramsObrigatorios.length > 0) {
+    if (!def.paramsObrigatorios.every((chave) => !!linha.params?.[chave]?.trim())) return false;
+  }
+  return avisoPermiteTemplate(def, linha);
+}
+
+/** Ações que o roteador do M6 responde com o link do aviso (`aviso-botao.ts`: `COM_LINK` e `criar_atividade`). */
+const ACOES_QUE_PRECISAM_DE_LINK: ReadonlySet<AcaoAviso> = new Set(["abrir", "ver_formulario", "ver_proposta", "criar_atividade"]);
+/** Ações que o roteador só aceita com `alvoId` no aviso (e, no reenvio, com o negócio da linha). */
+const ACOES_QUE_PRECISAM_DE_ALVO: ReadonlySet<AcaoAviso> = new Set(["reenviar_link", "concluir", "adiar_1d"]);
+
+/**
+ * O que o template V5 pede da linha (M9). Templates sem `respostas` nem
+ * `cabecalho` não pedem nada. Cada exigência espelha uma recusa do roteador
+ * do toque (`rotearBotaoDeAviso`), para o template nunca oferecer um botão que
+ * ele vá recusar:
+ *  · sem `aviso` v1, ou aviso de PARTE (`deal_party`), não há V5;
+ *  · toda ação do botão está em `aviso.acoes` (senão `acao_fora_do_aviso`);
+ *  · ação de link precisa de `aviso.link.url` ou do `link_url` da linha;
+ *  · `reenviar_link` precisa do `alvoId` da ação e do `deal_id` da linha;
+ *  · cabeçalho de imagem precisa de `aviso.imagemUrl` https.
+ * A POLÍTICA do destinatário (`form.create` etc.) só se conhece no toque; o
+ * emissor já filtra `aviso.acoes` por ela, e o roteador confere de novo.
+ */
+function avisoPermiteTemplate(def: TemplateDef, linha: LinhaParaTemplate): boolean {
+  const respostas = def.botao?.tipo === "respostas" ? def.botao.respostas : null;
+  if (!respostas && !def.cabecalho) return true;
+  const aviso = linha.aviso;
+  if (!aviso || aviso.v !== 1) return false;
+  if (linha.audience === "deal_party") return false;
+  if (def.cabecalho?.tipo === "imagem" && !(aviso.imagemUrl ?? "").startsWith("https://")) return false;
+  for (const r of respostas ?? []) {
+    const item = aviso.acoes.find((a) => a.id === r.acao);
+    if (!item) return false;
+    if (ACOES_QUE_PRECISAM_DE_LINK.has(r.acao) && !(aviso.link?.url || linha.link_url)) return false;
+    if (ACOES_QUE_PRECISAM_DE_ALVO.has(r.acao) && !item.alvoId) return false;
+    if (r.acao === "reenviar_link" && !linha.deal_id) return false;
+  }
+  return true;
 }
 
 /** O primeiro parâmetro obrigatório que falta nesta linha, ou `null`. */
 export function parametroObrigatorioFaltando(def: TemplateDef, linha: LinhaParaTemplate): string | null {
   return def.paramsObrigatorios?.find((chave) => !linha.params?.[chave]?.trim()) ?? null;
+}
+
+/**
+ * Template que o `templates-sync` NÃO submete (M9): cabeçalho de imagem exige
+ * `example.header_handle` (upload), então vai pelo Gerenciador do WhatsApp —
+ * `docs/templates-v5-para-submeter.md`.
+ */
+export function submeteSoPeloGerenciador(def: TemplateDef): boolean {
+  return !!def.cabecalho;
 }
 
 /** Parâmetros do corpo na ordem de `{{1}}`, `{{2}}`… */

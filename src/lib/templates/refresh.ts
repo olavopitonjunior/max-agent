@@ -45,9 +45,23 @@ function normalizarTexto(t: string): string {
 
 /** Os botões na ordem e no tipo que o envio vai preencher (`botoesDaLinha`). */
 function botoesConferem(def: TemplateDef, t: TemplateNaMeta): boolean {
-  const naMeta = (t.components?.find((c) => c.type === "BUTTONS")?.buttons ?? []).map((b) => b.type);
-  const esperado = botoesEmOrdem(def.botao).map((b) => (b.tipo === "url" ? "URL" : "QUICK_REPLY"));
-  return naMeta.length === esperado.length && naMeta.every((tipo, i) => tipo === esperado[i]);
+  // Template com cabeçalho de imagem (M9): sem o HEADER IMAGE aprovado, o envio
+  // com `header` seria recusado (132000) — não conta como conferido.
+  if (def.cabecalho?.tipo === "imagem") {
+    const header = t.components?.find((c) => c.type === "HEADER");
+    if (header?.format !== "IMAGE") return false;
+  }
+  const naMeta = t.components?.find((c) => c.type === "BUTTONS")?.buttons ?? [];
+  const esperado = botoesEmOrdem(def.botao);
+  if (naMeta.length !== esperado.length) return false;
+  return esperado.every((b, i) => {
+    if (naMeta[i].type !== (b.tipo === "url" ? "URL" : "QUICK_REPLY")) return false;
+    // Resposta rápida do V5: o payload `av:<rowId>:<acao>` vai pelo ÍNDICE. Se
+    // no Gerenciador a ordem trocar, o toque em "Próximo passo" executaria a
+    // ação de outro botão — confere o texto de cada um, na ordem.
+    if (b.tipo === "quick_reply_aviso") return normalizarTexto(naMeta[i].text ?? "") === normalizarTexto(b.texto);
+    return true;
+  });
 }
 
 interface TemplateNaMeta {
@@ -58,7 +72,7 @@ interface TemplateNaMeta {
   rejected_reason?: string;
   /** A Meta pode RECLASSIFICAR (UTILITY → MARKETING) depois de aprovar. */
   category?: string;
-  components?: Array<{ type: string; text?: string; buttons?: Array<{ type: string }> }>;
+  components?: Array<{ type: string; format?: string; text?: string; buttons?: Array<{ type: string; text?: string }> }>;
 }
 
 /** Teto de páginas da listagem (100 por página): a WABA é compartilhada. */
