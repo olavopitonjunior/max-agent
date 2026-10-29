@@ -1,4 +1,18 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { Identity } from "@/lib/identity";
+import { withExecution } from "@/lib/runtime/context";
+
+// Os testes unitários usam o saver real em memória. Com DATABASE_URL, os
+// testes de integração abaixo continuam usando Postgres e o bootstrap real.
+vi.mock("@langchain/langgraph-checkpoint-postgres", async (orig) => {
+  if (process.env.DATABASE_URL) return orig();
+  const { MemorySaver } = await import("@langchain/langgraph");
+  return { PostgresSaver: class extends MemorySaver { async setup() {} } };
+});
+vi.mock("@/lib/db", async (orig) => ({
+  ...(await orig<typeof import("@/lib/db")>()),
+  ...(!process.env.DATABASE_URL ? { checkpointerPool: vi.fn() } : {}),
+}));
 
 /**
  * Áudio e imagem no inbound.
@@ -37,6 +51,7 @@ vi.mock("@/lib/identity", async (orig) => ({
   ...(await orig<typeof import("@/lib/identity")>()),
   resolveIdentity: vi.fn(),
   saveChoice: vi.fn().mockResolvedValue(undefined),
+  markGreeted: vi.fn().mockResolvedValue(undefined),
 }));
 
 const { runTurn } = await import("../graph");
@@ -47,10 +62,10 @@ const { resolveIdentity } = await import("@/lib/identity");
 
 const transcrever = transcribeMedia as unknown as ReturnType<typeof vi.fn>;
 const baixar = downloadMedia as unknown as ReturnType<typeof vi.fn>;
-const identidade = resolveIdentity as unknown as ReturnType<typeof vi.fn>;
+const identidade = vi.mocked(resolveIdentity);
 
 /**
- * Os três testes que chegam ao `invoke` do grafo precisam do checkpointer real
+ * Os dois testes que chegam ao `invoke` do grafo precisam do checkpointer real
  * (Postgres). Pulam sem `DATABASE_URL` para que `npm test` continue verde em
  * quem não tem o banco de teste — mesmo gate dos `*.integration.test.ts`.
  */
@@ -81,14 +96,38 @@ function midia(kind: "audio" | "image", over: Record<string, unknown> = {}) {
   } as Parameters<typeof runTurn>[0];
 }
 
+// O caminho unitário começa depois da admissão do runtime, com contexto
+// validado pelo mesmo schema de produção. Nenhuma consulta de privacidade é
+// suprimida no runTurn público usado pelos testes de integração.
+function runMediaUnit(inbound: Parameters<typeof runTurn>[0]) {
+  return withExecution({
+    orgId: "org1", subject: { kind: "user", userId: "u1" },
+    conversationId: "multimodal-unit", taskId: "00000000-0000-4000-8000-000000000001",
+    mode: "live", workflowVersion: "max-v1", controlVersion: 0,
+    deadline: Date.now() + 30_000, budgetUsd: 0.25, maxConcurrency: 1,
+  }, () => runTurn(inbound));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
-  identidade.mockResolvedValue({ kind: "identified", candidate: CANDIDATO });
+  const resolved: Identity = {
+    kind: "resolved", candidate: CANDIDATO,
+    org: { orgId: "org1", orgName: "RE/MAX Trio", apiToken: "test-only-token" },
+  };
+  identidade.mockResolvedValue(resolved);
   baixar.mockResolvedValue({ data: Buffer.from("bytes"), contentType: "audio/ogg" });
   transcrever.mockResolvedValue("o contrato do Fulano já saiu?");
 });
 
 describe("mídia vira o turno da pessoa", () => {
+  it("recusa contexto de privacidade de outro telefone antes de resolver identidade ou baixar mídia", async () => {
+    await expect(runTurn(midia("audio"), {
+      dispatchFence: { personDigest: "0".repeat(64), privacyEpoch: 0 },
+    })).rejects.toThrow("execution_revoked");
+    expect(identidade).not.toHaveBeenCalled();
+    expect(baixar).not.toHaveBeenCalled();
+    expect(transcrever).not.toHaveBeenCalled();
+  });
   itDb("áudio é baixado e transcrito com a org já resolvida", async () => {
     await runTurn(midia("audio"));
 
@@ -104,7 +143,7 @@ describe("mídia vira o turno da pessoa", () => {
    * ImobPro, sem modelo. Antes ela era descrita pelo Gemini e virava texto.
    */
   it("imagem NÃO é transcrita: frase fixa aponta o sistema", async () => {
-    const { reply } = await runTurn(midia("image"));
+    const { reply } = await runMediaUnit(midia("image"));
 
     expect(reply).toBe("Não leio imagens nem documentos por aqui. Para anexar, use o ImobPro.");
     expect(baixar).not.toHaveBeenCalled();
@@ -118,7 +157,7 @@ describe("mídia vira o turno da pessoa", () => {
   it("download falho vira aviso, não silêncio", async () => {
     baixar.mockResolvedValue(null);
 
-    const { reply } = await runTurn(midia("audio"));
+    const { reply } = await runMediaUnit(midia("audio"));
 
     expect(reply).toContain("Não consegui ouvir");
     expect(transcrever).not.toHaveBeenCalled();
@@ -127,11 +166,11 @@ describe("mídia vira o turno da pessoa", () => {
   it("transcrição falha vira aviso", async () => {
     transcrever.mockResolvedValue(null);
 
-    expect((await runTurn(midia("audio"))).reply).toContain("Não consegui ouvir");
+    expect((await runMediaUnit(midia("audio"))).reply).toContain("Não consegui ouvir");
   });
 
   it("mensagem sem mediaUrl não tenta baixar", async () => {
-    const { reply } = await runTurn(midia("audio", { mediaUrl: null }));
+    const { reply } = await runMediaUnit(midia("audio", { mediaUrl: null }));
 
     expect(baixar).not.toHaveBeenCalled();
     expect(reply).toContain("Não consegui ouvir");
@@ -158,7 +197,7 @@ describe("mídia vira o turno da pessoa", () => {
       candidates: [CANDIDATO, { ...CANDIDATO, orgId: "org2", orgName: "RE/MAX Ace" }],
     });
 
-    const { reply } = await runTurn(midia("audio"));
+    const { reply } = await runMediaUnit(midia("audio"));
 
     expect(reply).toContain("por escrito");
     expect(transcrever).not.toHaveBeenCalled();
@@ -168,7 +207,7 @@ describe("mídia vira o turno da pessoa", () => {
   it("número desconhecido não gasta transcrição", async () => {
     identidade.mockResolvedValue({ kind: "unknown" });
 
-    await runTurn(midia("audio"));
+    await runMediaUnit(midia("audio"));
 
     expect(baixar).not.toHaveBeenCalled();
     expect(transcrever).not.toHaveBeenCalled();
