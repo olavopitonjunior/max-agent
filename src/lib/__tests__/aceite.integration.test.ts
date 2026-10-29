@@ -115,6 +115,14 @@ d("aceite (Postgres real)", () => {
       expect(await interceptar(msg({ text: "ok" }))).toBeNull();
     });
 
+    it("toque em botão de aviso (av:) passa direto: não vira dúvida nem consome pendência", async () => {
+      const id = await enviada("a-av", { kind: "manual_message" });
+      expect(await interceptar(msg({ text: "📨 Reenviar link", buttonPayload: "av:row1:reenviar_link" }))).toBeNull();
+      expect(await interceptar(msg({ text: "tenho uma dúvida", buttonPayload: "av:row1:abrir" }))).toBeNull();
+      const [l] = await query<{ released_at: Date | null }>(`SELECT released_at FROM outbox WHERE id = $1`, [id]);
+      expect(l.released_at).toBeNull();
+    });
+
     it("OK digitado entrega TODAS as pendentes deste telefone, e só deste", async () => {
       await enviada("a-t1", { kind: "manual_message", body: "Primeira." });
       await enviada("a-t2", { kind: "manual_message_parte", body: "Segunda." });

@@ -149,8 +149,34 @@ export async function sendInteractive(params: {
       recipient_type: "individual",
       to: params.to,
       type: "interactive",
-      interactive,
+      interactive: i.tipo === "botoes" && i.imagemUrl
+        ? { ...interactive, header: { type: "image", image: { link: i.imagemUrl } } }
+        : interactive,
       ...(params.quoteMessageId ? { context: { message_id: params.quoteMessageId } } : {}),
+    }),
+  });
+  return { messageId: res.messages?.[0]?.id ?? null };
+}
+
+/**
+ * Reação com emoji a uma mensagem RECEBIDA (o toque do botão, por exemplo).
+ * Como o texto livre, só vale dentro da janela de 24h. Lança `MetaHttpError`
+ * em erro; quem chama (`transport/index.ts`) trata como cortesia e devolve
+ * `false`.
+ */
+export async function sendReaction(params: {
+  to: string;
+  messageId: string;
+  emoji: string;
+}): Promise<{ messageId: string | null }> {
+  const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
+    method: "POST",
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: params.to,
+      type: "reaction",
+      reaction: { message_id: params.messageId, emoji: params.emoji },
     }),
   });
   return { messageId: res.messages?.[0]?.id ?? null };
@@ -176,6 +202,12 @@ export async function sendTemplate(params: {
    * tem (ou deixar de mandar o que ele tem) a Meta recusa (132000).
    */
   botoes: BotaoEnviado[];
+  /**
+   * Link https da imagem do CABEÇALHO (templates com `cabecalho: imagem`, M9).
+   * Sai como o primeiro componente: `header` com um parâmetro `image`. Mandar
+   * cabeçalho a um template que não tem (ou omitir o que ele tem) é 132000.
+   */
+  imagemCabecalho?: string;
 }): Promise<{ messageId: string | null }> {
   const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
     method: "POST",
@@ -188,6 +220,9 @@ export async function sendTemplate(params: {
         name: params.name,
         language: { code: params.lang },
         components: [
+          ...(params.imagemCabecalho
+            ? [{ type: "header", parameters: [{ type: "image", image: { link: params.imagemCabecalho } }] }]
+            : []),
           ...(params.bodyParams.length > 0
             ? [{ type: "body", parameters: params.bodyParams.map((text) => ({ type: "text", text })) }]
             : []),

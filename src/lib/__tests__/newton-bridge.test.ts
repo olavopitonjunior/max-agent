@@ -91,6 +91,7 @@ describe("newtonBridgeAdapter: capacidades", () => {
       status: false,
       typing: false,
       interactive: false,
+      reactions: false,
     });
     expect(newtonBridgeAdapter.sendTemplate).toBeUndefined();
     expect(newtonBridgeAdapter.markReadTyping).toBeUndefined();

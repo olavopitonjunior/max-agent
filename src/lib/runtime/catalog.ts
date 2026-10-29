@@ -20,6 +20,7 @@ const POLICY_MAPPING: Record<string, Capability | null> = {
  'proposal.convert': 'proposal.create', 'proposal.duplicate': 'proposal.create',
  'form.options': 'form.create',
  'activity.get': 'activity.list',
+ 'form.remind': 'form.create', 'activity.postpone': 'activity.write',
  'activity.create': 'activity.write', 'activity.comment': 'activity.write', 'activity.complete': 'activity.write', 'activity.refuse': 'activity.write',
 };
 const DOMAIN_SCOPE: Record<string, string> = {

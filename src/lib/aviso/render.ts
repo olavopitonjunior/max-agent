@@ -1,5 +1,5 @@
 import { escaparMarkdownWa } from "./escapar";
-import { AVISO_ITENS_MAX, type AcaoAviso, type Aviso } from "./schema";
+import { AVISO_ACOES_BOTOES_MAX, AVISO_ITENS_MAX, type AcaoAviso, type Aviso } from "./schema";
 
 /** Teto do corpo no WhatsApp (`NOTIFY_BODY_MAX` no contractmaker). */
 export const AVISO_TEXTO_TOTAL_MAX = 1500;
@@ -33,6 +33,18 @@ const ROTULO_NUMERADO: Partial<Record<AcaoAviso, string>> = {
   adiar_1d: "adiar 1 dia",
   criar_atividade: "próximo passo",
 };
+
+/**
+ * As ações que o modo numerado oferece, NA ORDEM em que aparecem como `*1*`, `*2*`...
+ *
+ * É a fonte única do texto e do roteador da resposta (`numero.ts`): o "2" que a
+ * pessoa digita é a 2ª desta lista, não a 2ª de `aviso.acoes` (que pode começar
+ * por uma ação de link, que não entra aqui). Corta em 3, o que o roteador aceita
+ * (`^[1-3]$`), para o texto nunca oferecer um número que ninguém trata.
+ */
+export function acoesNumeradas(aviso: Aviso): Aviso["acoes"] {
+  return aviso.acoes.filter((a) => !!ROTULO_NUMERADO[a.id]).slice(0, AVISO_ACOES_BOTOES_MAX);
+}
 
 /** Corta em `max` unidades UTF-16 (o `.length` do contrato) sem partir um par substituto; termina em "…". */
 function cortar(s: string, max: number): string {
@@ -87,9 +99,7 @@ export function renderAvisoTexto(aviso: Aviso, ctx: AvisoRenderCtx): string {
 
   let responda: string | null = null;
   if (ctx.modo === "numerado" && ctx.respondaNumerado === true) {
-    const opcoes = aviso.acoes
-      .map((a) => ROTULO_NUMERADO[a.id])
-      .filter((r): r is string => !!r);
+    const opcoes = acoesNumeradas(aviso).map((a) => ROTULO_NUMERADO[a.id]!);
     if (opcoes.length) {
       responda = `Responda:\n${opcoes.map((r, i) => `*${i + 1}* · ${r}`).join("\n")}`;
     }

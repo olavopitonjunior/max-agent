@@ -168,12 +168,33 @@ export async function sendTemplate(params: {
   lang: string;
   bodyParams: string[];
   botoes: BotaoEnviado[];
+  imagemCabecalho?: string;
 }): Promise<SendResult> {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
   const a = adapter();
   if (!a.capabilities.templates || !a.sendTemplate) throw new Error("transport_sem_template");
   return a.sendTemplate(params);
+}
+
+/**
+ * Reação com emoji à mensagem que a pessoa mandou (o toque de botão, por
+ * exemplo). Cortesia de UX: nunca lança, `false` = não foi (provedor sem
+ * `reactions`, kill switch, playground, id sintético ou recusa da Meta).
+ */
+export async function sendReaction(params: { to: string; messageId: string; emoji: string }): Promise<boolean> {
+  try {
+    if (process.env.MAX_OUTBOUND_KILL === "true") return false;
+    if (currentExecution() && currentExecution()!.context.mode !== "live") return false;
+    if (!params.messageId || SINTETICOS.some((p) => params.messageId.startsWith(p))) return false;
+    const a = adapter();
+    if (!a.capabilities.reactions || !a.sendReaction) return false;
+    await a.sendReaction(params);
+    return true;
+  } catch (err) {
+    log.warn("transport.reacao_falhou", { motivo: err instanceof Error ? err.name : "erro" });
+    return false;
+  }
 }
 
 export async function connectionStatus(): Promise<ConnectionState> {

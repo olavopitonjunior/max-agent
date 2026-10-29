@@ -24,7 +24,7 @@ vi.mock("../transport", () => ({
   connectionStatus: vi.fn().mockResolvedValue({ connected: true }),
   markReadTyping: vi.fn().mockResolvedValue(true),
   provider: () => "meta",
-  capabilities: () => ({ templates: true, window24h: true, media: true, groups: false, status: true, typing: true, interactive: true }),
+  capabilities: () => ({ templates: true, window24h: true, media: true, groups: false, status: true, typing: true, interactive: true, reactions: true }),
 }));
 vi.mock("../janela24h", () => ({ janelaAberta: vi.fn().mockResolvedValue(true), abrirJanela: vi.fn() }));
 vi.mock("@/graph/graph", () => ({ seedNotification: vi.fn(), runTurn: vi.fn() }));

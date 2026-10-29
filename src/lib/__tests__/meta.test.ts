@@ -8,6 +8,7 @@ import {
   parseWebhook,
   sendTemplate,
   sendInteractive,
+  sendReaction,
   sendText,
   verifyChallenge,
   verifySignature,
@@ -724,6 +725,47 @@ describe("chamadas à Graph API", () => {
     ]);
   });
 
+  it("sendTemplate: cabeçalho de imagem (M9) vai como o PRIMEIRO componente, antes do corpo e dos botões", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL5" }] }));
+    await sendTemplate({
+      to: "1",
+      name: "max_marco_v5",
+      lang: "pt_BR",
+      bodyParams: ["Ana", "RE/MAX Trio", "Contrato assinado"],
+      botoes: [
+        { tipo: "quick_reply", payload: "av:r9:abrir" },
+        { tipo: "quick_reply", payload: "av:r9:criar_atividade" },
+      ],
+      imagemCabecalho: "https://trio.imobpro.ia.br/api/og/marco/abc",
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body).template.components).toEqual([
+      { type: "header", parameters: [{ type: "image", image: { link: "https://trio.imobpro.ia.br/api/og/marco/abc" } }] },
+      {
+        type: "body",
+        parameters: [
+          { type: "text", text: "Ana" },
+          { type: "text", text: "RE/MAX Trio" },
+          { type: "text", text: "Contrato assinado" },
+        ],
+      },
+      { type: "button", sub_type: "quick_reply", index: "0", parameters: [{ type: "payload", payload: "av:r9:abrir" }] },
+      {
+        type: "button",
+        sub_type: "quick_reply",
+        index: "1",
+        parameters: [{ type: "payload", payload: "av:r9:criar_atividade" }],
+      },
+    ]);
+  });
+
+  it("sendTemplate: sem imagemCabecalho nenhum componente header vai", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL6" }] }));
+    await sendTemplate({ to: "1", name: "x", lang: "pt_BR", bodyParams: ["a"], botoes: [] });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body).template.components.some((c: { type: string }) => c.type === "header")).toBe(false);
+  });
+
   it("sendTemplate: sem botões = template SEM botão — nenhum componente de botão vai (a Meta recusa com 132000)", async () => {
     fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL3" }] }));
     await sendTemplate({
@@ -816,6 +858,49 @@ describe("chamadas à Graph API", () => {
         button: "Ver opções",
         sections: [{ rows: [{ id: "op:0", title: "Todas as etapas" }, { id: "op:1", title: "Em contr…", description: "Em contrato longo" }] }],
       },
+    });
+  });
+
+  it("sendInteractive botões com imagemUrl: header image com o link", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.IMG" }] }));
+    await sendInteractive({
+      to: "5511987654321",
+      interativo: {
+        tipo: "botoes",
+        corpo: "Contrato assinado",
+        imagemUrl: "https://app.exemplo.com/og/marco?t=abc",
+        opcoes: [{ id: "av:r1:abrir", titulo: "Abrir negócio" }],
+      },
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.interactive.header).toEqual({
+      type: "image",
+      image: { link: "https://app.exemplo.com/og/marco?t=abc" },
+    });
+    expect(body.interactive.type).toBe("button");
+  });
+
+  it("sendInteractive botões sem imagemUrl: nenhum header", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.NOIMG" }] }));
+    await sendInteractive({
+      to: "5511987654321",
+      interativo: { tipo: "botoes", corpo: "x", opcoes: [{ id: "op:SIM", titulo: "SIM" }] },
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.interactive.header).toBeUndefined();
+  });
+
+  it("sendReaction: type reaction com message_id e emoji", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.REA" }] }));
+    await sendReaction({ to: "5511987654321", messageId: "wamid.IN9", emoji: "✅" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`https://graph.facebook.com/v24.0/${PNID}/messages`);
+    expect(JSON.parse(init.body)).toEqual({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: "5511987654321",
+      type: "reaction",
+      reaction: { message_id: "wamid.IN9", emoji: "✅" },
     });
   });
 

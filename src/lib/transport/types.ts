@@ -62,7 +62,7 @@ export interface OpcaoInterativa {
  * fallback, e o toque nunca é escrita (o SIM continua obrigatório).
  */
 export type Interativo =
-  | { tipo: "botoes"; corpo: string; opcoes: OpcaoInterativa[] }
+  | { tipo: "botoes"; corpo: string; opcoes: OpcaoInterativa[]; imagemUrl?: string }
   | { tipo: "lista"; corpo: string; botao: string; opcoes: OpcaoInterativa[] };
 
 /** Botão preenchido na hora do envio, na ordem em que o template os declara. */
@@ -127,6 +127,8 @@ export interface TransportCapabilities {
   typing: boolean;
   /** Botões de resposta e lista na conversa (Meta). Sem isso, texto numerado. */
   interactive: boolean;
+  /** Reação com emoji a uma mensagem recebida (Meta). Sem isso, `sendReaction` devolve `false`. */
+  reactions: boolean;
 }
 
 export interface TransportAdapter {
@@ -140,9 +142,13 @@ export interface TransportAdapter {
     lang: string;
     bodyParams: string[];
     botoes: BotaoEnviado[];
+    /** Link https da imagem do cabeçalho (templates com `cabecalho: imagem`). */
+    imagemCabecalho?: string;
   }): Promise<SendResult>;
   /** Ausente quando `capabilities.interactive` é `false`. */
   sendInteractive?(params: { to: string; interativo: Interativo; quoteMessageId?: string }): Promise<SendResult>;
+  /** Ausente quando `capabilities.reactions` é `false`. Lança em erro do provedor. */
+  sendReaction?(params: { to: string; messageId: string; emoji: string }): Promise<SendResult>;
   /**
    * Marca a mensagem recebida como lida e mostra "digitando…". Ausente quando
    * `capabilities.typing` é `false`. Nunca lança; `false` = não foi.

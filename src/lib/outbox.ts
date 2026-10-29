@@ -11,7 +11,15 @@ import { resolveIdentity } from "./identity";
 import { deployProfile } from "./deploy-profile";
 import { escaparMarkdownWa } from "./aviso/escapar";
 import { renderAvisoTexto } from "./aviso/render";
+import { interativoDoAviso, PREFIXO_AVISO } from "./aviso/interativo";
 import { avisoParaAudiencia, groupKeyDoAviso, type Aviso } from "./aviso/schema";
+import {
+  acaoDeLinkDoResumo,
+  atrasoDeAgrupamento,
+  interativoDoResumo,
+  resumoDaRajada,
+  RESUMO_CORPO_INTERATIVO_MAX,
+} from "./aviso/agrupar";
 import {
   inoperanciaDoErro,
   falhaDaMensagemMeta,
@@ -28,7 +36,7 @@ import {
   parametrosDoCorpo,
   type TemplateDef,
 } from "./templates/catalog";
-import type { BotaoEnviado } from "./transport";
+import type { BotaoEnviado, Interativo } from "./transport";
 import { templatesAprovados } from "./templates/aprovacao";
 
 /**
@@ -91,10 +99,25 @@ export function botoesDaLinha(def: TemplateDef, rowId: string): BotaoEnviado[] {
   return botoesEmOrdem(def.botao).map((b) => {
     if (b.tipo === "url") return { tipo: "url", param: rowId };
     if (b.tipo === "quick_reply") return { tipo: "quick_reply", payload: `${b.prefixo}:${rowId}` };
+    // Família V5 (M9): o toque volta como `av:<id>:<ação>` e vai ao roteador do M6.
+    if (b.tipo === "quick_reply_aviso") return { tipo: "quick_reply", payload: `${PREFIXO_AVISO}${rowId}:${b.acao}` };
     // `quick_reply_acao`: o payload que o toque devolve no webhook
     // (`acao:<id>:<ação>`, interceptado em `lib/aceite.ts`).
     return { tipo: "quick_reply", payload: `acao:${rowId}:${b.acao}` };
   });
+}
+
+/**
+ * Link do cabeçalho de imagem do template (M9), ou `undefined` quando o
+ * template não tem cabeçalho. `templateUsavel` já garantiu o `imagemUrl` https
+ * antes de o template ser escolhido.
+ */
+export function imagemCabecalhoDaLinha(
+  def: TemplateDef,
+  row: { aviso?: Aviso | null }
+): string | undefined {
+  if (def.cabecalho?.tipo !== "imagem") return undefined;
+  return row.aviso?.imagemUrl || undefined;
 }
 
 /** A Meta recusou o template na hora do envio (132xxx: parâmetro, pausa…). */
@@ -129,6 +152,16 @@ export const MARCA_ENVIO_INCERTO =
   "envio_incerto: timeout no envio do template — não reenviado para não duplicar";
 
 /**
+ * Resumo de rajada cujo envio foi revogado (privacidade/identidade mudou entre
+ * o claim e o envio). Nada saiu: as linhas vão a `dropped`, nunca a `sent`.
+ */
+export const MARCA_ENVIO_REVOGADO =
+  "envio_revogado: privacidade ou identidade mudou antes do envio — resumo não enviado";
+
+/** Marca do resumo na linha: o `provider_message_id` quando a transportadora não devolve um. */
+const marcaDoResumo = (primeiraLinhaId: string) => `resumo:${primeiraLinhaId}`;
+
+/**
  * Fila de saída das notificações proativas.
  *
  * Existe porque o ImobPro passou a entregar a qualquer hora: os call-sites de
@@ -154,6 +187,11 @@ export interface EnqueueParams {
   params?: Record<string, string> | null;
   /** Contrato `aviso` v1 (migration 027). Para `deal_party` é regravado sem ações/imagem. */
   aviso?: Aviso | null;
+  /**
+   * Quando pode sair, no lugar do próximo horário de janela (`nextDeliveryTime`).
+   * Para agendar de propósito, como o "me lembra amanhã" do botão do aviso (M6).
+   */
+  deliverAfter?: Date;
 }
 
 export type EnqueueResult =
@@ -167,12 +205,20 @@ export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
     throw new Error("audience_nao_permitida_no_perfil");
   }
   const id = randomUUID();
-  const deliverAfter = nextDeliveryTime();
   const dispatchFence=await captureDispatchFence(p.phone);
   // Segunda trava (a primeira é o /notify): quem enfileirar direto também não
   // leva ação nem imagem para parte do negócio.
   const aviso = avisoParaAudiencia(p.audience, p.aviso);
   const groupKey = groupKeyDoAviso(p.dealId, aviso);
+  let deliverAfter = p.deliverAfter ?? nextDeliveryTime();
+  // Agrupamento (M8): um irmão (mesmo telefone e negócio) enviado há menos de
+  // 10 min segura este aviso até `sent_at + 10 min`, para sair no resumo. Roda
+  // DEPOIS do horário 7h–22h (`nextDeliveryTime(atraso)` empurra para as 7h se o
+  // prazo cair fora da janela), e nunca para parte do negócio.
+  if (p.audience !== "deal_party") {
+    const atraso = await atrasoDeAgrupamento(p.phone, groupKey, aviso?.nivel ?? null);
+    if (atraso && atraso.getTime() > deliverAfter.getTime()) deliverAfter = nextDeliveryTime(atraso);
+  }
 
   // `ON CONFLICT DO NOTHING` + RETURNING: a linha só volta quando FOI inserida
   // agora. Conflito devolve zero linhas, e aí a chave já existia — que é
@@ -242,10 +288,13 @@ export function renderMessage(row: {
       recipientName: row.recipient_name,
       orgName: row.org_name,
       modo: interativoDisponivel() ? "interativo" : "numerado",
-      // Botões só chegam em tarefa posterior; sem eles o link precisa ficar no texto.
+      // Este é o texto inteiro (Newton, MAX_INTERACTIVE=off) e também a reserva
+      // do interativo recusado: o link precisa ficar nele. O corpo dos botões é
+      // montado em `interativoDaLinha`, com o link no botão.
       linkNoBotao: false,
-      // Sem roteador das respostas numeradas ainda: o bloco "Responda" fica fora.
-      respondaNumerado: false,
+      // O roteador do número existe (M7, `aviso/numero.ts`), e usa o MESMO critério
+      // de modo (`interativoDisponivel`): o texto só pede "Responda" onde o número é tratado.
+      respondaNumerado: true,
     });
   }
   // Aviso de crédito (M3): texto fixo com o link; sem os params, o formato genérico.
@@ -260,6 +309,32 @@ export function renderMessage(row: {
   if (row.link_url && !row.body.includes(row.link_url)) parts.push(row.link_url);
   if (row.org_name) parts.push(`_${escaparMarkdownWa(row.org_name)}_`);
   return parts.filter(Boolean).join("\n\n");
+}
+
+/**
+ * Botões/lista do aviso (M5) para esta linha, ou `null` = só texto. Só onde o
+ * provedor sabe e `MAX_INTERACTIVE` não está `off`, e NUNCA para `deal_party`
+ * (parte do negócio não ganha botão nem imagem).
+ *
+ * O corpo interativo dispensa a linha 👉 quando o link vem num botão; o `body`
+ * de `renderMessage` (com o link) segue como texto de reserva se a Meta recusar
+ * a forma.
+ */
+export function interativoDaLinha(row: {
+  id: string;
+  audience: string;
+  org_name: string;
+  recipient_name: string;
+  aviso?: Aviso | null;
+}): Interativo | null {
+  if (!row.aviso || row.audience === "deal_party" || !interativoDisponivel()) return null;
+  const corpo = renderAvisoTexto(row.aviso, {
+    recipientName: row.recipient_name,
+    orgName: row.org_name,
+    modo: "interativo",
+    linkNoBotao: true,
+  });
+  return interativoDoAviso(row.aviso, row.id, corpo);
 }
 
 export interface DispatchTotals {
@@ -313,6 +388,8 @@ interface OutboxRow extends Record<string, unknown> {
   params: Record<string, string> | null;
   /** Contrato `aviso` v1 (migration 027) — jsonb, o driver devolve objeto. */
   aviso: Aviso | null;
+  /** Negócio da linha — o `reenviar_link` dos templates V5 precisa dele (`templateUsavel`). */
+  deal_id: string | null;
   /** `dealId` quando o aviso agrupa por negócio (nível ≠ C); `null` caso contrário. */
   group_key: string | null;
   /** Desfecho da tentativa anterior — diz qual template a Meta acabou de recusar. */
@@ -383,6 +460,349 @@ export async function contarVencidas(): Promise<number> {
  *              só gasta o orçamento da function.
  *  - ausente → comportamento antigo, pergunta por conta própria.
  */
+/** Colunas que o despacho lê de cada linha reivindicada. */
+const COLUNAS_OUTBOX = `id, org_id, audience, phone, title, body, link_url, org_name,
+                recipient_name, attempts, send_started_at, kind, params, last_error,
+                created_at, dispatch_fence, aviso, group_key, deal_id`;
+
+/** Teto de irmãos puxados por rajada; o resto da fila segue no próximo despacho. */
+const IRMAOS_MAX = 50;
+
+/**
+ * Pode entrar em resumo? Só aviso de gente da casa (nunca `deal_party`), com
+ * chave de grupo (nível ≠ C, o marco), na 1ª tentativa (linha que já falhou
+ * sai sozinha, para um erro do resumo não se repetir em laço), sem envio
+ * iniciado (a órfã é liquidada individualmente) e com `dispatch_fence` (é ele
+ * que diz que a pessoa continua apta a receber).
+ */
+function podeAgrupar(r: OutboxRow): boolean {
+  return (
+    r.group_key != null &&
+    r.audience !== "deal_party" &&
+    r.aviso != null &&
+    r.aviso.nivel !== "C" &&
+    r.kind !== "support_handoff" &&
+    r.send_started_at == null &&
+    r.attempts === 1 &&
+    r.dispatch_fence != null
+  );
+}
+
+/** Mesma fence = mesma pessoa, mesma época de privacidade e mesmo controle de conversa. */
+function mesmaFence(a: DispatchFence, b: DispatchFence): boolean {
+  const norm = (f: DispatchFence) => JSON.stringify(Object.entries(f).sort(([x], [y]) => x.localeCompare(y)));
+  return norm(a) === norm(b);
+}
+
+/**
+ * As outras linhas DEVIDAS do mesmo (org, telefone, negócio), reivindicadas
+ * agora com a mesma regra do claim principal (`FOR UPDATE SKIP LOCKED`): uma
+ * linha só é de uma instância, então duas `dispatchDue` concorrentes nunca
+ * põem o mesmo aviso em dois lugares.
+ */
+async function reivindicarIrmaos(r: OutboxRow, jaReivindicadas: string[]): Promise<OutboxRow[]> {
+  return query<OutboxRow>(
+    `UPDATE outbox
+        SET status = 'sending', attempts = attempts + 1, last_attempt_at = now()
+      WHERE id IN (
+        SELECT id FROM outbox
+         WHERE status = 'pending' AND deliver_after <= now()
+           AND org_id = $1 AND phone = $2 AND group_key = $3
+           AND audience <> 'deal_party'
+           AND aviso IS NOT NULL AND aviso->>'nivel' <> 'C'
+           AND dispatch_fence IS NOT NULL AND send_started_at IS NULL AND attempts = 0
+           AND id <> ALL($4::text[])
+         ORDER BY created_at, id
+         LIMIT ${IRMAOS_MAX}
+         FOR UPDATE SKIP LOCKED
+      )
+      RETURNING ${COLUNAS_OUTBOX}`,
+    [r.org_id, r.phone, r.group_key, jaReivindicadas]
+  );
+}
+
+/**
+ * Agrupa as linhas reivindicadas por (org, telefone, negócio). Onde há janela de
+ * 24h (Meta) e ela está fechada, NÃO agrupa: texto livre fora da janela é
+ * recusado, e cada linha segue o caminho de template. Os irmãos devidos que o
+ * claim principal não trouxe são reivindicados aqui e acrescentados a `rows`
+ * (que o laço percorre e que as devoluções por canal inoperante cobrem).
+ *
+ * Devolve os lotes (2+ linhas, mesma fence) indexados pela PRIMEIRA linha deles
+ * na ordem do laço, e o conjunto das demais, que o laço pula.
+ */
+async function montarLotes(
+  rows: OutboxRow[],
+  temJanela24h: boolean
+): Promise<{ lotes: Map<string, OutboxRow[]>; emLote: Set<string> }> {
+  const lotes = new Map<string, OutboxRow[]>();
+  const emLote = new Set<string>();
+
+  const porChave = new Map<string, OutboxRow[]>();
+  for (const r of rows) {
+    if (!podeAgrupar(r)) continue;
+    const chave = `${r.org_id}\u0000${r.phone}\u0000${r.group_key}`;
+    porChave.set(chave, [...(porChave.get(chave) ?? []), r]);
+  }
+
+  for (const membros of porChave.values()) {
+    const ref = membros[0];
+    if (temJanela24h && !(await janelaAberta(ref.phone))) continue;
+    const irmaos = await reivindicarIrmaos(
+      ref,
+      rows.map((r) => r.id)
+    ).catch((err) => {
+      console.warn(
+        "[outbox] irmãos de agrupamento não reivindicados — segue sem eles:",
+        err instanceof Error ? err.message : String(err)
+      );
+      return [] as OutboxRow[];
+    });
+    rows.push(...irmaos);
+
+    const refFence = DispatchFenceSchema.parse(ref.dispatch_fence);
+    const lote = [...membros, ...irmaos.filter(podeAgrupar)]
+      .filter((r) => mesmaFence(DispatchFenceSchema.parse(r.dispatch_fence), refFence))
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()); // estável: empate no ms mantém a ordem do claim
+    if (lote.length < 2) continue;
+
+    const ids = new Set(lote.map((r) => r.id));
+    const primeira = rows.find((r) => ids.has(r.id))!;
+    lotes.set(primeira.id, lote);
+    for (const r of lote) if (r.id !== primeira.id) emLote.add(r.id);
+  }
+  return { lotes, emLote };
+}
+
+/**
+ * Manda UM resumo no lugar das linhas do lote e as liquida juntas: todas
+ * `sent`, com o mesmo `sent_at` e o mesmo `provider_message_id`.
+ *
+ * Mesmas travas do envio individual: `send_started_at` em TODAS antes do envio
+ * (a retomada de órfã liquida cada uma como `sent` sem reenviar), a fence da
+ * linha no `withTransportFence`, e o `MAX_OUTBOUND_KILL` no próprio transporte.
+ *
+ * Falha do envio do resumo NÃO derruba o aviso: cada linha volta a `pending`
+ * com o backoff de sempre, e como já gastou a 1ª tentativa deixa de ser elegível
+ * a resumo (`podeAgrupar`), saindo sozinha.
+ */
+async function despacharResumo(p: {
+  lote: OutboxRow[];
+  totals: DispatchTotals;
+  /** Linhas deste ponto do laço em diante: voltam a `pending` se o canal estiver inoperante. */
+  restantes: string[];
+  semear: (texto?: string) => Promise<void>;
+}): Promise<"seguir" | "parar"> {
+  const { lote, totals } = p;
+  const ids = lote.map((r) => r.id);
+  const ref = lote[0];
+  const fence = DispatchFenceSchema.parse(ref.dispatch_fence);
+  const avisos = lote.map((r) => r.aviso as Aviso);
+  const link = avisos.find((a) => a.link)?.link?.url ?? lote.find((r) => r.link_url)?.link_url ?? null;
+
+  const marca = marcaDoResumo(ref.id);
+
+  // Texto de reserva (e do transporte sem botão): com a linha 👉 e sem bloco "Responda:".
+  const texto = resumoDaRajada(avisos, { orgName: ref.org_name, link });
+  // Meta com botões: o link vai no botão, e o corpo cabe em 1024.
+  const alvo =
+    link && interativoDisponivel()
+      ? acaoDeLinkDoResumo(lote.map((r) => ({ id: r.id, aviso: r.aviso as Aviso })))
+      : null;
+  const interativo = alvo
+    ? interativoDoResumo(
+        resumoDaRajada(avisos, { orgName: ref.org_name, link: null, max: RESUMO_CORPO_INTERATIVO_MAX }),
+        alvo
+      )
+    : null;
+
+  try {
+    // O marcador do resumo entra JUNTO com `send_started_at`, antes do envio: a
+    // retomada de órfã e o envio incerto liquidam sem mexer em `provider_message_id`,
+    // e o `numero.ts` precisa reconhecer um resumo mesmo quando o Newton não devolve
+    // `messageId` (null) ou quando a liquidação final não chegou a gravar.
+    await query(
+      `UPDATE outbox SET send_started_at = now(), template_name = NULL, provider_message_id = $2
+        WHERE id = ANY($1::text[])`,
+      [ids, marca]
+    );
+    const res = await withTransportFence({ table: "outbox", id: ref.id, phone: ref.phone, fence }, () =>
+      sendText({ to: ref.phone, body: texto, interativo })
+    );
+    log.info("outbox.enviado_resumo", {
+      rowIds: ids,
+      orgId: ref.org_id,
+      phone: ref.phone,
+      sentMessageId: res.messageId,
+      audience: ref.audience,
+      avisos: ids.length,
+    });
+    const settle = () =>
+      query(
+        `UPDATE outbox
+            SET status = 'sent', sent_at = now(), provider_message_id = $2,
+                template_name = NULL, last_error = NULL
+          WHERE id = ANY($1::text[])`,
+        [ids, res.messageId ?? marca]
+      );
+    await settle().catch(async () => {
+      await new Promise((r) => setTimeout(r, 500));
+      // Segunda falha NÃO sobe (subir limparia o marcador e o reenvio voltaria):
+      // as linhas ficam `sending` com marcador e a retomada de órfã as liquida.
+      await settle().catch((e) =>
+        console.warn(
+          `[outbox] resumo enviado mas não liquidado (${ids.join(",")}) — a retomada fecha:`,
+          e instanceof Error ? e.message : String(e)
+        )
+      );
+    });
+    await p.semear(texto);
+    totals.sent += ids.length;
+    return "seguir";
+  } catch (err) {
+    if (err instanceof TransportAcceptedCommitError) {
+      await query(`UPDATE outbox SET last_error = $2 WHERE id = ANY($1::text[])`, [ids, err.message]);
+      totals.sent += ids.length;
+      return "seguir";
+    }
+    if (err instanceof Error && err.message === "execution_revoked") {
+      // Nada foi enviado: limpa o marcador (senão a retomada de órfã liquidaria como
+      // `sent` um aviso que nunca saiu) e encerra as linhas em `dropped`.
+      await query(
+        `UPDATE outbox
+            SET status = 'dropped', last_error = $2, send_started_at = NULL, provider_message_id = NULL
+          WHERE id = ANY($1::text[]) AND status = 'sending'`,
+        [ids, MARCA_ENVIO_REVOGADO]
+      ).catch((e) =>
+        console.error(
+          `[outbox] revogação do resumo ${ids.join(",")} NÃO registrada — linhas em 'sending'; intervenção manual necessária:`,
+          e instanceof Error ? e.message : String(e)
+        )
+      );
+      log.warn("outbox.resumo_revogado", { rowIds: ids, orgId: ref.org_id });
+      totals.blocked += ids.length;
+      return "seguir";
+    }
+
+    // A janela de 24h fechou entre a checagem e o envio: volta como faria a linha sozinha.
+    const falhaMsg = falhaDaMensagemMeta(err);
+    if (falhaMsg === "requer_template" || falhaMsg === "template_invalido") {
+      await query(
+        `UPDATE outbox
+            SET status = 'pending', attempts = GREATEST(attempts - 1, 0), send_started_at = NULL,
+                provider_message_id = NULL,
+                deliver_after = now() + interval '5 minutes', last_error = $2
+          WHERE id = ANY($1::text[]) AND status = 'sending'`,
+        [ids, MARCA_REQUER_TEMPLATE]
+      ).catch((e) =>
+        console.error(
+          `[outbox] resumo ${ids.join(",")} preso em 'sending' após ${falhaMsg} — a retomada de órfã o pega:`,
+          e instanceof Error ? e.message : String(e)
+        )
+      );
+      totals.held += ids.length;
+      return "seguir";
+    }
+
+    // O canal recusou: este lote e tudo que falta voltam a `pending` sem gastar tentativa.
+    const inop = inoperanciaDoErro(err);
+    if (inop) {
+      await query(
+        `UPDATE outbox
+            SET status = 'pending', attempts = GREATEST(attempts - 1, 0), send_started_at = NULL,
+                provider_message_id = NULL, last_error = $2
+          WHERE id = ANY($1::text[]) AND status = 'sending'`,
+        [p.restantes, `${MARCA_CANAL_INOPERANTE} (${inop.motivo}) — envio recusado, tentativa não contada`]
+      ).catch((e) =>
+        console.error(
+          `[outbox] ${p.restantes.length} linha(s) presas em 'sending' após recusa do canal — a retomada de órfã as pega em 10 min:`,
+          e instanceof Error ? e.message : String(e)
+        )
+      );
+      totals.blocked += p.restantes.length;
+      totals.inoperante = inop;
+      console.error(
+        `[outbox] INSTÂNCIA INOPERANTE (${inop.motivo}) no ENVIO — ` +
+          `${p.restantes.length} linha(s) devolvida(s) a pending sem contar tentativa. ${inop.detalhe}`
+      );
+      return "parar";
+    }
+
+    if (falhaMsg === "restricao_meta") {
+      const codigo = err instanceof MetaHttpError ? err.code : null;
+      const detalhe = err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
+      await query(
+        `UPDATE outbox
+            SET status = 'failed', error_code = $2, last_error = $3, send_started_at = NULL,
+                provider_message_id = NULL, reported_at = NULL
+          WHERE id = ANY($1::text[]) AND status = 'sending'`,
+        [ids, codigo, detalhe]
+      ).catch((e) =>
+        console.error(
+          `[outbox] recusa Meta ${codigo ?? "?"} NÃO REGISTRADA (${ids.join(",")}) — linhas ainda em 'sending'; intervenção manual necessária:`,
+          e instanceof Error ? e.message : String(e)
+        )
+      );
+      totals.failed += ids.length;
+      return "seguir";
+    }
+
+    // Qualquer outro erro: cada linha trata como se fosse dela (backoff por tentativa; esgotou, `failed`).
+    const message = err instanceof Error ? err.message : String(err);
+
+    // Timeout: o resumo pode ter saído. Devolver as N linhas ao backoff individual
+    // reenviaria os N avisos (a pessoa já pode ter recebido o resumo). Liquida como
+    // envio incerto, como o template (ver MARCA_ENVIO_INCERTO); a marca do resumo fica.
+    if (/^timeout de \d+ms em /.test(message)) {
+      const incerto = () =>
+        query(
+          `UPDATE outbox
+              SET status = 'sent', sent_at = now(), provider_message_id = $3,
+                  last_error = $2, send_started_at = NULL
+            WHERE id = ANY($1::text[])`,
+          [ids, MARCA_ENVIO_INCERTO, marca]
+        );
+      await incerto().catch(async () => {
+        await new Promise((r) => setTimeout(r, 500));
+        await incerto().catch((e) =>
+          console.error(
+            `[outbox] envio incerto do resumo NÃO registrado (${ids.join(",")}) — a retomada de órfã ` +
+              `liquida como 'sent' sem reenviar:`,
+            e instanceof Error ? e.message : String(e)
+          )
+        );
+      });
+      log.warn("outbox.envio_incerto_resumo", { rowIds: ids, orgId: ref.org_id });
+      totals.sent += ids.length;
+      return "seguir";
+    }
+    const falhar = () =>
+      query(
+        `UPDATE outbox
+            SET status = CASE WHEN attempts >= $3 THEN 'failed' ELSE 'pending' END,
+                last_error = $2,
+                send_started_at = NULL,
+                provider_message_id = NULL,
+                deliver_after = CASE WHEN attempts >= $3 THEN deliver_after
+                                     ELSE now() + ((attempts * 5)::text || ' minutes')::interval END
+          WHERE id = ANY($1::text[])`,
+        [ids, message.slice(0, 500), MAX_ATTEMPTS]
+      );
+    await falhar().catch(async () => {
+      await new Promise((r) => setTimeout(r, 500));
+      await falhar().catch((e) =>
+        console.error(
+          `[outbox] FALHA DO RESUMO NÃO REGISTRADA (${ids.join(",")}) — linhas seguem 'sending' com marcador; ` +
+            `intervenção: SET send_started_at = NULL, status = 'pending'. Motivo: ` +
+            (e instanceof Error ? e.message : String(e))
+        )
+      );
+    });
+    totals.failed += ids.length;
+    return "seguir";
+  }
+}
+
 /** O que o despacho precisa saber da instância — o `raw` é só para o log. */
 type StatusDaInstancia = Pick<ConnectionState, "connected" | "inoperante"> & {
   raw?: unknown;
@@ -501,11 +921,14 @@ export async function dispatchDue(
          LIMIT $1
          FOR UPDATE SKIP LOCKED
       )
-      RETURNING id, org_id, audience, phone, title, body, link_url, org_name,
-                recipient_name, attempts, send_started_at, kind, params, last_error,
-                created_at, dispatch_fence, aviso, group_key`,
+      RETURNING ${COLUNAS_OUTBOX}`,
     [limit, String(SENDING_ORPHAN_MINUTES)]
   );
+
+  // Agrupamento (M8): as outras devidas do mesmo telefone+negócio entram neste
+  // despacho, e 2 ou mais viram um resumo. Depois do filtro de janela/horário
+  // (só há `due` o que `deliver_after` já liberou) e do opt-out (feito no /notify).
+  const { lotes, emLote } = await montarLotes(rows, caps.window24h);
   totals.claimed = rows.length;
 
   /**
@@ -524,7 +947,12 @@ export async function dispatchDue(
   const seedDeadline = (iniciadoEm ?? Date.now()) + 40_000;
 
   for (const [indice, row] of rows.entries()) {
+    // Membro de um resumo já despachado no primeiro da rajada: nada a fazer aqui.
+    if (emLote.has(row.id)) continue;
     let deliveryFence:DispatchFence|undefined;
+    // Declarado aqui (e não perto da janela de 24h) porque `semear`, definido
+    // logo abaixo, lê esta variável: chamá-lo antes da declaração cairia na TDZ.
+    let envioTemplate: TemplateDef | null = null;
     /**
      * O que saiu no WhatsApp vira turno do assistente no thread — para que
      * "o que é isso?" tenha contexto. DEPOIS do envio, com catch próprio, e
@@ -543,7 +971,7 @@ export async function dispatchDue(
      *    check de `processing` estreita a janela de ~15s para milissegundos;
      *    o residual é aceito e está documentado aqui.
      */
-    const semear = async () => {
+    const semear = async (texto?: string) => {
       try {
         if (Date.now() > seedDeadline) return;
         if (row.audience === "deal_party") return;
@@ -567,7 +995,7 @@ export async function dispatchDue(
         );
         if (emVoo.length > 0) return;
 
-        await seedNotification(row.org_id, row.phone, renderMessage(row),{id:row.id,fence:deliveryFence??await captureDispatchFence(row.phone),subject:identity.candidate.kind==='user'?{kind:'user',userId:identity.candidate.userId}:{kind:'broker',splitRecipientId:identity.candidate.splitRecipientId}});
+        await seedNotification(row.org_id, row.phone, texto ?? renderMessage(row),{id:row.id,fence:deliveryFence??await captureDispatchFence(row.phone),subject:identity.candidate.kind==='user'?{kind:'user',userId:identity.candidate.userId}:{kind:'broker',splitRecipientId:identity.candidate.splitRecipientId}});
       } catch (err) {
         console.warn(
           `[outbox] thread não semeado (${row.id}) — o envio ficou de pé:`,
@@ -599,6 +1027,24 @@ export async function dispatchDue(
     }
 
     /**
+     * ── Rajada: 2 ou mais avisos do mesmo negócio saem como UM resumo ───────
+     * `montarLotes` só monta lote com a janela de 24h aberta (ou transporte sem
+     * janela): fora dela cada linha segue o caminho do template, logo abaixo.
+     */
+    const lote = lotes.get(row.id);
+    if (lote) {
+      deliveryFence = DispatchFenceSchema.parse(lote[0].dispatch_fence);
+      const desfecho = await despacharResumo({
+        lote,
+        totals,
+        restantes: rows.slice(indice).map((r) => r.id),
+        semear,
+      });
+      if (desfecho === "parar") break;
+      continue;
+    }
+
+    /**
      * ── Janela de 24h da Meta ──────────────────────────────────────────────
      *
      * Na Cloud API, texto livre fora da janela é aceito com 200 e recusado
@@ -613,7 +1059,6 @@ export async function dispatchDue(
      * provedor com janela (`capabilities().window24h`, hoje só a Meta): sem
      * janela, sai texto livre sempre.
      */
-    let envioTemplate: TemplateDef | null = null;
     if (caps.window24h && !(await janelaAberta(row.phone))) {
       const candidatosDoKind = templatesDoKind(row.kind);
       if (candidatosDoKind.length === 0) {
@@ -633,7 +1078,9 @@ export async function dispatchDue(
       // aprovado", e NUNCA sai com um fallback genérico (ver `catalog.ts`).
       const candidatos = candidatosDoKind.filter((c) => templateUsavel(c, row));
       if (candidatos.length === 0) {
-        const faltando = parametroObrigatorioFaltando(candidatosDoKind[0], row) ?? "?";
+        // Qualquer versão pode ser a que não coube (o V5 sai por falta de `aviso`, não de
+        // parâmetro): procura o parâmetro faltante em TODAS, não só na primeira.
+        const faltando = candidatosDoKind.map((c) => parametroObrigatorioFaltando(c, row)).find((p) => !!p) ?? "?";
         const marca = marcaParametroAusente(faltando);
         await query(
           `UPDATE outbox
@@ -768,8 +1215,8 @@ export async function dispatchDue(
       deliveryFence=row.dispatch_fence?DispatchFenceSchema.parse(row.dispatch_fence):await captureDispatchFence(row.phone);
       if(!row.dispatch_fence&&deliveryFence.privacyEpoch>0)throw new Error('execution_revoked');
       const res=await withTransportFence({table:'outbox',id:row.id,phone:row.phone,fence:deliveryFence},()=>envioTemplate
-        ? sendTemplate({to:row.phone,name:envioTemplate.name,lang:envioTemplate.lang,bodyParams:parametrosDoCorpo(envioTemplate,row),botoes:botoesDaLinha(envioTemplate,row.id)})
-        : sendText({to:row.phone,body:renderMessage(row)}));
+        ? sendTemplate({to:row.phone,name:envioTemplate.name,lang:envioTemplate.lang,bodyParams:parametrosDoCorpo(envioTemplate,row),botoes:botoesDaLinha(envioTemplate,row.id),imagemCabecalho:imagemCabecalhoDaLinha(envioTemplate,row)})
+        : sendText({to:row.phone,body:renderMessage(row),interativo:interativoDaLinha(row)}));
       log.info(envioTemplate ? "outbox.enviado_template" : "outbox.enviado", {
         rowId: row.id,
         orgId: row.org_id,
