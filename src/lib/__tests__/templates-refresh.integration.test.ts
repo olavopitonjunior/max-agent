@@ -98,6 +98,62 @@ d("refreshTemplates", () => {
     expect(await status(DEF.name)).toBe("DIVERGENTE");
   });
 
+  it("M9: template com cabeçalho de imagem só vira APPROVED se a Meta tem o HEADER IMAGE", async () => {
+    const marco = todosOsTemplates().find((t) => t.name === "max_marco_v5")!;
+    const botoes = {
+      type: "BUTTONS",
+      buttons: [
+        { type: "QUICK_REPLY", text: "Abrir negócio" },
+        { type: "QUICK_REPLY", text: "Próximo passo" },
+      ],
+    };
+    const corpo = { type: "BODY", text: marco.body };
+    await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'PENDING')`, [marco.name]);
+
+    // Sem o header: enviar com `header` seria 132000 — não conta como conferido.
+    vi.stubGlobal("fetch", graph({ [marco.name]: [naMeta({ name: marco.name, components: [corpo, botoes] })] }));
+    let r = await refreshTemplates();
+    expect(r.find((x) => x.name === marco.name)?.acao).toBe("diverge");
+    expect(await status(marco.name)).toBe("PENDING");
+
+    // Com o header IMAGE: aprovado.
+    vi.stubGlobal(
+      "fetch",
+      graph({
+        [marco.name]: [naMeta({ name: marco.name, components: [{ type: "HEADER", format: "IMAGE" }, corpo, botoes] })],
+      })
+    );
+    r = await refreshTemplates();
+    expect(r.find((x) => x.name === marco.name)?.acao).toBe("atualizado");
+    expect(await status(marco.name)).toBe("APPROVED");
+  });
+
+  it("M9: respostas rápidas cadastradas fora de ordem no Gerenciador → diverge (o payload vai pelo índice)", async () => {
+    const marco = todosOsTemplates().find((t) => t.name === "max_marco_v5")!;
+    const trocados = {
+      type: "BUTTONS",
+      buttons: [
+        { type: "QUICK_REPLY", text: "Próximo passo" },
+        { type: "QUICK_REPLY", text: "Abrir negócio" },
+      ],
+    };
+    await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'PENDING')`, [marco.name]);
+    vi.stubGlobal(
+      "fetch",
+      graph({
+        [marco.name]: [
+          naMeta({
+            name: marco.name,
+            components: [{ type: "HEADER", format: "IMAGE" }, { type: "BODY", text: marco.body }, trocados],
+          }),
+        ],
+      })
+    );
+    const r = await refreshTemplates();
+    expect(r.find((x) => x.name === marco.name)?.acao).toBe("diverge");
+    expect(await status(marco.name)).toBe("PENDING");
+  });
+
   it("aspas tipográficas e espaços a mais na Meta não contam como divergência", async () => {
     const def = CATALOGO.onboarding_pending; // tem "Tenho uma dúvida" entre aspas
     await query(`INSERT INTO wa_template (name, lang, status) VALUES ($1, 'pt_BR', 'PENDING')`, [def.name]);

@@ -725,6 +725,47 @@ describe("chamadas à Graph API", () => {
     ]);
   });
 
+  it("sendTemplate: cabeçalho de imagem (M9) vai como o PRIMEIRO componente, antes do corpo e dos botões", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL5" }] }));
+    await sendTemplate({
+      to: "1",
+      name: "max_marco_v5",
+      lang: "pt_BR",
+      bodyParams: ["Ana", "RE/MAX Trio", "Contrato assinado"],
+      botoes: [
+        { tipo: "quick_reply", payload: "av:r9:abrir" },
+        { tipo: "quick_reply", payload: "av:r9:criar_atividade" },
+      ],
+      imagemCabecalho: "https://trio.imobpro.ia.br/api/og/marco/abc",
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body).template.components).toEqual([
+      { type: "header", parameters: [{ type: "image", image: { link: "https://trio.imobpro.ia.br/api/og/marco/abc" } }] },
+      {
+        type: "body",
+        parameters: [
+          { type: "text", text: "Ana" },
+          { type: "text", text: "RE/MAX Trio" },
+          { type: "text", text: "Contrato assinado" },
+        ],
+      },
+      { type: "button", sub_type: "quick_reply", index: "0", parameters: [{ type: "payload", payload: "av:r9:abrir" }] },
+      {
+        type: "button",
+        sub_type: "quick_reply",
+        index: "1",
+        parameters: [{ type: "payload", payload: "av:r9:criar_atividade" }],
+      },
+    ]);
+  });
+
+  it("sendTemplate: sem imagemCabecalho nenhum componente header vai", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL6" }] }));
+    await sendTemplate({ to: "1", name: "x", lang: "pt_BR", bodyParams: ["a"], botoes: [] });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body).template.components.some((c: { type: string }) => c.type === "header")).toBe(false);
+  });
+
   it("sendTemplate: sem botões = template SEM botão — nenhum componente de botão vai (a Meta recusa com 132000)", async () => {
     fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.TPL3" }] }));
     await sendTemplate({

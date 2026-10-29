@@ -202,6 +202,12 @@ export async function sendTemplate(params: {
    * tem (ou deixar de mandar o que ele tem) a Meta recusa (132000).
    */
   botoes: BotaoEnviado[];
+  /**
+   * Link https da imagem do CABEÇALHO (templates com `cabecalho: imagem`, M9).
+   * Sai como o primeiro componente: `header` com um parâmetro `image`. Mandar
+   * cabeçalho a um template que não tem (ou omitir o que ele tem) é 132000.
+   */
+  imagemCabecalho?: string;
 }): Promise<{ messageId: string | null }> {
   const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
     method: "POST",
@@ -214,6 +220,9 @@ export async function sendTemplate(params: {
         name: params.name,
         language: { code: params.lang },
         components: [
+          ...(params.imagemCabecalho
+            ? [{ type: "header", parameters: [{ type: "image", image: { link: params.imagemCabecalho } }] }]
+            : []),
           ...(params.bodyParams.length > 0
             ? [{ type: "body", parameters: params.bodyParams.map((text) => ({ type: "text", text })) }]
             : []),
