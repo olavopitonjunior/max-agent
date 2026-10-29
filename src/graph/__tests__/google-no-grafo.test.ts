@@ -31,9 +31,9 @@ const COM = { byRole: { "*": ["deal.list", "activity.list", "activity.write"] },
 const SEM = { byRole: { "*": ["deal.list", "activity.list"] }, byRecipient: {}, brokerDefault: ["deal.list"] };
 const uso = { model: "openai/gpt-5.4-nano", promptTokens: 10, completionTokens: 5, latencyMs: 5, success: true };
 
-function run(text: string, state: Record<string, unknown> = {}, messageId = "m1", buttonPayload: string | null = null) {
+function run(text: string, state: Record<string, unknown> = {}, messageId = "m1", buttonPayload: string | null = null, kind: "text" | "audio" | "image" | "document" = "text") {
   return buildGraph().compile().invoke({
-    inbound: { messageId, fromPhone: "5511987654321", groupId: null, kind: "text" as const, text, mediaUrl: null,
+    inbound: { messageId, fromPhone: "5511987654321", groupId: null, kind, text, mediaUrl: null,
       mimeType: null, timestampMs: null, senderName: "Olavo", replyToMessageId: null, buttonPayload },
     identity: usuario, reply: null, halt: null, propostaDescartada: false, ...state,
   });
@@ -46,6 +46,29 @@ beforeEach(() => {
 });
 
 describe('Google no grafo',()=>{
+ it.each(['audio', 'image', 'document', 'text'] as const)('descarta confirmação oriunda de mídia: %s', async (kind) => {
+  const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
+  const googlePending={proposalId:'p1',digest:'a'.repeat(64),expiresAt:new Date(Date.now()+60000).toISOString(),kind:'calendar.cancel',preview:{},askedMessageId:'m1',subjectKey};
+  acao.mockResolvedValue({status:200,body:{jobId:'j1',status:'queued'}});
+  const s=await run('SIM',{googlePending,fromMedia:kind==='audio'||kind==='text'?'audio':null},'m2',null,kind);
+  expect(acao).not.toHaveBeenCalled();expect(llm).not.toHaveBeenCalled();
+  expect(s.googlePending).toBeNull();expect(s.reply).toContain('descartada');
+ });
+
+ it('lista Google substitui a numeração legada e impede ação no item antigo',async()=>{
+  vi.mocked(fetchProfile).mockResolvedValue({enabled:true,googleMaxEnabled:true,maxPolicy:{byRole:{'*':['google.calendar.read','google.calendar.write','activity.list','activity.write']}}} as never);
+  const referencias={criadoEm:Date.now(),turno:'m0',itens:[{n:1,tipo:'atividade',id:'legacy-a',rotulo:'Legada A'}]};
+  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_atividades',args:{startAt:'2026-10-29T00:00:00Z',endAt:'2026-10-30T00:00:00Z'}}],usage:uso});
+  acao.mockResolvedValueOnce({status:200,body:{items:[{id:'google-b',title:'Google B',version:1}]}});
+  const s=await run('Lista minha agenda Google',{referencias},'m1');
+  expect(s.reply).toContain('1. Google B');expect(s.referencias).toBeNull();
+  expect(s.googleRefs?.items[0].id).toBe('google-b');
+  acao.mockClear();
+  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'concluir_atividade',args:{numero:1}}],usage:uso});
+  const next=await run('conclui a atividade 1',{referencias:s.referencias,googleRefs:s.googleRefs},'m2');
+  expect(acao).not.toHaveBeenCalled();expect(next.pendingAction).toBeNull();
+ });
+
  it('a competing numbered stage menu invalidates the Google list',async()=>{
   vi.mocked(fetchProfile).mockResolvedValue({enabled:true,googleMaxEnabled:true,maxPolicy:{byRole:{'*':['deal.list','google.calendar.read']}}} as never);
   const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);

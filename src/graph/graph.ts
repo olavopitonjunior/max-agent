@@ -949,7 +949,9 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   const userText = textoDoTurno(state).trim();
   const usage: LlmUsage[] = [];
   if (state.googlePending) {
-    const step = await googleStep({ ...googleContext(state), text: userText, pending: state.googlePending, action: depsDoFluxo(state, usage).acao });
+    // Captions and transcriptions cannot stand in for a written confirmation.
+    const confirmation = state.inbound?.kind === "text" && !state.fromMedia ? userText : "";
+    const step = await googleStep({ ...googleContext(state), text: confirmation, pending: state.googlePending, action: depsDoFluxo(state, usage).acao });
     return { googlePending: step.pending, reply: step.reply, messages: [{role: "user", content: userText}, {role: "assistant", content: step.reply}] };
   }
   const vencido = state.fluxo && fluxoExpirou(state.fluxo, agora);
@@ -1802,7 +1804,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
     const step = await googleStep({ ...googleContext(state), call: googleCall, refs: state.googleRefs,
       enabled: state.googleEnabled && oferecidas.includes(googleCall.name) && !state.fluxo && !state.pendingAction,
       action: depsDoFluxo(state, usageDoTurn).acao });
-    return { ...daOferta, googlePending: step.pending, ...(step.refs !== undefined ? {googleRefs: step.refs} : {}),
+    return { ...daOferta, googlePending: step.pending, ...(step.refs !== undefined ? {googleRefs: step.refs, referencias: null, queryOptions: null, selectedDealQuery: null, restoDaResposta: null} : {}),
       reply: step.reply, messages: [{role:'user',content:userText},{role:'assistant',content:step.reply}], usage: usageDoTurn, piiMap: mapaTurno };
   }
   const trilha: ToolLogEntry[] = [];
