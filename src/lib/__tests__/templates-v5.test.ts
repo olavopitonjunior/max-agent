@@ -35,13 +35,21 @@ const metaSendTemplate = meta.sendTemplate as unknown as ReturnType<typeof vi.fn
 
 const {
   CATALOGO,
-  templatesDoKind,
-  templateDoKind,
   templateUsavel,
   todosOsTemplates,
   botoesEmOrdem,
   submeteSoPeloGerenciador,
 } = catalogo;
+
+/**
+ * Aqui a lista é a da família V5 (prioridade máxima da régua antiga). A V6
+ * (UTILITY de reserva, 29/10/2026) fica na frente dela no catálogo real e é
+ * coberta em `catalog.test.ts`; sai da lista para estas regras seguirem
+ * afirmando o V5.
+ */
+const templatesDoKind = (kind: string | null | undefined) =>
+  catalogo.templatesDoKind(kind).filter((t) => !t.name.endsWith("_v6"));
+const templateDoKind = (kind: string | null | undefined) => templatesDoKind(kind)[0] ?? null;
 
 const V5_DEFS = todosOsTemplates().filter((t) => t.name.endsWith("_v5"));
 

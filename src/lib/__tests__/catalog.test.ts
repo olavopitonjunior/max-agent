@@ -15,16 +15,19 @@ import {
   type TemplateDef,
 } from "../templates/catalog";
 import { botoesDaLinha, renderMessage } from "../outbox";
+import type { Aviso } from "../aviso/schema";
 
 /**
  * Estes testes modelam a régua v1–v4 (ordem, versões, famílias). A família V5
  * (M9, fora da janela com `aviso`) tem prioridade máxima e é coberta em
- * `templates-v5.test.ts`; aqui ela sai da lista para as regras antigas
- * continuarem afirmando o que afirmavam. As regras de CORPO (topo do arquivo)
- * usam `todosOsTemplates()` e valem para o V5 também.
+ * `templates-v5.test.ts`; a V6 (UTILITY de reserva, 29/10/2026) fica na frente
+ * dela e é coberta no bloco "família V6" no fim deste arquivo. Aqui as duas saem
+ * da lista para as regras antigas continuarem afirmando o que afirmavam. As
+ * regras de CORPO (topo do arquivo) usam `todosOsTemplates()` e valem para V5 e
+ * V6 também.
  */
 const templatesDoKind = (kind: string | null | undefined): TemplateDef[] =>
-  templatesDoKindComV5(kind).filter((d) => !d.name.endsWith("_v5"));
+  templatesDoKindComV5(kind).filter((d) => !d.name.endsWith("_v5") && !d.name.endsWith("_v6"));
 const templateDoKind = (kind: string | null | undefined): TemplateDef | null => templatesDoKind(kind)[0] ?? null;
 
 /**
@@ -571,11 +574,12 @@ describe("atividades pendentes (2026-10-14)", () => {
     expect(parametroObrigatorioFaltando(CATALOGO.activity_assigned, { ...linha, params: null })).toBeNull();
   });
 
-  it("só os templates de atividade (v1, v2 e v5) são 'um por janela'", () => {
+  it("só os templates de atividade (v1, v2, v5 e v6) são 'um por janela'", () => {
     expect(CATALOGO.activity_assigned.umPorJanela).toBe(true);
     expect(todosOsTemplates().filter((d) => d.umPorJanela).map((d) => d.name).sort()).toEqual([
       "max_atividades_pendentes",
       "max_atividades_pendentes_v2",
+      "max_atividades_prazo_v6",
       "max_atividades_v5",
     ]);
   });
@@ -788,3 +792,114 @@ describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
     }
   });
 });
+
+/**
+ * Família V6 (29/10/2026): a Meta reclassificou os V5 como MARKETING; o V6
+ * reescreve o aviso para voltar a UTILITY (sem emoji, sem negrito, sem variável
+ * de título livre) e entra na frente do V5 em `templatesDoKindComV5`.
+ */
+describe("família V6 (UTILITY de reserva, 29/10/2026)", () => {
+  const V6 = todosOsTemplates().filter((t) => t.name.endsWith("_v6"));
+  const porNome = (n: string) => V6.find((t) => t.name === n)!;
+  const linhaV6 = (extra: Partial<Parameters<typeof templateUsavel>[1]> = {}) => ({
+    recipient_name: "Ana Souza",
+    org_name: "RE/MAX Trio",
+    title: "Status do negócio atualizado",
+    params: { negocio: "Venda Apto 302" } as Record<string, string> | null,
+    aviso: AVISO_ABRIR,
+    audience: "platform_user" as const,
+    link_url: "https://trio.imobpro.ia.br/deals/cmx1",
+    deal_id: "deal1",
+    ...extra,
+  });
+
+  it("são três templates, com os nomes esperados", () => {
+    expect(V6.map((t) => t.name).sort()).toEqual([
+      "max_atividades_prazo_v6",
+      "max_formulario_pendente_v6",
+      "max_negocio_etapa_v6",
+    ]);
+  });
+
+  it("todos UTILITY pt_BR", () => {
+    for (const t of V6) {
+      expect(t.category, t.name).toBe("UTILITY");
+      expect(t.lang, t.name).toBe("pt_BR");
+    }
+  });
+
+  it("sem emoji nem `*` no corpo; sem emoji no texto dos botões; sem variável de título livre", () => {
+    for (const t of V6) {
+      expect(t.body, t.name).not.toMatch(/\p{Extended_Pictographic}/u);
+      expect(t.body, t.name).not.toContain("*");
+      for (const b of botoesEmOrdem(t.botao)) expect(b.texto, t.name).not.toMatch(/\p{Extended_Pictographic}/u);
+      expect(t.vars, t.name).not.toContain("titulo");
+    }
+  });
+
+  it("o primeiro da lista é o V6 nos kinds que o têm (ordem completa: [v6, v5, v4, v3, v2, v1])", () => {
+    expect(templatesDoKindComV5("form_reminder")[0].name).toBe("max_formulario_pendente_v6");
+    expect(templatesDoKindComV5("deal_form_reminder")[0].name).toBe("max_formulario_pendente_v6");
+    for (const k of ["stage_change", "deal_stage_change"]) expect(templatesDoKindComV5(k)[0].name, k).toBe("max_negocio_etapa_v6");
+    for (const k of ["activity_assigned", "activity_due", "activity_due_soon"])
+      expect(templatesDoKindComV5(k)[0].name, k).toBe("max_atividades_prazo_v6");
+    for (const k of ["form_reminder", "stage_change", "activity_assigned"]) {
+      const nomes = templatesDoKindComV5(k).map((t) => t.name);
+      expect(nomes[0], k).toMatch(/_v6$/);
+      expect(nomes[1], k).toMatch(/_v5$/);
+      expect(nomes.filter((n) => n.endsWith("_v6")), k).toHaveLength(1);
+    }
+  });
+
+  it("mesmas variáveis do V5 do kind — exceto o etapa_v6, que troca `titulo` pela `etapa` e por isso exige `etapa`", () => {
+    const chave = (v: unknown) => JSON.stringify(v);
+    for (const k of ["form_reminder", "deal_form_reminder", "activity_assigned", "activity_due", "activity_due_soon"]) {
+      const [v6, v5] = templatesDoKindComV5(k);
+      expect(v6.vars.map(chave).sort(), v6.name).toEqual(v5.vars.map(chave).sort());
+    }
+    for (const k of ["stage_change", "deal_stage_change"]) {
+      const [v6, v5] = templatesDoKindComV5(k);
+      expect(v6.name).toBe("max_negocio_etapa_v6");
+      expect(v6.vars).toContainEqual({ param: "etapa" });
+      expect(v5.vars).not.toContainEqual({ param: "etapa" });
+      expect(v6.paramsObrigatorios).toEqual(["negocio", "etapa"]);
+    }
+    expect(porNome("max_formulario_pendente_v6").paramsObrigatorios).toEqual(["negocio"]);
+  });
+
+  it("max_negocio_etapa_v6: sem `params.etapa` não é usável (cai no V5); com ela é", () => {
+    const def = porNome("max_negocio_etapa_v6");
+    expect(templateUsavel(def, linhaV6({ params: { negocio: "Venda Apto 302" } }))).toBe(false);
+    expect(templateUsavel(def, linhaV6({ params: { negocio: "Venda Apto 302", etapa: "  " } }))).toBe(false);
+    expect(templateUsavel(def, linhaV6({ params: null }))).toBe(false);
+    expect(templateUsavel(def, linhaV6({ params: { negocio: "Venda Apto 302", etapa: "Em contrato" } }))).toBe(true);
+    expect(parametrosDoCorpo(def, linhaV6({ params: { negocio: "Venda Apto 302", etapa: "Em contrato" } }))).toEqual([
+      "Ana",
+      "Venda Apto 302",
+      "Em contrato",
+      "RE/MAX Trio",
+    ]);
+  });
+
+  it("atividades_prazo_v6 é 'um por janela'; os outros dois não", () => {
+    expect(porNome("max_atividades_prazo_v6").umPorJanela).toBe(true);
+    expect(porNome("max_negocio_etapa_v6").umPorJanela).toBeUndefined();
+    expect(porNome("max_formulario_pendente_v6").umPorJanela).toBeUndefined();
+  });
+});
+
+/** Aviso v1 mínimo com a ação `abrir` e link, como o contractmaker emite para etapa/atividade. */
+const AVISO_ABRIR: Aviso = {
+  v: 1,
+  evento: "stage_change",
+  nivel: "B",
+  emoji: "📌",
+  titulo: "Status do negócio atualizado",
+  negocio: "Venda Apto 302",
+  frase: "O negócio *Venda Apto 302* mudou de etapa.",
+  itens: [],
+  itensExtras: 0,
+  link: { rotulo: "Abrir negócio", url: "https://trio.imobpro.ia.br/deals/cmx1" },
+  acoes: [{ id: "abrir" }],
+  forma: "botoes",
+};
