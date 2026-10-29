@@ -210,6 +210,7 @@ const ORG = "org" as const;
 const NEGOCIO = { param: "negocio" };
 const PROPOSTA = { param: "proposta" };
 const QUEM = { param: "quem" };
+const ETAPA = { param: "etapa" };
 
 const ABRIR_NEGOCIO: Botao = { tipo: "url", texto: "Abrir negócio" };
 const OK: Botao = { tipo: "ok", texto: "OK" };
@@ -905,6 +906,72 @@ const MARCO_V5 = v5(
 V5.contract_signed = MARCO_V5;
 V5.contract_signed_status = MARCO_V5;
 
+/**
+ * Versão 6 — a família do AVISO reescrita para voltar a UTILITY (decisão do
+ * Olavo, 29/10/2026). A Meta classificou todos os V5 como MARKETING e, no
+ * smoke do 3228, recusou um V5 com 131049 (limite de MARKETING por pessoa):
+ * fora da janela, aviso de corretor deixava de chegar. Formulário pendente,
+ * andamento e atividades não tinham NENHUMA versão UTILITY de reserva.
+ *
+ * O que os templates que seguem UTILITY têm em comum (`max_contrato_assinado`,
+ * `max_proposta_enviada`, `max_formulario_concluido_v2`…) e o V6 copia: um fato
+ * concreto sobre um negócio NOMEADO, sem emoji, sem negrito, sem variável de
+ * título livre (o `titulo` dos V5 é texto que a Meta não tem como conferir).
+ * Mesmas ações e botões dos V5 — o toque cai no mesmo roteador
+ * (`av:<id>:<ação>`) e vale a mesma regra de `templateUsavel`.
+ *
+ * O envio prefere o aprovado NÃO MARKETING (`outbox.ts`): se a Meta aprovar o
+ * V6 como UTILITY ele passa a sair; se reclassificar de novo, a ordem
+ * [v6, v5, …] segue e nada fica mudo. Dentro da janela nada muda: sai o
+ * interativo com o layout de emoji/negrito.
+ */
+const V6: Record<string, TemplateDef> = {};
+
+/** Mudança de etapa — só com a etapa nos params; sem ela fica o V5. */
+const ANDAMENTO_V6: TemplateDef = {
+  ...v5(
+    "max_negocio_etapa_v6",
+    "Olá, {{1}}! O negócio {{2}} passou para a etapa {{3}} na {{4}}. Toque no botão abaixo para abrir o negócio.",
+    [NOME, NEGOCIO, ETAPA, ORG],
+    ["Ana", "Venda Apto 302", "Em contrato", "RE/MAX Trio"],
+    [{ texto: "Abrir negócio", acao: "abrir" }]
+  ),
+  paramsObrigatorios: ["negocio", "etapa"],
+};
+V6.stage_change = ANDAMENTO_V6;
+V6.deal_stage_change = ANDAMENTO_V6;
+
+/** Formulário pendente — mesmas três ações do V5. */
+const FORMULARIO_V6: TemplateDef = {
+  ...v5(
+    "max_formulario_pendente_v6",
+    "Olá, {{1}}! O formulário do negócio {{2}}, na {{3}}, ainda não foi concluído pelas partes. Use os botões abaixo para reenviar o link às partes ou abrir o formulário.",
+    [NOME, NEGOCIO, ORG],
+    ["Ana", "Venda Apto 302", "RE/MAX Trio"],
+    [
+      { texto: "Reenviar link", acao: "reenviar_link" },
+      { texto: "Me lembra amanhã", acao: "lembrar_amanha" },
+      { texto: "Ver formulário", acao: "ver_formulario" },
+    ]
+  ),
+  paramsObrigatorios: ["negocio"],
+};
+V6.form_reminder = FORMULARIO_V6;
+V6.deal_form_reminder = FORMULARIO_V6;
+
+/** Atividades — o mesmo aviso neutro (sem dado da atividade) e o mesmo "um por janela". */
+const ATIVIDADES_V6 = v5(
+  "max_atividades_prazo_v6",
+  "Olá, {{1}}! Há atividades atribuídas a você na {{2}} com prazo em aberto. Toque no botão abaixo para ver suas atividades.",
+  [NOME, ORG],
+  ["Ana", "RE/MAX Trio"],
+  [{ texto: "Ver atividades", acao: "abrir" }],
+  { umPorJanela: true }
+);
+V6.activity_assigned = ATIVIDADES_V6;
+V6.activity_due = ATIVIDADES_V6;
+V6.activity_due_soon = ATIVIDADES_V6;
+
 /** Todos os templates (sem repetição, todas as versões), para a submissão, o refresh e os testes de regra. */
 export function todosOsTemplates(): TemplateDef[] {
   return [
@@ -915,6 +982,7 @@ export function todosOsTemplates(): TemplateDef[] {
         ...Object.values(V3),
         ...Object.values(V4),
         ...Object.values(V5),
+        ...Object.values(V6),
       ].map((d) => [d.name, d])
     ).values(),
   ];
@@ -922,13 +990,13 @@ export function todosOsTemplates(): TemplateDef[] {
 
 /**
  * Os templates do `kind` em ordem de preferência — a versão mais nova primeiro
- * ([v5, v4, v3, v2, v1], pulando as versões que esse `kind` não tem) —, ou `[]`
+ * ([v6, v5, v4, v3, v2, v1], pulando as versões que esse `kind` não tem) —, ou `[]`
  * quando o tipo está FORA DA RÉGUA. O envio usa o aprovado, de preferência
  * não MARKETING (`outbox.ts`).
  */
 export function templatesDoKind(kind: string | null | undefined): TemplateDef[] {
   if (!kind || !CATALOGO[kind]) return [];
-  return [V5[kind], V4[kind], V3[kind], V2[kind], CATALOGO[kind]].filter((d): d is TemplateDef => !!d);
+  return [V6[kind], V5[kind], V4[kind], V3[kind], V2[kind], CATALOGO[kind]].filter((d): d is TemplateDef => !!d);
 }
 
 /** O template preferido do `kind`, ou `null` quando o tipo está FORA DA RÉGUA. */
