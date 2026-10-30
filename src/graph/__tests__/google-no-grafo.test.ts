@@ -114,4 +114,34 @@ describe('Google no grafo',()=>{
   llm.mockResolvedValue({text:'',toolCalls:[{name:'google_confirm',args:{proposalId:'p1',digest:'a'.repeat(64)}}],usage:uso});
   const s=await run('confirma agenda Google');expect(acao).not.toHaveBeenCalled();expect(s.googlePending).toBeNull();
  });
+ it('offers Google follow-up actions without requiring a Google keyword again',async()=>{
+  const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
+  const googleRefs={subjectKey,createdAt:Date.now(),items:[{id:'a1',title:'Visita',version:2}]};
+  const input={activityId:'a1',expectedVersion:2,startAt:'2026-11-02T17:30:00Z',endAt:'2026-11-02T17:45:00Z',timeZone:'America/Sao_Paulo',participants:[],createMeet:false};
+  llm.mockResolvedValue({text:'',toolCalls:[{name:'google_propor',args:{kind:'calendar.schedule',numero:1,...input}}],usage:uso});
+  acao.mockResolvedValueOnce({status:200,body:{proposalId:'p1',digest:'a'.repeat(64),expiresAt:new Date(Date.now()+60000).toISOString(),kind:'calendar.schedule',summary:{title:'Visita',dueAt:null},preview:input}});
+  const s=await run('Mude o horário da atividade 1 para 02/11/2026 das 14h30 às 14h45.',{googleRefs,messages:[],summary:'A pessoa consultou a lista profissional.'});
+  expect(s.googlePending?.proposalId).toBe('p1');
+  expect(acao).toHaveBeenCalledTimes(1);expect(acao.mock.calls[0][0].verb).toBe('google.propose');
+ });
+ it('asks for the missing time even when the model invents valid dates from prior context',async()=>{
+  const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
+  const googleRefs={subjectKey,createdAt:Date.now(),items:[{id:'a1',title:'Visita',version:2,startAt:'2026-11-02T17:00:00Z',endAt:'2026-11-02T17:15:00Z'}]};
+  const input={activityId:'a1',expectedVersion:2,startAt:'2026-11-02T17:30:00Z',endAt:'2026-11-02T17:45:00Z',timeZone:'America/Sao_Paulo',participants:[],createMeet:false};
+  llm.mockResolvedValue({text:'',toolCalls:[{name:'google_propor',args:{kind:'calendar.schedule',numero:1,...input}}],usage:uso});
+  acao.mockResolvedValueOnce({status:200,body:{proposalId:'p1',digest:'a'.repeat(64),expiresAt:new Date(Date.now()+60000).toISOString(),kind:'calendar.schedule',summary:{title:'Visita',dueAt:null},preview:input}});
+  const s=await run('Mude o horário da atividade 1.',{googleRefs,messages:[{role:'user',content:'Veja minha agenda de amanhã às 14h.'}],summary:'A atividade é dia 02/11/2026 às 14h.'});
+  expect(acao).not.toHaveBeenCalled();expect(s.googlePending).toBeNull();
+  expect(s.reply).toMatch(/qual|informe/i);expect(s.reply).toMatch(/horário/i);
+  expect(s.googleRefs).toEqual(googleRefs);
+ });
+ it.each(['expired','other-subject','empty'])('does not offer contextual tools from %s references',async(kind)=>{
+  const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
+  const googleRefs={subjectKey:kind==='other-subject'?'other':subjectKey,createdAt:Date.now()-(kind==='expired'?1801000:0),items:kind==='empty'?[]:[{id:'a1',title:'Visita',version:2}]};
+  llm.mockResolvedValue({text:'Consulte a lista novamente.',toolCalls:[],usage:uso});
+  await run('Mude o horário da atividade 1 para as 14h30.',{googleRefs});
+  expect(llm.mock.calls[0][0].tools?.some((t:{name:string})=>t.name.startsWith('google_'))??false).toBe(false);
+  expect(acao).not.toHaveBeenCalled();
+ });
+
 });
