@@ -6,7 +6,7 @@ import { VERBOS_DE_LEITURA } from '@/graph/scope-contract';
 import { DEFAULT_MODEL } from '../llm';
 import { CATALOG_VERSION, WORKFLOW_VERSION } from './contracts';
 import { deployProfile } from '../deploy-profile';
-export const READ_ACTIONS = new Set<string>(['proposal.list','proposal.status','proposal.options','proposal.preflight','form.options','credit.preflight','credit.status','captacao.options','captacao.preflight','captacao.list','captacao.autorizacao.listar','marketing.options','marketing.library','marketing.status']);
+export const READ_ACTIONS = new Set<string>(['google.availability','google.activities','proposal.list','proposal.status','proposal.options','proposal.preflight','form.options','credit.preflight','credit.status','captacao.options','captacao.preflight','captacao.list','captacao.autorizacao.listar','marketing.options','marketing.library','marketing.status']);
 export function isWriteVerb(verb:string):boolean {return !READ_ACTIONS.has(verb);}
 export const NEW_QUERIES=['notification.list','activity.list','activity.get','metrics.get','property.list','property.detail','contract.status','template.decisions'];
 export interface CatalogTool {
@@ -14,6 +14,8 @@ export interface CatalogTool {
  schema:Record<string,unknown>;permission:Capability|null;policyCapability:Capability|null;domainScope:string;projection:string;dataClass:string;timeoutMs:number;retry:string;reconciliation:string;confirmation:boolean;evaluationCases:string[];provenance:string;
 }
 const POLICY_MAPPING: Record<string, Capability | null> = {
+ 'google.availability': 'google.calendar.read', 'google.activities': 'google.calendar.read',
+ 'google.propose': 'google.calendar.write', 'google.confirm': 'google.calendar.write',
  'proposal.status': null, 'proposal.options': null, 'proposal.preflight': null,
  'proposal.update': 'proposal.create', 'proposal.cancel': 'proposal.send', 'proposal.remind': 'proposal.send',
  'proposal.complete': 'proposal.send', 'proposal.recreate': 'proposal.create',

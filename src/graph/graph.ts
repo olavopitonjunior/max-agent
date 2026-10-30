@@ -1,3 +1,4 @@
+import { googleStep, googleTools, GOOGLE_READ_INSTRUCTIONS, type GooglePending, type GoogleRefs } from './google-workspace';
 import { deployProfile, nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled, durableRuntimeEnabled } from '@/lib/runtime/rollout';
 import { liveNamespaceFor } from "@/lib/runtime/context";
@@ -382,6 +383,9 @@ export const MaxState = Annotation.Root({
    * `reducer` que aceita `null` explicitamente: limpar a pendência é a operação
    * mais comum deste campo, e um `next ?? prev` a tornaria impossível.
    */
+  googleEnabled: Annotation<boolean>({ reducer: (_p,n) => n, default: () => false }),
+  googlePending: Annotation<GooglePending | null>({ reducer: (_p,n) => n, default: () => null }),
+  googleRefs: Annotation<GoogleRefs | null>({ reducer: (_p,n) => n, default: () => null }),
   pendingAction: Annotation<PendingAction | null>({
     reducer: (_prev, next) => next,
     default: () => null,
@@ -674,6 +678,8 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       marketingPending: null,
       halt: "org_suspensa",
       pendingAction: null,
+      googlePending: null,
+      googleRefs: null,
       restoDaResposta: null,
       fluxo: rebaixarFluxo(state.fluxo),
       reply: TEXTO_ORG_SUSPENSA,
@@ -685,6 +691,8 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       marketingPending: null,
       halt: "desligado",
       pendingAction: null,
+      googlePending: null,
+      googleRefs: null,
       restoDaResposta: null,
       fluxo: rebaixarFluxo(state.fluxo),
       reply:
@@ -721,6 +729,8 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       // Ver o descarte no kill switch acima: `halt` desvia do `confirm`, e uma
       // pendência que atravessa o turn vira escrita confirmada por engano.
       pendingAction: null,
+      googlePending: null,
+      googleRefs: null,
       restoDaResposta: null,
       fluxo: rebaixarFluxo(state.fluxo),
       reply: TEXTO_ASSUNTO_BLOQUEADO,
@@ -737,6 +747,8 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
     return {
       halt: "pede_leitura_de_anexo",
       pendingAction: null,
+      googlePending: null,
+      googleRefs: null,
       restoDaResposta: null,
       fluxo: rebaixarFluxo(state.fluxo),
       reply: textoSemLeituraDeMidia(null),
@@ -814,7 +826,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
   const politicaIndisponivel =
     perfilFalhou || !profile || (state.identity.kind === "user" && chave === null);
 
-  return { policy, politicaIndisponivel };
+  return { policy, politicaIndisponivel, googleEnabled: profile?.googleMaxEnabled === true };
 }
 
 /**
@@ -922,10 +934,26 @@ const OPERACAO_DA_TOOL_DE_ATIVIDADE: Record<string, OperacaoDeAtividade | undefi
   recusar_atividade: "recusar",
 };
 
+function googleContext(state: MaxStateType) {
+ return { enabled: state.googleEnabled, identity: state.identity, policy: state.policy, now: Date.now(), messageId: state.inbound.messageId, subjectKey: JSON.stringify([state.identity.orgId, subjectDe(state.identity)]) };
+}
+
 async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
+ const result = await conduzirInterno(state);
+ // A deterministic flow may emit its own numbered choices. Those replace the Google list.
+ return result.reply || result.fluxo ? {...result, googleRefs: null} : result;
+}
+
+async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   const agora = Date.now();
   const userText = textoDoTurno(state).trim();
   const usage: LlmUsage[] = [];
+  if (state.googlePending) {
+    // Captions and transcriptions cannot stand in for a written confirmation.
+    const confirmation = state.inbound?.kind === "text" && !state.fromMedia ? userText : "";
+    const step = await googleStep({ ...googleContext(state), text: confirmation, pending: state.googlePending, action: depsDoFluxo(state, usage).acao });
+    return { googlePending: step.pending, reply: step.reply, messages: [{role: "user", content: userText}, {role: "assistant", content: step.reply}] };
+  }
   const vencido = state.fluxo && fluxoExpirou(state.fluxo, agora);
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
   // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
@@ -1151,7 +1179,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
     !/\b(quem|signat[aá]ri|falta(?:m)? assinar)/i.test(userText);
   const contratoPergunta = coletando || gestao || assinatura || continuidade || contratoLeitura ? false : perguntaDoContrato(userText);
   // Leitura que o Max faz mas a política não concede: "não liberado", nunca "foge do que eu faço" (smoke 26/10).
-  const leituraNegada = coletando || gestao || assinatura || continuidade || foraDoMax || contratoPergunta || negada ? null
+  const leituraNegada = (state.googleEnabled && state.identity.kind === "user" && /google/i.test(userText) && state.policy.includes("google.calendar.read")) || coletando || gestao || assinatura || continuidade || foraDoMax || contratoPergunta || negada ? null
     : pedeLeituraNaoLiberada(userText, state.policy, { consultasLigadas: featureEnabled("queries", state.identity.orgId), politicaIndisponivel: state.politicaIndisponivel });
   if (leituraNegada) {
     return { reply: TEXTO_LEITURA_NAO_LIBERADA, pendingAction: null,
@@ -1523,6 +1551,13 @@ async function retrieve(state: MaxStateType): Promise<MaxUpdate> {
 }
 
 async function answer(state: MaxStateType): Promise<MaxUpdate> {
+ const result = await answerInterno(state);
+ // Stage selectors and new domain flows have independent numbered references.
+ return !("googleRefs" in result) && (result.fluxo || result.queryOptions || "referencias" in result)
+   ? {...result, googleRefs: null} : result;
+}
+
+async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   const stageSubject = JSON.stringify([state.identity.orgId, subjectDe(state.identity)]);
   const text = textoDoTurno(state).trim();
   const clarification = state.toolResults.find(r => r.tool === "listar_negocios" && r.clarification)?.clarification;
@@ -1655,13 +1690,14 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
     );
   }
 
+  const googleDefs = state.toolRounds === 0 && /google|agenda|agend|disponib|sincroniz|cancel.*atividade/i.test(userText) ? googleTools(googleContext(state)) : [];
   const oferecidas =
-    state.toolRounds === 0 ? oferta.entradas.map((e) => e.nome) : state.toolsOferecidas;
+    state.toolRounds === 0 ? [...oferta.entradas.map((e) => e.nome), ...googleDefs.map(e => e.name)] : state.toolsOferecidas;
   // Só a volta 0 grava: as seguintes herdam a oferta do turn.
   const daOferta = state.toolRounds === 0 ? { toolsOferecidas: oferecidas, queryOptions: null }
     : clarification?.options.length ? { queryOptions: { subjectKey: stageSubject, createdAt: Date.now(),
         options: clarification.options, offset: 0, numbered: false } } : {};
-  const defs = oferta.entradas.map((e) => e.def);
+  const defs = [...oferta.entradas.map((e) => e.def), ...googleDefs];
   const tools = defs.length > 0 ? defs : undefined;
 
   /**
@@ -1683,7 +1719,7 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
   let result;
   try {
     result = await complete({
-      system,
+      system: state.googleEnabled ? `${system}\n${GOOGLE_READ_INSTRUCTIONS}` : system,
       // G7: todo texto da PESSOA vai escapado (não forja cerca nossa) — o do
       // histórico também, porque uma injeção de três turns atrás continua no
       // prompt. Sem etiqueta em volta: medido, ela derrubava a escolha de
@@ -1763,6 +1799,14 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    * Passa pelo despachante como qualquer chamada: existe, foi oferecida, a
    * política concede a capability DESTE tipo, e quem fala pode escrever.
    */
+  const googleCall = result.toolCalls.find(c => c.name.startsWith('google_'));
+  if (googleCall) {
+    const step = await googleStep({ ...googleContext(state), call: googleCall, refs: state.googleRefs,
+      enabled: state.googleEnabled && oferecidas.includes(googleCall.name) && !state.fluxo && !state.pendingAction,
+      action: depsDoFluxo(state, usageDoTurn).acao });
+    return { ...daOferta, googlePending: step.pending, ...(step.refs !== undefined ? {googleRefs: step.refs, referencias: null, queryOptions: null, selectedDealQuery: null, restoDaResposta: null} : {}),
+      reply: step.reply, messages: [{role:'user',content:userText},{role:'assistant',content:step.reply}], usage: usageDoTurn, piiMap: mapaTurno };
+  }
   const trilha: ToolLogEntry[] = [];
   for (const c of result.toolCalls) {
     // Nome fora do registro: registrado e ignorado, como antes (sem volta de
@@ -2091,6 +2135,7 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
 
   return {
     pendingToolCalls: [],
+    googleRefs: referencias !== state.referencias ? null : state.googleRefs,
     toolRounds: state.toolRounds + 1,
     // Só quando mudou: uma volta sem lista não pode apagar a numeração que a
     // pessoa acabou de ler.
@@ -2943,8 +2988,10 @@ async function descartarPendencias(orgId: string, phone: string, identity: Candi
     const fluxoRebaixado = rebaixarFluxo(v?.fluxo);
     const fluxoMudou = JSON.stringify(fluxoRebaixado ?? null) !== JSON.stringify(v?.fluxo ?? null);
     const marketingAcionavel = !!v?.marketingPending && v.marketingPending.phase !== "tracking";
-    if (!v?.pendingAction && !v?.restoDaResposta && !fluxoMudou && !marketingAcionavel) return;
+    if (!v?.pendingAction && !v?.googlePending && !v?.restoDaResposta && !fluxoMudou && !marketingAcionavel) return;
     await app.updateState(config, {
+      googlePending: null,
+      googleRefs: null,
       pendingAction: null,
       restoDaResposta: null,
       ...(marketingAcionavel ? { marketingPending: null } : {}),

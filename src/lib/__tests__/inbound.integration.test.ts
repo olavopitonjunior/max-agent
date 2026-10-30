@@ -93,10 +93,14 @@ d("inbound_queue (Postgres real)", () => {
     turn.mockResolvedValue({ reply: "resposta do Max" });
     status.mockResolvedValue({ connected: true, raw: {} });
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
+    await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [`+${PHONE}`]);
+    await query(`DELETE FROM identity_cache WHERE phone = $1`, [`+${PHONE}`]);
   });
 
   afterAll(async () => {
     await query(`DELETE FROM inbound_queue WHERE from_phone = $1`, [PHONE]);
+    await query(`DELETE FROM phone_org_choice WHERE phone = $1`, [`+${PHONE}`]);
+    await query(`DELETE FROM identity_cache WHERE phone = $1`, [`+${PHONE}`]);
     await db().end();
   });
 
@@ -120,6 +124,12 @@ d("inbound_queue (Postgres real)", () => {
   });
 
   it("processa, responde e fecha o laço", async () => {
+    // O indicador só é autorizado para remetente já conhecido no banco local.
+    await query(
+      `INSERT INTO phone_org_choice (phone, chosen_org_id, candidates, asked_at, chosen_at, updated_at)
+       VALUES ($1, $2, '[]'::jsonb, now(), now(), now())`,
+      [`+${PHONE}`, "inbound-test-org"]
+    );
     typing.mockClear();
     const m = msg();
     const r = await enqueueInbound(m);
@@ -136,6 +146,14 @@ d("inbound_queue (Postgres real)", () => {
     expect(sent).toHaveBeenCalledTimes(1);
     expect(typing).toHaveBeenCalledTimes(1);
     expect(typing).toHaveBeenCalledWith(m.messageId);
+  });
+
+  it("remetente desconhecido não recebe indicador de leitura ou digitação", async () => {
+    const r = await enqueueInbound(msg());
+    if (r.status !== "queued") throw new Error("esperava queued");
+    await processInboundNow(r.id);
+    expect((await statusDe(r.id)).status).toBe("done");
+    expect(typing).not.toHaveBeenCalled();
   });
 
   /**
