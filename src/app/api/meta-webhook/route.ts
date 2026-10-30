@@ -9,6 +9,7 @@ import { enqueueInbound, processInboundNow } from "@/lib/inbound";
 import { applyFalhaDeEnvio, applyStatusCallback } from "@/lib/delivery";
 import { applyTemplateStatusUpdate } from "@/lib/templates/aprovacao";
 import { log } from "@/lib/log";
+import { whatsappPilotAllows } from "@/lib/whatsapp-pilot";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -98,6 +99,7 @@ export async function POST(req: NextRequest) {
 
   const aceitas: string[] = [];
   for (const msg of ev.messages) {
+    if (!whatsappPilotAllows(msg.fromPhone)) continue;
     const r = await enqueueInbound(msg);
     if (r.status === "duplicate") continue;
     log.info("inbound.aceito", {
