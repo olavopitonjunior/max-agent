@@ -1,4 +1,4 @@
-import { googleStep, googleTools, GOOGLE_READ_INSTRUCTIONS, type GooglePending, type GoogleRefs } from './google-workspace';
+import { googleStep, googleTools, googlePrompt, type GooglePending, type GoogleRefs } from './google-workspace';
 import { deployProfile, nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled, durableRuntimeEnabled } from '@/lib/runtime/rollout';
 import { liveNamespaceFor } from "@/lib/runtime/context";
@@ -1719,7 +1719,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   let result;
   try {
     result = await complete({
-      system: state.googleEnabled ? `${system}\n${GOOGLE_READ_INSTRUCTIONS}` : system,
+      system: state.googleEnabled ? `${system}\n${googlePrompt(googleContext(state), state.googleRefs)}` : system,
       // G7: todo texto da PESSOA vai escapado (não forja cerca nossa) — o do
       // histórico também, porque uma injeção de três turns atrás continua no
       // prompt. Sem etiqueta em volta: medido, ela derrubava a escolha de
