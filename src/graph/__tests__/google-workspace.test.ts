@@ -7,7 +7,7 @@ describe('Google confirmation boundary',()=>{
  it('schedule canonicalizes optional defaults before comparing preview',async()=>{
   const input={activityId:'a',expectedVersion:2,startAt:'2026-10-30T12:00:00Z',endAt:'2026-10-30T13:00:00Z',timeZone:'America/Sao_Paulo',participants:[],createMeet:false};
   const action=vi.fn().mockResolvedValue({status:200,body:{...proposal,kind:'calendar.schedule',preview:input}});
-  const r=await googleStep({...ctx,refs,call:{name:'google_propor',args:{kind:'calendar.schedule',numero:1,startAt:input.startAt,endAt:input.endAt}},action});
+  const r=await googleStep({...ctx,text:'Agende a atividade 1 hoje das 9h às 10h.',refs,call:{name:'google_propor',args:{kind:'calendar.schedule',numero:1,startAt:input.startAt,endAt:input.endAt}},action});
   expect(action).toHaveBeenCalledWith('google.propose',{kind:'calendar.schedule',input},'m1');expect(r.pending).not.toBeNull();
  });
 
@@ -53,5 +53,81 @@ describe('Google live reference projection',()=>{
  });
  it.each([{now:1801001},{now:999},{subjectKey:'other-tenant'},{enabled:false},{identity:{kind:'broker',orgId:'o'}},{policy:[]},{policy:['google.calendar.write']}])('does not expose stale, cross-subject or unauthorized references: %j',(change)=>{
   expect(projection(googlePrompt({...ctx,...change},current))).toEqual([]);
+ });
+});
+
+// A UTC instant must be displayed in the proposal's zone without mutating the confirmed payload.
+describe('Calendar confirmation presentation',()=>{
+ it.each([
+  ['America/Sao_Paulo','02/11/2026, 14:30','02/11/2026, 14:45'],
+  ['America/Manaus','02/11/2026, 13:30','02/11/2026, 13:45'],
+  ['Asia/Tokyo','03/11/2026, 02:30','03/11/2026, 02:45'],
+ ])('renders local dates in %s and preserves exact confirmation input',async(timeZone,start,end)=>{
+  const input={activityId:'a',expectedVersion:2,startAt:'2026-11-02T17:30:00Z',endAt:'2026-11-02T17:45:00Z',timeZone,participants:[],createMeet:false};
+  const action=vi.fn().mockResolvedValue({status:200,body:{...proposal,kind:'calendar.schedule',preview:input}});
+  const r=await googleStep({...ctx,text:'Mude a atividade 1 para 02/11/2026 das 14h30 às 14h45.',refs,call:{name:'google_propor',args:{kind:'calendar.schedule',numero:1,...input}},action});
+  expect(r.reply).toContain(start);expect(r.reply).toContain(end);expect(r.reply).toContain(timeZone);
+  expect(r.reply).toContain('reagendamento');expect(r.reply).not.toContain('calendar.schedule');
+  expect(r.pending?.preview).toEqual(input);expect(r.pending?.digest).toBe(proposal.digest);
+  expect(action).toHaveBeenCalledTimes(1);
+ });
+ it('labels cancellation plainly without hiding its confirmation boundary',async()=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:proposal});
+  const r=await googleStep({...ctx,refs,call:{name:'google_propor',args:{kind:'calendar.cancel',numero:1}},action});
+  expect(r.reply).toContain('cancelamento');expect(r.reply).not.toContain('calendar.cancel');
+  expect(r.reply).toContain('SIM');expect(r.pending?.kind).toBe('calendar.cancel');
+ });
+ it('refuses invalid time zones before creating a proposal instead of showing a guessed time',async()=>{
+  const action=vi.fn().mockResolvedValue({status:500,body:{}});
+  const r=await googleStep({...ctx,text:'Mude a atividade 1 para as 14h30.',refs,call:{name:'google_propor',args:{kind:'calendar.schedule',numero:1,startAt:'2026-11-02T17:30:00Z',endAt:'2026-11-02T17:45:00Z',timeZone:'not/a-zone'}},action});
+  expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();
+ });
+});
+
+describe('Google schedule requires temporal evidence from the current human turn',()=>{
+ const input={activityId:'a',expectedVersion:2,startAt:'2026-11-02T17:30:00Z',endAt:'2026-11-02T17:45:00Z',timeZone:'America/Sao_Paulo',participants:[],createMeet:false};
+ const scheduledRefs={...refs,items:[{...refs.items[0],startAt:input.startAt,endAt:input.endAt,timeZone:input.timeZone}]};
+ const call={name:'google_propor',args:{kind:'calendar.schedule',numero:1,...input}};
+ it.each([
+  undefined,'','Mude o horário da atividade 1.','Reagende a primeira atividade.','Reagende a segunda atividade.',
+  'Mude o dia da atividade número 2.','Remarque a atividade 1, com 3 participantes.','Reagende as duas atividades.',
+  'Mude o horário para a segunda atividade.','Passe para a segunda tarefa.',
+  'Mude o horário da atividade 1 de amanhã.','Reagende a atividade 1 que está às 14h.',
+  'Mude a atividade 1 de amanhã para outro horário.','Reagende as duas.','segunda',
+ ])('asks instead of proposing invented or copied dates for %s',async(text)=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:{...proposal,kind:'calendar.schedule',preview:input}});
+  const r=await googleStep({...ctx,text,refs:scheduledRefs,call,action});
+  expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();
+  expect(r.reply).toMatch(/qual|informe/i);expect(r.reply).toMatch(/dia|data/i);expect(r.reply).toMatch(/horário/i);
+ });
+ it.each([
+  'Mude a atividade 1 para 14h30.',
+  'Mude a atividade 1 para as 14:30.',
+  'Mude a atividade 1 para às 14.',
+  'Mude a atividade 1 para às duas e meia.',
+  'Mude a atividade 1 para as duas.',
+  'Mude a atividade 1 às duas.',
+  'Mude a atividade 1 para meio-dia.',
+  'Mude a atividade 1 para 02/11/2026.',
+  'Mude a atividade 1 para 2026-11-02.',
+  'Mude a atividade 1 para dia 2.',
+  'Mude a atividade 1 para 2 de novembro.',
+  'Mude a atividade 1 para amanhã.',
+  'Mude a atividade 1 para segunda-feira.',
+  'Mude a atividade 1 para segunda.',
+  'Mude a atividade 1 para a próxima semana.',
+  'Mude a atividade 1 para meia hora depois.',
+  'Mude a atividade 1 para 30 minutos depois.',
+  'Mude a atividade 1 para daqui a um mês.',
+  'Reagende a atividade 1 daqui a quatro horas.',
+  'Reagende a atividade 1 daqui a quinze minutos.',
+  'Mude o horário da atividade 1 de amanhã para sexta-feira.',
+  'Reagende a atividade 1 que está às 14h para as 16h.',
+  'Mude a atividade 1 para mais tarde.',
+ ])('keeps model-selected schedule subject to a later SIM for %s',async(text)=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:{...proposal,kind:'calendar.schedule',preview:input}});
+  const r=await googleStep({...ctx,text,refs:scheduledRefs,call,action});
+  expect(action).toHaveBeenCalledTimes(1);expect(action).toHaveBeenCalledWith('google.propose',{kind:'calendar.schedule',input},'m1');
+  expect(r.pending?.preview).toEqual(input);expect(r.reply).toContain('SIM');
  });
 });

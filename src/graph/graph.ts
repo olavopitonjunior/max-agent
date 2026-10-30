@@ -1,4 +1,4 @@
-import { googleStep, googleTools, googlePrompt, type GooglePending, type GoogleRefs } from './google-workspace';
+import { googleStep, googleToolsForTurn, googlePrompt, type GooglePending, type GoogleRefs } from './google-workspace';
 import { deployProfile, nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled, durableRuntimeEnabled } from '@/lib/runtime/rollout';
 import { liveNamespaceFor } from "@/lib/runtime/context";
@@ -1690,7 +1690,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
     );
   }
 
-  const googleDefs = state.toolRounds === 0 && /google|agenda|agend|disponib|sincroniz|cancel.*atividade/i.test(userText) ? googleTools(googleContext(state)) : [];
+  const googleDefs = state.toolRounds === 0 ? googleToolsForTurn(googleContext(state), userText, state.googleRefs) : [];
   const oferecidas =
     state.toolRounds === 0 ? [...oferta.entradas.map((e) => e.nome), ...googleDefs.map(e => e.name)] : state.toolsOferecidas;
   // Só a volta 0 grava: as seguintes herdam a oferta do turn.
@@ -1801,7 +1801,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
    */
   const googleCall = result.toolCalls.find(c => c.name.startsWith('google_'));
   if (googleCall) {
-    const step = await googleStep({ ...googleContext(state), call: googleCall, refs: state.googleRefs,
+    const step = await googleStep({ ...googleContext(state), text: userText, call: googleCall, refs: state.googleRefs,
       enabled: state.googleEnabled && oferecidas.includes(googleCall.name) && !state.fluxo && !state.pendingAction,
       action: depsDoFluxo(state, usageDoTurn).acao });
     return { ...daOferta, googlePending: step.pending, ...(step.refs !== undefined ? {googleRefs: step.refs, referencias: null, queryOptions: null, selectedDealQuery: null, restoDaResposta: null} : {}),
