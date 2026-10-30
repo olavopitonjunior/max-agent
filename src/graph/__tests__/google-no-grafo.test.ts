@@ -99,6 +99,17 @@ describe('Google no grafo',()=>{
   expect(llm).not.toHaveBeenCalled();expect(s2.googlePending).toBeNull();
   expect(acao.mock.calls[1][0]).toMatchObject({verb:'google.confirm',args:{proposalId:'p1',digest:'a'.repeat(64)},subject:{kind:'user',userId:'u1'},orgId:'org1'});
  });
+ it('retains the current Google list at the model boundary after compaction',async()=>{
+  const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
+  const googleRefs={subjectKey,createdAt:Date.now(),items:[{id:'internal-do-not-send',title:'PII do not send',version:2,startAt:'2026-11-02T17:00:00Z',endAt:'2026-11-02T17:15:00Z',timeZone:'America/Sao_Paulo'}]};
+  llm.mockResolvedValue({text:'Preciso confirmar o novo horário.',toolCalls:[],usage:uso});
+  await run('Reagende a atividade 1 para 02/11/2026 das 14h30 às 14h45.',{googleRefs,messages:[],summary:'O usuário já consultou sua agenda.'});
+  const request=llm.mock.calls[0][0];
+  expect(request.system).toContain('2026-11-02T17:00:00.000Z');
+  expect(request.system).toContain('"numero":1');
+  expect(request.system).not.toContain('internal-do-not-send');expect(request.system).not.toContain('PII do not send');
+  expect(acao).not.toHaveBeenCalled();
+ });
  it('modelo não pode confirmar diretamente',async()=>{
   llm.mockResolvedValue({text:'',toolCalls:[{name:'google_confirm',args:{proposalId:'p1',digest:'a'.repeat(64)}}],usage:uso});
   const s=await run('confirma agenda Google');expect(acao).not.toHaveBeenCalled();expect(s.googlePending).toBeNull();
