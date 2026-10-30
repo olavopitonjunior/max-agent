@@ -16,6 +16,7 @@ import { currentExecution } from "../runtime/context";
 
 import { deployProfile } from "../deploy-profile";
 import { log } from "../log";
+import { assertWhatsAppPilotRecipient, whatsappPilotAllows, whatsappPilotConfigured } from "../whatsapp-pilot";
 import { logAdapter } from "./adapters/log";
 import { metaAdapter } from "./adapters/meta";
 import { NEWTON_SYNTHETIC_PREFIX, newtonBridgeAdapter } from "./adapters/newton-bridge";
@@ -128,6 +129,7 @@ export async function sendText(params: {
 }): Promise<SendResult> {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
+  assertWhatsAppPilotRecipient(params.to);
   const { interativo, ...texto } = params;
   const a = adapter();
   if (interativo && a.sendInteractive && interativoDisponivel()) {
@@ -172,6 +174,7 @@ export async function sendTemplate(params: {
 }): Promise<SendResult> {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
+  assertWhatsAppPilotRecipient(params.to);
   const a = adapter();
   if (!a.capabilities.templates || !a.sendTemplate) throw new Error("transport_sem_template");
   return a.sendTemplate(params);
@@ -186,6 +189,7 @@ export async function sendReaction(params: { to: string; messageId: string; emoj
   try {
     if (process.env.MAX_OUTBOUND_KILL === "true") return false;
     if (currentExecution() && currentExecution()!.context.mode !== "live") return false;
+    if (!whatsappPilotAllows(params.to)) return false;
     if (!params.messageId || SINTETICOS.some((p) => params.messageId.startsWith(p))) return false;
     const a = adapter();
     if (!a.capabilities.reactions || !a.sendReaction) return false;
@@ -219,6 +223,8 @@ const SINTETICOS = [NEWTON_SYNTHETIC_PREFIX, "playground-", "human-"];
  */
 export async function markReadTyping(messageId: string): Promise<boolean> {
   try {
+    // This API has no recipient to verify; suppress ID-only events in a pilot.
+    if (whatsappPilotConfigured()) return false;
     if ((process.env.MAX_TYPING_INDICATOR ?? "").trim().toLowerCase() === "off") return false;
     if (!messageId || SINTETICOS.some((p) => messageId.startsWith(p))) return false;
     const a = adapter();
