@@ -138,6 +138,7 @@ export async function googleStep(c:Context & {call?:{name:string;args:Record<str
   Object.assign(input,{startAt:a.startAt,endAt:a.endAt,timeZone:a.timeZone,participants:a.participants,createMeet:a.createMeet});
  }
  const r=await c.action('google.propose',{kind:a.kind,input},c.messageId);const b=r?.body;
+ if(b?.error==='GOOGLE_RECONNECT_REQUIRED')return no('Sua conta Google não está conectada para isso. Conecte em Minha conta > Meu perfil > Integrações e peça de novo. Nada foi confirmado.');
  if((!r||r.status<200||r.status>=300)||!b||typeof b.proposalId!=='string'||typeof b.digest!=='string'||! /^[a-f0-9]{64}$/.test(b.digest)||typeof b.expiresAt!=='string'||Date.parse(b.expiresAt)<=c.now||!Number.isFinite(Date.parse(b.expiresAt))||b.kind!==a.kind||contentDigest(b.preview)!==contentDigest(input))return no('Não consegui preparar uma proposta válida. Nada foi confirmado.');
  const summary=b.summary&&typeof b.summary==='object'&&!Array.isArray(b.summary)?b.summary as Record<string,unknown>:null;
  if(!summary||typeof summary.title!=='string'||!summary.title.trim()||!(summary.dueAt===null||(typeof summary.dueAt==='string'&&summary.dueAt.length<=40&&Number.isFinite(Date.parse(summary.dueAt)))))return no('Não consegui preparar um resumo atual da atividade. Nada foi confirmado.');

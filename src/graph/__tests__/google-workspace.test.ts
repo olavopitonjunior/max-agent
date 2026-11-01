@@ -4,6 +4,11 @@ const ctx={enabled:true,identity:{kind:'user',orgId:'o',userId:'u'},policy:['goo
 const proposal={proposalId:'p',digest:'a'.repeat(64),expiresAt:new Date(10000).toISOString(),kind:'calendar.cancel',summary:{title:'Visita atual',dueAt:null},preview:{activityId:'a',expectedVersion:2}};
 const refs={createdAt:1000,subjectKey:'o:u',items:[{id:'a',title:'Visita',version:2}]};
 describe('Google confirmation boundary',()=>{
+ it('sem conexão Google orienta conectar, sem proposta pendente',async()=>{
+  const action=vi.fn().mockResolvedValue({status:409,body:{error:'GOOGLE_RECONNECT_REQUIRED'}});
+  const r=await googleStep({...ctx,refs,call:{name:'google_propor',args:{kind:'calendar.cancel',numero:1}},action});
+  expect(r.pending).toBeNull();expect(r.reply).toContain('Integrações');expect(r.reply).toContain('Nada foi confirmado');
+ });
  it('schedule canonicalizes optional defaults before comparing preview',async()=>{
   const input={activityId:'a',expectedVersion:2,startAt:'2026-10-30T12:00:00Z',endAt:'2026-10-30T13:00:00Z',timeZone:'America/Sao_Paulo',participants:[],createMeet:false};
   const action=vi.fn().mockResolvedValue({status:200,body:{...proposal,kind:'calendar.schedule',preview:input}});
