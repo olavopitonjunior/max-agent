@@ -2,7 +2,7 @@ import { contentDigest } from '@/lib/runtime/contracts';
 import type { LlmTool } from '@/lib/llm';
 import type { RespostaDeAcao } from '@/lib/acao';
 export interface GooglePending { proposalId:string; digest:string; expiresAt:string; kind:string; preview:Record<string,unknown>; askedMessageId:string; subjectKey:string }
-export interface GoogleRefs { createdAt:number; subjectKey:string; items:{id:string;title:string;version:number;updatedAt?:string;startAt?:string;endAt?:string;timeZone?:string;status?:string}[] }
+export interface GoogleRefs { createdAt:number; subjectKey:string; items:{id:string;title:string;version:number;updatedAt?:string;startAt?:string;endAt?:string;timeZone?:string;status?:string;hasTime?:boolean}[] }
 interface Context { enabled:boolean; identity:{kind:string;orgId?:string;userId?:string}; policy:readonly string[]; now:number; messageId:string; subjectKey:string }
 type Action=(verb:'google.activities'|'google.availability'|'google.propose'|'google.confirm',args:Record<string,unknown>,key?:string)=>Promise<RespostaDeAcao|null>;
 const capability=(kind:unknown)=>kind==='tasks.sync'?'google.tasks.write':'google.calendar.write';
@@ -25,6 +25,23 @@ function validTimeZone(value:unknown):value is string {
 }
 function localDateTime(value:string,timeZone:string):string {
  return new Intl.DateTimeFormat('pt-BR',{timeZone,dateStyle:'short',timeStyle:'short',hourCycle:'h23'}).format(new Date(value));
+}
+const DEFAULT_TIME_ZONE='America/Sao_Paulo';
+function localDate(value:string,timeZone:string):string {
+ return new Intl.DateTimeFormat('pt-BR',{timeZone,dateStyle:'short'}).format(new Date(value));
+}
+const isInstant=(value:unknown):value is string=>typeof value==='string'&&Number.isFinite(Date.parse(value));
+const STATUS_LABEL:Record<string,string>={synced:'sincronizada',pending:'sincronização pendente',unsynced:'sem evento no Google',conflict:'conflito, confira no sistema',removed:'evento removido do Google'};
+/** Human list line: local time only, never a raw ISO instant or internal status.
+ * A date-only activity has no meaningful hour; an absent hasTime keeps the time. */
+function activityLine(v:GoogleRefs['items'][number],index:number):string {
+ const timeZone=validTimeZone(v.timeZone)?v.timeZone:DEFAULT_TIME_ZONE;
+ const dateOnly=v.hasTime===false;
+ const start=isInstant(v.startAt)?` — ${dateOnly?localDate(v.startAt,DEFAULT_TIME_ZONE):localDateTime(v.startAt,timeZone)}`:'';
+ const end=!dateOnly&&start&&isInstant(v.endAt)?` a ${localDateTime(v.endAt,timeZone)}`:'';
+ const zone=!dateOnly&&start&&timeZone!==DEFAULT_TIME_ZONE?` (${timeZone})`:'';
+ const status=v.status&&STATUS_LABEL[v.status]?` — ${STATUS_LABEL[v.status]}`:'';
+ return `${index+1}. ${v.title}${start}${end}${zone}${status}`;
 }
 /** Evidence gate, not an intent or date parser: the model still chooses the
  * operation and interprets dates. Only the current human turn can supply this
@@ -81,7 +98,7 @@ export async function googleStep(c:Context & {call?:{name:string;args:Record<str
   const p=c.pending;
   if(!allowed(c,capability(p.kind))||p.subjectKey!==c.subjectKey)return no();
   if(!Number.isFinite(Date.parse(p.expiresAt))||Date.parse(p.expiresAt)<=c.now||p.askedMessageId===c.messageId)return no('Essa confirmação expirou. Peça uma nova proposta.');
-  if(c.call||c.text?.trim().toUpperCase()!=='SIM')return no('Proposta descartada. Peça novamente com os ajustes desejados.');
+  if(c.call||c.text?.trim()!=='SIM')return no(!c.call&&/^sim\W*$/i.test(c.text?.trim()??'')?'Só SIM em maiúsculas confirma. Proposta descartada; peça de novo.':'Proposta descartada. Peça novamente com os ajustes desejados.');
   const r=await c.action('google.confirm',{proposalId:p.proposalId,digest:p.digest},c.messageId);
   if(r?.status===409&&r.body.error==='PROPOSAL_ALREADY_CONSUMED')return no('Essa operação já foi colocada na fila. Não enviei outra operação.');
   return no(r&&r.status>=200&&r.status<300&&r.body.status==='queued'?'Operação confirmada e colocada na fila.':'Não consegui confirmar a operação. Consulte a agenda no sistema antes de tentar novamente.');
@@ -97,13 +114,13 @@ export async function googleStep(c:Context & {call?:{name:string;args:Record<str
    // Availability never forwards arbitrary server strings or private event metadata.
    if(!Array.isArray(r.body.busy))return no('Não consegui consultar a disponibilidade agora.');
    const slots=r.body.busy.slice(0,5);
-   const times=slots.flatMap(v=>v&&typeof v==='object'&&typeof v.start==='string'&&v.start.length<=40&&Number.isFinite(Date.parse(v.start))&&typeof v.end==='string'&&v.end.length<=40&&Number.isFinite(Date.parse(v.end))?[`${v.start} — ${v.end}`]:[]);
+   const times=slots.flatMap(v=>v&&typeof v==='object'&&typeof v.start==='string'&&v.start.length<=40&&Number.isFinite(Date.parse(v.start))&&typeof v.end==='string'&&v.end.length<=40&&Number.isFinite(Date.parse(v.end))?[`${localDateTime(v.start,DEFAULT_TIME_ZONE)} a ${localDateTime(v.end,DEFAULT_TIME_ZONE)}`]:[]);
    if(times.length!==slots.length)return no('Não consegui consultar a disponibilidade agora.');
    return no(times.length?`Horários ocupados (até 5):\n${times.join('\n')}`:'Nenhum horário ocupado informado para esse período.');
   }
   if(!Array.isArray(r.body.items))return no('Não consegui consultar as atividades profissionais.');
-  const items:GoogleRefs['items']=r.body.items.slice(0,5).flatMap(v=>v&&typeof v==='object'&&typeof v.id==='string'&&typeof v.title==='string'&&Number.isInteger(v.version)&&v.version>=0?[{id:v.id,title:v.title.replace(/[\r\n\u0000-\u001f]/g,' ').slice(0,120),version:v.version,...Object.fromEntries(['startAt','endAt','timeZone','status','updatedAt'].flatMap(k=>typeof v[k]==='string'?[[k,v[k].replace(/[\r\n\u0000-\u001f]/g,' ').slice(0,80)]]:[]))}]:[]);
-  return {pending:null,refs:{createdAt:c.now,subjectKey:c.subjectKey,items},reply:items.length?`Atividades profissionais (até 5):\n${items.map((v,i)=>`${i+1}. ${v.title}${v.startAt?` — ${v.startAt}`:''}${v.endAt?` a ${v.endAt}`:''}${v.timeZone?` (${v.timeZone})`:''}${v.status?` — ${v.status}`:''}`).join('\n')}`:'Nenhuma atividade profissional nesse período.'};
+  const items:GoogleRefs['items']=r.body.items.slice(0,5).flatMap(v=>v&&typeof v==='object'&&typeof v.id==='string'&&typeof v.title==='string'&&Number.isInteger(v.version)&&v.version>=0?[{id:v.id,title:v.title.replace(/[\r\n\u0000-\u001f]/g,' ').slice(0,120),version:v.version,...Object.fromEntries(['startAt','endAt','timeZone','status','updatedAt'].flatMap(k=>typeof v[k]==='string'?[[k,v[k].replace(/[\r\n\u0000-\u001f]/g,' ').slice(0,80)]]:[])),...(typeof v.hasTime==='boolean'?{hasTime:v.hasTime}:{})}]:[]);
+  return {pending:null,refs:{createdAt:c.now,subjectKey:c.subjectKey,items},reply:items.length?`Atividades profissionais (até 5):\n${items.map(activityLine).join('\n')}`:'Nenhuma atividade profissional nesse período.'};
  }
  if(!['calendar.schedule','calendar.cancel','tasks.sync'].includes(String(a.kind))||!allowed(c,capability(a.kind)))return no();
  const refs=c.refs;const item=Number.isInteger(a.numero)&&refs&&refs.subjectKey===c.subjectKey&&c.now>=refs.createdAt&&c.now-refs.createdAt<=1800000?refs.items[Number(a.numero)-1]:null;
@@ -126,11 +143,11 @@ export async function googleStep(c:Context & {call?:{name:string;args:Record<str
  if(!summary||typeof summary.title!=='string'||!summary.title.trim()||!(summary.dueAt===null||(typeof summary.dueAt==='string'&&summary.dueAt.length<=40&&Number.isFinite(Date.parse(summary.dueAt)))))return no('Não consegui preparar um resumo atual da atividade. Nada foi confirmado.');
  const title=summary.title.replace(/[\r\n\u0000-\u001f]/g,' ').slice(0,120);
  const pending:GooglePending={proposalId:b.proposalId,digest:b.digest,expiresAt:b.expiresAt,kind:String(b.kind),preview:input,askedMessageId:c.messageId,subjectKey:c.subjectKey};
- if(a.kind==='tasks.sync')return {pending,reply:`Confirmar sincronização da tarefa “${title}”?\n${summary.dueAt?`Prazo da atividade: ${summary.dueAt}\n`:''}Atualização da atividade: ${input.expectedUpdatedAt}. Responda somente SIM para confirmar esta versão. Validade: ${b.expiresAt}.`};
- const timeZone=a.kind==='calendar.schedule'?input.timeZone as string:validTimeZone(item.timeZone)?item.timeZone:'UTC';
+ if(a.kind==='tasks.sync')return {pending,reply:`Confirmar sincronização da tarefa “${title}”?\n${summary.dueAt?`Prazo da atividade: ${localDate(summary.dueAt,DEFAULT_TIME_ZONE)}\n`:''}Atualização da atividade: ${localDateTime(input.expectedUpdatedAt as string,DEFAULT_TIME_ZONE)}. Responda somente SIM para confirmar esta versão. Validade: ${localDateTime(b.expiresAt,DEFAULT_TIME_ZONE)}.`};
+ const timeZone=a.kind==='calendar.schedule'?input.timeZone as string:validTimeZone(item.timeZone)?item.timeZone:DEFAULT_TIME_ZONE;
  const operation=a.kind==='calendar.cancel'?'cancelamento':item.version>0?'reagendamento':'agendamento';
  const details=a.kind==='calendar.schedule'
   ? `Início: ${localDateTime(input.startAt as string,timeZone)}\nFim: ${localDateTime(input.endAt as string,timeZone)}\nParticipantes: ${(input.participants as string[]).join(', ')||'nenhum'}\nGoogle Meet: ${input.createMeet?'sim':'não'}\n`
-  : summary.dueAt?`Horário registrado: ${localDateTime(summary.dueAt,timeZone)}\n`:'';
+  : summary.dueAt?(summary.hasTime===false?`Data registrada: ${localDate(summary.dueAt,DEFAULT_TIME_ZONE)}\n`:`Horário registrado: ${localDateTime(summary.dueAt,timeZone)}\n`):'';
  return {pending,reply:`Confirmar ${operation} de “${title}”?\n${details}Fuso: ${timeZone}\nResponda somente SIM para confirmar esta proposta. Validade: ${localDateTime(b.expiresAt,timeZone)} (${timeZone}).`};
 }

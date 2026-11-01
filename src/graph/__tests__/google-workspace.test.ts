@@ -16,7 +16,7 @@ describe('Google confirmation boundary',()=>{
   const action=vi.fn().mockResolvedValue({status:200,body:{...proposal,kind:'tasks.sync',summary:{title:'Título atual do servidor',dueAt:'2026-10-30T12:00:00.000Z'},preview:{activityId:'a',expectedUpdatedAt:updatedAt}}});
   const r=await googleStep({...ctx,call:{name:'google_propor',args:{kind:'tasks.sync',numero:1,expectedUpdatedAt:'evil'}},refs:{...refs,items:[{...refs.items[0],updatedAt}]},action});
   expect(action).toHaveBeenCalledWith('google.propose',{kind:'tasks.sync',input:{activityId:'a',expectedUpdatedAt:updatedAt}},'m1');
-  expect(r.reply).toContain('Título atual do servidor');expect(r.reply).toContain('2026-10-30T12:00:00.000Z');expect(r.reply).not.toContain('Versão: 2');expect(r.pending).not.toBeNull();
+  expect(r.reply).toContain('Título atual do servidor');expect(r.reply).toContain('Prazo da atividade: 30/10/2026\n');expect(r.reply).toContain('Atualização da atividade: 29/10/2026, 09:00');expect(r.reply).not.toMatch(/\d{4}-\d{2}-\d{2}T/);expect(r.reply).not.toContain('Versão: 2');expect(r.pending).not.toBeNull();
  });
  it('Tasks without authoritative activity update cannot propose',async()=>{
   const action=vi.fn();const r=await googleStep({...ctx,call:{name:'google_propor',args:{kind:'tasks.sync',numero:1}},refs,action});expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();
@@ -81,6 +81,56 @@ describe('Calendar confirmation presentation',()=>{
   const action=vi.fn().mockResolvedValue({status:500,body:{}});
   const r=await googleStep({...ctx,text:'Mude a atividade 1 para as 14h30.',refs,call:{name:'google_propor',args:{kind:'calendar.schedule',numero:1,startAt:'2026-11-02T17:30:00Z',endAt:'2026-11-02T17:45:00Z',timeZone:'not/a-zone'}},action});
   expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();
+ });
+});
+
+describe('Human replies use local time, never raw instants',()=>{
+ const list={name:'google_atividades',args:{startAt:'2026-12-01T00:00:00Z',endAt:'2026-12-02T00:00:00Z'}};
+ const iso=/\d{4}-\d{2}-\d{2}T/;
+ it('renders timed items in their zone and date-only items without an hour',async()=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:{items:[
+   {id:'a',title:'Visita',version:1,updatedAt:'2026-11-01T00:00:00Z',startAt:'2026-12-01T17:00:00.000Z',endAt:'2026-12-01T18:00:00.000Z',timeZone:'America/Sao_Paulo',status:'synced',hasTime:true},
+   {id:'b',title:'Ligar',version:0,updatedAt:'2026-11-01T00:00:00Z',startAt:'2026-12-01T15:00:00.000Z',endAt:null,timeZone:'America/Sao_Paulo',status:'unsynced',hasTime:false},
+   {id:'c',title:'Antiga',version:1,startAt:'2026-12-01T17:00:00.000Z',endAt:'2026-12-01T18:00:00.000Z',timeZone:'America/Manaus',status:'novo_status'},
+  ]}});
+  const r=await googleStep({...ctx,call:list,action});
+  const lines=r.reply.split('\n');
+  expect(lines[1]).toBe('1. Visita — 01/12/2026, 14:00 a 01/12/2026, 15:00 — sincronizada');
+  expect(lines[2]).toBe('2. Ligar — 01/12/2026 — sem evento no Google');
+  expect(lines[3]).toBe('3. Antiga — 01/12/2026, 13:00 a 01/12/2026, 14:00 (America/Manaus)');
+  expect(r.reply).not.toMatch(iso);expect(r.refs?.items[1].hasTime).toBe(false);
+ });
+ it('keeps hasTime out of the model projection',async()=>{
+  const prompt=googlePrompt(ctx,{...refs,items:[{...refs.items[0],hasTime:false}]});
+  expect(prompt).not.toContain('hasTime');
+ });
+ it('renders busy slots in local time',async()=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:{busy:[{start:'2026-12-01T17:00:00Z',end:'2026-12-01T18:00:00Z'}]}});
+  const r=await googleStep({...ctx,call:{...list,name:'google_disponibilidade'},action});
+  expect(r.reply).toContain('01/12/2026, 14:00 a 01/12/2026, 15:00');expect(r.reply).not.toMatch(iso);
+ });
+ it('cancelling a date-only activity shows only its date',async()=>{
+  const body=(hasTime:boolean)=>({...proposal,summary:{title:'Ligar',dueAt:'2026-12-01T15:00:00.000Z',hasTime}});
+  const cancel={name:'google_propor',args:{kind:'calendar.cancel',numero:1}};
+  const dateOnly=await googleStep({...ctx,refs,call:cancel,action:vi.fn().mockResolvedValue({status:200,body:body(false)})});
+  expect(dateOnly.reply).toContain('Data registrada: 01/12/2026\n');expect(dateOnly.reply).not.toContain('Horário registrado');
+  const timed=await googleStep({...ctx,refs,call:cancel,action:vi.fn().mockResolvedValue({status:200,body:body(true)})});
+  expect(timed.reply).toContain('Horário registrado: 01/12/2026, 12:00');
+ });
+ it.each(['sim','Sim','sIm'])('%s does not confirm: only the exact SIM does',async(text)=>{
+  const action=vi.fn();
+  const r=await googleStep({...ctx,messageId:'m2',text,pending:{...proposal,askedMessageId:'m1',subjectKey:'o:u'},action});
+  expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();expect(r.reply).toContain('Só SIM em maiúsculas');
+ });
+ it('a date-only item keeps its day whatever the link zone, and removed has a label',async()=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:{items:[{id:'a',title:'Ligar',version:1,startAt:'2026-12-01T15:00:00.000Z',endAt:null,timeZone:'Asia/Tokyo',status:'removed',hasTime:false}]}});
+  const r=await googleStep({...ctx,call:list,action});
+  expect(r.reply.split('\n')[1]).toBe('1. Ligar — 01/12/2026 — evento removido do Google');
+ });
+ it('tolerates surrounding spaces on the exact SIM',async()=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:{status:'queued',jobId:'j'}});
+  await googleStep({...ctx,messageId:'m2',text:'  SIM\n',pending:{...proposal,askedMessageId:'m1',subjectKey:'o:u'},action});
+  expect(action).toHaveBeenCalledTimes(1);
  });
 });
 
