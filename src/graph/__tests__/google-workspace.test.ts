@@ -120,7 +120,12 @@ describe('Human replies use local time, never raw instants',()=>{
  it.each(['sim','Sim','sIm'])('%s does not confirm: only the exact SIM does',async(text)=>{
   const action=vi.fn();
   const r=await googleStep({...ctx,messageId:'m2',text,pending:{...proposal,askedMessageId:'m1',subjectKey:'o:u'},action});
-  expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();
+  expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();expect(r.reply).toContain('Só SIM em maiúsculas');
+ });
+ it('a date-only item keeps its day whatever the link zone, and removed has a label',async()=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:{items:[{id:'a',title:'Ligar',version:1,startAt:'2026-12-01T15:00:00.000Z',endAt:null,timeZone:'Asia/Tokyo',status:'removed',hasTime:false}]}});
+  const r=await googleStep({...ctx,call:list,action});
+  expect(r.reply.split('\n')[1]).toBe('1. Ligar — 01/12/2026 — evento removido do Google');
  });
  it('tolerates surrounding spaces on the exact SIM',async()=>{
   const action=vi.fn().mockResolvedValue({status:200,body:{status:'queued',jobId:'j'}});

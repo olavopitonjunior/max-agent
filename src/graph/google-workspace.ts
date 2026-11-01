@@ -31,13 +31,13 @@ function localDate(value:string,timeZone:string):string {
  return new Intl.DateTimeFormat('pt-BR',{timeZone,dateStyle:'short'}).format(new Date(value));
 }
 const isInstant=(value:unknown):value is string=>typeof value==='string'&&Number.isFinite(Date.parse(value));
-const STATUS_LABEL:Record<string,string>={synced:'sincronizada',pending:'sincronização pendente',unsynced:'sem evento no Google',conflict:'conflito, confira no sistema'};
+const STATUS_LABEL:Record<string,string>={synced:'sincronizada',pending:'sincronização pendente',unsynced:'sem evento no Google',conflict:'conflito, confira no sistema',removed:'evento removido do Google'};
 /** Human list line: local time only, never a raw ISO instant or internal status.
  * A date-only activity has no meaningful hour; an absent hasTime keeps the time. */
 function activityLine(v:GoogleRefs['items'][number],index:number):string {
  const timeZone=validTimeZone(v.timeZone)?v.timeZone:DEFAULT_TIME_ZONE;
  const dateOnly=v.hasTime===false;
- const start=isInstant(v.startAt)?` — ${dateOnly?localDate(v.startAt,timeZone):localDateTime(v.startAt,timeZone)}`:'';
+ const start=isInstant(v.startAt)?` — ${dateOnly?localDate(v.startAt,DEFAULT_TIME_ZONE):localDateTime(v.startAt,timeZone)}`:'';
  const end=!dateOnly&&start&&isInstant(v.endAt)?` a ${localDateTime(v.endAt,timeZone)}`:'';
  const zone=!dateOnly&&start&&timeZone!==DEFAULT_TIME_ZONE?` (${timeZone})`:'';
  const status=v.status&&STATUS_LABEL[v.status]?` — ${STATUS_LABEL[v.status]}`:'';
@@ -98,7 +98,7 @@ export async function googleStep(c:Context & {call?:{name:string;args:Record<str
   const p=c.pending;
   if(!allowed(c,capability(p.kind))||p.subjectKey!==c.subjectKey)return no();
   if(!Number.isFinite(Date.parse(p.expiresAt))||Date.parse(p.expiresAt)<=c.now||p.askedMessageId===c.messageId)return no('Essa confirmação expirou. Peça uma nova proposta.');
-  if(c.call||c.text?.trim()!=='SIM')return no('Proposta descartada. Peça novamente com os ajustes desejados.');
+  if(c.call||c.text?.trim()!=='SIM')return no(!c.call&&/^sim\W*$/i.test(c.text?.trim()??'')?'Só SIM em maiúsculas confirma. Proposta descartada; peça de novo.':'Proposta descartada. Peça novamente com os ajustes desejados.');
   const r=await c.action('google.confirm',{proposalId:p.proposalId,digest:p.digest},c.messageId);
   if(r?.status===409&&r.body.error==='PROPOSAL_ALREADY_CONSUMED')return no('Essa operação já foi colocada na fila. Não enviei outra operação.');
   return no(r&&r.status>=200&&r.status<300&&r.body.status==='queued'?'Operação confirmada e colocada na fila.':'Não consegui confirmar a operação. Consulte a agenda no sistema antes de tentar novamente.');
@@ -148,6 +148,6 @@ export async function googleStep(c:Context & {call?:{name:string;args:Record<str
  const operation=a.kind==='calendar.cancel'?'cancelamento':item.version>0?'reagendamento':'agendamento';
  const details=a.kind==='calendar.schedule'
   ? `Início: ${localDateTime(input.startAt as string,timeZone)}\nFim: ${localDateTime(input.endAt as string,timeZone)}\nParticipantes: ${(input.participants as string[]).join(', ')||'nenhum'}\nGoogle Meet: ${input.createMeet?'sim':'não'}\n`
-  : summary.dueAt?(summary.hasTime===false?`Data registrada: ${localDate(summary.dueAt,timeZone)}\n`:`Horário registrado: ${localDateTime(summary.dueAt,timeZone)}\n`):'';
+  : summary.dueAt?(summary.hasTime===false?`Data registrada: ${localDate(summary.dueAt,DEFAULT_TIME_ZONE)}\n`:`Horário registrado: ${localDateTime(summary.dueAt,timeZone)}\n`):'';
  return {pending,reply:`Confirmar ${operation} de “${title}”?\n${details}Fuso: ${timeZone}\nResponda somente SIM para confirmar esta proposta. Validade: ${localDateTime(b.expiresAt,timeZone)} (${timeZone}).`};
 }
