@@ -70,7 +70,7 @@ describe('Calendar confirmation presentation',()=>{
  ])('renders local dates in %s and preserves exact confirmation input',async(timeZone,start,end)=>{
   const input={activityId:'a',expectedVersion:2,startAt:'2026-11-02T17:30:00Z',endAt:'2026-11-02T17:45:00Z',timeZone,participants:[],createMeet:false};
   const action=vi.fn().mockResolvedValue({status:200,body:{...proposal,kind:'calendar.schedule',preview:input}});
-  const r=await googleStep({...ctx,text:'Mude a atividade 1 para 02/11/2026 das 14h30 às 14h45.',refs,call:{name:'google_propor',args:{kind:'calendar.schedule',numero:1,...input}},action});
+  const r=await googleStep({...ctx,text:`Mude a atividade 1 para ${start.slice(0,10)} das ${start.slice(-5)} às ${end.slice(-5)}.`,refs,call:{name:'google_propor',args:{kind:'calendar.schedule',numero:1,...input}},action});
   expect(r.reply).toContain(start);expect(r.reply).toContain(end);expect(r.reply).toContain(timeZone);
   expect(r.reply).toContain('reagendamento');expect(r.reply).not.toContain('calendar.schedule');
   expect(r.pending?.preview).toEqual(input);expect(r.pending?.digest).toBe(proposal.digest);
@@ -177,12 +177,54 @@ describe('Google schedule requires temporal evidence from the current human turn
   'Reagende a atividade 1 daqui a quatro horas.',
   'Reagende a atividade 1 daqui a quinze minutos.',
   'Mude o horário da atividade 1 de amanhã para sexta-feira.',
-  'Reagende a atividade 1 que está às 14h para as 16h.',
   'Mude a atividade 1 para mais tarde.',
  ])('keeps model-selected schedule subject to a later SIM for %s',async(text)=>{
   const action=vi.fn().mockResolvedValue({status:200,body:{...proposal,kind:'calendar.schedule',preview:input}});
   const r=await googleStep({...ctx,text,refs:scheduledRefs,call,action});
   expect(action).toHaveBeenCalledTimes(1);expect(action).toHaveBeenCalledWith('google.propose',{kind:'calendar.schedule',input},'m1');
   expect(r.pending?.preview).toEqual(input);expect(r.reply).toContain('SIM');
+ });
+});
+describe('horário escrito pela pessoa contra o instante do modelo',()=>{
+ const propor=async(text:string,startAt:string,endAt:string)=>{
+  const input={activityId:'a',expectedVersion:2,startAt,endAt,timeZone:'America/Sao_Paulo',participants:[],createMeet:false};
+  const action=vi.fn().mockResolvedValue({status:200,body:{...proposal,kind:'calendar.schedule',preview:input}});
+  const r=await googleStep({...ctx,text,refs,call:{name:'google_propor',args:{kind:'calendar.schedule',numero:1,...input}},action});
+  return {r,action};
+ };
+ it('recusa 15:00 que o modelo mandou em UTC, sem chamar o servidor (medido 01/11)',async()=>{
+  const {r,action}=await propor('Agende a atividade 2 dia 05/11/2026 das 15:00 às 15:30','2026-11-05T15:00:00Z','2026-11-05T15:30:00Z');
+  expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();expect(r.reply).toContain('Nada foi proposto');
+ });
+ it('recusa 14h30 quando o instante cai noutra hora',async()=>{
+  const {action}=await propor('Mude a atividade 1 para amanhã às 14h30','2026-11-05T14:30:00Z','2026-11-05T15:00:00Z');
+  expect(action).not.toHaveBeenCalled();
+ });
+ it.each([
+  ['das 15:00 às 15:30 dia 05/11','2026-11-05T15:00:00-03:00','2026-11-05T15:30:00-03:00'],
+  ['dia 05/11 às 15h','2026-11-05T18:00:00Z','2026-11-05T18:30:00Z'],
+  ['dia 05/11 das 9h30 às 10h','2026-11-05T09:30:00-03:00','2026-11-05T10:00:00-03:00'],
+ ])('aceita "%s"',async(text,startAt,endAt)=>{
+  const {r,action}=await propor(`Agende a atividade 1 ${text}`,startAt,endAt);
+  expect(action).toHaveBeenCalledTimes(1);expect(r.pending).not.toBeNull();
+ });
+ it('reagendar de 14h para 16h aceita o destino',async()=>{
+  const {action}=await propor('Reagende a atividade 1 que está às 14h para as 16h.','2026-11-05T16:00:00-03:00','2026-11-05T16:30:00-03:00');
+  expect(action).toHaveBeenCalledTimes(1);
+ });
+ it('reagendar de 14h para 16h recusa o horário de origem',async()=>{
+  const {action}=await propor('Reagende a atividade 1 que está às 14h para as 16h.','2026-11-05T14:00:00-03:00','2026-11-05T14:30:00-03:00');
+  expect(action).not.toHaveBeenCalled();
+ });
+ it('duração solta não vira horário: "adie 2h" segue valendo',async()=>{
+  const {action}=await propor('Adie a atividade 1 em 2h','2026-11-05T17:00:00-03:00','2026-11-05T17:30:00-03:00');
+  expect(action).toHaveBeenCalledTimes(1);
+ });
+ it('data 05/11/2026 não é confundida com horário',async()=>{
+  const {action}=await propor('Agende a atividade 1 dia 05/11/2026','2026-11-05T10:00:00-03:00','2026-11-05T10:30:00-03:00');
+  expect(action).toHaveBeenCalledTimes(1);
+ });
+ it('o prompt manda deslocamento -03:00, nunca Z',()=>{
+  expect(googlePrompt(ctx,refs)).toContain('-03:00');expect(googlePrompt(ctx,refs)).toContain('nunca com Z');
  });
 });
