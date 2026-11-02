@@ -18,7 +18,7 @@ existentes, com estes `verb`/`args` (datas ISO com offset):
 | Verbo | Args | Capability | Resposta |
 |---|---|---|---|
 | `google.availability` | `{startAt,endAt}` | `google.calendar.read` | `{busy:[{start,end}]}` |
-| `google.activities` | `{startAt,endAt}` | `google.calendar.read` | `{items:[{id,title,dealId,startAt,endAt,timeZone,status,version,updatedAt}]}` |
+| `google.activities` | `{startAt,endAt}` ou `{activityId}` | `google.calendar.read` | `{items:[{id,title,dealId,startAt,endAt,hasTime,timeZone,status,version,updatedAt}]}` |
 | `google.propose` | `{kind,input}` | calendar.write ou tasks.write conforme kind | proposta abaixo |
 | `google.confirm` | `{proposalId,digest}` | mesma capability da proposta armazenada | `{jobId,status:"queued"}` |
 

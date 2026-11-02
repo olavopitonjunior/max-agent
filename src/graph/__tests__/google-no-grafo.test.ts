@@ -55,18 +55,29 @@ describe('Google no grafo',()=>{
   expect(s.googlePending).toBeNull();expect(s.reply).toContain('descartada');
  });
 
- it('lista Google substitui a numeração legada e impede ação no item antigo',async()=>{
+ it('número de listar_atividades serve para google_propor, com a versão vinda do servidor',async()=>{
+  vi.mocked(fetchProfile).mockResolvedValue({enabled:true,googleMaxEnabled:true,maxPolicy:{byRole:{'*':['google.calendar.read','google.calendar.write','activity.list']}}} as never);
+  const referencias={criadoEm:Date.now(),turno:'m0',itens:[{n:1,tipo:'atividade',id:'a1',rotulo:'Visita'}]};
+  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_propor',args:{kind:'calendar.cancel',numero:1}}],usage:uso});
+  acao.mockResolvedValueOnce({status:200,body:{items:[{id:'a1',title:'Visita',version:3}]}});
+  const preview={activityId:'a1',expectedVersion:3};
+  acao.mockResolvedValueOnce({status:200,body:{proposalId:'p',digest:'a'.repeat(64),expiresAt:new Date(Date.now()+60000).toISOString(),kind:'calendar.cancel',summary:{title:'Visita',dueAt:null},preview}});
+  const s=await run('cancela a 1',{referencias},'m1');
+  expect(acao.mock.calls[0][0]).toMatchObject({verb:'google.activities',args:{activityId:'a1'}});
+  expect(acao.mock.calls[1][0]).toMatchObject({verb:'google.propose',args:{kind:'calendar.cancel',input:preview}});
+  expect(s.googlePending?.proposalId).toBe('p');expect(s.reply).toContain('Visita');
+  expect(s.referencias?.itens[0].id).toBe('a1');
+ });
+
+ it('número da lista Google serve para ver_atividade e a numeração antiga deixa de valer',async()=>{
   vi.mocked(fetchProfile).mockResolvedValue({enabled:true,googleMaxEnabled:true,maxPolicy:{byRole:{'*':['google.calendar.read','google.calendar.write','activity.list','activity.write']}}} as never);
   const referencias={criadoEm:Date.now(),turno:'m0',itens:[{n:1,tipo:'atividade',id:'legacy-a',rotulo:'Legada A'}]};
   llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_atividades',args:{startAt:'2026-10-29T00:00:00Z',endAt:'2026-10-30T00:00:00Z'}}],usage:uso});
   acao.mockResolvedValueOnce({status:200,body:{items:[{id:'google-b',title:'Google B',version:1}]}});
   const s=await run('Lista minha agenda Google',{referencias},'m1');
-  expect(s.reply).toContain('1. Google B');expect(s.referencias).toBeNull();
+  expect(s.reply).toContain('1. Google B');
   expect(s.googleRefs?.items[0].id).toBe('google-b');
-  acao.mockClear();
-  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'concluir_atividade',args:{numero:1}}],usage:uso});
-  const next=await run('conclui a atividade 1',{referencias:s.referencias,googleRefs:s.googleRefs},'m2');
-  expect(acao).not.toHaveBeenCalled();expect(next.pendingAction).toBeNull();
+  expect(s.referencias?.itens).toEqual([{n:1,tipo:'atividade',id:'google-b',rotulo:'Google B'}]);
  });
 
  it('a competing numbered stage menu invalidates the Google list',async()=>{
@@ -75,6 +86,30 @@ describe('Google no grafo',()=>{
   leitura.mockResolvedValueOnce({items:[],truncated:false,clarification:{field:'estado',options:['Novo']}});
   const s=await run('etapas',{queryOptions:{subjectKey,createdAt:Date.now(),options:['Novo'],offset:0},googleRefs:{subjectKey,createdAt:Date.now(),items:[{id:'a1',title:'Visita',version:2}]}});
   expect(s.reply).toContain('1) Novo');expect(s.googleRefs).toBeNull();
+ });
+
+ it('um menu numerado concorrente também invalida os números vindos da lista Google',async()=>{
+  vi.mocked(fetchProfile).mockResolvedValue({enabled:true,googleMaxEnabled:true,maxPolicy:{byRole:{'*':['deal.list','google.calendar.read']}}} as never);
+  const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
+  leitura.mockResolvedValueOnce({items:[],truncated:false,clarification:{field:'estado',options:['Novo']}});
+  const referencias={criadoEm:Date.now(),turno:'m0',itens:[{n:1,tipo:'atividade',id:'a1',rotulo:'Visita'}]};
+  const s=await run('etapas',{referencias,queryOptions:{subjectKey,createdAt:Date.now(),options:['Novo'],offset:0},googleRefs:{subjectKey,createdAt:Date.now(),items:[{id:'a1',title:'Visita',version:2}]}});
+  expect(s.reply).toContain('1) Novo');expect(s.referencias).toBeNull();
+ });
+
+ it('resposta determinística preserva a numeração que não veio da lista Google',async()=>{
+  const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
+  const googlePending={proposalId:'p1',digest:'a'.repeat(64),expiresAt:new Date(Date.now()+60000).toISOString(),kind:'calendar.cancel',preview:{},askedMessageId:'m1',subjectKey};
+  const referencias={criadoEm:Date.now(),turno:'m0',itens:[{n:1,tipo:'atividade',id:'a1',rotulo:'Visita'}]};
+  const s=await run('deixa pra lá',{googlePending,referencias},'m2');
+  expect(s.reply).toContain('descartada');expect(s.referencias).toEqual(referencias);
+ });
+
+ it('avisa quando outra chamada do mesmo turno não foi feita',async()=>{
+  llm.mockResolvedValue({text:'',toolCalls:[{name:'google_atividades',args:{startAt:'2026-10-29T00:00:00Z',endAt:'2026-10-30T00:00:00Z'}},{name:'concluir_atividade',args:{numero:1}}],usage:uso});
+  acao.mockResolvedValueOnce({status:200,body:{items:[]}});
+  const s=await run('lista minha agenda Google e conclui a 1');
+  expect(s.reply).toContain('Fiz só essa parte');
  });
 
  it('Google read grant does not require legacy activity.list',async()=>{
