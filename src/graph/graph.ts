@@ -1805,7 +1805,8 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   const googleCall = result.toolCalls.find(c => c.name.startsWith('google_'));
   if (googleCall) {
     const step = await googleStep({ ...googleContext(state), text: userText, call: googleCall, refs: state.googleRefs, referencias: state.referencias,
-      enabled: state.googleEnabled && oferecidas.includes(googleCall.name) && !state.fluxo && !state.pendingAction,
+      // "mais" sem lista vigente não é oferecido, mas tem resposta própria; googleStep reconfere capability e lista.
+      enabled: state.googleEnabled && (oferecidas.includes(googleCall.name) || googleCall.name === 'google_atividades_mais') && !state.fluxo && !state.pendingAction,
       action: depsDoFluxo(state, usageDoTurn).acao });
     // Only this call runs: the person must not read this as the whole request being done.
     const reply = result.toolCalls.length > 1 ? `${step.reply}\n\nFiz só essa parte. Mande o restante do pedido em outra mensagem.` : step.reply;

@@ -84,6 +84,13 @@ describe('Google confirmation boundary',()=>{
   const action=vi.fn();const r=await googleStep({...ctx,call:{name:'google_propor',args:{kind:'tasks.sync',numero:1}},refs,action});expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();
  });
 
+ it('google_atividades exige período; "mais" é outra tool e só existe com lista vigente',()=>{
+  const lista=googleTools(ctx).find(t=>t.name==='google_atividades');
+  expect((lista?.parameters as {required?:string[]}).required).toEqual(['startAt','endAt']);
+  expect(googleTools(ctx).map(t=>t.name)).not.toContain('google_atividades_mais');
+  const refs={subjectKey:ctx.subjectKey,createdAt:ctx.now,items:[],range:{startAt:'2026-11-02T00:00:00-03:00',endAt:'2026-11-09T00:00:00-03:00'}};
+  expect(googleTools(ctx,refs).map(t=>t.name)).toContain('google_atividades_mais');
+ });
  it('defaults closed and rejects broker',()=>{expect(googleTools({...ctx,enabled:false})).toEqual([]);expect(googleTools({...ctx,identity:{kind:'broker',orgId:'o'}})).toEqual([])});
  it('resolves numbered references; never accepts model ids or versions',async()=>{const action=vi.fn().mockResolvedValue({status:200,body:proposal});const r=await googleStep({...ctx,call:{name:'google_propor',args:{kind:'calendar.cancel',numero:1,activityId:'evil',expectedVersion:99}},refs,action});expect(action).toHaveBeenCalledWith('google.propose',{kind:'calendar.cancel',input:{activityId:'a',expectedVersion:2}},'m1');expect(r.pending?.digest).toBe(proposal.digest);expect(action).not.toHaveBeenCalledWith('google.confirm',expect.anything(),expect.anything())});
  it('only next human SIM confirms exact digest once',async()=>{const action=vi.fn().mockResolvedValue({status:200,body:{status:'queued',jobId:'j'}});const pending={...proposal,askedMessageId:'m1',subjectKey:'o:u'};await googleStep({...ctx,messageId:'m2',text:'SIM',pending,action});expect(action).toHaveBeenCalledWith('google.confirm',{proposalId:'p',digest:proposal.digest},'m2');action.mockClear();const r=await googleStep({...ctx,messageId:'m2',text:'sim, muda para amanhã',pending,action});expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull()});

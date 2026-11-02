@@ -132,7 +132,7 @@ describe('Google no grafo',()=>{
   const primeira=await run('minhas atividades Google de hoje');
   expect(primeira.reply).toContain('1. Visita 1');expect(primeira.reply).toContain('5. Visita 5');expect(primeira.reply).not.toContain('Visita 6');
   expect(primeira.reply).toContain('Há mais 2');
-  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_atividades',args:{mais:true}}],usage:uso});
+  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_atividades_mais',args:{}}],usage:uso});
   acao.mockResolvedValueOnce({status:200,body:{items:lista}});
   const segunda=await run('mostre mais',{googleRefs:primeira.googleRefs,referencias:primeira.referencias},'m2');
   expect(segunda.reply).toContain('6. Visita 6');expect(segunda.reply).toContain('7. Visita 7');expect(segunda.reply).not.toContain('Visita 5');expect(segunda.reply).not.toContain('Há mais');
@@ -146,7 +146,7 @@ describe('Google no grafo',()=>{
   const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
   const criadoEm=Date.now()-60000;
   const googleRefs={subjectKey,createdAt:criadoEm,items:lista.slice(0,5),range:{startAt:'2026-10-29T00:00:00-03:00',endAt:'2026-10-30T00:00:00-03:00'}};
-  llm.mockResolvedValue({text:'',toolCalls:[{name:'google_atividades',args:{mais:true}}],usage:uso});
+  llm.mockResolvedValue({text:'',toolCalls:[{name:'google_atividades_mais',args:{}}],usage:uso});
   acao.mockResolvedValue({status:200,body:{items:lista}});
   const primeira=await run('mostre mais',{googleRefs},'m2');
   const retentativa=await run('mostre mais',{googleRefs:primeira.googleRefs,referencias:primeira.referencias},'m2');
@@ -154,10 +154,10 @@ describe('Google no grafo',()=>{
   expect(retentativa.googleRefs!.items).toHaveLength(10);expect(retentativa.googleRefs!.createdAt).toBe(criadoEm);
  });
 
- it('"mais" sem lista vigente não consulta nada e não aceita período inventado',async()=>{
-  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_atividades',args:{mais:true,startAt:'2026-10-29T00:00:00-03:00',endAt:'2026-10-30T00:00:00-03:00'}}],usage:uso});
+ it('"mais" sem lista vigente não consulta nada',async()=>{
+  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_atividades_mais',args:{}}],usage:uso});
   const s=await run('agenda Google: mostre mais');
-  expect(s.reply).toContain('novamente');expect(acao).not.toHaveBeenCalled();
+  expect(s.reply).toContain('Essa lista expirou');expect(acao).not.toHaveBeenCalled();
  });
 
  it('avisa quando outra chamada do mesmo turno não foi feita',async()=>{
