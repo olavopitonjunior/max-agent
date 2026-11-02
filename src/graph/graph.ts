@@ -943,7 +943,7 @@ async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
  // A deterministic flow may emit its own numbered choices. Those replace the Google list.
  // `referencias` is only dropped when it came from that list; a flow may set its own.
  if (!(result.reply || result.fluxo)) return result;
- return {...result, googleRefs: null, ...(state.googleRefs && result.referencias === undefined ? {referencias: null} : {})};
+ return {googleRefs: null, ...(state.googleRefs && result.referencias === undefined ? {referencias: null} : {}), ...result};
 }
 
 async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
@@ -954,7 +954,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     // Captions and transcriptions cannot stand in for a written confirmation.
     const confirmation = state.inbound?.kind === "text" && !state.fromMedia ? userText : "";
     const step = await googleStep({ ...googleContext(state), text: confirmation, pending: state.googlePending, action: depsDoFluxo(state, usage).acao });
-    return { googlePending: step.pending, reply: step.reply, messages: [{role: "user", content: userText}, {role: "assistant", content: step.reply}] };
+    // A discarded proposal changed nothing, so the numbers the person read still hold.
+    return { googlePending: step.pending, ...(step.consumed ? {} : {googleRefs: state.googleRefs, referencias: state.referencias}), reply: step.reply, messages: [{role: "user", content: userText}, {role: "assistant", content: step.reply}] };
   }
   const vencido = state.fluxo && fluxoExpirou(state.fluxo, agora);
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
