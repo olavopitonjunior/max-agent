@@ -20,6 +20,7 @@ import { ITENS_POR_LISTA, REFERENCIA_TTL_MS, resolverReferencia, numerarLista, t
 import type { StageClarification } from "./query-options";
 import { projetarParaOModelo } from "./preferencias";
 import { projetarNotificacao } from "./notificacao-projecao";
+import { atividadeEmHoraLocal } from "./atividade-hora-local";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -257,6 +258,7 @@ export async function despacharLeituras(params: {
 
     // Notificação: só os campos que o Max conhece; título/corpo (CM do Passo 5) entram marcados como dado de terceiros.
     if (entrada.verb === "notification.list") r.items = r.items.map(projetarNotificacao);
+    if (entrada.verb === "activity.list" || entrada.verb === "activity.get") r.items = r.items.map(atividadeEmHoraLocal);
 
     // Negado no servidor volta `{items:[]}` SEM `naoMedidos`; vazio de verdade sempre o traz.
     // Sem ele, o modelo diria "não há pendência" a quem só não tem acesso.
