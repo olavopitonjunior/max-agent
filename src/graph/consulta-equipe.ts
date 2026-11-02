@@ -39,7 +39,7 @@ export interface PedidoDeLista {
 }
 
 const EQUIPE = /\b(da equipe|de todos|dos corretores|de todos os corretores|todos os corretores|da imobiliaria|de toda (a )?(equipe|imobiliaria)|toda a (equipe|imobiliaria))\b/;
-const RESPONSAVEL = /\b(em que (eu )?sou (o |a )?(responsavel|gerente)|que sou (o |a )?(responsavel|gerente)|como (o |a )?(gerente|responsavel)|destinadas? ((a|ao|para|pra) )?\S+ como|(a|ao|para|pra) (?!(o|a|os|as|um|uma) )\S+ (gerente|responsavel)|sob (a )?minha responsabilidade|atribuidas? a mim|destinadas? a mim)\b/;
+const RESPONSAVEL = /\b(em que (eu )?sou (o |a )?(responsavel|gerente)|que sou (o |a )?(responsavel|gerente)|como (o |a )?(gerente|responsavel)|destinadas? ((a|ao|para|pra) )?\S+ como|(a|ao|para|pra) (?!(o|a|os|as|um|uma|minha|minhas|sua|suas|nossa|nova|novo|outra|outro|meu|seu|nosso) )\S+ (gerente|responsavel)|sob (a )?minha responsabilidade|atribuidas? a mim|destinadas? a mim)\b/;
 const NOME_DO_CORRETOR = /\b(nome do corretor|corretor de cada|qual corretor|de quem (e|sao))\b/;
 
 /** Situações que o pedido nomeia → códigos de `status` do servidor. */
@@ -105,7 +105,7 @@ export function mesPedido(texto: string, agora: Date = new Date()): { mes: strin
 function semFrasesDePapel(texto: string): string {
   return texto
     .replace(/\b(destinad\w*|atribuid\w*)\s+((a|à|ao|para|pra)\s+)?\S+\s+como\s+(gerente|respons\w+)/gi, " ")
-    .replace(/\b(a|ao|para|pra)\s+(?!(o|a|os|as|um|uma)\s)\S+\s+(gerente|respons\w+)/gi, " ")
+    .replace(/\b(a|ao|para|pra)\s+(?!(o|a|os|as|um|uma|minha|minhas|sua|suas|nossa|nova|novo|outra|outro|meu|seu|nosso)\s)\S+\s+(gerente|respons\w+)/gi, " ")
     .replace(/\bcomo\s+(o\s+|a\s+)?(gerente|respons\w+)\b/gi, " ");
 }
 
@@ -128,7 +128,7 @@ export function pedidoDeLista(texto: string, agora: Date = new Date()): PedidoDe
   if (escopo === "minhas" && !mes && busca) return null;
   const nomeDoPapel =
     texto.match(/\b(?:destinad\w*|atribuid\w*)\s+(?:(?:a|à|ao|para|pra)\s+)?(\S+)\s+como\b/i)?.[1] ??
-    texto.match(/\b(?:a|à|ao|para|pra)\s+(?!(?:o|a|os|as|um|uma)\s)(\S+)\s+(?:gerente|respons\w+)/i)?.[1];
+    texto.match(/\b(?:a|à|ao|para|pra)\s+(?!(?:o|a|os|as|um|uma|minha|minhas|sua|suas|nossa|nova|novo|outra|outro|meu|seu|nosso)\s)(\S+)\s+(?:gerente|respons\w+)/i)?.[1];
   return {
     escopo,
     ...(nomeDoPapel ? { nomeDoPapel: nomeDoPapel.replace(/[^\p{L}]/gu, "") } : {}),
@@ -214,17 +214,27 @@ export async function responderListaFiltrada(
 
 /** Palavras que só fazem sentido como AJUSTE de uma lista pedida antes ("Todos", "Que sou responsável"). */
 const AJUSTE = /\b(responsavel|gerente|todos|todas|equipe|corretor\w*)\b/;
+/** Ligações que podem acompanhar um ajuste sem mudar o assunto. */
+const LIGACAO = new Set(["que", "sou", "e", "de", "do", "da", "dos", "das", "a", "as", "o", "os", "em", "no", "na", "eu", "so", "somente", "apenas", "mes", "ano", "propostas", "proposta", "por", "favor", "pra", "para", "com", "o", "nome", "do"]);
 
 /**
  * A mensagem é um ajuste curto de uma lista ("Que sou responsável", "Todos",
  * "Outubro 2026 pendentes e assinatura")? Sozinha ela não pede nada: só vale
  * herdando o pedido anterior (caso da gerente da Newcore, 02/11 à noite).
- * "Sim", "ok", "obrigada" NÃO são ajuste.
+ * Estrito: SÓ palavras de filtro, mês, ano e ligações — qualquer outra palavra
+ * ("Bom dia equipe", "e a assinatura do João?", "o corretor desistiu") é outro
+ * assunto e não herda nada (review do PR #166).
  */
 export function ehAjusteDeLista(texto: string, agora: Date = new Date()): boolean {
-  const t = normalizar(texto);
-  if (t.split(/\s+/).filter(Boolean).length > 10) return false;
-  return !!mesPedido(texto, agora) || GRUPOS.some((g) => g.re.test(t)) || AJUSTE.test(t);
+  const palavras = normalizar(texto).replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean);
+  if (!palavras.length || palavras.length > 10) return false;
+  let sinal = false;
+  for (const w of palavras) {
+    if (LIGACAO.has(w) || /^20[2-3]\d$/.test(w)) continue;
+    if (w in MESES || AJUSTE.test(w) || GRUPOS.some((g) => g.re.test(w))) { sinal = true; continue; }
+    return false;
+  }
+  return sinal || !!mesPedido(texto, agora);
 }
 
 /** "Todos" sozinho, respondendo à pergunta "só as suas ou de toda a equipe?". */

@@ -56,6 +56,10 @@ export function textoDaConsulta(
   agora: Date = new Date()
 ): string {
   if (pedeConsulta(texto) || !ehAjusteDeLista(texto, agora)) return texto;
+  // Só herda se a última resposta foi uma lista de propostas: ajuste solto, depois
+  // de outro assunto, não é continuação (review do PR #166).
+  const ultimaResposta = [...historico].reverse().find((m) => m.role === "assistant" && typeof m.content === "string");
+  if (!ultimaResposta || !/\bPROP-\d{4}-\d+|\bpropostas?\b/i.test(ultimaResposta.content as string)) return texto;
   const anteriores = historico
     .filter((m) => m.role === "user" && typeof m.content === "string")
     .map((m) => m.content as string)

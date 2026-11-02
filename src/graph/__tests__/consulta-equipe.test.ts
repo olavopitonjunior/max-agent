@@ -212,7 +212,7 @@ describe("frases reais da segunda rodada", () => {
   });
 
   it("ajuste herda o pedido anterior (cadeia R1 → R2 → R3 → R4)", () => {
-    const h = (...u: string[]) => u.flatMap((c) => [{ role: "user", content: c }, { role: "assistant", content: "…" }]);
+    const h = (...u: string[]) => u.flatMap((c) => [{ role: "user", content: c }, { role: "assistant", content: "Encontrei 2 propostas." }]);
     const t2 = textoDaConsulta(R2, h(R1), AGORA);
     expect(pedidoDeLista(t2, AGORA)).toMatchObject({ escopo: "responsavel", mes: "2026-10" });
     const t3 = textoDaConsulta(R3, h(R1, R2), AGORA);
@@ -226,7 +226,7 @@ describe("frases reais da segunda rodada", () => {
   });
 
   it("'Todos' sobre uma lista das minhas vira da equipe", () => {
-    const h = [{ role: "user", content: "Propostas de outubro pendentes e concluídas" }, { role: "assistant", content: "…" }];
+    const h = [{ role: "user", content: "Propostas de outubro pendentes e concluídas" }, { role: "assistant", content: "Encontrei 2 propostas." }];
     expect(pedidoDeLista(textoDaConsulta("Todos", h, AGORA), AGORA)?.escopo).toBe("equipe");
   });
 
@@ -237,8 +237,28 @@ describe("frases reais da segunda rodada", () => {
   });
 
   it("'sim', 'ok' e 'obrigada' depois de uma lista não repetem a lista", () => {
-    const h = [{ role: "user", content: R1 }, { role: "assistant", content: "…" }];
+    const h = [{ role: "user", content: R1 }, { role: "assistant", content: "Encontrei 2 propostas." }];
     for (const t of ["sim", "ok", "obrigada"]) expect(textoDaConsulta(t, h, AGORA)).toBe(t);
+  });
+
+  it("outro assunto logo depois de uma lista não herda (review do PR #166)", () => {
+    const h = [{ role: "user", content: R1 }, { role: "assistant", content: "Encontrei 2 propostas." }];
+    for (const t of ["Obrigada a todos", "Bom dia equipe", "quem é o corretor?", "preciso falar com o gerente", "o corretor desistiu",
+      "Em outubro vou viajar", "como funciona a assinatura?", "e a assinatura do João?", "o cliente já fez a assinatura"]) {
+      expect(textoDaConsulta(t, h, AGORA)).toBe(t);
+    }
+  });
+
+  it("sem lista na última resposta, o ajuste não herda", () => {
+    const h = [{ role: "user", content: R1 }, { role: "assistant", content: "Bom dia! Como posso ajudar?" }];
+    expect(textoDaConsulta(R2, h, AGORA)).toBe(R2);
+  });
+
+  it("possessivo e adjetivo não são nome de gerente", () => {
+    for (const t of ["propostas de outubro pra minha gerente", "propostas de outubro para sua gerente", "propostas de outubro a nova gerente"]) {
+      expect(pedidoDeLista(t, AGORA)?.nomeDoPapel).toBeUndefined();
+      expect(pedidoDeLista(t, AGORA)?.escopo).toBe("minhas");
+    }
   });
 
   it("pedido que já é consulta não é alterado", () => {
