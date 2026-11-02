@@ -69,3 +69,7 @@ Arquivos: ContractMaker `lib/google-workspace/*`, `api/me/google/*`; emissor
 `src/graph/google-workspace.ts`, integração em `graph.ts`, catálogo e política.
 Runbook receptor: `docs/google-workspace.md` no repositório ContractMaker. Validar HMAC/capability
 nos dois repositórios e habilitar piloto somente após deploy do receptor.
+
+## Lista no WhatsApp
+
+O receptor devolve até 50 atividades; o Max mostra 5 por vez. `google_atividades` com `mais:true` reconsulta o período guardado, pula por id o que já foi mostrado e continua a numeração. Descartar ou deixar expirar uma proposta mantém os números; um SIM que tenta executar invalida a lista Google, porque as versões podem ter mudado.
