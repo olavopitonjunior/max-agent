@@ -64,12 +64,28 @@ const PALAVRAS_DE_FILTRO = new Set([
   "pendente", "pendentes", "concluida", "concluidas", "completa", "completas", "finalizada", "finalizadas",
   "enviada", "enviadas", "equipe", "time", "todos", "gerente", "responsavel", "corretor", "corretores",
   "destinada", "destinadas", "atribuida", "atribuidas", "somente", "apenas", "acrescentar", "acrescente",
-  "janeiro", "fevereiro", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro",
-  "dezembro", "periodo", "formularios", "formulario",
+  "periodo", "formularios", "formulario",
 ]);
-/** "março" minúsculo depois de "de/em/no mês de" é o mês; "de Marco" (maiúscula) é o nome. */
-const ehMes = (limpa: string, anterior: string) =>
-  normalizar(limpa) === "marco" && limpa === limpa.toLowerCase() && /^(de|em|mes)$/.test(anterior);
+const ANTES_DE_DATA = /^(\d+|sete|primeiro|quinze|vinte|xv)$/;
+const LOGRADOURO = /^(rua|r|av|avenida|alameda|travessa|praca|estrada|rodovia|largo)$/;
+const sa = (w: string | undefined) => normalizar(w ?? "").replace(/[^a-z0-9]/g, "");
+/**
+ * A palavra `i` é um MÊS pedido ("de outubro", "outubro de 2026", "mês de maio")
+ * e não parte de um nome? "Rua Sete de Setembro", "15 de Novembro" e "Maio
+ * Imóveis" ficam como nome (review 02/11). "Março" só em minúscula (é nome).
+ */
+export function mesNoContexto(palavras: string[], i: number): boolean {
+  const limpa = (palavras[i] ?? "").replace(/[^\p{L}\p{N}-]/gu, "");
+  const n = normalizar(limpa);
+  if (!(n in MESES)) return false;
+  if (n === "marco" && limpa !== limpa.toLowerCase()) return false;
+  if (sa(palavras[i + 1]) === "de" && /^20[2-3]\d$/.test(sa(palavras[i + 2]))) return true;
+  if (palavras.some((w) => LOGRADOURO.test(sa(w)))) return false;
+  if (i === 0) return n !== "marco";
+  const ant = sa(palavras[i - 1]);
+  if (!/^(de|em|no|mes)$/.test(ant)) return false;
+  return !(ant === "de" && ANTES_DE_DATA.test(sa(palavras[i - 2])));
+}
 
 const ESTADOS: Record<string, string> = {
   rascunho: "rascunho",
@@ -103,7 +119,7 @@ export function termoDeBusca(texto: string): string | null {
     const n = normalizar(limpa);
     if (!n || NAO_E_NOME.has(n) || ESTADOS[n] || PALAVRAS_DE_FILTRO.has(n)) return;
     const anterior = normalizar(palavras[i - 1] ?? "").replace(/[^a-z]/g, "");
-    if (ehMes(limpa, anterior)) return;
+    if (mesNoContexto(palavras, i)) return;
     // Ano de período ("outubro de 2026"), não número de endereço.
     if (/^20[2-3]\d$/.test(n) && /^(de|em|do|ano)$/.test(anterior)) return;
     // 3 ou 4 dígitos: número do endereço, final do código. Mensagem com 8+

@@ -82,7 +82,12 @@ const emEstado = (estado: string) => `em ${estado === ANDAMENTO ? "andamento" : 
 export async function responderConsulta(deps: DepsDoFluxo, texto: string): Promise<{ reply: string; evento: string }> {
   // Mês, várias situações, equipe/responsável: o servidor filtra (02/11, caso da gerente da Newcore).
   const filtrada = pedidoDeLista(texto);
-  if (filtrada) return responderListaFiltrada(deps, filtrada);
+  if (filtrada) {
+    const r = await responderListaFiltrada(deps, filtrada);
+    // Plataforma antiga e pedido que o fluxo de sempre já atendia (só situações, nas
+    // minhas): não troca uma resposta que funcionava por uma recusa.
+    if (!(r.evento === "consulta_filtro_indisponivel" && filtrada.escopo === "minhas" && !filtrada.mes)) return r;
+  }
   const r = await buscarPropostas(deps, texto);
   // Com quem/código citado, o estado é a PERGUNTA ("a do Carlos já foi
   // assinada?"), não filtro: mostra a proposta com a situação real (review 09/10).

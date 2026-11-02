@@ -39,6 +39,45 @@ describe("mesPedido", () => {
   });
 });
 
+describe("mês só vale como período, nunca dentro de um nome (review 02/11)", () => {
+  it.each([
+    "status da proposta da Rua Sete de Setembro 120",
+    "proposta da Av. Primeiro de Maio 300",
+    "proposta da Rua 15 de Novembro 40",
+    "tem proposta da Maio Imóveis?",
+  ])("%s", (t) => {
+    expect(mesPedido(t, AGORA)).toBeNull();
+    expect(pedidoDeLista(t, AGORA)).toBeNull();
+  });
+  it("e o nome do logradouro segue na busca", () => {
+    expect(termoDeBusca("status da proposta da Rua Sete de Setembro 120")).toContain("setembro");
+    expect(termoDeBusca("proposta da Rua 15 de Novembro 40")).toContain("novembro");
+  });
+});
+
+describe("regressões do fluxo antigo (review 02/11)", () => {
+  it("nome citado + só situação: a situação é a pergunta", () => {
+    expect(pedidoDeLista("a proposta da Letícia já foi assinada e concluída?", AGORA)).toBeNull();
+    expect(pedidoDeLista("tem proposta pendente da Letícia?", AGORA)).toBeNull();
+  });
+  it("'sou gerente da equipe' é equipe; 'do Time Brasil' é nome", () => {
+    expect(pedidoDeLista("sou gerente da equipe, propostas de outubro", AGORA)?.escopo).toBe("equipe");
+    expect(pedidoDeLista("propostas do Time Brasil pendentes", AGORA)).toBeNull();
+  });
+  it("plataforma antiga: pedido que o fluxo de sempre atendia não vira recusa", async () => {
+    const { deps, acao } = depsCom({ total: 1, items: [item("PROP-2026-0001")] });
+    const r = await responderConsulta(deps, "quais propostas estão pendentes e concluídas?");
+    expect(r.evento).not.toBe("consulta_filtro_indisponivel");
+    expect(acao).toHaveBeenCalledTimes(2);
+  });
+  it("nome do papel e formulários são ditos na resposta, não descartados em silêncio", async () => {
+    const { deps } = depsCom({ escopo: "responsavel", total: 1, items: [item("PROP-2026-0033")] });
+    const r = await responderListaFiltrada(deps, pedidoDeLista("Outubro de 2026 destinadas Adélia como gerente e formulários", AGORA)!);
+    expect(r.reply).toContain('Entendi "Adélia" como você');
+    expect(r.reply).toContain("Formulários não entram");
+  });
+});
+
 describe("termoDeBusca ignora mês, situação e papel", () => {
   // A frase 2 leva o nome dela: quem o tira é pedidoDeLista (frase de papel), testado abaixo.
   it.each([ADELIA_1, ADELIA_3])("%s", (t) => {

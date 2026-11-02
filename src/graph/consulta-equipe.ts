@@ -1,5 +1,5 @@
 import type { DepsDoFluxo } from "./fluxos";
-import { codigoCitado, MESES, paraListada, termoDeBusca, type PropostaListada } from "./localizar";
+import { codigoCitado, MESES, mesNoContexto, paraListada, termoDeBusca, type PropostaListada } from "./localizar";
 import { normalizar } from "./tools";
 
 /**
@@ -32,10 +32,14 @@ export interface PedidoDeLista {
   rotuloEstados?: string;
   /** Nome de cliente/endereço citado, se houver. */
   busca?: string;
+  /** Nome em "destinadas a X como gerente": lido como a própria pessoa, e a resposta diz isso. */
+  nomeDoPapel?: string;
+  /** Pediu "formulários" junto: não fazem parte desta lista. */
+  comFormulario?: boolean;
 }
 
-const EQUIPE = /\b(da equipe|do time|de todos|dos corretores|de todos os corretores|todos os corretores|da imobiliaria|de toda (a )?(equipe|imobiliaria)|toda a (equipe|imobiliaria))\b/;
-const RESPONSAVEL = /\b(em que (eu )?sou (o |a )?(responsavel|gerente)|que sou (o |a )?(responsavel|gerente)|sou (o |a )?(responsavel|gerente) (da|pela|pelas|delas)|como (o |a )?(gerente|responsavel)|destinadas? ((a|ao|para|pra) )?\S+ como|sob (a )?minha responsabilidade|atribuidas? a mim|destinadas? a mim)\b/;
+const EQUIPE = /\b(da equipe|de todos|dos corretores|de todos os corretores|todos os corretores|da imobiliaria|de toda (a )?(equipe|imobiliaria)|toda a (equipe|imobiliaria))\b/;
+const RESPONSAVEL = /\b(em que (eu )?sou (o |a )?(responsavel|gerente)|que sou (o |a )?(responsavel|gerente)|como (o |a )?(gerente|responsavel)|destinadas? ((a|ao|para|pra) )?\S+ como|sob (a )?minha responsabilidade|atribuidas? a mim|destinadas? a mim)\b/;
 const NOME_DO_CORRETOR = /\b(nome do corretor|corretor de cada|qual corretor|de quem (e|sao))\b/;
 
 /** Situações que o pedido nomeia → códigos de `status` do servidor. */
@@ -66,6 +70,7 @@ function hojeEmBrasilia(agora: Date): { ano: number; mes: number } {
   return { ano: pega("year"), mes: pega("month") };
 }
 
+const sa = (w: string | undefined) => normalizar(w ?? "").replace(/[^a-z0-9]/g, "");
 const NOME_DO_MES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
 
 /**
@@ -84,13 +89,12 @@ export function mesPedido(texto: string, agora: Date = new Date()): { mes: strin
   if (/\bmes passado\b|\bultimo mes\b/.test(t)) {
     return hoje.mes === 1 ? monta(hoje.ano - 1, 12) : monta(hoje.ano, hoje.mes - 1);
   }
-  for (const [nome, m] of Object.entries(MESES)) {
-    // "março" é também nome: só conta como mês em minúscula depois de de/em.
-    const re = nome === "marco" ? /\b(de|em) mar[cç]o\b/ : new RegExp(`\\b${nome}\\b`);
-    if (!re.test(nome === "marco" ? texto : t)) continue;
-    const ano = t.match(new RegExp(`\\b${nome}(?:\\s+de)?\\s+(20[2-3]\\d)\\b`))?.[1];
-    if (ano) return monta(Number(ano), m);
-    return monta(m > hoje.mes ? hoje.ano - 1 : hoje.ano, m);
+  const palavras = texto.split(/\s+/).filter(Boolean);
+  const i = palavras.findIndex((_, k) => mesNoContexto(palavras, k));
+  if (i >= 0) {
+    const m = MESES[normalizar(palavras[i]!.replace(/[^\p{L}]/gu, ""))]!;
+    const ano = sa(palavras[i + 1]) === "de" && /^20[2-3]\d$/.test(sa(palavras[i + 2])) ? Number(sa(palavras[i + 2])) : null;
+    return monta(ano ?? (m > hoje.mes ? hoje.ano - 1 : hoje.ano), m);
   }
   return null;
 }
@@ -112,15 +116,20 @@ export function pedidoDeLista(texto: string, agora: Date = new Date()): PedidoDe
   const escopo: EscopoDeLista = RESPONSAVEL.test(t) ? "responsavel" : EQUIPE.test(t) ? "equipe" : "minhas";
   const mes = mesPedido(texto, agora);
   const grupos = GRUPOS.filter((g) => g.re.test(t));
-  const efetivos = grupos;
-  const estados = [...new Set(efetivos.flatMap((g) => g.estados))];
-  const novo = efetivos.some((g) => g.novo) || efetivos.length >= 2;
+  const estados = [...new Set(grupos.flatMap((g) => g.estados))];
+  const novo = grupos.some((g) => g.novo) || grupos.length >= 2;
   if (escopo === "minhas" && !mes && !novo) return null;
   const busca = termoDeBusca(semFrasesDePapel(texto)) ?? undefined;
+  // Com nome citado e só a situação, a situação é a PERGUNTA ("a da Letícia já foi
+  // assinada e concluída?"), não filtro: o fluxo antigo mostra a real (review 09/10).
+  if (escopo === "minhas" && !mes && busca) return null;
+  const nomeDoPapel = texto.match(/\b(?:destinad\w*|atribuid\w*)\s+(?:(?:a|à|ao|para|pra)\s+)?(\S+)\s+como\b/i)?.[1];
   return {
     escopo,
+    ...(nomeDoPapel ? { nomeDoPapel: nomeDoPapel.replace(/[^\p{L}]/gu, "") } : {}),
+    ...(/\bformul[aá]rios?\b/i.test(texto) ? { comFormulario: true } : {}),
     ...(mes ? { mes: mes.mes, rotuloMes: mes.rotulo } : {}),
-    ...(estados.length ? { estados, rotuloEstados: efetivos.map((g) => g.rotulo).join(" e ") } : {}),
+    ...(estados.length ? { estados, rotuloEstados: grupos.map((g) => g.rotulo).join(" e ") } : {}),
     ...(busca ? { busca } : {}),
   };
 }
@@ -181,14 +190,19 @@ export async function responderListaFiltrada(
       reply: [
         `Não achei propostas ${quem}${sobre ? ` ${sobre}` : ""}.`,
         pedido.escopo === "minhas" ? DICA_EQUIPE(pedido.rotuloMes) : "",
+        pedido.nomeDoPapel ? `(Entendi "${pedido.nomeDoPapel}" como você. Se for outra pessoa, ela mesma precisa pedir.)` : "",
       ].filter(Boolean).join("\n"),
       evento: "consulta_vazia",
     };
   }
   const comCorretor = pedido.escopo !== "minhas" || itens.some((p) => p.corretor);
+  const notas = [
+    pedido.nomeDoPapel ? `\n(Entendi "${pedido.nomeDoPapel}" como você. Se for outra pessoa, ela mesma precisa pedir.)` : "",
+    pedido.comFormulario ? "\n(Formulários não entram nesta lista; peça-os à parte.)" : "",
+  ].join("");
   const cabeca = `${total} ${total === 1 ? "proposta" : "propostas"} ${quem}${sobre ? ` ${sobre}` : ""}:`;
   const resto = total > itens.length ? `\nMostrando ${itens.length} de ${total}. Para afunilar, diga o nome do cliente ou a situação.` : "";
   const truncado = r.body.truncado === true ? "\n(A busca olhou só as 500 mais recentes; diga o mês para afunilar.)" : "";
   const dica = pedido.escopo === "minhas" ? `\n${DICA_EQUIPE(pedido.rotuloMes)}` : "";
-  return { reply: `${cabeca}\n${itens.map((p) => linha(p, comCorretor)).join("\n")}${resto}${truncado}${dica}`, evento: "consulta_lista_filtrada" };
+  return { reply: `${cabeca}\n${itens.map((p) => linha(p, comCorretor)).join("\n")}${resto}${truncado}${dica}${notas}`, evento: "consulta_lista_filtrada" };
 }
