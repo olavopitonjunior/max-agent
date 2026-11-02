@@ -22,6 +22,8 @@
  * envelope, status de proposta, andamento do negócio, andamento de formulário
  * e certidões (pendência e lote concluído) — ver `FAMILIAS` abaixo. Andamento
  * de atividade (`activity_completed` etc.) continua FORA, pela decisão de 14/10.
+ * Desde 02/11/2026, o resumo do horário marcado (`horario_marcado`): uma
+ * contagem dos avisos desde o último horário, com a lista em /avisos.
  * Nenhum texto cita o nome do sistema. Tudo o mais é FORA DA RÉGUA: sai como texto livre dentro da
  * janela de 24h e, fora dela, não sai pelo WhatsApp (`templateDoKind` devolve
  * `null` e o outbox desiste). Não existe mais template genérico — ele fazia
@@ -505,6 +507,20 @@ export const CATALOGO: Record<string, TemplateDef> = {
   // da janela. Dentro dela (e no Newton) sai o texto completo do emissor.
   activity_due_soon: ATIVIDADES_PENDENTES,
   portal_notice_parte: PORTAL_AVISO_PARTE,
+  /**
+   * Resumo do horário marcado (02/11/2026, decisão do Olavo): o contractmaker
+   * junta os avisos da pessoa desde o último horário e manda UMA linha com a
+   * contagem no título ("3 atualizações desde 18h de ontem"). O título é texto
+   * do sistema (contagem + horário), nunca dado de negócio ou de parte; a lista
+   * fica em /avisos, que o botão abre. Texto de STATUS, no molde das famílias.
+   */
+  horario_marcado: t(
+    "max_resumo_avisos",
+    "Olá, {{1}}! Status dos seus avisos na {{2}}: {{3}}. A lista completa está no botão abaixo.",
+    [NOME, ORG, "titulo"],
+    ["Ana", "RE/MAX Trio", "3 atualizações desde 18h de ontem"],
+    { tipo: "url", texto: "Ver avisos" }
+  ),
 };
 
 // Crédito Upestate (M3): o aviso `credit_result` não ganha template novo na

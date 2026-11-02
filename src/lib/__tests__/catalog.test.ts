@@ -95,6 +95,7 @@ describe("a régua do Olavo (01/10/2026)", () => {
         "form_completed_parte",
         "form_reminder",
         "form_reminder_parte",
+        "horario_marcado",
         "manual_message",
         "manual_message_parte",
         "onboarding_pending",
@@ -605,6 +606,30 @@ describe("aviso do portal do negócio à parte (2026-10-20)", () => {
 
   it("não é 'um por janela': o emissor já limita a 1 aviso por hora", () => {
     expect(d.umPorJanela).toBeUndefined();
+  });
+});
+
+describe("resumo do horário marcado (2026-11-02)", () => {
+  const d = CATALOGO.horario_marcado;
+  const linha = { recipient_name: "Ana Souza", org_name: "RE/MAX Trio", title: "3 atualizações desde 18h de ontem", params: { total: "3" } };
+
+  it("corpo de status com a contagem no título, sem tom de lembrete", () => {
+    expect(d.name).toBe("max_resumo_avisos");
+    expect(d.category).toBe("UTILITY");
+    expect(d.vars).toEqual(["nome", "org", "titulo"]);
+    expect(d.body).not.toMatch(/ainda|incomplet|continue|tem uma mensagem|avisa:/i);
+    expect(parametrosDoCorpo(d, linha)).toEqual(["Ana", "RE/MAX Trio", "3 atualizações desde 18h de ontem"]);
+  });
+
+  it("só o botão de URL (/avisos), sem resposta pelo Max", () => {
+    expect(botoesEmOrdem(d.botao)).toEqual([{ tipo: "url", texto: "Ver avisos" }]);
+    expect(KINDS_COM_ACEITE).not.toContain("horario_marcado");
+  });
+
+  it("não exige params e não é 'um por janela': o emissor manda um lote por horário", () => {
+    expect(templateUsavel(d, { ...linha, params: null })).toBe(true);
+    expect(d.umPorJanela).toBeUndefined();
+    expect(templatesDoKind("horario_marcado").map((t) => t.name)).toEqual(["max_resumo_avisos"]);
   });
 });
 
