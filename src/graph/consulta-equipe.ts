@@ -39,7 +39,7 @@ export interface PedidoDeLista {
 }
 
 const EQUIPE = /\b(da equipe|de todos|dos corretores|de todos os corretores|todos os corretores|da imobiliaria|de toda (a )?(equipe|imobiliaria)|toda a (equipe|imobiliaria))\b/;
-const RESPONSAVEL = /\b(em que (eu )?sou (o |a )?(responsavel|gerente)|que sou (o |a )?(responsavel|gerente)|como (o |a )?(gerente|responsavel)|destinadas? ((a|ao|para|pra) )?\S+ como|sob (a )?minha responsabilidade|atribuidas? a mim|destinadas? a mim)\b/;
+const RESPONSAVEL = /\b(em que (eu )?sou (o |a )?(responsavel|gerente)|que sou (o |a )?(responsavel|gerente)|como (o |a )?(gerente|responsavel)|destinadas? ((a|ao|para|pra) )?\S+ como|(a|ao|para|pra) (?!(o|a|os|as|um|uma) )\S+ (gerente|responsavel)|sob (a )?minha responsabilidade|atribuidas? a mim|destinadas? a mim)\b/;
 const NOME_DO_CORRETOR = /\b(nome do corretor|corretor de cada|qual corretor|de quem (e|sao))\b/;
 
 /** Situações que o pedido nomeia → códigos de `status` do servidor. */
@@ -53,7 +53,7 @@ const GRUPOS: { re: RegExp; rotulo: string; estados: string[]; novo: boolean }[]
     estados: ["completa", "convertida"],
   },
   {
-    re: /\b(enviadas?( para| pra| p\/)? assinatura|enviadas?|aguardando assinatura|para assinatura)\b/, rotulo: "enviadas para assinatura", novo: false,
+    re: /\b(enviadas?( para| pra| p\/)? assinatura|enviadas?|aguardando assinatura|para assinatura|assinatura)\b/, rotulo: "enviadas para assinatura", novo: false,
     estados: ["enviando", "enviada", "entregue", "visualizada", "assinada_proponente", "aguardando_vendedor"],
   },
   { re: /\bassinadas?\b/, rotulo: "assinadas", novo: false, estados: ["assinada_proponente", "completa"] },
@@ -93,7 +93,9 @@ export function mesPedido(texto: string, agora: Date = new Date()): { mes: strin
   const i = palavras.findIndex((_, k) => mesNoContexto(palavras, k));
   if (i >= 0) {
     const m = MESES[normalizar(palavras[i]!.replace(/[^\p{L}]/gu, ""))]!;
-    const ano = sa(palavras[i + 1]) === "de" && /^20[2-3]\d$/.test(sa(palavras[i + 2])) ? Number(sa(palavras[i + 2])) : null;
+    const ano = sa(palavras[i + 1]) === "de" && /^20[2-3]\d$/.test(sa(palavras[i + 2]))
+      ? Number(sa(palavras[i + 2]))
+      : /^20[2-3]\d$/.test(sa(palavras[i + 1])) ? Number(sa(palavras[i + 1])) : null;
     return monta(ano ?? (m > hoje.mes ? hoje.ano - 1 : hoje.ano), m);
   }
   return null;
@@ -103,6 +105,7 @@ export function mesPedido(texto: string, agora: Date = new Date()): { mes: strin
 function semFrasesDePapel(texto: string): string {
   return texto
     .replace(/\b(destinad\w*|atribuid\w*)\s+((a|à|ao|para|pra)\s+)?\S+\s+como\s+(gerente|respons\w+)/gi, " ")
+    .replace(/\b(a|ao|para|pra)\s+(?!(o|a|os|as|um|uma)\s)\S+\s+(gerente|respons\w+)/gi, " ")
     .replace(/\bcomo\s+(o\s+|a\s+)?(gerente|respons\w+)\b/gi, " ");
 }
 
@@ -123,7 +126,9 @@ export function pedidoDeLista(texto: string, agora: Date = new Date()): PedidoDe
   // Com nome citado e só a situação, a situação é a PERGUNTA ("a da Letícia já foi
   // assinada e concluída?"), não filtro: o fluxo antigo mostra a real (review 09/10).
   if (escopo === "minhas" && !mes && busca) return null;
-  const nomeDoPapel = texto.match(/\b(?:destinad\w*|atribuid\w*)\s+(?:(?:a|à|ao|para|pra)\s+)?(\S+)\s+como\b/i)?.[1];
+  const nomeDoPapel =
+    texto.match(/\b(?:destinad\w*|atribuid\w*)\s+(?:(?:a|à|ao|para|pra)\s+)?(\S+)\s+como\b/i)?.[1] ??
+    texto.match(/\b(?:a|à|ao|para|pra)\s+(?!(?:o|a|os|as|um|uma)\s)(\S+)\s+(?:gerente|respons\w+)/i)?.[1];
   return {
     escopo,
     ...(nomeDoPapel ? { nomeDoPapel: nomeDoPapel.replace(/[^\p{L}]/gu, "") } : {}),
@@ -206,3 +211,21 @@ export async function responderListaFiltrada(
   const dica = pedido.escopo === "minhas" ? `\n${DICA_EQUIPE(pedido.rotuloMes)}` : "";
   return { reply: `${cabeca}\n${itens.map((p) => linha(p, comCorretor)).join("\n")}${resto}${truncado}${dica}${notas}`, evento: "consulta_lista_filtrada" };
 }
+
+/** Palavras que só fazem sentido como AJUSTE de uma lista pedida antes ("Todos", "Que sou responsável"). */
+const AJUSTE = /\b(responsavel|gerente|todos|todas|equipe|corretor\w*)\b/;
+
+/**
+ * A mensagem é um ajuste curto de uma lista ("Que sou responsável", "Todos",
+ * "Outubro 2026 pendentes e assinatura")? Sozinha ela não pede nada: só vale
+ * herdando o pedido anterior (caso da gerente da Newcore, 02/11 à noite).
+ * "Sim", "ok", "obrigada" NÃO são ajuste.
+ */
+export function ehAjusteDeLista(texto: string, agora: Date = new Date()): boolean {
+  const t = normalizar(texto);
+  if (t.split(/\s+/).filter(Boolean).length > 10) return false;
+  return !!mesPedido(texto, agora) || GRUPOS.some((g) => g.re.test(t)) || AJUSTE.test(t);
+}
+
+/** "Todos" sozinho, respondendo à pergunta "só as suas ou de toda a equipe?". */
+export const PEDE_TODOS = /^\s*(todos|todas|toda a equipe|de todos)\W*$/i;

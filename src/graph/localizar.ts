@@ -121,7 +121,7 @@ export function termoDeBusca(texto: string): string | null {
     const anterior = normalizar(palavras[i - 1] ?? "").replace(/[^a-z]/g, "");
     if (mesNoContexto(palavras, i)) return;
     // Ano de período ("outubro de 2026"), não número de endereço.
-    if (/^20[2-3]\d$/.test(n) && /^(de|em|do|ano)$/.test(anterior)) return;
+    if (/^20[2-3]\d$/.test(n) && (/^(de|em|do|ano)$/.test(anterior) || anterior in MESES)) return;
     // 3 ou 4 dígitos: número do endereço, final do código. Mensagem com 8+
     // dígitos no total (CPF, telefone, mesmo picotado) não cede número nenhum —
     // iria para a busca e voltaria na resposta.

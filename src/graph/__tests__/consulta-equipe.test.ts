@@ -185,3 +185,67 @@ describe("responderConsulta chama a lista filtrada", () => {
     expect(args).toHaveProperty("estados");
   });
 });
+
+/**
+ * Segunda rodada da gerente (02/11, 19:01–19:06 BRT): o Newton não reconheceu a
+ * frase e esqueceu o pedido nos ajustes curtos seguintes.
+ */
+import { textoDaConsulta } from "../consulta";
+
+const R1 = "Lista de todas propostas que entraram em outubro pra Adélia gerente";
+const R2 = "Que sou responsável";
+const R3 = "Todos";
+const R4 = "Outubro 2026 pendentes e assinatura";
+
+describe("frases reais da segunda rodada", () => {
+  it("'entraram em outubro pra <nome> gerente' é lista em que ela é responsável, sem virar busca por nome", () => {
+    expect(pedeConsulta(R1)).toBe(true);
+    const p = pedidoDeLista(R1, AGORA)!;
+    expect(p.escopo).toBe("responsavel");
+    expect(p.mes).toBe("2026-10");
+    expect(p.nomeDoPapel).toBe("Adélia");
+    expect(p.busca).toBeUndefined();
+  });
+
+  it("os ajustes curtos sozinhos não são consulta", () => {
+    for (const t of [R2, R3, R4]) expect(pedeConsulta(t)).toBe(false);
+  });
+
+  it("ajuste herda o pedido anterior (cadeia R1 → R2 → R3 → R4)", () => {
+    const h = (...u: string[]) => u.flatMap((c) => [{ role: "user", content: c }, { role: "assistant", content: "…" }]);
+    const t2 = textoDaConsulta(R2, h(R1), AGORA);
+    expect(pedidoDeLista(t2, AGORA)).toMatchObject({ escopo: "responsavel", mes: "2026-10" });
+    const t3 = textoDaConsulta(R3, h(R1, R2), AGORA);
+    expect(pedidoDeLista(t3, AGORA)).toMatchObject({ escopo: "responsavel", mes: "2026-10" });
+    const t4 = textoDaConsulta(R4, h(R1, R2, R3), AGORA);
+    const p4 = pedidoDeLista(t4, AGORA)!;
+    expect(p4.escopo).toBe("responsavel");
+    expect(p4.mes).toBe("2026-10");
+    expect(p4.estados).toEqual(expect.arrayContaining(["rascunho", "enviada", "aguardando_vendedor"]));
+    expect(p4.busca).toBeUndefined();
+  });
+
+  it("'Todos' sobre uma lista das minhas vira da equipe", () => {
+    const h = [{ role: "user", content: "Propostas de outubro pendentes e concluídas" }, { role: "assistant", content: "…" }];
+    expect(pedidoDeLista(textoDaConsulta("Todos", h, AGORA), AGORA)?.escopo).toBe("equipe");
+  });
+
+  it("sem pedido de lista antes, ou com conversa de outro assunto no meio, não herda", () => {
+    expect(textoDaConsulta(R2, [], AGORA)).toBe(R2);
+    const outro = [{ role: "user", content: R1 }, { role: "user", content: "Qual o endereço do cartório?" }];
+    expect(textoDaConsulta(R2, outro, AGORA)).toBe(R2);
+  });
+
+  it("'sim', 'ok' e 'obrigada' depois de uma lista não repetem a lista", () => {
+    const h = [{ role: "user", content: R1 }, { role: "assistant", content: "…" }];
+    for (const t of ["sim", "ok", "obrigada"]) expect(textoDaConsulta(t, h, AGORA)).toBe(t);
+  });
+
+  it("pedido que já é consulta não é alterado", () => {
+    expect(textoDaConsulta(R1, [{ role: "user", content: ADELIA_1 }], AGORA)).toBe(R1);
+  });
+
+  it("'para o gerente' não vira papel", () => {
+    expect(pedidoDeLista("propostas de outubro para o gerente aprovar", AGORA)?.escopo).toBe("minhas");
+  });
+});
