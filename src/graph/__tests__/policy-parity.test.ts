@@ -315,6 +315,9 @@ const CATALOGO_DO_IMOBPRO = [
       // Pendências e avisos (24/10/2026): posições 27 e 28 (0-based), FIXAS.
       "pending.summary",
       "prefs.self",
+  "google.calendar.read",
+  "google.calendar.write",
+  "google.tasks.write",
 ];
 
 describe("paridade do catálogo de capabilities", () => {

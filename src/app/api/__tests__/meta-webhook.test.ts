@@ -69,6 +69,7 @@ function assinar(body: string, secret = SECRET) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubEnv("MAX_WHATSAPP_PILOT_ALLOWLIST", undefined);
   vi.stubEnv("META_APP_SECRET", SECRET);
   vi.stubEnv("META_PHONE_NUMBER_ID", PNID);
   vi.stubEnv("META_WEBHOOK_VERIFY_TOKEN", "verify-tok");
@@ -78,6 +79,45 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("POST /api/meta-webhook", () => {
+  it("pilot only enqueues the allowed sender from a mixed batch", async () => {
+    vi.stubEnv("MAX_WHATSAPP_PILOT_ALLOWLIST", '["5511999990001"]');
+    const messages = ["5511999990002", "5511999990001"].map((from, i) => ({
+      from, id: `wamid.P${i}`, type: "text", text: { body: "teste" },
+    }));
+    const res = await POST(post(corpo({ messages })));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ accepted: 1 });
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ fromPhone: "5511999990001", messageId: "wamid.P1" }));
+    expect(waitUntil).toHaveBeenCalledOnce();
+  });
+
+  it.each(["", "[]", "invalid", '["5511999990001",null]'])("pilot config %j denies inbound before queue and processing", async (config) => {
+    vi.stubEnv("MAX_WHATSAPP_PILOT_ALLOWLIST", config);
+    const res = await POST(post(corpo({ messages: [{ from: "5511999990001", id: "wamid.P", type: "text", text: { body: "teste" } }] })));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ accepted: 0 });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(inbound.processInboundNow).not.toHaveBeenCalled();
+  });
+
+  it("pilot compares the existing canonical BR sender, including legacy Meta wa_id", async () => {
+    vi.stubEnv("MAX_WHATSAPP_PILOT_ALLOWLIST", '["+5511999990001"]');
+    const res = await POST(post(corpo({ messages: [{ from: "551199990001", id: "wamid.P", type: "text", text: { body: "teste" } }] })));
+    expect(await res.json()).toMatchObject({ accepted: 1 });
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ fromPhone: "5511999990001" }));
+  });
+
+  it("pilot admission still requires the valid signature and configured Meta number", async () => {
+    vi.stubEnv("MAX_WHATSAPP_PILOT_ALLOWLIST", '["5511999990001"]');
+    const value = { messages: [{ from: "5511999990001", id: "wamid.P", type: "text", text: { body: "teste" } }] };
+    expect((await POST(post(corpo(value), null))).status).toBe(401);
+    expect(await (await POST(post(corpo(value, "other-phone-id")))).json()).toMatchObject({ ignored: "numero" });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(waitUntil).not.toHaveBeenCalled();
+  });
+
   it("mensagem assinada vira linha na fila e processamento em background", async () => {
     const res = await POST(post(corpo(texto("wamid.A"))));
     expect(res.status).toBe(200);
@@ -122,6 +162,8 @@ describe("POST /api/meta-webhook", () => {
   });
 
   it("status e falha de envio são aplicados; falha leva o código da Meta", async () => {
+    // Reconciliation remains available even when the pilot blocks all new messages.
+    vi.stubEnv("MAX_WHATSAPP_PILOT_ALLOWLIST", "[]");
     const res = await POST(
       post(
         corpo({

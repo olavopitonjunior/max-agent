@@ -20,6 +20,7 @@ import { ITENS_POR_LISTA, REFERENCIA_TTL_MS, resolverReferencia, numerarLista, t
 import type { StageClarification } from "./query-options";
 import { projetarParaOModelo } from "./preferencias";
 import { projetarNotificacao } from "./notificacao-projecao";
+import { atividadeEmHoraLocal } from "./atividade-hora-local";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -202,6 +203,7 @@ export async function despacharLeituras(params: {
         trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
         continue;
       }
+      numeroDoDetalhe = selected.item.n;
       args = { atividade_id: selected.item.id };
     }
     if (entrada.verb === "pending.summary") {
@@ -256,6 +258,7 @@ export async function despacharLeituras(params: {
 
     // Notificação: só os campos que o Max conhece; título/corpo (CM do Passo 5) entram marcados como dado de terceiros.
     if (entrada.verb === "notification.list") r.items = r.items.map(projetarNotificacao);
+    if (entrada.verb === "activity.list" || entrada.verb === "activity.get") r.items = r.items.map(atividadeEmHoraLocal);
 
     // Negado no servidor volta `{items:[]}` SEM `naoMedidos`; vazio de verdade sempre o traz.
     // Sem ele, o modelo diria "não há pendência" a quem só não tem acesso.
@@ -273,8 +276,10 @@ export async function despacharLeituras(params: {
 
     // G2: o código numera, o modelo vê só número + rótulo. Leitura que não
     // declara o que produz passa como veio (nenhuma hoje).
+    // Detalhe apontado por número não é lista: renumerar trocaria a numeração vigente por um item só,
+    // e o próximo "cancela a 1" cairia em outra atividade.
     const produz = (a.entrada as EntradaDeLeitura).refs?.produz;
-    if (produz) {
+    if (produz && numeroDoDetalhe === null) {
       const numerada = numerarLista({
         items: r.items,
         tipo: produz,

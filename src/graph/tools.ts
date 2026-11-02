@@ -899,12 +899,12 @@ function escritaDeAtividade(
 
 export const CRIAR_ATIVIDADE = escritaDeAtividade(
   "criar_atividade",
-  "Propõe criar uma atividade interna (ligação, visita, reunião, documento, pendência) num negócio da pessoa. " +
+  "Propõe criar uma atividade interna (ligação, visita, reunião, documento, pendência, vistoria, assinatura, contato, prazo documental) num negócio da pessoa. " +
     "Só registra o pedido: a pessoa confirma com 'sim' antes de qualquer coisa ser criada. Não contata cliente nem parte. " +
     "Use numero da lista de negócios; se não houver lista, consulte listar_negocios primeiro.",
   {
     numero: { type: "integer", minimum: 1, description: "Número do negócio na lista de negócios anterior, nunca um ID interno." },
-    tipo: { type: "string", enum: ["ligacao", "visita", "reuniao", "documento", "pendencia", "outro"] },
+    tipo: { type: "string", enum: ["ligacao", "visita", "reuniao", "documento", "pendencia", "outro", "vistoria", "assinatura", "contato", "prazo_documental"] },
     titulo: { type: "string", description: "Título curto, até 140 caracteres." },
     vencimento: { type: "string", description: "Quando vence: data AAAA-MM-DD ou data e hora ISO com fuso. Só o que a pessoa disse." },
     notas: { type: "string", description: "Observação opcional." },

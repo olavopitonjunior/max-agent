@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Capability } from "../policy";
 import { autorizarChamada } from "../despachante";
-import { ferramentasDoTurno, pedeAtividade, REGISTRO_DE_TOOLS } from "../tools";
+import { CRIAR_ATIVIDADE, ferramentasDoTurno, pedeAtividade, REGISTRO_DE_TOOLS } from "../tools";
 import {
+  TIPOS_DE_ATIVIDADE,
+  lerTipoDeAtividade,
   conduzirAtividade,
   iniciarAtividade,
   lerVencimento,
@@ -378,5 +380,19 @@ describe("fix round 1", () => {
     expect(pedeAtividade("o cliente comentou sobre o contrato")).toBe(false);
     expect(pedeAtividade("conclui a 2")).toBe(true);
     expect(pedeAtividade("recusa a atividade 3")).toBe(true);
+  });
+});
+
+
+describe("tipos de atividade em paridade com o CM", () => {
+  const tipos = ["ligacao", "visita", "reuniao", "documento", "pendencia", "outro", "vistoria", "assinatura", "contato", "prazo_documental"];
+  it("preserva os tipos existentes e aceita os novos no fluxo", () => {
+    expect([...TIPOS_DE_ATIVIDADE]).toEqual(tipos);
+    expect(CRIAR_ATIVIDADE.def.parameters).toMatchObject({ properties: { tipo: { enum: tipos } } });
+    for (const tipo of tipos) {
+      expect(lerTipoDeAtividade(tipo)).toBe(tipo);
+      const r = iniciarAtividade({ operacao: "criar", alvo: ALVO, tipo, titulo: "Compromisso", vencimento: "2026-11-05" }, ctx(""));
+      expect(r.fluxo).toMatchObject({ etapa: "confirmacao", dados: { tipo } });
+    }
   });
 });

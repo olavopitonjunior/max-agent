@@ -1058,6 +1058,24 @@ describe("envio", () => {
       expect(reply.split("\n").filter((l) => l.startsWith("Responda *sim*"))).toHaveLength(1);
     });
 
+    it("caractere invisível de direção ou largura zero sai do nome", () => {
+      const nome = "fdp.\u202eexe\u200b\u2066rg\u2069\ufeff.pdf";
+      expect(cap.lerPreflight({ pronto: true, faltantes: [], bloqueios: [], emBranco: 0, version: 1, anexos: [{ nome }] })!.anexos).toEqual([
+        "fdp.exerg.pdf",
+      ]);
+    });
+
+    it("corte longo não parte emoji ao meio", () => {
+      const nome = `${"a".repeat(58)}😀😀😀.pdf`;
+      const [lido] = cap.lerPreflight({ pronto: true, faltantes: [], bloqueios: [], emBranco: 0, version: 1, anexos: [{ nome }] })!.anexos!;
+      expect(lido).toBe(`${"a".repeat(58)}😀…`);
+    });
+
+    it("nome que não sobra nada depois da limpeza conta como 'documento sem nome'", async () => {
+      const reply = await resumoComAnexos([{ nome: "avaliacao.pdf" }, { nome: "**<>**" }, { nome: "\u200b\u202e" }]);
+      expect(reply).toContain("Vai em um PDF só: contrato + 3 anexos (avaliacao.pdf, documento sem nome, documento sem nome).");
+    });
+
     it.each([
       ["vazio", []],
       ["não-lista", "avaliacao.pdf"],

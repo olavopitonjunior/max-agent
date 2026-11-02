@@ -28,6 +28,7 @@ import type { ScopeSubject } from "@/graph/scope-contract";
  */
 
 export const VERBOS_DE_ACAO = [
+  "google.availability", "google.activities", "google.propose", "google.confirm",
   "proposal.list",
   "proposal.status",
   "proposal.create",

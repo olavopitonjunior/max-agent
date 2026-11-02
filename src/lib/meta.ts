@@ -29,6 +29,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { fetchWithTimeout, META_TIMEOUT_MS } from "./http";
 import { log } from "./log";
+import { assertWhatsAppPilotRecipient, whatsappPilotConfigured } from "./whatsapp-pilot";
 import { PREFIXO_OPCAO } from "./interativo";
 import { classificarMeta, MetaHttpError } from "./transport/erro";
 import type {
@@ -92,6 +93,7 @@ export async function sendText(params: {
   body: string;
   quoteMessageId?: string;
 }): Promise<{ messageId: string | null }> {
+  assertWhatsAppPilotRecipient(params.to);
   const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
     method: "POST",
     body: JSON.stringify({
@@ -118,6 +120,7 @@ export async function sendInteractive(params: {
   interativo: Interativo;
   quoteMessageId?: string;
 }): Promise<{ messageId: string | null }> {
+  assertWhatsAppPilotRecipient(params.to);
   const i = params.interativo;
   const interactive =
     i.tipo === "botoes"
@@ -169,6 +172,7 @@ export async function sendReaction(params: {
   messageId: string;
   emoji: string;
 }): Promise<{ messageId: string | null }> {
+  assertWhatsAppPilotRecipient(params.to);
   const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
     method: "POST",
     body: JSON.stringify({
@@ -209,6 +213,7 @@ export async function sendTemplate(params: {
    */
   imagemCabecalho?: string;
 }): Promise<{ messageId: string | null }> {
+  assertWhatsAppPilotRecipient(params.to);
   const res = await graph<MetaSendResponse>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
     method: "POST",
     body: JSON.stringify({
@@ -264,6 +269,7 @@ export const META_MEDIA_PREFIX = "meta:";
  * leva só o status/código da Meta, sem token nem telefone.
  */
 export async function markReadTyping(messageId: string): Promise<boolean> {
+  if (whatsappPilotConfigured()) return false;
   try {
     await graph<unknown>(`/${env("META_PHONE_NUMBER_ID")}/messages`, {
       method: "POST",

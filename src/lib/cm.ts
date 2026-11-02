@@ -69,6 +69,7 @@ export interface AgentProfile {
    * filtrar seria desligar a única capability viva. Ver `graph/policy.ts`.
    */
   maxPolicy?: MaxPolicy | null;
+  googleMaxEnabled?: boolean;
 }
 
 /**

@@ -357,14 +357,27 @@ const MAX_ANEXOS_LIDOS = 50;
 const MAX_CHARS_NOME_ANEXO = 60;
 const MAX_ANEXOS_NO_RESUMO = 5;
 
-/** Nome de arquivo vira texto inerte: sem quebra de linha/controle nem marcação do WhatsApp, e curto. */
+/** Rótulo de um anexo cujo nome não sobra nada depois da limpeza: ele vai no PDF, então conta. */
+const ANEXO_SEM_NOME = "documento sem nome";
+
+/**
+ * Nome de arquivo vira texto inerte: sem quebra de linha/controle, sem caractere invisível de direção
+ * ou largura zero (que embaralharia o nome na tela), sem marcação do WhatsApp, e curto. O corte é por
+ * ponto de código, para não partir emoji ao meio.
+ */
 function nomeDeAnexo(v: unknown): string | null {
   const cru = str(v);
   if (!cru) return null;
-  // eslint-disable-next-line no-control-regex
-  const limpo = cru.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/[*_~`<>]/g, "").replace(/\s+/g, " ").trim();
-  if (!limpo) return null;
-  return limpo.length > MAX_CHARS_NOME_ANEXO ? `${limpo.slice(0, MAX_CHARS_NOME_ANEXO - 1).trimEnd()}…` : limpo;
+  const limpo = cru
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ")
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "")
+    .replace(/[*_~`<>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!limpo) return ANEXO_SEM_NOME;
+  const pontos = Array.from(limpo);
+  return pontos.length > MAX_CHARS_NOME_ANEXO ? `${pontos.slice(0, MAX_CHARS_NOME_ANEXO - 1).join("").trimEnd()}…` : limpo;
 }
 
 function lerAnexos(v: unknown): string[] {
