@@ -30,6 +30,9 @@ export interface PropostaListada {
    * em servidor antigo ou quando o servidor não sabe: nesse caso é desconhecido, nunca inventado.
    */
   assinaturas?: { nome: string; status: string; canal?: CanalDeAssinatura }[];
+  /** ISO da criação e nome do corretor responsável — só vêm da lista de equipe (02/11); falta em servidor antigo. */
+  criadoEm?: string;
+  corretor?: string;
 }
 
 export type CanalDeAssinatura = "email" | "whatsapp" | "sms";
@@ -50,6 +53,39 @@ const NAO_E_NOME = new Set([
   "copiar", "editar", "aprovar", "cancelar", "preencher", "continuar", "seguir", "assinatura",
 ]);
 const PREPOSICAO = /^(da|do|de|das|dos|pra|para|pro)$/;
+
+/** Meses (sem acento) → número 1..12. "marco" também é nome: só vale como mês em minúscula depois de de/em (ver `ehMes`). */
+export const MESES: Record<string, number> = {
+  janeiro: 1, fevereiro: 2, marco: 3, abril: 4, maio: 5, junho: 6,
+  julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12,
+};
+/** Palavras do PEDIDO de lista (período, situação, papel) que nunca são nome de cliente. */
+const PALAVRAS_DE_FILTRO = new Set([
+  "pendente", "pendentes", "concluida", "concluidas", "completa", "completas", "finalizada", "finalizadas",
+  "enviada", "enviadas", "equipe", "time", "todos", "gerente", "responsavel", "corretor", "corretores",
+  "destinada", "destinadas", "atribuida", "atribuidas", "somente", "apenas", "acrescentar", "acrescente",
+  "periodo", "formularios", "formulario",
+]);
+const ANTES_DE_DATA = /^(\d+|sete|primeiro|quinze|vinte|xv)$/;
+const LOGRADOURO = /^(rua|r|av|avenida|alameda|travessa|praca|estrada|rodovia|largo)$/;
+const sa = (w: string | undefined) => normalizar(w ?? "").replace(/[^a-z0-9]/g, "");
+/**
+ * A palavra `i` é um MÊS pedido ("de outubro", "outubro de 2026", "mês de maio")
+ * e não parte de um nome? "Rua Sete de Setembro", "15 de Novembro" e "Maio
+ * Imóveis" ficam como nome (review 02/11). "Março" só em minúscula (é nome).
+ */
+export function mesNoContexto(palavras: string[], i: number): boolean {
+  const limpa = (palavras[i] ?? "").replace(/[^\p{L}\p{N}-]/gu, "");
+  const n = normalizar(limpa);
+  if (!(n in MESES)) return false;
+  if (n === "marco" && limpa !== limpa.toLowerCase()) return false;
+  if (sa(palavras[i + 1]) === "de" && /^20[2-3]\d$/.test(sa(palavras[i + 2]))) return true;
+  if (palavras.some((w) => LOGRADOURO.test(sa(w)))) return false;
+  if (i === 0) return n !== "marco";
+  const ant = sa(palavras[i - 1]);
+  if (!/^(de|em|no|mes)$/.test(ant)) return false;
+  return !(ant === "de" && ANTES_DE_DATA.test(sa(palavras[i - 2])));
+}
 
 const ESTADOS: Record<string, string> = {
   rascunho: "rascunho",
@@ -81,8 +117,11 @@ export function termoDeBusca(texto: string): string | null {
   palavras.forEach((p, i) => {
     const limpa = p.replace(/[^\p{L}\p{N}-]/gu, "");
     const n = normalizar(limpa);
-    if (!n || NAO_E_NOME.has(n) || ESTADOS[n]) return;
+    if (!n || NAO_E_NOME.has(n) || ESTADOS[n] || PALAVRAS_DE_FILTRO.has(n)) return;
     const anterior = normalizar(palavras[i - 1] ?? "").replace(/[^a-z]/g, "");
+    if (mesNoContexto(palavras, i)) return;
+    // Ano de período ("outubro de 2026"), não número de endereço.
+    if (/^20[2-3]\d$/.test(n) && /^(de|em|do|ano)$/.test(anterior)) return;
     // 3 ou 4 dígitos: número do endereço, final do código. Mensagem com 8+
     // dígitos no total (CPF, telefone, mesmo picotado) não cede número nenhum —
     // iria para a busca e voltaria na resposta.
@@ -104,7 +143,7 @@ export function pedeLista(texto: string): boolean {
 
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
 
-function paraListada(v: unknown): PropostaListada | null {
+export function paraListada(v: unknown): PropostaListada | null {
   const p = obj(v);
   if (typeof p.id !== "string" || typeof p.status !== "string") return null;
   const assinaturas = (Array.isArray(p.signatarios) ? p.signatarios : [])
@@ -122,6 +161,8 @@ function paraListada(v: unknown): PropostaListada | null {
     estado: typeof p.estado === "string" ? p.estado : undefined,
     nomes,
     ...(assinaturas.length ? { assinaturas } : {}),
+    ...(typeof p.criadoEm === "string" ? { criadoEm: p.criadoEm } : {}),
+    ...(typeof p.corretor === "string" && p.corretor ? { corretor: p.corretor } : {}),
   };
 }
 
