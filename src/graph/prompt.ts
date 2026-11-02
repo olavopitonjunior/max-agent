@@ -421,7 +421,7 @@ const RECEBIDO_POR: Record<"audio" | "image", string> = {
  * primeira como a segunda mentiria para a pessoa sobre a carteira dela.
  */
 export function fenceToolResults(
-  results: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] } }[]
+  results: { tool: string; items: unknown[] | null; truncated: boolean; hasMore?: boolean; clarification?: { field: "estado"; options: string[] } }[]
 ): string {
   if (results.length === 0) return "";
 
@@ -442,23 +442,34 @@ e ofereça tentar de novo. NÃO afirme que não há nada.
       // Escapado ANTES do corte: campo livre de terceiro (nome de cliente,
       // título) com `</dados_do_sistema>` dentro fecharia a cerca e o resto
       // viraria "instrução" fora dela. JSON.stringify não escapa `<`.
-      const cru = escaparDelimitadores(JSON.stringify(r.items, null, 1));
-      const corpo = cru.slice(0, 4000);
       /**
        * Dois truncamentos diferentes, e os dois têm que se declarar.
        *
-       * `r.truncated` é do SERVIDOR ("não olhei além daqui"). O `slice` é
-       * NOSSO, e pode cortar no meio de um objeto. Anunciar só o primeiro
-       * deixaria uma lista cortada aqui passar por completa — o mesmo defeito
-       * de "apresentar incompleto como completo" que o `items: null` existe
-       * para evitar.
+       * `r.truncated` é do SERVIDOR ("não olhei além daqui"). O corte por
+       * tamanho é NOSSO e é por ITEM INTEIRO: cortar no meio de um objeto
+       * deixava o modelo contar o item partido ("5 atividades") e listar 4.
+       * `mostrados` é o que de fato está no bloco; o `total` só é afirmado
+       * quando nada ficou de fora (o servidor não devolve contagem total).
        */
-      const cortadoAqui = cru.length > corpo.length;
-      const aviso =
-        r.truncated || cortadoAqui
-          ? '\ntruncado="true" — há mais itens além destes; diga isso se listar.'
-          : "";
+      const todos = r.items;
+      let mostrados = todos.length;
+      let corpo = escaparDelimitadores(JSON.stringify(todos, null, 1));
+      while (corpo.length > 4000 && mostrados > 1) {
+        mostrados -= 1;
+        corpo = escaparDelimitadores(JSON.stringify(todos.slice(0, mostrados), null, 1));
+      }
+      // Um único item maior que o teto: corte duro, mas ele conta como 1 mostrado.
+      corpo = corpo.slice(0, 4000);
+      const cortadoAqui = mostrados < todos.length;
+      const haMais = r.hasMore === true || r.truncated || cortadoAqui;
+      const aviso = haMais ? '\ntruncado="true" — há mais itens além destes; diga isso se listar.' : "";
+      const contagem = `mostrados="${mostrados}" total="${haMais ? "desconhecido" : mostrados}" ha_mais="${haMais}"`;
+      const regra = haMais
+        ? `Mostrando ${mostrados}; há mais. Diga exatamente "mostrando ${mostrados}" e ofereça ver mais; não informe total nem outro número.`
+        : `Mostrando ${mostrados} (lista completa). Cite exatamente ${mostrados}.`;
       return `<dados_do_sistema origem="${r.tool}">${aviso}
+${contagem}
+${regra}
 ${corpo}
 </dados_do_sistema>`;
     })
