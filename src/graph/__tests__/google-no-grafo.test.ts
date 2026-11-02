@@ -156,8 +156,8 @@ describe('Google no grafo',()=>{
 
  it('"mais" sem lista vigente não consulta nada',async()=>{
   llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_atividades_mais',args:{}}],usage:uso});
-  await run('agenda Google: mostre mais');
-  expect(acao).not.toHaveBeenCalled();
+  const s=await run('agenda Google: mostre mais');
+  expect(s.reply).toContain('Essa lista expirou');expect(acao).not.toHaveBeenCalled();
  });
 
  it('avisa quando outra chamada do mesmo turno não foi feita',async()=>{
