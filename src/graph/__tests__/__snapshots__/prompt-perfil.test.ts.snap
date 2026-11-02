@@ -210,6 +210,8 @@ Cada item tem um número em "n": é por ele que você e a pessoa se referem ao
 item. Responda usando só o que estiver aqui; não complete com memória própria.
 
 <dados_do_sistema origem="listar_negocios">
+mostrados="1" total="1" ha_mais="false"
+Mostrando 1 (lista completa). Cite exatamente 1.
 [
  {
   "codigo": "AP1011"
