@@ -72,4 +72,4 @@ nos dois repositórios e habilitar piloto somente após deploy do receptor.
 
 ## Lista no WhatsApp
 
-O receptor devolve até 50 atividades; o Max mostra 5 por vez. `google_atividades` com `mais:true` reconsulta o período guardado, pula por id o que já foi mostrado e continua a numeração. Descartar ou deixar expirar uma proposta mantém os números; um SIM que tenta executar invalida a lista Google, porque as versões podem ter mudado.
+O receptor devolve até 50 atividades; o Max mostra 5 por vez. `google_atividades_mais`, oferecida só com lista vigente, reconsulta o período guardado, pula por id o que já foi mostrado e continua a numeração. Descartar ou deixar expirar uma proposta mantém os números; um SIM que tenta executar invalida a lista Google, porque as versões podem ter mudado.
