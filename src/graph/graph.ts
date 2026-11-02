@@ -25,7 +25,7 @@ import {
   negaAcao, pedeAcaoForaDoMax, pedeCapacidades, pedeLeituraNaoLiberada, TEXTO_LEITURA_NAO_LIBERADA, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
   textoDoAndamentoDoContrato, textoForaDoMax,
 } from "./capacidades";
-import { pedeConsulta, responderConsulta } from "./consulta";
+import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import {
   conduzirCredito, continuacaoCredito, creditoLigado, iniciarCredito, pedeCredito, responderStatusCredito,
   toolExtrairCredito, TEXTO_APROVAR, TEXTO_SCORE,
@@ -1235,8 +1235,10 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // recentes de cabeça (teste 09/10). Envio vem antes: "envia a da X" é envio.
   // O fluxo aberto fica, rebaixado: um "sim" depois da lista não executa nada.
   const emSelecao = (atual?.kind === "continuidade" || atual?.kind === "gestao" || atual?.kind === "assinatura") && atual.etapa === "selecao";
+  // Ajuste curto de uma lista ("Que sou responsável", "Todos") herda o pedido anterior.
+  const textoConsulta = textoDaConsulta(userText, state.messages);
   if (livre && !emSelecao && podeEscrever(state.identity) &&
-      !pedeEnvio(userText) && pedeConsulta(userText)) {
+      !pedeEnvio(userText) && pedeConsulta(textoConsulta)) {
     // Reconhecer a consulta independe da permissão: sem leitura, recusa aqui.
     // Deixar passar ao modelo oferece criação e pode converter o código citado
     // em continuidade de proposta, mesmo quando a pessoa pediu só o status.
@@ -1244,7 +1246,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
       ? { reply: "Não consegui validar sua permissão para consultar propostas agora. Tente de novo em instantes.", evento: "consulta_politica_indisponivel" }
       : !state.policy.includes("proposal.list")
         ? { reply: `Você não tem permissão para consultar propostas pelo ${nomeDoAgente()} nesta imobiliária.`, evento: "consulta_sem_politica" }
-        : await responderConsulta(depsDoFluxo(state, usage), userText);
+        : await responderConsulta(depsDoFluxo(state, usage), textoConsulta);
     return {
       ...(atual ? { fluxo: rebaixarFluxo(atual) } : vencido ? { fluxo: null } : {}),
       reply: r.reply,

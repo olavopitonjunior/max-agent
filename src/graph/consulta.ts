@@ -1,6 +1,6 @@
 import type { DepsDoFluxo } from "./fluxos";
 import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, termoDeBusca, type PropostaListada } from "./localizar";
-import { pedeListaDeEquipeImplicita, pedidoDeLista, responderListaFiltrada } from "./consulta-equipe";
+import { ehAjusteDeLista, PEDE_TODOS, pedeListaDeEquipeImplicita, pedidoDeLista, responderListaFiltrada } from "./consulta-equipe";
 import { normalizar } from "./tools";
 
 /**
@@ -39,6 +39,39 @@ const ESTADOS: [RegExp, string][] = [
 function estadoPedido(texto: string): string | null {
   const t = normalizar(texto);
   return ESTADOS.find(([re]) => re.test(t))?.[1] ?? null;
+}
+
+/**
+ * Ajuste curto de uma lista pedida antes ("Que sou responsável", "Todos",
+ * "Outubro 2026 pendentes e assinatura") herda o pedido anterior: devolve o
+ * texto a interpretar — o ajuste primeiro (vale o mais novo), o pedido depois,
+ * separados por ponto para a maiúscula do começo de frase não virar nome de
+ * cliente. Sem ajuste ou sem pedido de lista nas últimas mensagens, devolve o
+ * texto como veio. Caso real: gerente da Newcore, 02/11 à noite, em 4 mensagens
+ * seguidas o Newton esqueceu o que ela tinha pedido.
+ */
+export function textoDaConsulta(
+  texto: string,
+  historico: { role: string; content: unknown }[],
+  agora: Date = new Date()
+): string {
+  if (pedeConsulta(texto) || !ehAjusteDeLista(texto, agora)) return texto;
+  // Só herda se a última resposta foi uma lista de propostas: ajuste solto, depois
+  // de outro assunto, não é continuação (review do PR #166).
+  const ultimaResposta = [...historico].reverse().find((m) => m.role === "assistant" && typeof m.content === "string");
+  if (!ultimaResposta || !/\bPROP-\d{4}-\d+|\bpropostas?\b/i.test(ultimaResposta.content as string)) return texto;
+  const anteriores = historico
+    .filter((m) => m.role === "user" && typeof m.content === "string")
+    .map((m) => m.content as string)
+    .slice(-4)
+    .reverse();
+  const ajustes = [PEDE_TODOS.test(texto) ? "da equipe" : texto];
+  for (const t of anteriores) {
+    if (pedeConsulta(t)) return [...ajustes, t].join(". ");
+    if (!ehAjusteDeLista(t, agora)) return texto;
+    ajustes.push(PEDE_TODOS.test(t) ? "da equipe" : t);
+  }
+  return texto;
 }
 
 /**
