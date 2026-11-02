@@ -3,7 +3,7 @@ import type { LlmTool } from '@/lib/llm';
 import type { RespostaDeAcao } from '@/lib/acao';
 import { numerarLista, resolverReferencia, REFERENCIA_TTL_MS, type MapaDeReferencias } from './referencias';
 export interface GooglePending { proposalId:string; digest:string; expiresAt:string; kind:string; preview:Record<string,unknown>; askedMessageId:string; subjectKey:string }
-export interface GoogleRefs { createdAt:number; subjectKey:string; items:{id:string;title:string;version:number;updatedAt?:string;startAt?:string;endAt?:string;timeZone?:string;status?:string;hasTime?:boolean}[]; range?:{startAt:string;endAt:string} }
+export interface GoogleRefs { createdAt:number; subjectKey:string; items:{id:string;title:string;version:number;updatedAt?:string;startAt?:string;endAt?:string;timeZone?:string;status?:string;hasTime?:boolean}[]; range?:{startAt:string;endAt:string}; lastPage?:{messageId:string;from:number} }
 interface Context { enabled:boolean; identity:{kind:string;orgId?:string;userId?:string}; policy:readonly string[]; now:number; messageId:string; subjectKey:string }
 type Action=(verb:'google.activities'|'google.availability'|'google.propose'|'google.confirm',args:Record<string,unknown>,key?:string)=>Promise<RespostaDeAcao|null>;
 const capability=(kind:unknown)=>kind==='tasks.sync'?'google.tasks.write':'google.calendar.write';
@@ -140,7 +140,7 @@ export function googleTools(c:Context):LlmTool[]{
  if(!c.enabled||c.identity.kind!=='user')return [];
  const range={startAt:{type:'string',description:'ISO 8601 com fuso'},endAt:{type:'string',description:'ISO 8601 com fuso'}};
  return [
- ...(['google_atividades','google_disponibilidade'] as const).filter(()=>allowed(c,'google.calendar.read')).map(name=>({name,description:name==='google_atividades'?'Lista atividades profissionais no período e versões oficiais.':'Consulta disponibilidade pessoal sem detalhes de eventos privados.',parameters:name==='google_atividades'?{type:'object',properties:{...range,mais:{type:'boolean',description:'true para a próxima página da lista vigente; sem período'}},additionalProperties:false}:{type:'object',properties:range,required:['startAt','endAt'],additionalProperties:false}})),
+ ...(['google_atividades','google_disponibilidade'] as const).filter(()=>allowed(c,'google.calendar.read')).map(name=>({name,description:name==='google_atividades'?'Lista atividades profissionais no período e versões oficiais. startAt e endAt são obrigatórios, exceto com mais:true.':'Consulta disponibilidade pessoal sem detalhes de eventos privados.',parameters:name==='google_atividades'?{type:'object',properties:{...range,mais:{type:'boolean',description:'true para a próxima página da lista vigente; sem período'}},additionalProperties:false}:{type:'object',properties:range,required:['startAt','endAt'],additionalProperties:false}})),
  ...(allowed(c,'google.calendar.write')||allowed(c,'google.tasks.write')?[{name:'google_propor',description:'Propõe agendar OU reagendar a mesma atividade (calendar.schedule), cancelar explicitamente (calendar.cancel), ou sincronizar tarefa. Usa o número da lista profissional vigente; nunca executa, aguarda SIM no próximo turno.',parameters:{type:'object',properties:{kind:{type:'string',description:'calendar.schedule: agendar ou reagendar/alterar horário do mesmo compromisso; exige startAt e endAt. calendar.cancel: cancelar explicitamente, nunca reagendar. tasks.sync: espelhar tarefa sem horário.',enum:[...(allowed(c,'google.calendar.write')?['calendar.schedule','calendar.cancel']:[]),...(allowed(c,'google.tasks.write')?['tasks.sync']:[])]},numero:{type:'integer'},...range,timeZone:{type:'string'},participants:{type:'array',items:{type:'string'}},createMeet:{type:'boolean'}},required:['kind','numero'],additionalProperties:false}}]:[]),
  ];
 }
@@ -178,16 +178,19 @@ export async function googleStep(c:Context & {call?:{name:string;args:Record<str
   if(!Array.isArray(r.body.items))return no('Não consegui consultar as atividades profissionais.');
   const all=parseActivities(r.body.items);
   // By id, not offset: the numbers already read keep their activity if the period changed meanwhile.
-  const shown=previous?.items??[];
+  // A queue retry of the same message shows the same page, or that page would never be read.
+  const shown=previous?(previous.lastPage?.messageId===c.messageId?previous.items.slice(0,previous.lastPage.from):previous.items):[];
   const seen=new Set(shown.map(item=>item.id));
   const unseen=all.filter(item=>!seen.has(item.id));
   const page=unseen.slice(0,PAGE_SIZE);
   const rest=unseen.length-page.length;
   const items=[...shown.map(item=>all.find(v=>v.id===item.id)??item),...page];
-  const refs:GoogleRefs={createdAt:c.now,subjectKey:c.subjectKey,items,range:period};
+  // "mais" does not extend the list's validity: older items are not read again.
+  const refs:GoogleRefs={createdAt:previous?.createdAt??c.now,subjectKey:c.subjectKey,items,range:period,lastPage:{messageId:c.messageId,from:shown.length}};
   const lines=page.map((item,index)=>activityLine(item,shown.length+index)).join('\n');
-  const footer=rest>0?`\n\nHá mais ${rest}. Peça "mais" para ver.`:r.body.items.length>=SERVER_LIST_LIMIT?'\n\nEssa consulta para em 50 atividades. Peça um período menor para ver o restante.':'';
-  if(!page.length)return {pending:null,refs,reply:shown.length?`Não há mais atividades nesse período.${footer}`:'Nenhuma atividade profissional nesse período.'};
+  const capped='Essa consulta para em 50 atividades. Peça um período menor para ver o restante.';
+  const footer=rest>0?`\n\nHá mais ${rest}. Peça "mais" para ver.`:r.body.items.length>=SERVER_LIST_LIMIT?`\n\n${capped}`:'';
+  if(!page.length)return {pending:null,refs,reply:shown.length?(r.body.items.length>=SERVER_LIST_LIMIT?capped:'Não há mais atividades nesse período.'):'Nenhuma atividade profissional nesse período.'};
   return {pending:null,refs,reply:`Atividades profissionais:\n${lines}${footer}`};
  }
  if(!['calendar.schedule','calendar.cancel','tasks.sync'].includes(String(a.kind))||!allowed(c,capability(a.kind)))return no();

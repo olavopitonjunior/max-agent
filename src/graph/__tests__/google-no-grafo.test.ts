@@ -141,6 +141,19 @@ describe('Google no grafo',()=>{
   expect(segunda.referencias!.itens).toHaveLength(7);
  });
 
+ it('retentativa do mesmo "mais" repete a página em vez de pular',async()=>{
+  const lista=Array.from({length:12},(_,i)=>({id:`a${i+1}`,title:`Visita ${i+1}`,version:1}));
+  const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
+  const criadoEm=Date.now()-60000;
+  const googleRefs={subjectKey,createdAt:criadoEm,items:lista.slice(0,5),range:{startAt:'2026-10-29T00:00:00-03:00',endAt:'2026-10-30T00:00:00-03:00'}};
+  llm.mockResolvedValue({text:'',toolCalls:[{name:'google_atividades',args:{mais:true}}],usage:uso});
+  acao.mockResolvedValue({status:200,body:{items:lista}});
+  const primeira=await run('mostre mais',{googleRefs},'m2');
+  const retentativa=await run('mostre mais',{googleRefs:primeira.googleRefs,referencias:primeira.referencias},'m2');
+  expect(retentativa.reply).toContain('6. Visita 6');expect(retentativa.reply).not.toContain('Visita 11');
+  expect(retentativa.googleRefs!.items).toHaveLength(10);expect(retentativa.googleRefs!.createdAt).toBe(criadoEm);
+ });
+
  it('"mais" sem lista vigente não consulta nada e não aceita período inventado',async()=>{
   llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_atividades',args:{mais:true,startAt:'2026-10-29T00:00:00-03:00',endAt:'2026-10-30T00:00:00-03:00'}}],usage:uso});
   const s=await run('agenda Google: mostre mais');
