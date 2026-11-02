@@ -202,6 +202,7 @@ export async function despacharLeituras(params: {
         trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
         continue;
       }
+      numeroDoDetalhe = selected.item.n;
       args = { atividade_id: selected.item.id };
     }
     if (entrada.verb === "pending.summary") {
@@ -273,8 +274,10 @@ export async function despacharLeituras(params: {
 
     // G2: o código numera, o modelo vê só número + rótulo. Leitura que não
     // declara o que produz passa como veio (nenhuma hoje).
+    // Detalhe apontado por número não é lista: renumerar trocaria a numeração vigente por um item só,
+    // e o próximo "cancela a 1" cairia em outra atividade.
     const produz = (a.entrada as EntradaDeLeitura).refs?.produz;
-    if (produz) {
+    if (produz && numeroDoDetalhe === null) {
       const numerada = numerarLista({
         items: r.items,
         tipo: produz,
