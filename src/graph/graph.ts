@@ -1,4 +1,4 @@
-import { googleStep, googleToolsForTurn, googlePrompt, type GooglePending, type GoogleRefs } from './google-workspace';
+import { googleStep, googleToolsForTurn, googlePrompt, referenciasDaListaGoogle, type GooglePending, type GoogleRefs } from './google-workspace';
 import { deployProfile, nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled, durableRuntimeEnabled } from '@/lib/runtime/rollout';
 import { liveNamespaceFor } from "@/lib/runtime/context";
@@ -941,7 +941,9 @@ function googleContext(state: MaxStateType) {
 async function conduzir(state: MaxStateType): Promise<MaxUpdate> {
  const result = await conduzirInterno(state);
  // A deterministic flow may emit its own numbered choices. Those replace the Google list.
- return result.reply || result.fluxo ? {...result, googleRefs: null} : result;
+ // `referencias` is only dropped when it came from that list; a flow may set its own.
+ if (!(result.reply || result.fluxo)) return result;
+ return {...result, googleRefs: null, ...(state.googleRefs && result.referencias === undefined ? {referencias: null} : {})};
 }
 
 async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
@@ -1690,7 +1692,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
     );
   }
 
-  const googleDefs = state.toolRounds === 0 ? googleToolsForTurn(googleContext(state), userText, state.googleRefs) : [];
+  const googleDefs = state.toolRounds === 0 ? googleToolsForTurn(googleContext(state), userText, state.googleRefs, state.referencias) : [];
   const oferecidas =
     state.toolRounds === 0 ? [...oferta.entradas.map((e) => e.nome), ...googleDefs.map(e => e.name)] : state.toolsOferecidas;
   // Só a volta 0 grava: as seguintes herdam a oferta do turn.
@@ -1719,7 +1721,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   let result;
   try {
     result = await complete({
-      system: state.googleEnabled ? `${system}\n${googlePrompt(googleContext(state), state.googleRefs)}` : system,
+      system: state.googleEnabled ? `${system}\n${googlePrompt(googleContext(state), state.googleRefs, state.referencias)}` : system,
       // G7: todo texto da PESSOA vai escapado (não forja cerca nossa) — o do
       // histórico também, porque uma injeção de três turns atrás continua no
       // prompt. Sem etiqueta em volta: medido, ela derrubava a escolha de
@@ -1801,11 +1803,13 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
    */
   const googleCall = result.toolCalls.find(c => c.name.startsWith('google_'));
   if (googleCall) {
-    const step = await googleStep({ ...googleContext(state), text: userText, call: googleCall, refs: state.googleRefs,
+    const step = await googleStep({ ...googleContext(state), text: userText, call: googleCall, refs: state.googleRefs, referencias: state.referencias,
       enabled: state.googleEnabled && oferecidas.includes(googleCall.name) && !state.fluxo && !state.pendingAction,
       action: depsDoFluxo(state, usageDoTurn).acao });
-    return { ...daOferta, googlePending: step.pending, ...(step.refs !== undefined ? {googleRefs: step.refs, referencias: null, queryOptions: null, selectedDealQuery: null, restoDaResposta: null} : {}),
-      reply: step.reply, messages: [{role:'user',content:userText},{role:'assistant',content:step.reply}], usage: usageDoTurn, piiMap: mapaTurno };
+    // Only this call runs: the person must not read this as the whole request being done.
+    const reply = result.toolCalls.length > 1 ? `${step.reply}\n\nFiz só essa parte. Mande o restante do pedido em outra mensagem.` : step.reply;
+    return { ...daOferta, googlePending: step.pending, ...(step.refs !== undefined ? {googleRefs: step.refs, referencias: step.refs ? referenciasDaListaGoogle(step.refs, state.inbound.messageId) : null, queryOptions: null, selectedDealQuery: null, restoDaResposta: null} : {}),
+      reply, messages: [{role:'user',content:userText},{role:'assistant',content:reply}], usage: usageDoTurn, piiMap: mapaTurno };
   }
   const trilha: ToolLogEntry[] = [];
   for (const c of result.toolCalls) {

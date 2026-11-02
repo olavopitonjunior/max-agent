@@ -1,8 +1,65 @@
 import { describe,it,expect,vi } from 'vitest';
-import { googleStep,googleTools,googlePrompt } from '../google-workspace';
+import { googleStep,googleTools,googleToolsForTurn,googlePrompt,referenciasDaListaGoogle } from '../google-workspace';
 const ctx={enabled:true,identity:{kind:'user',orgId:'o',userId:'u'},policy:['google.calendar.read','google.calendar.write','google.tasks.write'],now:1000,messageId:'m1',subjectKey:'o:u'} as const;
 const proposal={proposalId:'p',digest:'a'.repeat(64),expiresAt:new Date(10000).toISOString(),kind:'calendar.cancel',summary:{title:'Visita atual',dueAt:null},preview:{activityId:'a',expectedVersion:2}};
 const refs={createdAt:1000,subjectKey:'o:u',items:[{id:'a',title:'Visita',version:2}]};
+describe('one numbering across activity lists',()=>{
+ const referencias={criadoEm:1000,turno:'m0',itens:[{n:1,tipo:'negocio' as const,id:'d',rotulo:'Negócio'},{n:2,tipo:'atividade' as const,id:'a',rotulo:'Visita'}]};
+ const cancel=(numero:number)=>({name:'google_propor',args:{kind:'calendar.cancel',numero}});
+ it('uses the version from the server, never one from the model',async()=>{
+  const action=vi.fn().mockResolvedValueOnce({status:200,body:{items:[{id:'a',title:'Visita',version:2}]}}).mockResolvedValueOnce({status:200,body:proposal});
+  const r=await googleStep({...ctx,referencias,call:{name:'google_propor',args:{kind:'calendar.cancel',numero:2,expectedVersion:99}},action});
+  expect(action).toHaveBeenNthCalledWith(1,'google.activities',{activityId:'a'});
+  expect(action).toHaveBeenNthCalledWith(2,'google.propose',{kind:'calendar.cancel',input:{activityId:'a',expectedVersion:2}},'m1');
+  expect(r.pending?.proposalId).toBe('p');
+ });
+ it('refuses, without proposing, an activity the server does not return',async()=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:{items:[]}});
+  const r=await googleStep({...ctx,referencias,call:cancel(2),action});
+  expect(action).toHaveBeenCalledTimes(1);expect(r.pending).toBeNull();expect(r.reply).toContain('Nada foi proposto');
+ });
+ it('refuses an item the server answers with a different id',async()=>{
+  const action=vi.fn().mockResolvedValue({status:200,body:{items:[{id:'outra',title:'Outra',version:1}]}});
+  const r=await googleStep({...ctx,referencias,call:cancel(2),action});
+  expect(action).toHaveBeenCalledTimes(1);expect(r.pending).toBeNull();
+ });
+ it('does not propose cancelling an activity with nothing on the calendar',async()=>{
+  const action=vi.fn().mockResolvedValueOnce({status:200,body:{items:[{id:'a',title:'Visita',version:0}]}});
+  const r=await googleStep({...ctx,referencias,call:cancel(2),action});
+  expect(action).toHaveBeenCalledTimes(1);expect(r.pending).toBeNull();expect(r.reply).toContain('não tem compromisso na agenda');
+ });
+ it('without calendar read, a number neither consults nor is announced in the prompt',async()=>{
+  const action=vi.fn();
+  const policy=['google.tasks.write'];
+  const r=await googleStep({...ctx,policy,referencias,call:{name:'google_propor',args:{kind:'tasks.sync',numero:2}},action});
+  expect(action).not.toHaveBeenCalled();expect(r.reply).toContain('Peça a lista');
+  expect(googlePrompt({...ctx,policy},null,referencias)).not.toContain('"numero":2');
+  expect(googlePrompt({...ctx,policy:['google.calendar.read']},null,referencias)).not.toContain('"numero":2');
+ });
+ it('never treats another kind of item, an absent number or an expired list as an activity',async()=>{
+  const action=vi.fn();
+  for(const c of [{referencias,call:cancel(1)},{referencias,call:cancel(9)},{referencias,now:1000+1800001,call:cancel(2)}]){
+   const r=await googleStep({...ctx,...c,action});
+   expect(r.reply).toContain('Peça a lista');
+  }
+  expect(action).not.toHaveBeenCalled();
+ });
+ it('without calendar write, an activity number proposes nothing',async()=>{
+  const action=vi.fn();
+  const r=await googleStep({...ctx,policy:['google.calendar.read'],referencias,call:cancel(2),action});
+  expect(action).not.toHaveBeenCalled();expect(r.pending).toBeNull();
+ });
+ it('shows the model only numbers from the activity list and offers the tools',()=>{
+  const prompt=googlePrompt(ctx,null,referencias);
+  expect(prompt).toContain('[{"numero":2}]');expect(prompt).not.toContain('Visita');expect(prompt).not.toMatch(/"id"/);
+  expect(googleToolsForTurn(ctx,'muda a 2 para amanhã',null,referencias).map(t=>t.name)).toContain('google_propor');
+  expect(googleToolsForTurn({...ctx,now:1000+1800001},'muda a 2 para amanhã',null,referencias)).toEqual([]);
+ });
+ it('numbers a Google list exactly as it is shown',()=>{
+  expect(referenciasDaListaGoogle({createdAt:1000,subjectKey:'o:u',items:[{id:'a',title:'A',version:1},{id:'b',title:'B',version:0}]},'m1')?.itens.map(i=>[i.n,i.id,i.tipo])).toEqual([[1,'a','atividade'],[2,'b','atividade']]);
+  expect(referenciasDaListaGoogle({createdAt:1000,subjectKey:'o:u',items:[]},'m1')).toBeNull();
+ });
+});
 describe('Google confirmation boundary',()=>{
  it('sem conexão Google orienta conectar, sem proposta pendente',async()=>{
   const action=vi.fn().mockResolvedValue({status:409,body:{error:'GOOGLE_RECONNECT_REQUIRED'}});

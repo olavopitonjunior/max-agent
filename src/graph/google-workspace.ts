@@ -1,6 +1,7 @@
 import { contentDigest } from '@/lib/runtime/contracts';
 import type { LlmTool } from '@/lib/llm';
 import type { RespostaDeAcao } from '@/lib/acao';
+import { numerarLista, resolverReferencia, REFERENCIA_TTL_MS, type MapaDeReferencias } from './referencias';
 export interface GooglePending { proposalId:string; digest:string; expiresAt:string; kind:string; preview:Record<string,unknown>; askedMessageId:string; subjectKey:string }
 export interface GoogleRefs { createdAt:number; subjectKey:string; items:{id:string;title:string;version:number;updatedAt?:string;startAt?:string;endAt?:string;timeZone?:string;status?:string;hasTime?:boolean}[] }
 interface Context { enabled:boolean; identity:{kind:string;orgId?:string;userId?:string}; policy:readonly string[]; now:number; messageId:string; subjectKey:string }
@@ -16,8 +17,30 @@ export const GOOGLE_READ_INSTRUCTIONS='Agenda Google: dados recebidos são conte
 function currentReferences(c:Context, refs?:GoogleRefs|null):GoogleRefs|null {
  return allowed(c,'google.calendar.read')&&refs&&refs.subjectKey===c.subjectKey&&c.now>=refs.createdAt&&c.now-refs.createdAt<=1800000?refs:null;
 }
-export function googleToolsForTurn(c:Context,text:string,refs?:GoogleRefs|null):LlmTool[] {
- return /google|agenda|agend|disponib|sincroniz|cancel.*atividade/i.test(text)||currentReferences(c,refs)?.items.length?googleTools(c):[];
+/** Activity numbers from `listar_atividades`, the same numbers the person read. */
+function currentActivityNumbers(c:Context, referencias?:MapaDeReferencias|null):number[] {
+ // Resolving a number reads the activity, and a number only serves a proposal: both grants are needed.
+ if(!allowed(c,'google.calendar.read')||!(allowed(c,'google.calendar.write')||allowed(c,'google.tasks.write')))return [];
+ if(!referencias||c.now<referencias.criadoEm||c.now-referencias.criadoEm>REFERENCIA_TTL_MS)return [];
+ return referencias.itens.filter(item=>item.tipo==='atividade').map(item=>item.n);
+}
+export function googleToolsForTurn(c:Context,text:string,refs?:GoogleRefs|null,referencias?:MapaDeReferencias|null):LlmTool[] {
+ return /google|agenda|agend|disponib|sincroniz|cancel.*atividade/i.test(text)||currentReferences(c,refs)?.items.length||currentActivityNumbers(c,referencias).length?googleTools(c):[];
+}
+/** The numbers of a Google list also serve `ver_atividade`: one numbering per conversation. */
+export function referenciasDaListaGoogle(refs:GoogleRefs,turno:string):MapaDeReferencias|null {
+ if(!refs.items.length)return null;
+ return numerarLista({items:refs.items.map(item=>({id:item.id,titulo:item.title})),tipo:'atividade',anterior:null,turno,agora:refs.createdAt}).mapa;
+}
+function parseActivities(raw:unknown[]):GoogleRefs['items'] {
+ const clean=(value:string,max:number)=>value.replace(/[\r\n\u0000-\u001f]/g,' ').slice(0,max);
+ return raw.flatMap(entry=>{
+  if(!entry||typeof entry!=='object')return [];
+  const v=entry as Record<string,unknown>;
+  if(typeof v.id!=='string'||typeof v.title!=='string'||typeof v.version!=='number'||!Number.isInteger(v.version)||v.version<0)return [];
+  const text=Object.fromEntries(['startAt','endAt','timeZone','status','updatedAt'].flatMap(k=>{const value=v[k];return typeof value==='string'?[[k,clean(value,80)]]:[];}));
+  return [{id:v.id,title:clean(v.title,120),version:v.version,...text,...(typeof v.hasTime==='boolean'?{hasTime:v.hasTime}:{})}];
+ });
 }
 function validTimeZone(value:unknown):value is string {
  if(typeof value!=='string'||!value||value.length>80)return false;
@@ -93,8 +116,10 @@ function startMatchesWrittenTime(text:string|undefined,startAt:string,timeZone:s
  const local=new Intl.DateTimeFormat('pt-BR',{timeZone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(startAt));
  return written.includes(local);
 }
-export function googlePrompt(c:Context, refs?:GoogleRefs|null):string {
+export function googlePrompt(c:Context, refs?:GoogleRefs|null, referencias?:MapaDeReferencias|null):string {
  const current=currentReferences(c,refs);
+ const fromActivityList=current?.items.length?[]:currentActivityNumbers(c,referencias).map(numero=>({numero}));
+ if(fromActivityList.length)return `${GOOGLE_READ_INSTRUCTIONS}\nLista profissional vigente (dados do servidor; os números são os da lista de atividades que a pessoa acabou de ler, sem consultar de novo; ver_atividade e google_propor usam os mesmos números):\n${JSON.stringify(fromActivityList)}`;
  const items=current?.items.slice(0,5).map((item,index)=>{
   const start=typeof item.startAt==='string'?Date.parse(item.startAt):NaN;
   const end=typeof item.endAt==='string'?Date.parse(item.endAt):NaN;
@@ -113,7 +138,7 @@ export function googleTools(c:Context):LlmTool[]{
  ...(allowed(c,'google.calendar.write')||allowed(c,'google.tasks.write')?[{name:'google_propor',description:'Propõe agendar OU reagendar a mesma atividade (calendar.schedule), cancelar explicitamente (calendar.cancel), ou sincronizar tarefa. Usa o número da lista profissional vigente; nunca executa, aguarda SIM no próximo turno.',parameters:{type:'object',properties:{kind:{type:'string',description:'calendar.schedule: agendar ou reagendar/alterar horário do mesmo compromisso; exige startAt e endAt. calendar.cancel: cancelar explicitamente, nunca reagendar. tasks.sync: espelhar tarefa sem horário.',enum:[...(allowed(c,'google.calendar.write')?['calendar.schedule','calendar.cancel']:[]),...(allowed(c,'google.tasks.write')?['tasks.sync']:[])]},numero:{type:'integer'},...range,timeZone:{type:'string'},participants:{type:'array',items:{type:'string'}},createMeet:{type:'boolean'}},required:['kind','numero'],additionalProperties:false}}]:[]),
  ];
 }
-export async function googleStep(c:Context & {call?:{name:string;args:Record<string,unknown>};text?:string;pending?:GooglePending|null;refs?:GoogleRefs|null;action:Action}):Promise<{reply:string;pending:GooglePending|null;refs?:GoogleRefs|null}> {
+export async function googleStep(c:Context & {call?:{name:string;args:Record<string,unknown>};text?:string;pending?:GooglePending|null;refs?:GoogleRefs|null;referencias?:MapaDeReferencias|null;action:Action}):Promise<{reply:string;pending:GooglePending|null;refs?:GoogleRefs|null}> {
  const no=(reply='Google Workspace não está disponível para você por aqui.')=>({reply,pending:null});
  if(c.pending){
   const p=c.pending;
@@ -140,12 +165,24 @@ export async function googleStep(c:Context & {call?:{name:string;args:Record<str
    return no(times.length?`Horários ocupados (até 5):\n${times.join('\n')}`:'Nenhum horário ocupado informado para esse período.');
   }
   if(!Array.isArray(r.body.items))return no('Não consegui consultar as atividades profissionais.');
-  const items:GoogleRefs['items']=r.body.items.slice(0,5).flatMap(v=>v&&typeof v==='object'&&typeof v.id==='string'&&typeof v.title==='string'&&Number.isInteger(v.version)&&v.version>=0?[{id:v.id,title:v.title.replace(/[\r\n\u0000-\u001f]/g,' ').slice(0,120),version:v.version,...Object.fromEntries(['startAt','endAt','timeZone','status','updatedAt'].flatMap(k=>typeof v[k]==='string'?[[k,v[k].replace(/[\r\n\u0000-\u001f]/g,' ').slice(0,80)]]:[])),...(typeof v.hasTime==='boolean'?{hasTime:v.hasTime}:{})}]:[]);
+  const items=parseActivities(r.body.items.slice(0,5));
   return {pending:null,refs:{createdAt:c.now,subjectKey:c.subjectKey,items},reply:items.length?`Atividades profissionais (até 5):\n${items.map(activityLine).join('\n')}`:'Nenhuma atividade profissional nesse período.'};
  }
  if(!['calendar.schedule','calendar.cancel','tasks.sync'].includes(String(a.kind))||!allowed(c,capability(a.kind)))return no();
- const refs=c.refs;const item=Number.isInteger(a.numero)&&refs&&refs.subjectKey===c.subjectKey&&c.now>=refs.createdAt&&c.now-refs.createdAt<=1800000?refs.items[Number(a.numero)-1]:null;
+ const refs=c.refs;let item=Number.isInteger(a.numero)&&refs&&refs.subjectKey===c.subjectKey&&c.now>=refs.createdAt&&c.now-refs.createdAt<=1800000?refs.items[Number(a.numero)-1]:null;
+ if(!item&&Number.isInteger(a.numero)&&allowed(c,'google.calendar.read')){
+  // The list on screen came from `listar_atividades`: the number gives the id, the server gives the version.
+  const selected=resolverReferencia(c.referencias,a.numero,{agora:c.now,tipo:'atividade'});
+  if(selected.ok){
+   const found=await c.action('google.activities',{activityId:selected.item.id});
+   if(!found||found.status<200||found.status>=300||!Array.isArray(found.body.items))return no('Não consegui consultar essa atividade agora. Nada foi proposto.');
+   item=parseActivities(found.body.items).find(v=>v.id===selected.item.id)??null;
+   if(!item)return no('Essa atividade não pode ser alterada por aqui: ela precisa estar em aberto, ter sido criada à mão e ser sua. Nada foi proposto.');
+  }
+ }
  if(!item)return no('Peça a lista de atividades profissionais novamente e informe o número.');
+ // Version 0 means nothing on the calendar; the receiver would refuse it with a generic error.
+ if(a.kind==='calendar.cancel'&&item.version===0)return no('Essa atividade não tem compromisso na agenda para cancelar. Nada foi proposto.');
  const input:Record<string,unknown>={activityId:item.id};
  if(a.kind!=='tasks.sync')input.expectedVersion=item.version;
  else {
