@@ -80,6 +80,23 @@ describe('Google no grafo',()=>{
   expect(s.referencias?.itens).toEqual([{n:1,tipo:'atividade',id:'google-b',rotulo:'Google B'}]);
  });
 
+ it('detalhe pelo número da lista Google chega ao modelo com o mesmo número e sem id',async()=>{
+  vi.stubEnv('MAX_EXTENDED_QUERIES','true');
+  vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({org1:['queries']}));
+  vi.mocked(fetchProfile).mockResolvedValue({enabled:true,googleMaxEnabled:true,maxPolicy:{byRole:{'*':['google.calendar.read','activity.list']}}} as never);
+  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'google_atividades',args:{startAt:'2026-10-29T00:00:00Z',endAt:'2026-10-30T00:00:00Z'}}],usage:uso});
+  acao.mockResolvedValueOnce({status:200,body:{items:[{id:'g-a',title:'Google A',version:1},{id:'g-b',title:'Google B',version:1}]}});
+  const lista=await run('Lista minha agenda Google',{},'m1');
+  llm.mockResolvedValueOnce({text:'',toolCalls:[{name:'ver_atividade',args:{numero:2}}],usage:uso});
+  leitura.mockResolvedValueOnce({items:[{id:'g-b',titulo:'Google B',notas:'Levar chaves'}],truncated:false});
+  llm.mockResolvedValueOnce({text:'Google B: levar chaves',toolCalls:[],usage:uso});
+  const s=await run('detalhes da atividade 2',{googleRefs:lista.googleRefs,referencias:lista.referencias},'m2');
+  expect(leitura).toHaveBeenCalledWith(expect.objectContaining({verb:'activity.get',args:{atividade_id:'g-b'}}));
+  expect(s.toolResults?.[0].items).toEqual([{n:2,titulo:'Google B',notas:'Levar chaves'}]);
+  expect(s.referencias?.itens.map((i:{id:string})=>i.id)).toEqual(['g-a','g-b']);
+  vi.unstubAllEnvs();
+ });
+
  it('a competing numbered stage menu invalidates the Google list',async()=>{
   vi.mocked(fetchProfile).mockResolvedValue({enabled:true,googleMaxEnabled:true,maxPolicy:{byRole:{'*':['deal.list','google.calendar.read']}}} as never);
   const subjectKey=JSON.stringify(['org1',{kind:'user',userId:'u1'}]);
