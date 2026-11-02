@@ -1,5 +1,6 @@
 import type { DepsDoFluxo } from "./fluxos";
 import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, termoDeBusca, type PropostaListada } from "./localizar";
+import { pedeListaDeEquipeImplicita, pedidoDeLista, responderListaFiltrada } from "./consulta-equipe";
 import { normalizar } from "./tools";
 
 /**
@@ -49,8 +50,11 @@ function estadoPedido(texto: string): string | null {
 export function pedeConsulta(texto: string): boolean {
   const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "");
   const codigo = codigoCitado(texto);
+  // "Outubro de 2026 somente as destinadas à Adélia como gerente, com o nome do corretor" (02/11).
+  if (!CRIACAO.test(t) && !codigo && pedeListaDeEquipeImplicita(texto)) return true;
   if (!PROPOSTA.test(t) && !codigo) return false;
   if (CRIACAO.test(t)) return false;
+  if (pedidoDeLista(texto)) return true;
   if (pedeLista(texto)) return true;
   if (!(pedeBusca(texto) || CONSULTA.test(t))) return false;
   return !!(codigo || termoDeBusca(texto) || estadoPedido(texto));
@@ -76,6 +80,9 @@ const emEstado = (estado: string) => `em ${estado === ANDAMENTO ? "andamento" : 
  * código, título e situação de cada uma (até 10), e quantas há ao todo.
  */
 export async function responderConsulta(deps: DepsDoFluxo, texto: string): Promise<{ reply: string; evento: string }> {
+  // Mês, várias situações, equipe/responsável: o servidor filtra (02/11, caso da gerente da Newcore).
+  const filtrada = pedidoDeLista(texto);
+  if (filtrada) return responderListaFiltrada(deps, filtrada);
   const r = await buscarPropostas(deps, texto);
   // Com quem/código citado, o estado é a PERGUNTA ("a do Carlos já foi
   // assinada?"), não filtro: mostra a proposta com a situação real (review 09/10).
