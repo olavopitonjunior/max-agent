@@ -16,6 +16,7 @@ for (const scenario of suite.scenarios) it(`replay ${scenario.id}`, async () => 
   // A bypass of the normal adapter guards is still caught before any connection.
   const network = vi.fn(() => { throw new Error("eval_network_forbidden"); });
   vi.stubGlobal("fetch", network);
+  vi.stubEnv("AGENT_DEPLOY_PROFILE", suite.profile === "max" ? "" : suite.profile);
   vi.stubEnv("MAX_MARKETING", "false");
   vi.stubEnv("MAX_EXTENDED_QUERIES", "false");
   const taskId = randomUUID();

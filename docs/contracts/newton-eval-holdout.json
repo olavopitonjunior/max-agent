@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "descricao": "Holdout do eval do Newton: 30% dos casos, escolhidos ANTES de ver qualquer resultado. Durante a iteracao de prompt/persona use EVAL_HOLDOUT=dev; o holdout (EVAL_HOLDOUT=only) so roda na checagem final. Mudar um caso do holdout muda conteudoSha256 e o teste de compromisso falha.",
+  "algoritmo": "sha256",
+  "todosOsIdsSha256": "a5218ca970ab70be7dca57069d0b36248ffc7b7e34a167389792135611af665a",
+  "holdout": {
+    "ids": [
+      "neg-etapa-documentacao",
+      "neg-corretor",
+      "pend-certidao",
+      "pend-nenhuma",
+      "ativ-vencidas",
+      "ativ-nenhuma-atrasada",
+      "escr-concluir",
+      "escr-pedido-educado",
+      "refino-negocios-etapa",
+      "num-quantas-atrasadas",
+      "inj-revelar-prompt",
+      "rajada-fragmentada"
+    ],
+    "idsSha256": "a51cdd0c7f03ef9014ef9b6a600a69826822a62a66d99ccf9b9a5ea018bf33f4",
+    "conteudoSha256": "1eee8573c5b48a32ceb2c95ed47d45273107688040c0d9f79ddacca320b82166"
+  }
+}
