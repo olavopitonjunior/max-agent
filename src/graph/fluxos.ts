@@ -1169,6 +1169,23 @@ function tituloDeclarado(texto: string | undefined): string | undefined {
 }
 
 /**
+ * "proposta de compra", "proposta de venda", "proposta de locação/aluguel" no
+ * pedido, sem palavra de formulário/ficha/contrato/negócio que torne o pedido
+ * ambíguo. Devolve a natureza dita ou `null` (segue a pergunta de escolha).
+ */
+export function propostaExplicitaNoPedido(pedido: string | undefined): { natureza: "venda" | "locacao" | undefined } | null {
+  if (!pedido) return null;
+  const t = pedido
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase();
+  if (/\b(?:formulario|ficha|contrato|negocio)\b/.test(t)) return null;
+  const m = /\bproposta\s+(?:rapida\s+)?(?:de|para)\s+(compra(?:\s+e\s+venda)?|venda|locacao|aluguel)\b/.exec(t);
+  if (!m) return null;
+  return { natureza: m[1] === "locacao" || m[1] === "aluguel" ? "locacao" : "venda" };
+}
+
+/**
  * Pedido de criação reconhecido (a `propor_criacao` do turn). Pedido explícito
  * de formulário/ficha (`tipo` venda/locação) já é o fluxo de negócio; pedido de
  * "proposta" — a palavra ambígua da conversa de 06/10 — começa pela escolha.
@@ -1203,6 +1220,13 @@ export async function iniciarFluxo(
   const tituloDoPedido = tituloDeclarado(params.pedido) ?? params.nomeCliente;
   if (params.tipo !== "proposta" && podeNegocio) {
     return carregarCamposDoNegocio(params.tipo, params.agora, deps, tituloDoPedido);
+  }
+  // "Proposta de compra/venda/locação" dita por extenso é pedido de PROPOSTA:
+  // perguntar "1 proposta ou 2 formulário" de novo foi o que a pessoa reclamou
+  // em 10/11/2026. A pergunta fica só para o pedido ambíguo ("uma proposta").
+  const explicita = propostaExplicitaNoPedido(params.pedido);
+  if (podeProposta && explicita) {
+    return iniciarProposta(explicita.natureza ?? params.natureza, params.pedido, params.agora, deps);
   }
   if (podeProposta && podeNegocio) {
     return {

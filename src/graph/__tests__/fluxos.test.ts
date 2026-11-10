@@ -42,7 +42,6 @@ describe("entrada", () => {
     "Faz uma proposta do João",
     "Cria uma proposta da Letícia",
     "Monta a proposta do Carlos pro apto 52",
-    "Crie uma proposta de compra do Pedro",
     "Max, crie proposta da Ana",
   ])("não bloqueia criação de proposta para uma pessoa: %s", async (pedido) => {
     const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps());
@@ -64,6 +63,28 @@ describe("entrada", () => {
     const d = deps({ acao: vi.fn().mockResolvedValue({ status: 200, body: { campos: [] } }) });
     const p = await F.iniciarFluxo({ tipo: "venda", pedido: "Crie um formulário novo de venda", policy: [...TUDO], agora }, d);
     expect(p.fluxo?.kind).toBe("negocio");
+  });
+  it.each([
+    ["Crie uma proposta de compra do Pedro", "venda"],
+    ["Quero uma proposta de compra e venda para a Ana", "venda"],
+    ["Faz uma proposta de venda do apto 52", "venda"],
+    ["Preciso de uma proposta de locação para o Carlos", "locacao"],
+    ["monta uma proposta de aluguel", "locacao"],
+  ])("proposta de compra/venda/locação dita por extenso não repete a pergunta 1 ou 2: %s", async (pedido, natureza) => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 200, body: { modelo: true, assinatura: true } }) });
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, d);
+    expect(p.reply).not.toBe(F.TEXTO_ESCOLHA);
+    expect(p.fluxo?.kind).toBe("proposta");
+    expect(p.fluxo && p.fluxo.kind === "proposta" ? p.fluxo.natureza : undefined).toBe(natureza);
+  });
+  it.each([
+    "Quero criar uma proposta de compra com formulário",
+    "Faz a proposta de compra e o contrato",
+    "uma proposta para o Pedro",
+  ])("pedido ambíguo mantém a pergunta: %s", async (pedido) => {
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps());
+    expect(p.reply).toBe(F.TEXTO_ESCOLHA);
+    expect(p.fluxo?.kind).toBe("escolha");
   });
   it("pedido de proposta pergunta proposta × negócio", async () => {
     const p = await F.iniciarFluxo({ tipo: "proposta", policy: [...TUDO], agora }, deps());
