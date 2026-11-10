@@ -83,7 +83,9 @@ export async function loadFacts(orgId: string, phone: string): Promise<Facts> {
  * inclusive linhas antigas que já estejam no banco.
  */
 export function ehFatoDeTratamento(key: string): boolean {
-  return /chamad[oa]|chamar|apelido|tratamento|preferencia_nome|nome_preferido|prefere_ser/i.test(key);
+  // Ancorado em palavra (separada por `_`, `-` ou espaço): "videochamada" e
+  // "chamada_video" (ligação) NÃO são tratamento; "ser_chamado"/"chamado_de" são.
+  return /(?:^|[_\s-])(?:apelido|tratamento|chamar|preferencia_nome|nome_preferido|prefere_ser|ser_chamad[oa]|chamad[oa]_(?:de|por|como))(?:$|[_\s-])/i.test(key);
 }
 
 /** Normaliza e recusa o que não deve virar fato. `null` = descartar. */

@@ -32,11 +32,16 @@ describe("fato de tratamento", () => {
     "apelido",
     "forma_de_tratamento",
     "nome_preferido",
+    "chamar_de",
+    "como_chamar",
+    "ser_chamado",
+    "chamado_de",
+    "Como_Pessoa_Prefere_Ser_Chamada",
   ])("reconhece a chave %s", (k) => {
     expect(ehFatoDeTratamento(k)).toBe(true);
   });
 
-  it.each(["area_atuacao", "preferencia_resposta", "foco_atual"])("não pega fato comum: %s", (k) => {
+  it.each(["area_atuacao", "preferencia_resposta", "foco_atual", "videochamada", "chamada_video", "horario_chamada_telefonica", "prefere_videochamada", "chamado_suporte"])("não pega fato comum: %s", (k) => {
     expect(ehFatoDeTratamento(k)).toBe(false);
   });
 
