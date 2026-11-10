@@ -23,4 +23,19 @@ describe("paraFormatoWhatsapp", () => {
   it("a URL ao lado do negrito segue igual", () => {
     expect(paraFormatoWhatsapp("**Link:** https://imobpro.ia.br/f/abc/joao")).toBe("*Link:* https://imobpro.ia.br/f/abc/joao");
   });
+
+  it("máscaras de documento ficam intactas (CPF e CNPJ mascarados)", () => {
+    expect(paraFormatoWhatsapp("CPF ***.***.789-01")).toBe("CPF ***.***.789-01");
+    expect(paraFormatoWhatsapp("CPF ***.456.789-**")).toBe("CPF ***.456.789-**");
+    expect(paraFormatoWhatsapp("CNPJ **.***.***/0001-**")).toBe("CNPJ **.***.***/0001-**");
+    expect(paraFormatoWhatsapp("**João** CPF ***.***.789-01, **ok**")).toBe("*João* CPF ***.***.789-01, *ok*");
+  });
+
+  it("potência e asteriscos colados em palavra ficam como estão", () => {
+    expect(paraFormatoWhatsapp("2**3 e 2**10")).toBe("2**3 e 2**10");
+  });
+
+  it("URL com ** no caminho não é reescrita", () => {
+    expect(paraFormatoWhatsapp("veja https://x.com/a**b**c")).toBe("veja https://x.com/a**b**c");
+  });
 });

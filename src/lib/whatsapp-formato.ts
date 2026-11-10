@@ -7,11 +7,12 @@
  * normalizado no ÚNICO ponto de saída (`transport.sendText`), que serve os
  * dois agentes e todos os caminhos (resposta, outbox, avisos).
  *
- * Só mexe em par `**texto**` na mesma linha, com texto colado nos asteriscos.
- * Não toca `*texto*` (já é WhatsApp), marcador de lista `* item`, asterisco
- * solto, nem a URL.
+ * Só mexe em par `**texto**` na mesma linha, com texto colado nos asteriscos
+ * e sem asterisco/letra/dígito encostado por fora. Não toca `*texto*` (já é
+ * WhatsApp), marcador de lista `* item`, asterisco solto, a URL, nem máscara
+ * de documento (`***.***.789-01`, `***.456.789-**`) ou `2**3`.
  */
-const NEGRITO_MARKDOWN = /\*\*(?=[^\s*])([^*\n]*?[^\s*])\*\*/g;
+const NEGRITO_MARKDOWN = /(?<![*\w])\*\*(?=[^\s*])([^*\n]*?[^\s*])\*\*(?![*\w])/g;
 
 export function paraFormatoWhatsapp(texto: string): string {
   if (!texto.includes("**")) return texto;
