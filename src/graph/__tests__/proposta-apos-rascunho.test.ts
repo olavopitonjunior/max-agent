@@ -127,6 +127,21 @@ describe("depois do rascunho (prod 10/11)", () => {
     expect(llm).not.toHaveBeenCalled();
   });
 
+  it("no passo de envio da PROP-2, 'manda a PROP-3' troca para a PROP-3 (e nunca envia sem o SIM)", async () => {
+    acao.mockImplementation(async ({ verb, args }: { verb: string; args: Record<string, unknown> }) => {
+      if (verb === "proposal.list") {
+        return { status: 200, body: { items: [{ id: "p3", codigo: "PROP-2026-0003", titulo: "Carlos", estado: "rascunho" }], total: 1, busca: args.busca } };
+      }
+      if (verb === "proposal.options") return OPCOES;
+      throw new Error(`Ação inesperada: ${verb}`);
+    });
+    const s = await run("manda a PROP-2026-0003 pro comprador assinar", { fluxo: { ...rascunho("PROP-2026-0002", "p2"), etapa: "envio" } });
+    expect(verbos()).toContain("proposal.list");
+    expect(verbos()).not.toContain("proposal.send");
+    expect(s.fluxo).toMatchObject({ kind: "proposta", propostaId: "p3", etapa: "envio" });
+    expect(llm).not.toHaveBeenCalled();
+  });
+
   it("troca de assunto (pendências de um negócio) não é capturada pelo rascunho: o fluxo encerra e o extrator não roda", async () => {
     llm.mockResolvedValue({ text: "Não achei esse negócio. Qual o nome ou código?", toolCalls: [], usage: uso });
     acao.mockImplementation(async () => ({ status: 200, body: { items: [], total: 0 } }));

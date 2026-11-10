@@ -1271,7 +1271,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     (atual.kind === "proposta" && atual.etapa === "selecao_envio") ||
     // Rascunho aberto para ajuste, e o pedido de envio cita OUTRA proposta (prod 10/11):
     // o fluxo é da anterior, a citada se acha pela busca. Sem escrita em aberto (`chave`).
-    (atual.kind === "proposta" && !!atual.propostaId && !atual.chave && !atual.ajustePendente && ["ajustes", "metodo"].includes(atual.etapa) &&
+    (atual.kind === "proposta" && !!atual.propostaId && !atual.chave && !atual.ajustePendente && ["ajustes", "metodo", "envio"].includes(atual.etapa) &&
       citaOutraProposta(userText, atual.codigo)) ||
     (atual.kind === "gestao" && !atual.chave) ||
     (atual.kind === "assinatura" && !atual.chave);
