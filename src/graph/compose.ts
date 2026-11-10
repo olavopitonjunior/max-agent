@@ -250,9 +250,39 @@ const CODIGOS_INTERNOS: [RegExp, string][] = [
   [/\b(?:sem_lista|fora_da_lista)\b/gi, "item fora da lista"],
 ];
 
+/** Trechos em que um `snake_case` é conteúdo, não vazamento: URL, e-mail, código entre crases. */
+const TRECHO_PROTEGIDO = /https?:\/\/\S+|[^\s@]+@[^\s@]+\.[^\s@]+|`[^`\n]*`/g;
+const SNAKE_CASE = /\b[a-z]+(?:_[a-z]+)+\b/g;
+
+/**
+ * Rede genérica: qualquer `snake_case` fora de URL/e-mail/código é código
+ * interno que escapou (`falha_envio`, `aguardando_aprovacao`). Os underscores
+ * viram espaço (a frase em volta fica legível e o dado não é inventado) e o
+ * token entra no log, para quem depura saber que o modelo copiou encanamento.
+ */
+function humanizarSnakeCase(texto: string): string {
+  const achados = new Set<string>();
+  let fim = 0;
+  let saida = "";
+  const trocar = (trecho: string) =>
+    trecho.replace(SNAKE_CASE, (m) => {
+      achados.add(m);
+      return m.replace(/_/g, " ");
+    });
+  for (const m of texto.matchAll(TRECHO_PROTEGIDO)) {
+    const ini = m.index ?? 0;
+    saida += trocar(texto.slice(fim, ini)) + m[0];
+    fim = ini + m[0].length;
+  }
+  saida += trocar(texto.slice(fim));
+  if (achados.size > 0) console.warn(`[compose] código interno na resposta humanizado: ${[...achados].join(", ")}`);
+  return saida;
+}
+
 export function humanizarCodigosInternos(texto: string): string {
   let t = texto;
   for (const [re, troca] of CODIGOS_INTERNOS) t = t.replace(re, troca);
+  t = humanizarSnakeCase(t);
   // "(n=5)" some inteiro, com o espaço que o antecede.
   t = t.replace(/[ \t]*\(\s*n\s*=\s*\d+\s*\)/gi, "");
   // "n=5" solto vira "item 5" (a pessoa vê a lista numerada).

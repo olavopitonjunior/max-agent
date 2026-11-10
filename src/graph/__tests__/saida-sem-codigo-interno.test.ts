@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { humanizarCodigosInternos } from "../compose";
 import { buildSystemPrompt, fenceToolResults } from "../prompt";
 
@@ -31,6 +31,26 @@ describe("código interno não chega à pessoa", () => {
   it("outros marcadores internos também são traduzidos", () => {
     const t = humanizarCodigosInternos("Falhou: referencia_invalida / negocio_nao_encontrado");
     expect(t).not.toMatch(/_/);
+  });
+
+  it("snake_case genérico (falha_envio) também sai da frase e é registrado", () => {
+    const aviso = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = humanizarCodigosInternos("O envio terminou com falha_envio e o status é aguardando_aprovacao_gerente.");
+    expect(t).not.toMatch(/[a-z]_[a-z]/);
+    expect(t).toContain("falha envio");
+    expect(aviso).toHaveBeenCalledTimes(1);
+    expect(String(aviso.mock.calls[0][0])).toContain("falha_envio");
+    aviso.mockRestore();
+  });
+
+  it("snake_case dentro de URL, e-mail ou código não é tocado", () => {
+    const original = "Link https://imobpro.ia.br/f/abc_def/joao_silva, e-mail joao_silva@fincasa.com.br e `um_codigo` ficam.";
+    expect(humanizarCodigosInternos(original)).toBe(original);
+  });
+
+  it("palavra comum sem underscore e números não são tocados", () => {
+    const original = "Total de 3 itens. Valor R$ 1.200,00 - ok.";
+    expect(humanizarCodigosInternos(original)).toBe(original);
   });
 
   it("o resultado sem permissão chega ao modelo SEM o marcador interno e sem 'tente de novo'", () => {
