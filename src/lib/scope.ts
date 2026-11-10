@@ -7,6 +7,7 @@ import { fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS } from "./http";
 import {
   CAMPOS_PROIBIDOS_AO_BROKER,
   ESTADOS_DE_PROPOSTA,
+  ORDENACOES_DE_NEGOCIO,
   type ScopeQueryVerb,
   type ScopeSubject,
 } from "@/graph/scope-contract";
@@ -155,6 +156,12 @@ export function limparArgs(
     if (valor === null || valor === undefined) continue;
     // `estado` é string no servidor (`z.string().min(1)`); lista/objeto/número do modelo seria 400.
     if (chave === "estado" && typeof valor !== "string") continue;
+    // `ordenar` é do `deal.list` e só aceita o enum: o servidor recusa (400) valor fora dele, e
+    // os outros verbos o ignoram — nos dois casos o que o modelo inventou não deve ir junto.
+    if (chave === "ordenar") {
+      if (verb === "deal.list" && (ORDENACOES_DE_NEGOCIO as readonly unknown[]).includes(valor)) limpos[chave] = valor;
+      continue;
+    }
     if (chave === "limite") {
       if (Number.isInteger(valor) && (valor as number) > 0) limpos[chave] = valor;
       continue;

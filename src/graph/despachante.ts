@@ -2,7 +2,7 @@ import type { LlmToolCall } from "@/lib/llm";
 import type { Candidate } from "@/lib/identity";
 import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
 import { lerPreferencias } from "@/lib/cm";
-import { PERIODOS_DE_METRICA, QUEBRAS_DE_METRICA } from "./scope-contract";
+import { ORDENACOES_DE_NEGOCIO, PERIODOS_DE_METRICA, QUEBRAS_DE_METRICA, type OrdenacaoDeNegocio } from "./scope-contract";
 import type { ToolLogEntry } from "@/lib/turnlog";
 import type { Capability } from "./policy";
 import {
@@ -104,6 +104,12 @@ export interface ResultadoDeTool {
   items: unknown[] | null;
   truncated: boolean;
   hasMore?: boolean;
+  /**
+   * `deal.list` pedido com `ordenar=mais_parados`: `mais_parados` = a página PROVA a ordem (todo item
+   * com `naEtapaDesde`, em ordem crescente); `indisponivel` = o servidor não a honrou (ImobPro antigo
+   * ignora `ordenar`) e o modelo não pode dizer que são "os mais parados". Ausente = nada a afirmar.
+   */
+  ordenacao?: "mais_parados" | "indisponivel";
   clarification?: StageClarification;
   /** `template.decisions`: modelos não medidos (o modelo nunca diz "sem pendência" com isso > 0). */
   naoMedidos?: number;
@@ -168,7 +174,19 @@ export async function despacharLeituras(params: {
     let args = { ...chamada.args };
     const agora = params.agora ?? Date.now();
     const subjectKey = JSON.stringify([params.identity.orgId, subject]);
-    const paginada = ["property.list", "activity.list", "notification.list"].includes(entrada.verb);
+    // Ordem pedida em `deal.list` (enum): vale para a primeira página e é a da continuação.
+    const ordenarPedido: OrdenacaoDeNegocio | null = entrada.verb === "deal.list" ? lerOrdenacaoDeNegocio(args.ordenar) : null;
+    // `deal.list` só pagina na ordem `mais_parados` (ou continuando uma lista assim): a página precisa
+    // ter o tamanho que o Max mostra, senão o cursor do servidor pularia itens. A lista padrão segue
+    // exatamente como era (sem `limite` forçado, sem continuação); `mais` ali é ignorado.
+    const continuaListaDeNegocios = entrada.verb === "deal.list" && args.mais === true && referencias?.continuacao?.tool === chamada.name;
+    const paginada = ["property.list", "activity.list", "notification.list"].includes(entrada.verb) ||
+      (entrada.verb === "deal.list" && (ordenarPedido === "mais_parados" || continuaListaDeNegocios));
+    if (entrada.verb === "deal.list" && !paginada) {
+      delete args.mais;
+      // Fora do enum não vai (o servidor recusaria com 400); `recentes` explícito é a ordem padrão.
+      if (ordenarPedido) args.ordenar = ordenarPedido; else delete args.ordenar;
+    }
     if (entrada.verb === "property.detail" || entrada.verb === "contract.status") {
       const property = entrada.verb === "property.detail";
       const selected = resolverReferencia(referencias, args.numero, { agora, tipo: property ? "imovel" : "negocio" });
@@ -232,6 +250,9 @@ export async function despacharLeituras(params: {
         args = {
           ...(typeof args.estado === "string" ? { estado: args.estado } : {}),
           ...(filtro ? { filtro } : {}),
+          ...(ordenarPedido ? { ordenar: ordenarPedido } : {}),
+          // Pedido interno do grafo (menu de etapas, max.md §12.2): não vem do modelo e precisa chegar ao servidor.
+          ...(entrada.verb === "deal.list" && args.opcoes_etapas === true ? { opcoes_etapas: true } : {}),
         };
       }
       args.limite = ITENS_POR_LISTA;
@@ -274,6 +295,13 @@ export async function despacharLeituras(params: {
       continue;
     }
 
+    // Ordem por tempo parado: só é afirmada se os itens a PROVAM (ver `ordenacaoDeNegocio`). A ordem
+    // efetiva é a dos args finais, que na continuação (`mais`) vêm do servidor, não do modelo.
+    const ordenacao = entrada.verb === "deal.list" && lerOrdenacaoDeNegocio(args.ordenar) === "mais_parados"
+      ? ordenacaoDeNegocio(r.items) : undefined;
+    // "há N dias na etapa" é conta de data: feita aqui, não pelo modelo.
+    if (entrada.verb.startsWith("deal.")) r.items = r.items.map((it) => comDiasNaEtapa(it, agora));
+
     // G2: o código numera, o modelo vê só número + rótulo. Leitura que não
     // declara o que produz passa como veio (nenhuma hoje).
     // Detalhe apontado por número não é lista: renumerar trocaria a numeração vigente por um item só,
@@ -299,6 +327,7 @@ export async function despacharLeituras(params: {
         // passar por completa.
         truncated: r.truncated || numerada.cortados > 0,
         ...(paginada ? { hasMore: !!r.nextCursor } : {}),
+        ...(ordenacao ? { ordenacao } : {}),
       });
     } else if (numeroDoDetalhe !== null) {
       // Detalhe: o `id` do servidor fica fora do prompt; o modelo vê o MESMO número que a pessoa usou.
@@ -309,12 +338,51 @@ export async function despacharLeituras(params: {
       });
       resultados.push({ tool: chamada.name, items: semId, truncated: r.truncated });
     } else {
-      resultados.push({ tool: chamada.name, items: r.items, truncated: r.truncated, ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) });
+      resultados.push({ tool: chamada.name, items: r.items, truncated: r.truncated, ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}), ...(ordenacao ? { ordenacao } : {}) });
     }
     trilha.push({ name: chamada.name, args: chamada.args, outcome: semPermissao ? "sem_permissao" : "ok" });
   }
 
   return { resultados, trilha, referencias };
+}
+
+/** `ordenar` do `deal.list` dentro do enum; qualquer outra coisa some (ordem padrão). */
+export function lerOrdenacaoDeNegocio(v: unknown): OrdenacaoDeNegocio | null {
+  return ORDENACOES_DE_NEGOCIO.find((o) => o === v) ?? null;
+}
+
+const MS_POR_DIA = 24 * 60 * 60 * 1000;
+
+function naEtapaDesdeMs(item: unknown): number | null {
+  const v = item && typeof item === "object" ? (item as { naEtapaDesde?: unknown }).naEtapaDesde : undefined;
+  if (typeof v !== "string") return null;
+  const ms = Date.parse(v);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * A ordem `mais_parados` foi mesmo honrada pelo servidor?
+ *
+ * O ImobPro anterior a 2026-11-10 ignora `ordenar` em silêncio (o corpo não é estrito) e devolve a
+ * ordem de atualização recente, sem `naEtapaDesde`. Apresentar essa lista como "os mais parados"
+ * levaria a pessoa a agir sobre a ordem errada. Só se afirma a ordem quando TODO item traz
+ * `naEtapaDesde` válido E a página está em ordem crescente (mais antigo na etapa primeiro): o
+ * segundo teste pega um servidor que já projeta o campo mas ainda ignora `ordenar`. Lista vazia
+ * não afirma nada (`undefined`).
+ */
+export function ordenacaoDeNegocio(items: readonly unknown[]): "mais_parados" | "indisponivel" | undefined {
+  if (items.length === 0) return undefined;
+  const tempos = items.map(naEtapaDesdeMs);
+  if (tempos.some((t) => t === null)) return "indisponivel";
+  for (let i = 1; i < tempos.length; i++) if ((tempos[i] as number) < (tempos[i - 1] as number)) return "indisponivel";
+  return "mais_parados";
+}
+
+/** Acrescenta `na_etapa_ha_dias` (inteiro, piso) ao negócio que traz `naEtapaDesde` válido e não futuro. */
+function comDiasNaEtapa(item: unknown, agora: number): unknown {
+  const ms = naEtapaDesdeMs(item);
+  if (ms === null || ms > agora || !item || typeof item !== "object") return item;
+  return { ...(item as Record<string, unknown>), na_etapa_ha_dias: Math.floor((agora - ms) / MS_POR_DIA) };
 }
 
 /** Blocos que o servidor aceita em `pending.summary`. Valor fora da lista some (todos os blocos). */

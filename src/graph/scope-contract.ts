@@ -86,6 +86,19 @@ export const ESTADOS_DE_PROPOSTA = [
 export const PERIODOS_DE_METRICA = ["hoje", "ontem", "7d", "30d", "mes", "mes_passado"] as const;
 export const QUEBRAS_DE_METRICA = ["corretor", "equipe", "departamento"] as const;
 
+/**
+ * `deal.list`: a ordem pedida (par do contractmaker, `docs/max.md` §12.2, 2026-11-10).
+ * Aditivo: ausente = `recentes` (`updatedAt DESC`). `mais_parados` ordena por
+ * `COALESCE(stageEnteredAt, createdAt) ASC` — o que está há mais tempo na etapa
+ * atual primeiro. Só vale em `deal.list`; os outros verbos a ignoram.
+ *
+ * ⚠️ Um ImobPro anterior a esta mudança IGNORA `ordenar` em silêncio e devolve
+ * `recentes`. Por isso o despachante confere os itens (`naEtapaDesde`) antes de
+ * afirmar a ordem.
+ */
+export const ORDENACOES_DE_NEGOCIO = ["recentes", "mais_parados"] as const;
+export type OrdenacaoDeNegocio = (typeof ORDENACOES_DE_NEGOCIO)[number];
+
 export interface ScopeQueryRequest {
   verb: ScopeQueryVerb;
   subject: ScopeSubject;
@@ -101,6 +114,8 @@ export interface ScopeQueryRequest {
     proposta_id?: string;
     imovel_id?: string;
     cursor?: string;
+    /** `deal.list`: ordem pedida (par do contractmaker, §12.2). Ausente = `recentes`. */
+    ordenar?: OrdenacaoDeNegocio;
     /** `activity.list`: recorte pedido (par do contractmaker PR11). */
     filtro?: "minhas" | "atrasadas" | "hoje";
     /** `activity.get`. */
@@ -122,6 +137,8 @@ export interface DealProjetadoUser {
   etapa: string | null;
   pendencias: string[];
   atualizadoEm: string;
+  /** ISO do instante em que entrou na etapa atual (`COALESCE(stageEnteredAt, createdAt)`). */
+  naEtapaDesde: string;
   titulo: string;
   cliente: string | null;
   valor: number | null;
@@ -139,6 +156,8 @@ export interface DealProjetadoBroker {
   etapa: string | null;
   pendencias: string[];
   atualizadoEm: string;
+  /** Instante do PRÓPRIO negócio (sem endereço, pessoa ou valor): o broker também recebe. */
+  naEtapaDesde: string;
   referencia: string;
 }
 
