@@ -15,8 +15,16 @@ describe("corrigirVocativo", () => {
     expect(corrigirVocativo("Certo, João. Abri o negócio.", OLAVO)).toBe("Certo. Abri o negócio.");
   });
 
-  it("interjeição + nome mesmo sem o nome no contexto (o modelo inventou)", () => {
-    expect(corrigirVocativo("Beleza, Carlos, já vi aqui.", { nomeDaPessoa: "Olavo", contexto: "" })).toBe("Beleza, já vi aqui.");
+  it("interjeição + nome que está no contexto do turno (outro nome, não o dela) perde o nome", () => {
+    expect(corrigirVocativo("Beleza, Carlos, já vi aqui.", { nomeDaPessoa: "Olavo", contexto: "o comprador Carlos Souza" })).toBe("Beleza, já vi aqui.");
+  });
+
+  it('interjeição + palavra que não é nome de ninguém do turno fica ("Ok, Feito!")', () => {
+    expect(corrigirVocativo("Ok, Feito! Abri o formulário.", { nomeDaPessoa: "Olavo", contexto: "" })).toBe("Ok, Feito! Abri o formulário.");
+    expect(corrigirVocativo("Beleza, Carlos, já vi aqui.", { nomeDaPessoa: "Olavo", contexto: "" })).toBe("Beleza, Carlos, já vi aqui.");
+    expect(corrigirVocativo("Pronto, Enviado. Confere aí.", OLAVO)).toBe("Pronto, Enviado. Confere aí.");
+    // a palavra aparece no contexto, mas em minúscula (não é nome de ninguém)
+    expect(corrigirVocativo("Ok, Feito! Abri.", { nomeDaPessoa: "Olavo", contexto: "já está feito?" })).toBe("Ok, Feito! Abri.");
   });
 
   it('"João, não consigo..." (nome de cliente do contexto) perde o vocativo e capitaliza', () => {

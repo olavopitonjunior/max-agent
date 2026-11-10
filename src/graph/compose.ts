@@ -319,7 +319,8 @@ function semAcento(s: string): string {
  * negócio. Na causa (memória que aprendia o próprio vocativo do assistente) o
  * código já foi corrigido; esta é a rede por baixo, no código, porque o modelo
  * mistura nome de cliente com nome de quem fala. Só olha a primeira linha:
- *  - "Interjeição, Nome" + pontuação → tira o nome (sempre que não for a pessoa);
+ *  - "Interjeição, Nome" + pontuação → tira o nome (quando não for a pessoa E o
+ *    nome aparecer no contexto do turno: sem isso "Ok, Feito!" perderia o "Feito");
  *  - "Nome, frase em minúscula" → só quando "Nome" aparece no contexto do turno
  *    (negócios, mensagens): "Resumindo, ..." e "Infelizmente, ..." não são nome.
  */
@@ -331,7 +332,13 @@ export function corrigirVocativo(texto: string, ctx: { nomeDaPessoa: string | nu
   const a = new RegExp(`^(${INTERJEICAO}),\\s+(\\p{Lu}\\p{L}{1,})([,!.:])(\\s+|$)`, "u").exec(texto);
   if (a) {
     const nome = semAcento(a[2]);
-    if (!dela.has(nome) && !NAO_E_NOME.has(nome)) {
+    // Só some quando o nome é de alguém DO TURNO (cliente, negócio, mensagem):
+    // "Ok, Feito!" não tem nome nenhum, e tirar "Feito" quebraria a frase.
+    // Grafado com maiúscula no contexto: "feito" minúsculo numa frase da pessoa
+    // não faz de "Feito" um nome.
+    const grafado = a[2].normalize("NFD").replace(/\p{Diacritic}/gu, "");
+    const noContexto = new RegExp(`\\b${grafado}\\b`).test((ctx.contexto ?? "").normalize("NFD").replace(/\p{Diacritic}/gu, ""));
+    if (!dela.has(nome) && !NAO_E_NOME.has(nome) && noContexto) {
       const resto = texto.slice(a[0].length);
       const abertura = a[3] === "," ? `${a[1]}, ` : `${a[1]}${a[3]} `;
       return `${abertura}${resto}`;
