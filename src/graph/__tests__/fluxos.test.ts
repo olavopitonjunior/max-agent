@@ -1021,12 +1021,13 @@ describe("pós-rascunho: pedido de envio e troca de assunto", () => {
 
   it("com um único método, vai ao cartão do SIM (não envia); só o SIM executa", async () => {
     const um = { status: 200, body: { ...OPCOES.body, metodos: [{ valor: "whatsapp", rotulo: "WhatsApp" }] } };
-    const d = deps({ acao: vi.fn().mockResolvedValue(um) });
+    const acao = vi.fn().mockResolvedValue(um);
+    const d = deps({ acao });
     const p = await F.conduzirFluxo(rascunho(), ctx("manda a PROP-2026-0003 pro comprador assinar"), d);
     expect(p.evento).toBe("proposta_envio");
     expect(p.fluxo).toMatchObject({ etapa: "envio" });
     expect(d.acao).not.toHaveBeenCalledWith("proposal.send", expect.anything(), expect.anything());
-    d.acao.mockResolvedValue({ status: 200, body: { proposta: { id: "p3" } } });
+    acao.mockResolvedValue({ status: 200, body: { proposta: { id: "p3" } } });
     await F.conduzirFluxo(p.fluxo!, ctx("sim", { messageId: "sim-env" }), d);
     expect(d.acao).toHaveBeenCalledWith("proposal.send", expect.anything(), "sim-env");
   });
