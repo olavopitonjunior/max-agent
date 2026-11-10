@@ -233,6 +233,33 @@ export function sanitizar(bruto: string): Saida {
   return { texto, bloqueios: [...bloqueios] };
 }
 
+// ─── Código interno que escapa para a conversa ──────────────────────────────
+
+/**
+ * Produção 10/11/2026: "o sistema retornou **sem_permissao** para o negócio X"
+ * e "está em Formulário (n=5). Quer que eu abra esse **n=5**". `sem_permissao`
+ * é o marcador do resultado de consulta e `n` é o campo de numeração da lista:
+ * dado interno que o modelo copiou para a frase. O prompt já pede para não
+ * escrever isso; aqui é a rede de segurança, no código, por palavra (não por
+ * linha: a frase em volta é boa e perder a linha esconderia a resposta).
+ */
+const CODIGOS_INTERNOS: [RegExp, string][] = [
+  [/\bsem_permissao\b/gi, "sem permissão"],
+  [/\breferencia_invalida\b/gi, "referência inválida"],
+  [/\bnegocio_nao_encontrado\b/gi, "negócio não encontrado"],
+  [/\b(?:sem_lista|fora_da_lista)\b/gi, "item fora da lista"],
+];
+
+export function humanizarCodigosInternos(texto: string): string {
+  let t = texto;
+  for (const [re, troca] of CODIGOS_INTERNOS) t = t.replace(re, troca);
+  // "(n=5)" some inteiro, com o espaço que o antecede.
+  t = t.replace(/[ \t]*\(\s*n\s*=\s*\d+\s*\)/gi, "");
+  // "n=5" solto vira "item 5" (a pessoa vê a lista numerada).
+  t = t.replace(/\bn\s*=\s*(\d+)\b/gi, "item $1");
+  return t;
+}
+
 // ─── G6 — teto de tamanho, imposto no código ────────────────────────────────
 
 /**

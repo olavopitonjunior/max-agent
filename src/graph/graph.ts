@@ -111,7 +111,7 @@ import {
   textoSemLeituraDeMidia,
   textoDeRecusa,
 } from "./prompt";
-import { limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
+import { humanizarCodigosInternos, limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
 import {
   argsDaCriacao,
@@ -2218,7 +2218,10 @@ function afterAnswer(state: MaxStateType): "tools" | "compose" {
 async function compose(state: MaxStateType): Promise<MaxUpdate> {
   if (state.draft === null) return {};
 
-  const { texto, bloqueios } = sanitizar(TURNO_CRU.get(state.inbound.messageId)?.draft ?? state.draft);
+  const saneado = sanitizar(TURNO_CRU.get(state.inbound.messageId)?.draft ?? state.draft);
+  const { bloqueios } = saneado;
+  // Código interno copiado do resultado de consulta (sem_permissao, n=5) vira linguagem de pessoa.
+  const texto = humanizarCodigosInternos(saneado.texto);
 
   if (bloqueios.length > 0) {
     // Nível de aviso e não de erro: o turno saiu, e o que se quer é o padrão
