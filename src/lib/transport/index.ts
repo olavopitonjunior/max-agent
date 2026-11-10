@@ -16,6 +16,7 @@ import { currentExecution } from "../runtime/context";
 
 import { deployProfile } from "../deploy-profile";
 import { log } from "../log";
+import { paraFormatoWhatsapp } from "../whatsapp-formato";
 import { assertWhatsAppPilotRecipient, whatsappPilotAllows, whatsappPilotConfigured } from "../whatsapp-pilot";
 import { logAdapter } from "./adapters/log";
 import { metaAdapter } from "./adapters/meta";
@@ -130,7 +131,10 @@ export async function sendText(params: {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
   assertWhatsAppPilotRecipient(params.to);
-  const { interativo, ...texto } = params;
+  // Ponto único de saída de texto (Max e Newton): negrito de markdown vira o do WhatsApp.
+  const { interativo: bruto, ...cru } = params;
+  const texto = { ...cru, body: paraFormatoWhatsapp(cru.body) };
+  const interativo = bruto ? { ...bruto, corpo: paraFormatoWhatsapp(bruto.corpo) } : bruto;
   const a = adapter();
   if (interativo && a.sendInteractive && interativoDisponivel()) {
     try {
