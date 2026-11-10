@@ -3,7 +3,7 @@ import { featureEnabled } from '@/lib/runtime/rollout';
 import type { LlmTool } from "@/lib/llm";
 import type { Capability } from "./policy";
 import type { ScopeQueryVerb } from "./scope-contract";
-import { ESTADOS_DE_PROPOSTA, PERIODOS_DE_METRICA, QUEBRAS_DE_METRICA } from "./scope-contract";
+import { ESTADOS_DE_PROPOSTA, ORDENACOES_DE_NEGOCIO, PERIODOS_DE_METRICA, QUEBRAS_DE_METRICA } from "./scope-contract";
 import { ALIAS_DE_TIPO_DE_AVISO } from "./preferencias-contract";
 import type { Candidate } from "@/lib/identity";
 import { captacaoLigada } from "./captacao-flags";
@@ -535,7 +535,8 @@ export const LISTAR_NEGOCIOS: ToolDef = {
   confirmacao: false,
   refs: { produz: "negocio" },
   prioridade: 10,
-  combina: (t) => PEDE_NEGOCIO.test(normalizar(t)),
+  // "listar_negocios" no texto = continuação ("mais") de uma lista de negócios (graph.ts monta o contexto com o nome da tool).
+  combina: (t) => PEDE_NEGOCIO.test(normalizar(t)) || /\blistar_negocios\b/.test(t),
   def: {
     name: "listar_negocios",
     /**
@@ -547,7 +548,13 @@ export const LISTAR_NEGOCIOS: ToolDef = {
       "Lista os negócios em que esta pessoa está envolvida, com a etapa de cada um. " +
       "Use quando ela perguntar sobre os negócios dela, o andamento ou a etapa, " +
       "ou pedir um resumo da carteira. Para saber só o que está pendente, use " +
-      "pendencias_do_negocio. Não use para perguntas gerais sobre como o processo funciona.",
+      "pendencias_do_negocio. Não use para perguntas gerais sobre como o processo funciona. " +
+      "Quando a pessoa perguntar quais negócios estão parados há mais tempo, sem andar ou " +
+      "travados, chame com ordenar=\"mais_parados\" (do que está há mais tempo na etapa atual " +
+      "para o menos): a ordem padrão é por atualização recente e NÃO responde a essa pergunta. " +
+      "Cada negócio traz na_etapa_ha_dias (dias na etapa atual): apresente como \"há N dias na etapa\", " +
+      "sem recalcular datas. Se o resultado avisar que a ordenação por tempo parado não está " +
+      "disponível, diga isso à pessoa em vez de afirmar quais são os mais parados.",
     parameters: {
       type: "object",
       properties: {
@@ -558,6 +565,17 @@ export const LISTAR_NEGOCIOS: ToolDef = {
         limite: {
           type: "integer",
           description: "Quantos negócios trazer. Padrão 10.",
+        },
+        ordenar: {
+          type: "string",
+          enum: [...ORDENACOES_DE_NEGOCIO],
+          description:
+            "\"mais_parados\" para \"parados há mais tempo\", \"sem andar\" ou \"travados\" (mais tempo na " +
+            "etapa atual primeiro). \"recentes\" (padrão) para o que mexeu por último. Opcional.",
+        },
+        mais: {
+          type: "boolean",
+          description: "Continua a última página desta lista; o servidor controla o cursor. Use quando a pessoa pedir mais resultados.",
         },
       },
       additionalProperties: false,

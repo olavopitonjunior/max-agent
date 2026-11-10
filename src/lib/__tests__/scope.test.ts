@@ -54,6 +54,27 @@ describe("consultarEscopo — o caminho feliz", () => {
     expect(r).toEqual({ items: [{ id: "d1" }], truncated: true });
   });
 
+  it("repassa o nextCursor do servidor como veio (opaco), para a paginação funcionar", async () => {
+    // Cursor da ordem mais_parados tem 5 elementos no fio; este lado nunca o lê.
+    const cursor = Buffer.from('[1,"deal.list","2026-08-10T09:00:00.000Z","deal-1","mais_parados"]').toString("base64url");
+    responde({ ok: true, status: 200, body: { items: [{ id: "d1" }], truncated: true, nextCursor: cursor } });
+    const r = await consultarEscopo({
+      orgId: "org1", rawPhone: PHONE, subject: SUJEITO, verb: "deal.list",
+      args: { ordenar: "mais_parados", limite: 5 },
+    });
+    expect(r).toEqual({ items: [{ id: "d1" }], truncated: true, nextCursor: cursor });
+    const corpo = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as { body: string }).body);
+    expect(corpo.args).toEqual({ ordenar: "mais_parados", limite: 5 });
+  });
+
+  it("nextCursor que não é string é descartado (nunca vira cursor)", async () => {
+    responde({ ok: true, status: 200, body: { items: [], truncated: false, nextCursor: 42 } });
+    const r = await consultarEscopo({
+      orgId: "org1", rawPhone: PHONE, subject: SUJEITO, verb: "deal.list",
+    });
+    expect(r).toEqual({ items: [], truncated: false });
+  });
+
   it("manda phone JUNTO do subject — o servidor reconfere o vínculo", async () => {
     responde({ ok: true, status: 200, body: { items: [] } });
     await consultarEscopo({

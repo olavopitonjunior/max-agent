@@ -5,8 +5,10 @@ import {
   type DealProjetadoUser,
   type ScopeQueryRequest,
   type ScopeQueryResponse,
+  ORDENACOES_DE_NEGOCIO,
   VERBOS_DE_LEITURA,
 } from "../scope-contract";
+import { limparArgs } from "@/lib/scope";
 import { catalog, executableTool } from "@/lib/runtime/catalog";
 
 /**
@@ -45,12 +47,14 @@ const ITEM_BROKER: DealProjetadoBroker = {
   etapa: "Documentação",
   pendencias: ["certidão de ônus"],
   atualizadoEm: "2026-08-19T14:02:00.000Z",
+  naEtapaDesde: "2026-08-10T09:00:00.000Z",
   referencia: "Negócio #DEAL-1",
 };
 
 const ITEM_BROKER_SERIALIZADO =
   '{"id":"deal-1","etapa":"Documentação","pendencias":["certidão de ônus"],' +
-  '"atualizadoEm":"2026-08-19T14:02:00.000Z","referencia":"Negócio #DEAL-1"}';
+  '"atualizadoEm":"2026-08-19T14:02:00.000Z","naEtapaDesde":"2026-08-10T09:00:00.000Z",' +
+  '"referencia":"Negócio #DEAL-1"}';
 
 /** A projeção do USUÁRIO — mesmo verbo, mais campos. */
 const ITEM_USER: DealProjetadoUser = {
@@ -58,6 +62,7 @@ const ITEM_USER: DealProjetadoUser = {
   etapa: "Documentação",
   pendencias: ["certidão de ônus"],
   atualizadoEm: "2026-08-19T14:02:00.000Z",
+  naEtapaDesde: "2026-08-10T09:00:00.000Z",
   titulo: "Apto Rua das Flores, 123 — apto 42",
   cliente: "Maria Silva",
   valor: 850000,
@@ -65,10 +70,51 @@ const ITEM_USER: DealProjetadoUser = {
 
 const ITEM_USER_SERIALIZADO =
   '{"id":"deal-1","etapa":"Documentação","pendencias":["certidão de ônus"],' +
-  '"atualizadoEm":"2026-08-19T14:02:00.000Z","titulo":"Apto Rua das Flores, 123 — apto 42",' +
+  '"atualizadoEm":"2026-08-19T14:02:00.000Z","naEtapaDesde":"2026-08-10T09:00:00.000Z",' +
+  '"titulo":"Apto Rua das Flores, 123 — apto 42",' +
   '"cliente":"Maria Silva","valor":850000}';
 
+/**
+ * `deal.list` aceita `args.ordenar` (aditivo; ausente = `recentes`). Literais do
+ * `scope-parity.test.ts` do ImobPro: valores do enum e request de exemplo. O
+ * cursor da ordem `mais_parados` (5 elementos, marcador de modo) é OPACO para
+ * este lado: só é devolvido como veio, nunca lido nem montado.
+ */
+const ORDENAR_VALORES_DO_IMOBPRO = ["recentes", "mais_parados"];
+const REQUEST_MAIS_PARADOS: ScopeQueryRequest = {
+  verb: "deal.list",
+  subject: { kind: "user", userId: "u-1" },
+  phone: "+5511987654321",
+  args: { ordenar: "mais_parados", limite: 10 },
+};
+const REQUEST_MAIS_PARADOS_SERIALIZADO =
+  '{"verb":"deal.list","subject":{"kind":"user","userId":"u-1"},"phone":"+5511987654321",' +
+  '"args":{"ordenar":"mais_parados","limite":10}}';
+
 describe("paridade do contrato de scope-query", () => {
+  it("o request com ordenar=mais_parados serializa exatamente como o vetor", () => {
+    expect(JSON.stringify(REQUEST_MAIS_PARADOS)).toBe(REQUEST_MAIS_PARADOS_SERIALIZADO);
+  });
+
+  it("os valores de ordenar são os mesmos, na mesma ordem, dos dois lados", () => {
+    expect([...ORDENACOES_DE_NEGOCIO]).toEqual(ORDENAR_VALORES_DO_IMOBPRO);
+  });
+
+  it("ordenar fora do enum (ou fora do deal.list) NUNCA vai ao servidor", () => {
+    expect(limparArgs({ ordenar: "mais_parados", limite: 10 }, "deal.list")).toEqual({ ordenar: "mais_parados", limite: 10 });
+    expect(limparArgs({ ordenar: "recentes" }, "deal.list")).toEqual({ ordenar: "recentes" });
+    expect(limparArgs({ ordenar: "por_valor" }, "deal.list")).toEqual({});
+    expect(limparArgs({ ordenar: "" }, "deal.list")).toEqual({});
+    expect(limparArgs({ ordenar: 3 }, "deal.list")).toEqual({});
+    expect(limparArgs({ ordenar: "mais_parados" }, "deal.pending")).toEqual({});
+    expect(limparArgs({ ordenar: "mais_parados" }, "proposal.list")).toEqual({});
+  });
+
+  it("naEtapaDesde é dado de tempo do próprio negócio: não é campo proibido ao broker", () => {
+    expect(CAMPOS_PROIBIDOS_AO_BROKER as readonly string[]).not.toContain("naEtapaDesde");
+    expect(ITEM_BROKER).toHaveProperty("naEtapaDesde");
+  });
+
   it("o request serializa exatamente como o vetor", () => {
     expect(JSON.stringify(REQUEST)).toBe(REQUEST_SERIALIZADO);
   });

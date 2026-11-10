@@ -421,7 +421,7 @@ const RECEBIDO_POR: Record<"audio" | "image", string> = {
  * primeira como a segunda mentiria para a pessoa sobre a carteira dela.
  */
 export function fenceToolResults(
-  results: { tool: string; items: unknown[] | null; truncated: boolean; hasMore?: boolean; clarification?: { field: "estado"; options: string[] } }[]
+  results: { tool: string; items: unknown[] | null; truncated: boolean; hasMore?: boolean; ordenacao?: "mais_parados" | "indisponivel"; clarification?: { field: "estado"; options: string[] } }[]
 ): string {
   if (results.length === 0) return "";
 
@@ -467,9 +467,15 @@ e ofereça tentar de novo. NÃO afirme que não há nada.
       const regra = haMais
         ? `Mostrando ${mostrados}; há mais. Diga exatamente "mostrando ${mostrados}" e ofereça ver mais; não informe total nem outro número.`
         : `Mostrando ${mostrados} (lista completa). Cite exatamente ${mostrados}.`;
+      // Ordem por tempo parado: afirmada só quando o código a provou nos itens (`ordenacaoDeNegocio`).
+      const ordem = r.ordenacao === "mais_parados"
+        ? "\nOrdem: do mais parado ao menos parado (mais tempo na etapa atual primeiro). Apresente o tempo de cada um como \"há N dias na etapa\", usando na_etapa_ha_dias; não recalcule datas."
+        : r.ordenacao === "indisponivel"
+          ? "\nATENÇÃO: a ordenação por tempo parado NÃO está disponível agora: estes itens vêm em outra ordem (atualização recente) e não dizem há quanto tempo cada negócio está parado. NÃO afirme que estão ordenados por tempo parado, nem que são os mais parados, nem cite dias na etapa. Diga à pessoa, em uma frase, que não consegue ordenar por tempo parado neste momento."
+          : "";
       return `<dados_do_sistema origem="${r.tool}">${aviso}
 ${contagem}
-${regra}
+${regra}${ordem}
 ${corpo}
 </dados_do_sistema>`;
     })
@@ -523,7 +529,7 @@ export function buildSystemPrompt(params: {
    */
   criacao?: "disponivel" | "sem_login" | "sem_politica";
   /** Resultado das tools de leitura deste turn, já cercado. */
-  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] } }[];
+  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean; hasMore?: boolean; ordenacao?: "mais_parados" | "indisponivel"; clarification?: { field: "estado"; options: string[] } }[];
   /** Flag `MAX_CREDITO` ligada: entra a regra de crédito. */
   credito?: boolean;
 }): string {
