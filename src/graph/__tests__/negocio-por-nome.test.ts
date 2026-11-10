@@ -23,7 +23,7 @@ vi.mock("@/lib/cm", async (orig) => ({
 }));
 vi.mock("@/lib/llm", () => ({ complete: vi.fn(), DEFAULT_MODEL: "openai/gpt-5.4-nano" }));
 
-const { nomeDeNegocioCitado, casarNegociosPorTitulo } = await import("../negocio-por-nome");
+const { nomeDeNegocioCitado, casarNegociosPorTitulo, resolverNegocioPorNome } = await import("../negocio-por-nome");
 const { despacharLeituras } = await import("../despachante");
 const { fenceToolResults } = await import("../prompt");
 const { consultarEscopo } = await import("@/lib/scope");
@@ -96,6 +96,52 @@ describe("casarNegociosPorTitulo", () => {
   });
   it("item sem id ou título não entra", () => {
     expect(casarNegociosPorTitulo("x1", [{ titulo: "x1" }, { id: "a" }, null])).toEqual([]);
+  });
+  it("título de UMA palavra contido na frase não casa ('Maria Silva' não é o negócio 'Maria')", () => {
+    const itens = [{ id: "m", titulo: "Maria" }];
+    expect(casarNegociosPorTitulo("Maria Silva", itens)).toEqual([]);
+  });
+  it("título de duas palavras contido na frase ainda casa", () => {
+    const itens = [{ id: "ms", titulo: "Maria Silva" }];
+    expect(casarNegociosPorTitulo("Maria Silva Rua das Flores", itens).map((n) => n.id)).toEqual(["ms"]);
+  });
+  it("sem 'contido': título dentro da frase não casa (bloqueio de criação)", () => {
+    const itens = [{ id: "ms", titulo: "Maria Silva" }];
+    expect(casarNegociosPorTitulo("Maria Silva Rua das Flores", itens, { contido: false })).toEqual([]);
+    expect(casarNegociosPorTitulo("Maria Silva", itens, { contido: false }).map((n) => n.id)).toEqual(["ms"]);
+  });
+});
+
+describe("resolverNegocioPorNome (paginação)", () => {
+  const identity = gerente;
+  const frase = "Casa Azul";
+  const fraco = Array.from({ length: 50 }, (_, i) => ({ id: `f${i}`, titulo: i === 0 ? "Casa Azul Rua Antiga" : `Outro ${i}` }));
+  it("casamento fraco (prefixo) na página 1 NÃO vence o exato da página 2", async () => {
+    escopo.mockResolvedValueOnce({ items: fraco, truncated: false, nextCursor: "c2" } as never);
+    escopo.mockResolvedValueOnce({ items: [{ id: "exato", titulo: "Casa Azul" }], truncated: false } as never);
+    const r = await resolverNegocioPorNome({ frase, identity, fromPhone: "+5511999990000" });
+    expect(escopo).toHaveBeenCalledTimes(2);
+    expect(escopo.mock.calls[1][0].args).toMatchObject({ cursor: "c2" });
+    expect(r).toMatchObject({ tipo: "um", negocio: { id: "exato" } });
+  });
+  it("exato na página 1 para de paginar", async () => {
+    escopo.mockResolvedValueOnce({ items: [{ id: "exato", titulo: "Casa Azul" }], truncated: false, nextCursor: "c2" } as never);
+    const r = await resolverNegocioPorNome({ frase, identity, fromPhone: "+5511999990000" });
+    expect(escopo).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ tipo: "um", negocio: { id: "exato" } });
+  });
+  it("só casamento fraco: lê as páginas (até 3) e devolve o fraco", async () => {
+    escopo.mockResolvedValueOnce({ items: fraco, truncated: false, nextCursor: "c2" } as never);
+    escopo.mockResolvedValueOnce({ items: [{ id: "x", titulo: "Nada" }], truncated: false, nextCursor: "c3" } as never);
+    escopo.mockResolvedValueOnce({ items: [{ id: "y", titulo: "Nada 2" }], truncated: false, nextCursor: "c4" } as never);
+    const r = await resolverNegocioPorNome({ frase, identity, fromPhone: "+5511999990000" });
+    expect(escopo).toHaveBeenCalledTimes(3);
+    expect(r).toMatchObject({ tipo: "um", negocio: { id: "f0" } });
+  });
+  it("falha numa página: indisponível", async () => {
+    escopo.mockResolvedValueOnce({ items: fraco, truncated: false, nextCursor: "c2" } as never);
+    escopo.mockResolvedValueOnce(null);
+    expect(await resolverNegocioPorNome({ frase, identity, fromPhone: "+5511999990000" })).toEqual({ tipo: "indisponivel" });
   });
 });
 
@@ -221,6 +267,44 @@ describe("despacharLeituras com o negócio citado pelo nome", () => {
       chamadas: [{ name: "pendencias_do_negocio", args: {} }],
     });
     expect(r.resultados[0].motivo).toBeUndefined();
+  });
+
+  it("listagem indisponível + nome com dígito: NUNCA usa o 'numero' do modelo (o bug do TESTE1)", async () => {
+    escopo.mockResolvedValueOnce(null);
+    const listaVigente = {
+      criadoEm: 900,
+      turno: "m0",
+      itens: [{ n: 1, tipo: "negocio" as const, id: "OUTRO-NEGOCIO", rotulo: "Outro" }],
+    };
+    const r = await despacharLeituras({
+      ...base,
+      referencias: listaVigente,
+      texto: "qual o status do contrato do negócio TESTE1?",
+      chamadas: [{ name: "situacao_contrato", args: { numero: 1 } }],
+    });
+    expect(escopo).toHaveBeenCalledTimes(1); // só a listagem; contract.status nunca roda
+    expect(r.resultados[0].items).toBeNull();
+    expect(r.resultados[0].motivo).toBeUndefined(); // vira "não consegui consultar agora"
+    expect(fenceToolResults(r.resultados)).toContain("falhou");
+    expect(JSON.stringify(r.resultados)).not.toContain("OUTRO-NEGOCIO");
+  });
+
+  it("sem casamento e frase NÃO explícita, mas com dígito: não usa o 'numero' do modelo; diz que não achou", async () => {
+    escopo.mockResolvedValueOnce({ items: CARTEIRA, truncated: false });
+    const listaVigente = {
+      criadoEm: 900,
+      turno: "m0",
+      itens: [{ n: 1, tipo: "negocio" as const, id: "OUTRO-NEGOCIO", rotulo: "Outro" }],
+    };
+    const r = await despacharLeituras({
+      ...base,
+      referencias: listaVigente,
+      texto: "status do TESTE77",
+      chamadas: [{ name: "situacao_contrato", args: { numero: 1 } }],
+    });
+    expect(escopo).toHaveBeenCalledTimes(1);
+    expect(r.resultados[0]).toMatchObject({ items: null, motivo: "negocio_nao_encontrado" });
+    expect(r.trilha[0].outcome).toBe("negocio_nao_encontrado");
   });
 
   it("pergunta sem nome de negócio não faz a listagem extra", async () => {

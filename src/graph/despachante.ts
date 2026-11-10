@@ -119,6 +119,11 @@ export interface ResultadoDeTool {
   desambiguar?: boolean;
 }
 
+/** Frase com letra e dígito: um código de negócio ("TESTE1"), não um índice de lista. */
+function ehCodigoComDigito(frase: string): boolean {
+  return /\p{L}/u.test(frase) && /\d/.test(frase);
+}
+
 /**
  * Despacha as leituras de uma volta do laço.
  *
@@ -194,6 +199,10 @@ export async function despacharLeituras(params: {
       (entrada.verb === "pending.summary" || entrada.verb === "deal.pending" || entrada.verb === "contract.status" || entrada.verb === "deal.detail") &&
       params.policy.includes("deal.list")
     ) {
+      // Nome com letra E dígito ("TESTE1", "TESTE assinatura 4"): é código, nunca
+      // índice. Nos verbos que leem o "numero" do modelo, sem casamento a
+      // resposta é "não achei" / "não consegui", jamais outro negócio.
+      const usaNumeroDoModelo = ehCodigoComDigito(citado.frase) && (entrada.verb === "contract.status" || entrada.verb === "deal.detail");
       resolucaoPorNome ??= resolverNegocioPorNome({ frase: citado.frase, identity: params.identity, fromPhone: params.fromPhone });
       const res = await resolucaoPorNome;
       if (res.tipo === "um") {
@@ -219,9 +228,16 @@ export async function despacharLeituras(params: {
         resultados.push({ tool: chamada.name, items: numerada.paraOModelo, truncated: false, desambiguar: true });
         trilha.push({ name: chamada.name, args: chamada.args, outcome: "negocio_ambiguo" });
         continue;
-      } else if (res.tipo === "nenhum" && citado.explicita) {
+      } else if (res.tipo === "nenhum" && (citado.explicita || usaNumeroDoModelo)) {
         resultados.push({ tool: chamada.name, items: null, truncated: false, motivo: "negocio_nao_encontrado" });
         trilha.push({ name: chamada.name, args: chamada.args, outcome: "negocio_nao_encontrado" });
+        continue;
+      } else if (res.tipo === "indisponivel" && usaNumeroDoModelo) {
+        // Sem a listagem não há como achar o negócio, e o "numero" do modelo
+        // leu o "1" de "TESTE1" como item de lista: nunca cai nele. Vira a
+        // resposta honesta de falha ("não consegui consultar agora").
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
         continue;
       }
     }

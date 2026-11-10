@@ -1943,7 +1943,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
       // pedido segue (o nome pode ser de um cliente novo).
       const citado = args.tipo === "captacao" ? null : nomeDeNegocioCitado(userText);
       if (citado?.explicita && state.policy.includes("deal.list")) {
-        const res = await resolverNegocioPorNome({ frase: citado.frase, identity: state.identity, fromPhone: state.inbound.fromPhone });
+        const res = await resolverNegocioPorNome({ frase: citado.frase, identity: state.identity, fromPhone: state.inbound.fromPhone, contido: false });
         const texto = res.tipo === "um" || res.tipo === "varios" ? textoDeNegocioExistente(res) : null;
         if (texto) {
           return {

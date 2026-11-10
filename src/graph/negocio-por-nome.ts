@@ -66,14 +66,23 @@ export interface NegocioCasado {
   item: Record<string, unknown>;
 }
 
+/** Há casamento EXATO (título igual à frase, sem acento/caixa)? */
+function temExato(frase: string, achados: NegocioCasado[]): boolean {
+  const f = normalizarNome(frase);
+  return achados.some((n) => normalizarNome(n.titulo) === f);
+}
+
 /**
  * Casa a frase com os títulos: igual (sem acento/caixa) vence; senão, título
  * que COMEÇA pela frase em fronteira de palavra ("TESTE assinatura 1" casa
  * "TESTE assinatura 1 - à vista", nunca "TESTE assinatura 10"); senão, título
- * contido na frase ("o negócio da Maria Silva ..."). Item sem id ou sem
- * título string não entra.
+ * contido na frase ("o negócio da Maria Silva ..."), mas só título de 2+
+ * palavras ("Maria" não é o negócio de "Maria Silva") e só quando `contido`
+ * não foi desligado (o bloqueio de CRIAÇÃO desliga: abrir "Maria Silva Santos"
+ * não pode ser barrado por existir "Maria Silva"). Item sem id ou sem título
+ * string não entra.
  */
-export function casarNegociosPorTitulo(frase: string, itens: unknown[]): NegocioCasado[] {
+export function casarNegociosPorTitulo(frase: string, itens: unknown[], opcoes: { contido?: boolean } = {}): NegocioCasado[] {
   const f = normalizarNome(frase);
   if (!f) return [];
   const lista: NegocioCasado[] = [];
@@ -89,9 +98,10 @@ export function casarNegociosPorTitulo(frase: string, itens: unknown[]): Negocio
     return t.startsWith(f) && !/[a-z0-9]/.test(t.charAt(f.length) || " ");
   });
   if (prefixo.length) return prefixo;
+  if (opcoes.contido === false) return [];
   return lista.filter((n) => {
     const t = normalizarNome(n.titulo);
-    return t.length >= 4 && f.startsWith(t) && !/[a-z0-9]/.test(f.charAt(t.length) || " ");
+    return t.length >= 4 && t.includes(" ") && f.startsWith(t) && !/[a-z0-9]/.test(f.charAt(t.length) || " ");
   });
 }
 
@@ -122,14 +132,18 @@ const POR_PAGINA = 50;
 
 /**
  * Lista a carteira visível (até `PAGINAS_MAX` páginas) e casa pelo título.
- * Falha de rede/servidor = `indisponivel` (o chamador segue o caminho antigo,
- * que já responde "não consegui"); NUNCA vira "nenhum".
+ * Só um casamento EXATO interrompe a leitura: um casamento fraco (prefixo,
+ * contido) na página 1 não pode esconder o exato da página 2.
+ * Falha de rede/servidor = `indisponivel`; NUNCA vira "nenhum".
  */
 export async function resolverNegocioPorNome(params: {
   frase: string;
   identity: Candidate;
   fromPhone: string;
+  /** `false` no bloqueio de criação: título contido na frase não conta. */
+  contido?: boolean;
 }): Promise<ResolucaoPorNome> {
+  const opcoes = { contido: params.contido };
   const subject = subjectDe(params.identity);
   const itens: unknown[] = [];
   let cursor: string | undefined;
@@ -143,11 +157,10 @@ export async function resolverNegocioPorNome(params: {
     });
     if (!r) return { tipo: "indisponivel" };
     itens.push(...r.items);
-    const achados = casarNegociosPorTitulo(params.frase, itens);
-    if (achados.length > 0 || !r.nextCursor) break;
+    if (temExato(params.frase, casarNegociosPorTitulo(params.frase, itens, opcoes)) || !r.nextCursor) break;
     cursor = r.nextCursor;
   }
-  const casados = casarNegociosPorTitulo(params.frase, itens);
+  const casados = casarNegociosPorTitulo(params.frase, itens, opcoes);
   if (casados.length === 0) return { tipo: "nenhum" };
   if (casados.length === 1) return { tipo: "um", negocio: casados[0] };
   return { tipo: "varios", negocios: casados.slice(0, 5) };

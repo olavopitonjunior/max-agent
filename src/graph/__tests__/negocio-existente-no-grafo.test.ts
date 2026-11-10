@@ -93,4 +93,16 @@ describe("formulário para o comprador de um negócio que já existe", () => {
     expect(escopo).toHaveBeenCalled();
     expect(s.reply).toBeTruthy();
   });
+
+  it("negócio de uma palavra contido no nome novo NÃO bloqueia a criação ('Maria Silva' x negócio 'Maria')", async () => {
+    escopo.mockResolvedValue({ items: [{ id: "m", titulo: "Maria", etapa: "Formulário" }], truncated: false });
+    const s = await run("quero mandar o formulário de negócio para o comprador do Maria Silva");
+    expect(s.reply).not.toContain("já existe");
+  });
+
+  it("negócio 'Maria Silva' existente não barra a criação de 'Maria Silva Santos' (título contido na frase)", async () => {
+    escopo.mockResolvedValue({ items: [{ id: "ms", titulo: "Maria Silva", etapa: "Formulário" }], truncated: false });
+    const s = await run("quero mandar o formulário de negócio para o comprador do Maria Silva Santos");
+    expect(s.reply).not.toContain("já existe");
+  });
 });
