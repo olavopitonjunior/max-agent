@@ -108,7 +108,7 @@ import {
   pedeLeituraDeAnexo,
   shouldSearch,
   textoSemLeituraDeMidia,
-  TEXTO_ASSUNTO_BLOQUEADO,
+  textoDeRecusa,
 } from "./prompt";
 import { limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
@@ -733,7 +733,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       googleRefs: null,
       restoDaResposta: null,
       fluxo: rebaixarFluxo(state.fluxo),
-      reply: TEXTO_ASSUNTO_BLOQUEADO,
+      reply: textoDeRecusa(bloqueado),
     };
   }
 
