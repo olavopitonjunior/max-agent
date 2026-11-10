@@ -260,6 +260,67 @@ export function humanizarCodigosInternos(texto: string): string {
   return t;
 }
 
+// ─── Vocativo errado ────────────────────────────────────────────────────────
+
+const INTERJEICAO =
+  "Perfeito|Certo|Ok|Okay|Beleza|Combinado|Entendido|Claro|Ótimo|Otimo|Show|Pronto|Legal|Obrigado|Obrigada|Valeu|Bom dia|Boa tarde|Boa noite|Olá|Ola|Oi";
+
+/** Palavra de abertura que parece nome mas é conversa ("Resumindo,", "Primeiro,"). */
+const NAO_E_NOME = new Set(
+  [
+    "sim", "nao", "entao", "infelizmente", "claro", "perfeito", "certo", "ok", "beleza", "ola", "oi", "otimo", "show", "pronto",
+    "obrigado", "obrigada", "desculpa", "desculpe", "bom", "boa", "aqui", "agora", "hoje", "ainda", "assim", "tambem", "porem",
+    "mas", "se", "quando", "como", "para", "por", "sobre", "segundo", "primeiro", "terceiro", "antes", "depois", "enquanto",
+    "alias", "veja", "olha", "importante", "atencao", "cuidado", "lembrando", "resumindo", "basicamente", "normalmente",
+    "geralmente", "atualmente", "provavelmente", "possivelmente", "exatamente", "realmente", "novamente", "apenas", "so",
+    "tudo", "nada", "algo", "isso", "esse", "essa", "este", "esta", "outro", "outra", "ja", "la", "ali", "entretanto",
+    "contudo", "portanto", "logo", "dessa", "desse", "nesse", "nessa", "neste", "nesta", "em", "no", "na", "de", "do", "da",
+  ]
+);
+
+function semAcento(s: string): string {
+  return s.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+}
+
+/**
+ * Tira do COMEÇO da resposta o vocativo que não é de quem está escrevendo.
+ *
+ * Prod 10/11/2026: "Perfeito, João" para o Olavo — João era o cliente de um
+ * negócio. Na causa (memória que aprendia o próprio vocativo do assistente) o
+ * código já foi corrigido; esta é a rede por baixo, no código, porque o modelo
+ * mistura nome de cliente com nome de quem fala. Só olha a primeira linha:
+ *  - "Interjeição, Nome" + pontuação → tira o nome (sempre que não for a pessoa);
+ *  - "Nome, frase em minúscula" → só quando "Nome" aparece no contexto do turno
+ *    (negócios, mensagens): "Resumindo, ..." e "Infelizmente, ..." não são nome.
+ */
+export function corrigirVocativo(texto: string, ctx: { nomeDaPessoa: string | null; contexto?: string }): string {
+  if (!ctx.nomeDaPessoa) return texto;
+  const dela = new Set(semAcento(ctx.nomeDaPessoa).split(/\s+/).filter(Boolean));
+  const conhecidos = semAcento(ctx.contexto ?? "");
+
+  const a = new RegExp(`^(${INTERJEICAO}),\\s+(\\p{Lu}\\p{L}{1,})([,!.:])(\\s+|$)`, "u").exec(texto);
+  if (a) {
+    const nome = semAcento(a[2]);
+    if (!dela.has(nome) && !NAO_E_NOME.has(nome)) {
+      const resto = texto.slice(a[0].length);
+      const abertura = a[3] === "," ? `${a[1]}, ` : `${a[1]}${a[3]} `;
+      return `${abertura}${resto}`;
+    }
+    return texto;
+  }
+
+  const b = /^(\p{Lu}\p{L}{1,}),\s+(\p{Ll})/u.exec(texto);
+  if (b) {
+    const nome = semAcento(b[1]);
+    const pareceConversa = NAO_E_NOME.has(nome) || /(mente|ndo)$/.test(nome);
+    const ehDeTerceiro = !dela.has(nome) && !pareceConversa && new RegExp(`\\b${nome}\\b`).test(conhecidos);
+    if (ehDeTerceiro) {
+      return b[2].toUpperCase() + texto.slice(b[0].length);
+    }
+  }
+  return texto;
+}
+
 // ─── G6 — teto de tamanho, imposto no código ────────────────────────────────
 
 /**

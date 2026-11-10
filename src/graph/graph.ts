@@ -111,7 +111,7 @@ import {
   textoSemLeituraDeMidia,
   textoDeRecusa,
 } from "./prompt";
-import { humanizarCodigosInternos, limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
+import { corrigirVocativo, humanizarCodigosInternos, limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
 import {
   argsDaCriacao,
@@ -2221,7 +2221,14 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   const saneado = sanitizar(TURNO_CRU.get(state.inbound.messageId)?.draft ?? state.draft);
   const { bloqueios } = saneado;
   // Código interno copiado do resultado de consulta (sem_permissao, n=5) vira linguagem de pessoa.
-  const texto = humanizarCodigosInternos(saneado.texto);
+  const humano = humanizarCodigosInternos(saneado.texto);
+  // Vocativo: o nome de quem escreve é o do cadastro; nome de cliente do turno não serve de tratamento.
+  const contextoDoTurno = [
+    JSON.stringify(state.toolResults ?? []),
+    state.summary ?? "",
+    ...(state.messages ?? []).slice(-12).map((m) => (typeof m.content === "string" ? m.content : "")),
+  ].join("\n");
+  const texto = corrigirVocativo(humano, { nomeDaPessoa: displayName(state.identity), contexto: contextoDoTurno });
 
   if (bloqueios.length > 0) {
     // Nível de aviso e não de erro: o turno saiu, e o que se quer é o padrão

@@ -583,7 +583,11 @@ export function buildSystemPrompt(params: {
   // não pode preceder o que nunca muda.
   // D1: nome vem do cadastro (texto de fora) — cercado e escapado como dado.
   if (params.userName) {
-    parts.push(`\nVocê está falando com ${cercar("nome_da_pessoa", params.userName.slice(0, 80), true)}.`);
+    parts.push(
+      `\nVocê está falando com ${cercar("nome_da_pessoa", params.userName.slice(0, 80), true)}. ` +
+        "Trate a pessoa só por esse nome, ou sem nome. Os outros nomes que aparecem (negócios, propostas, " +
+        "mensagens) são de clientes ou de terceiros: nunca os use para se dirigir a ela."
+    );
   }
 
   // Junto do nome, porque é da mesma natureza: varia por PESSOA. Antes do
