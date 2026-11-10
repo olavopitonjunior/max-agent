@@ -100,6 +100,7 @@ import { orgById } from "@/lib/orgs";
 import { conversationKey, phoneTag } from "@/lib/phone";
 import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
 import { rotaDoTurn } from "./rota";
+import { nomeDeNegocioCitado, resolverNegocioPorNome, textoDeNegocioExistente } from "./negocio-por-nome";
 import { tokenizar, destokenizarResposta, destokenizarArgs, redigir, redigirProfundo, redigirCredito, type MapaPii } from "@/lib/pii";
 import {
   assuntoBloqueado,
@@ -1931,6 +1932,29 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
           piiMap: mapaTurno,
         };
       }
+      // Pedido que cita um negócio JÁ EXISTENTE pelo nome ("o formulário para o
+      // comprador do TESTE assinatura 1"): não abre outro com o mesmo nome. Só
+      // age quando o nome casa com um negócio da carteira; sem casamento o
+      // pedido segue (o nome pode ser de um cliente novo).
+      const citado = args.tipo === "captacao" ? null : nomeDeNegocioCitado(userText);
+      if (citado?.explicita && state.policy.includes("deal.list")) {
+        const res = await resolverNegocioPorNome({ frase: citado.frase, identity: state.identity, fromPhone: state.inbound.fromPhone });
+        const texto = res.tipo === "um" || res.tipo === "varios" ? textoDeNegocioExistente(res) : null;
+        if (texto) {
+          return {
+            ...daOferta,
+            pendingAction: null,
+            messages: [
+              { role: "user", content: userText },
+              { role: "assistant", content: texto },
+            ],
+            reply: texto,
+            usage: usageDoTurn,
+            toolLog: [...trilha, { name: chamada.name, args: { tipo: args.tipo }, outcome: "negocio_existente" }],
+            piiMap: mapaTurno,
+          };
+        }
+      }
       const extra: LlmUsage[] = [];
       // `captacao` (P9, só com a flag) tem fluxo próprio, com gate de capability e `captacao.options`.
       let passo = args.tipo === "captacao"
@@ -2106,6 +2130,7 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
     fromPhone: state.inbound.fromPhone,
     referencias: state.referencias,
     turno: state.inbound.messageId,
+    texto: textoDoTurno(state),
   });
   let prepared = chamadas;
   const preflightLog: ToolLogEntry[] = [];

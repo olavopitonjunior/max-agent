@@ -421,12 +421,31 @@ const RECEBIDO_POR: Record<"audio" | "image", string> = {
  * primeira como a segunda mentiria para a pessoa sobre a carteira dela.
  */
 export function fenceToolResults(
-  results: { tool: string; items: unknown[] | null; truncated: boolean; hasMore?: boolean; clarification?: { field: "estado"; options: string[] } }[]
+  results: { tool: string; items: unknown[] | null; truncated: boolean; hasMore?: boolean; clarification?: { field: "estado"; options: string[] }; motivo?: "referencia_invalida" | "negocio_nao_encontrado"; desambiguar?: boolean }[]
 ): string {
   if (results.length === 0) return "";
 
   const blocos = results
     .map((r) => {
+      if (r.items === null && r.motivo) {
+        // Não é falha transitória: oferecer "tentar de novo mais tarde" seria
+        // mentira (medido em produção em 10/11/2026).
+        const causa = r.motivo === "negocio_nao_encontrado"
+          ? "Não existe, entre os negócios que esta pessoa pode ver, nenhum com o nome que ela citou."
+          : "Não há negócio com esse número na lista desta conversa (ou a lista já expirou).";
+        return `<dados_do_sistema origem="${r.tool}" nao_encontrado="true">
+${causa} Diga exatamente isso, em uma frase, e peça o NOME COMPLETO ou o código do negócio.
+NÃO diga que não conseguiu consultar, NÃO ofereça tentar de novo mais tarde e NÃO invente outro negócio.
+</dados_do_sistema>`;
+      }
+      if (r.desambiguar && r.items) {
+        const candidatos = escaparDelimitadores(JSON.stringify(r.items, null, 1));
+        return `<dados_do_sistema origem="${r.tool}" ambiguo="true">
+Mais de um negócio tem o nome citado. Pergunte qual deles é, listando cada um como "n. título"
+(o número está em "n"). Não escolha por conta própria e não responda a consulta ainda.
+${candidatos}
+</dados_do_sistema>`;
+      }
       if (r.clarification) {
         const options = escaparDelimitadores(JSON.stringify(r.clarification.options));
         return `Uma consulta tem filtro de etapa inválido, não carteira vazia. Responda os outros resultados disponíveis.
@@ -523,7 +542,7 @@ export function buildSystemPrompt(params: {
    */
   criacao?: "disponivel" | "sem_login" | "sem_politica";
   /** Resultado das tools de leitura deste turn, já cercado. */
-  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] } }[];
+  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] }; motivo?: "referencia_invalida" | "negocio_nao_encontrado"; desambiguar?: boolean }[];
   /** Flag `MAX_CREDITO` ligada: entra a regra de crédito. */
   credito?: boolean;
 }): string {
