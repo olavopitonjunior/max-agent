@@ -73,12 +73,28 @@ export async function loadFacts(orgId: string, phone: string): Promise<Facts> {
   }
 }
 
+/**
+ * Fato sobre COMO CHAMAR a pessoa ("como_pessoa_prefere_ser_chamada",
+ * "preferencia_nome", "apelido"). O nome de quem escreve vem do cadastro
+ * (identidade), não da memória: o extrator lia o próprio "Perfeito, João" do
+ * assistente — João era o cliente do negócio — e gravava "prefere ser chamada
+ * João" para o Olavo, que passou a ser chamado assim em toda conversa
+ * (prod 10/11/2026). Chave com esse tema nunca é gravada nem entra no prompt,
+ * inclusive linhas antigas que já estejam no banco.
+ */
+export function ehFatoDeTratamento(key: string): boolean {
+  // Ancorado em palavra (separada por `_`, `-` ou espaço): "videochamada" e
+  // "chamada_video" (ligação) NÃO são tratamento; "ser_chamado"/"chamado_de" são.
+  return /(?:^|[_\s-])(?:apelido|tratamento|chamar|preferencia_nome|nome_preferido|prefere_ser|ser_chamad[oa]|chamad[oa]_(?:de|por|como))(?:$|[_\s-])/i.test(key);
+}
+
 /** Normaliza e recusa o que não deve virar fato. `null` = descartar. */
 function limpar(key: unknown, value: unknown): [string, string] | null {
   if (typeof key !== "string" || typeof value !== "string") return null;
   const k = key.trim().toLowerCase().slice(0, MAX_KEY_CHARS);
   const v = value.trim().slice(0, MAX_VALUE_CHARS);
   if (!k || !v) return null;
+  if (ehFatoDeTratamento(k)) return null;
 
   /**
    * Segunda cerca, independente do prompt.
@@ -201,7 +217,6 @@ const EXTRACT_SYSTEM = `Você extrai FATOS DURÁVEIS sobre uma pessoa, a partir 
 Devolva um objeto JSON plano, com no máximo 5 pares "chave": "valor".
 
 O que extrair — só o que continuará verdade daqui a semanas:
-- como a pessoa prefere ser chamada
 - função ou área em que atua (locação, vendas, administrativo)
 - preferências de trabalho recorrentes
 - assunto que ela acompanha de forma continuada
@@ -210,6 +225,7 @@ O que NUNCA extrair:
 - CPF, CNPJ, RG, documento, dado bancário, PIX, cartão, senha
 - valores de negócio, endereços de imóvel, nomes de clientes dela
 - qualquer coisa sobre TERCEIROS
+- como chamar a pessoa (nome, apelido, tratamento): isso vem do cadastro, nunca da conversa
 - o assunto pontual desta conversa ("perguntou do contrato X") — isso é contexto, não fato
 
 Se não houver nada durável, devolva {}. Prefira {} a inventar.
@@ -270,7 +286,7 @@ export async function extractFacts(params: {
 
 /** Bloco pro prompt. String vazia quando não há nada — sem cabeçalho órfão. */
 export function renderFacts(facts: Facts): string {
-  const entries = Object.entries(facts);
+  const entries = Object.entries(facts).filter(([k]) => !ehFatoDeTratamento(k));
   if (entries.length === 0) return "";
   return (
     "\n\nO que você já sabe sobre esta pessoa (de conversas anteriores):\n" +

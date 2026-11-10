@@ -46,11 +46,11 @@ d("memory_facts (Postgres real)", () => {
   });
 
   it("grava e lê", async () => {
-    await saveFacts(ORG, PHONE, { area: "locação", chamar_de: "Neto" });
+    await saveFacts(ORG, PHONE, { area: "locação", regiao: "zona sul" });
 
     expect(await loadFacts(ORG, PHONE)).toEqual({
       area: "locação",
-      chamar_de: "Neto",
+      regiao: "zona sul",
     });
   });
 
@@ -203,12 +203,12 @@ describe("extração (sem banco)", () => {
 
   it("lê o JSON do modelo", async () => {
     llm.mockResolvedValue({
-      text: '{"chamar_de":"Neto","area":"locação"}',
+      text: '{"regiao":"zona sul","area":"locação"}',
       usage: { model: "m", promptTokens: 1, latencyMs: 1 },
     });
 
     expect(await extractFacts(args)).toEqual({
-      chamar_de: "Neto",
+      regiao: "zona sul",
       area: "locação",
     });
   });
@@ -266,8 +266,8 @@ describe("renderFacts", () => {
   });
 
   it("lista o que sabe", () => {
-    const out = renderFacts({ chamar_de: "Neto", area: "locação" });
-    expect(out).toContain("chamar_de: Neto");
+    const out = renderFacts({ regiao: "zona sul", area: "locação" });
+    expect(out).toContain("regiao: zona sul");
     expect(out).toContain("area: locação");
   });
 });

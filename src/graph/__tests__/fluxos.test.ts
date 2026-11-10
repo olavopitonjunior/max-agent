@@ -42,7 +42,6 @@ describe("entrada", () => {
     "Faz uma proposta do João",
     "Cria uma proposta da Letícia",
     "Monta a proposta do Carlos pro apto 52",
-    "Crie uma proposta de compra do Pedro",
     "Max, crie proposta da Ana",
   ])("não bloqueia criação de proposta para uma pessoa: %s", async (pedido) => {
     const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps());
@@ -64,6 +63,28 @@ describe("entrada", () => {
     const d = deps({ acao: vi.fn().mockResolvedValue({ status: 200, body: { campos: [] } }) });
     const p = await F.iniciarFluxo({ tipo: "venda", pedido: "Crie um formulário novo de venda", policy: [...TUDO], agora }, d);
     expect(p.fluxo?.kind).toBe("negocio");
+  });
+  it.each([
+    ["Crie uma proposta de compra do Pedro", "venda"],
+    ["Quero uma proposta de compra e venda para a Ana", "venda"],
+    ["Faz uma proposta de venda do apto 52", "venda"],
+    ["Preciso de uma proposta de locação para o Carlos", "locacao"],
+    ["monta uma proposta de aluguel", "locacao"],
+  ])("proposta de compra/venda/locação dita por extenso não repete a pergunta 1 ou 2: %s", async (pedido, natureza) => {
+    const d = deps({ acao: vi.fn().mockResolvedValue({ status: 200, body: { modelo: true, assinatura: true } }) });
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, d);
+    expect(p.reply).not.toBe(F.TEXTO_ESCOLHA);
+    expect(p.fluxo?.kind).toBe("proposta");
+    expect(p.fluxo && p.fluxo.kind === "proposta" ? p.fluxo.natureza : undefined).toBe(natureza);
+  });
+  it.each([
+    "Quero criar uma proposta de compra com formulário",
+    "Faz a proposta de compra e o contrato",
+    "uma proposta para o Pedro",
+  ])("pedido ambíguo mantém a pergunta: %s", async (pedido) => {
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps());
+    expect(p.reply).toBe(F.TEXTO_ESCOLHA);
+    expect(p.fluxo?.kind).toBe("escolha");
   });
   it("pedido de proposta pergunta proposta × negócio", async () => {
     const p = await F.iniciarFluxo({ tipo: "proposta", policy: [...TUDO], agora }, deps());
@@ -943,5 +964,106 @@ describe("sem modelo de proposta ativo (prod 07/10: FINCasa com modelos arquivad
     expect(p.reply).toContain("não tem um modelo");
     expect(p.reply).not.toContain("http");
     expect(p.fluxo).toBeNull();
+  });
+});
+
+/**
+ * Prod 10/11/2026 (Max Fincasa, Olavo): depois de `proposta_criada` o fluxo
+ * ficava em "ajustes" e engolia o turno seguinte. "manda a PROP-2026-0003 pro
+ * comprador assinar" não era reconhecido como envio (exigia "assinatura"),
+ * passava pelo extrator, saía `proposta_liberada` e o modelo improvisou.
+ */
+describe("pós-rascunho: pedido de envio e troca de assunto", () => {
+  const rascunho = (extra: Partial<Extract<Fluxo, { kind: "proposta" }>> = {}): Fluxo =>
+    ({ kind: "proposta", etapa: "ajustes", natureza: "venda", dados: DADOS_OK, propostaId: "p3", codigo: "PROP-2026-0003", atualizadoEm: agora, ...extra }) as Fluxo;
+  const OPCOES = {
+    status: 200,
+    body: {
+      assinaturaConfigurada: true,
+      metodos: [{ valor: "sms", rotulo: "SMS" }, { valor: "whatsapp", rotulo: "WhatsApp" }],
+      signatarios: [{ nome: "Carlos Eduardo TESTE Andrade", papel: "comprador" }],
+    },
+  };
+
+  it.each([
+    "manda a PROP-2026-0003 pro comprador assinar",
+    "Manda a PROP-2026-0003 pro comprador assinar",
+    "mande a proposta pro comprador assinar",
+    "envia pro Carlos assinar",
+    "manda pra ele assinar",
+    "manda a PROP-2026-0003",
+    "envie a PROP-2026-0003 agora",
+  ])("pedeEnvio reconhece: %s", (t) => {
+    expect(F.pedeEnvio(t)).toBe(true);
+  });
+
+  it.each([
+    "eu vou mandar pro comprador assinar depois",
+    "me manda o contrato pra eu assinar",
+    "não manda a PROP-2026-0003 pro comprador assinar",
+    "como faço pra mandar pro comprador assinar?",
+    "quem vai assinar a PROP-2026-0003",
+    "o comprador já assinou?",
+  ])("pedeEnvio NÃO reconhece: %s", (t) => {
+    expect(F.pedeEnvio(t)).toBe(false);
+  });
+
+  it("'manda a PROP-X pro comprador assinar' no fluxo de ajustes vai ao caminho de envio, sem extrator, sem enviar", async () => {
+    const d = deps({ acao: vi.fn().mockResolvedValue(OPCOES), extrairProposta: vi.fn().mockResolvedValue({}) });
+    const p = await F.conduzirFluxo(rascunho(), ctx("manda a PROP-2026-0003 pro comprador assinar"), d);
+    expect(d.extrairProposta).not.toHaveBeenCalled();
+    expect(d.acao).toHaveBeenCalledTimes(1);
+    expect(d.acao).toHaveBeenCalledWith("proposal.options", { proposta_id: "p3" });
+    expect(d.acao).not.toHaveBeenCalledWith("proposal.send", expect.anything(), expect.anything());
+    expect(p.liberar).toBeUndefined();
+    expect(p.evento).toBe("proposta_metodo");
+  });
+
+  it("com um único método, vai ao cartão do SIM (não envia); só o SIM executa", async () => {
+    const um = { status: 200, body: { ...OPCOES.body, metodos: [{ valor: "whatsapp", rotulo: "WhatsApp" }] } };
+    const acao = vi.fn().mockResolvedValue(um);
+    const d = deps({ acao });
+    const p = await F.conduzirFluxo(rascunho(), ctx("manda a PROP-2026-0003 pro comprador assinar"), d);
+    expect(p.evento).toBe("proposta_envio");
+    expect(p.fluxo).toMatchObject({ etapa: "envio" });
+    expect(d.acao).not.toHaveBeenCalledWith("proposal.send", expect.anything(), expect.anything());
+    acao.mockResolvedValue({ status: 200, body: { proposta: { id: "p3" } } });
+    await F.conduzirFluxo(p.fluxo!, ctx("sim", { messageId: "sim-env" }), d);
+    expect(d.acao).toHaveBeenCalledWith("proposal.send", expect.anything(), "sim-env");
+  });
+
+  it.each([
+    "quais as pendências do negócio TESTE1?",
+    "me mostra as pendências do TESTE1",
+    "como está o andamento do negócio TESTE1",
+    "status do contrato do João da Silva",
+    "minhas atividades de hoje",
+  ])("assunto de outra coisa nos ajustes ENCERRA o fluxo, sem extrator: %s", async (t) => {
+    const d = deps({ extrairProposta: vi.fn().mockResolvedValue({ proponente: { nome: "TESTE1" } }) });
+    const p = await F.conduzirFluxo(rascunho(), ctx(t), d);
+    expect(d.extrairProposta).not.toHaveBeenCalled();
+    expect(d.acao).not.toHaveBeenCalled();
+    expect(p.liberar).toBe(true);
+    expect(p.fluxo).toBeNull();
+    expect(p.evento).toBe("proposta_encerrada_por_assunto");
+  });
+
+  it.each([
+    "o telefone dela é 11999063228",
+    "muda o valor para 1,4 milhão",
+    "o e-mail é carlos@x.com",
+    "troca o comprador para Maria Souza",
+    "status da comissão: 5%",
+  ])("dado da proposta continua sendo ajuste: %s", async (t) => {
+    const d = deps({ extrairProposta: vi.fn().mockResolvedValue({}) });
+    await F.conduzirFluxo(rascunho(), ctx(t), d);
+    expect(d.extrairProposta).toHaveBeenCalled();
+  });
+
+  it("citar OUTRA proposta no pedido de envio é detectado (o grafo retoma pela busca, não pelo fluxo aberto)", () => {
+    expect(F.citaOutraProposta("manda a PROP-2026-0002 pro comprador assinar", "PROP-2026-0003")).toBe(true);
+    expect(F.citaOutraProposta("manda a PROP-2026-0003 pro comprador assinar", "PROP-2026-0003")).toBe(false);
+    expect(F.citaOutraProposta("manda pro comprador assinar", "PROP-2026-0003")).toBe(false);
+    expect(F.citaOutraProposta("manda a PROP-2026-0002", undefined)).toBe(true);
   });
 });

@@ -233,6 +233,131 @@ export function sanitizar(bruto: string): Saida {
   return { texto, bloqueios: [...bloqueios] };
 }
 
+// ─── Código interno que escapa para a conversa ──────────────────────────────
+
+/**
+ * Produção 10/11/2026: "o sistema retornou **sem_permissao** para o negócio X"
+ * e "está em Formulário (n=5). Quer que eu abra esse **n=5**". `sem_permissao`
+ * é o marcador do resultado de consulta e `n` é o campo de numeração da lista:
+ * dado interno que o modelo copiou para a frase. O prompt já pede para não
+ * escrever isso; aqui é a rede de segurança, no código, por palavra (não por
+ * linha: a frase em volta é boa e perder a linha esconderia a resposta).
+ */
+const CODIGOS_INTERNOS: [RegExp, string][] = [
+  [/\bsem_permissao\b/gi, "sem permissão"],
+  [/\breferencia_invalida\b/gi, "referência inválida"],
+  [/\bnegocio_nao_encontrado\b/gi, "negócio não encontrado"],
+  [/\b(?:sem_lista|fora_da_lista)\b/gi, "item fora da lista"],
+];
+
+/** Trechos em que um `snake_case` é conteúdo, não vazamento: URL, e-mail, código entre crases. */
+const TRECHO_PROTEGIDO = /https?:\/\/\S+|[^\s@]+@[^\s@]+\.[^\s@]+|`[^`\n]*`/g;
+const SNAKE_CASE = /\b[a-z]+(?:_[a-z]+)+\b/g;
+
+/**
+ * Rede genérica: qualquer `snake_case` fora de URL/e-mail/código é código
+ * interno que escapou (`falha_envio`, `aguardando_aprovacao`). Os underscores
+ * viram espaço (a frase em volta fica legível e o dado não é inventado) e o
+ * token entra no log, para quem depura saber que o modelo copiou encanamento.
+ */
+function humanizarSnakeCase(texto: string): string {
+  const achados = new Set<string>();
+  let fim = 0;
+  let saida = "";
+  const trocar = (trecho: string) =>
+    trecho.replace(SNAKE_CASE, (m) => {
+      achados.add(m);
+      return m.replace(/_/g, " ");
+    });
+  for (const m of texto.matchAll(TRECHO_PROTEGIDO)) {
+    const ini = m.index ?? 0;
+    saida += trocar(texto.slice(fim, ini)) + m[0];
+    fim = ini + m[0].length;
+  }
+  saida += trocar(texto.slice(fim));
+  if (achados.size > 0) console.warn(`[compose] código interno na resposta humanizado: ${[...achados].join(", ")}`);
+  return saida;
+}
+
+export function humanizarCodigosInternos(texto: string): string {
+  let t = texto;
+  for (const [re, troca] of CODIGOS_INTERNOS) t = t.replace(re, troca);
+  t = humanizarSnakeCase(t);
+  // "(n=5)" some inteiro, com o espaço que o antecede.
+  t = t.replace(/[ \t]*\(\s*n\s*=\s*\d+\s*\)/gi, "");
+  // "n=5" solto vira "item 5" (a pessoa vê a lista numerada).
+  t = t.replace(/\bn\s*=\s*(\d+)\b/gi, "item $1");
+  return t;
+}
+
+// ─── Vocativo errado ────────────────────────────────────────────────────────
+
+const INTERJEICAO =
+  "Perfeito|Certo|Ok|Okay|Beleza|Combinado|Entendido|Claro|Ótimo|Otimo|Show|Pronto|Legal|Obrigado|Obrigada|Valeu|Bom dia|Boa tarde|Boa noite|Olá|Ola|Oi";
+
+/** Palavra de abertura que parece nome mas é conversa ("Resumindo,", "Primeiro,"). */
+const NAO_E_NOME = new Set(
+  [
+    "sim", "nao", "entao", "infelizmente", "claro", "perfeito", "certo", "ok", "beleza", "ola", "oi", "otimo", "show", "pronto",
+    "obrigado", "obrigada", "desculpa", "desculpe", "bom", "boa", "aqui", "agora", "hoje", "ainda", "assim", "tambem", "porem",
+    "mas", "se", "quando", "como", "para", "por", "sobre", "segundo", "primeiro", "terceiro", "antes", "depois", "enquanto",
+    "alias", "veja", "olha", "importante", "atencao", "cuidado", "lembrando", "resumindo", "basicamente", "normalmente",
+    "geralmente", "atualmente", "provavelmente", "possivelmente", "exatamente", "realmente", "novamente", "apenas", "so",
+    "tudo", "nada", "algo", "isso", "esse", "essa", "este", "esta", "outro", "outra", "ja", "la", "ali", "entretanto",
+    "contudo", "portanto", "logo", "dessa", "desse", "nesse", "nessa", "neste", "nesta", "em", "no", "na", "de", "do", "da",
+  ]
+);
+
+function semAcento(s: string): string {
+  return s.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+}
+
+/**
+ * Tira do COMEÇO da resposta o vocativo que não é de quem está escrevendo.
+ *
+ * Prod 10/11/2026: "Perfeito, João" para o Olavo — João era o cliente de um
+ * negócio. Na causa (memória que aprendia o próprio vocativo do assistente) o
+ * código já foi corrigido; esta é a rede por baixo, no código, porque o modelo
+ * mistura nome de cliente com nome de quem fala. Só olha a primeira linha:
+ *  - "Interjeição, Nome" + pontuação → tira o nome (quando não for a pessoa E o
+ *    nome aparecer no contexto do turno: sem isso "Ok, Feito!" perderia o "Feito");
+ *  - "Nome, frase em minúscula" → só quando "Nome" aparece no contexto do turno
+ *    (negócios, mensagens): "Resumindo, ..." e "Infelizmente, ..." não são nome.
+ */
+export function corrigirVocativo(texto: string, ctx: { nomeDaPessoa: string | null; contexto?: string }): string {
+  if (!ctx.nomeDaPessoa) return texto;
+  const dela = new Set(semAcento(ctx.nomeDaPessoa).split(/\s+/).filter(Boolean));
+  const conhecidos = semAcento(ctx.contexto ?? "");
+
+  const a = new RegExp(`^(${INTERJEICAO}),\\s+(\\p{Lu}\\p{L}{1,})([,!.:])(\\s+|$)`, "u").exec(texto);
+  if (a) {
+    const nome = semAcento(a[2]);
+    // Só some quando o nome é de alguém DO TURNO (cliente, negócio, mensagem):
+    // "Ok, Feito!" não tem nome nenhum, e tirar "Feito" quebraria a frase.
+    // Grafado com maiúscula no contexto: "feito" minúsculo numa frase da pessoa
+    // não faz de "Feito" um nome.
+    const grafado = a[2].normalize("NFD").replace(/\p{Diacritic}/gu, "");
+    const noContexto = new RegExp(`\\b${grafado}\\b`).test((ctx.contexto ?? "").normalize("NFD").replace(/\p{Diacritic}/gu, ""));
+    if (!dela.has(nome) && !NAO_E_NOME.has(nome) && noContexto) {
+      const resto = texto.slice(a[0].length);
+      const abertura = a[3] === "," ? `${a[1]}, ` : `${a[1]}${a[3]} `;
+      return `${abertura}${resto}`;
+    }
+    return texto;
+  }
+
+  const b = /^(\p{Lu}\p{L}{1,}),\s+(\p{Ll})/u.exec(texto);
+  if (b) {
+    const nome = semAcento(b[1]);
+    const pareceConversa = NAO_E_NOME.has(nome) || /(mente|ndo)$/.test(nome);
+    const ehDeTerceiro = !dela.has(nome) && !pareceConversa && new RegExp(`\\b${nome}\\b`).test(conhecidos);
+    if (ehDeTerceiro) {
+      return b[2].toUpperCase() + texto.slice(b[0].length);
+    }
+  }
+  return texto;
+}
+
 // ─── G6 — teto de tamanho, imposto no código ────────────────────────────────
 
 /**

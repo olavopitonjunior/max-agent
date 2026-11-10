@@ -21,6 +21,7 @@ import type { StageClarification } from "./query-options";
 import { projetarParaOModelo } from "./preferencias";
 import { projetarNotificacao } from "./notificacao-projecao";
 import { atividadeEmHoraLocal } from "./atividade-hora-local";
+import { nomeDeNegocioCitado, resolverNegocioPorNome, type ResolucaoPorNome } from "./negocio-por-nome";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -107,6 +108,20 @@ export interface ResultadoDeTool {
   clarification?: StageClarification;
   /** `template.decisions`: modelos não medidos (o modelo nunca diz "sem pendência" com isso > 0). */
   naoMedidos?: number;
+  /**
+   * Por que NÃO houve resposta quando a causa não é "o sistema não respondeu":
+   * a pessoa citou um negócio que não se achou (ou o número não aponta nada).
+   * Sem isto o modelo dizia "não consegui verificar, tento de novo mais tarde"
+   * para uma falha que nunca é transitória.
+   */
+  motivo?: "referencia_invalida" | "negocio_nao_encontrado";
+  /** Vários negócios têm o nome citado: `items` são os candidatos numerados; a resposta é uma pergunta. */
+  desambiguar?: boolean;
+}
+
+/** Frase com letra e dígito: um código de negócio ("TESTE1"), não um índice de lista. */
+function ehCodigoComDigito(frase: string): boolean {
+  return /\p{L}/u.test(frase) && /\d/.test(frase);
 }
 
 /**
@@ -124,6 +139,11 @@ export async function despacharLeituras(params: {
   referencias: MapaDeReferencias | null;
   turno: string;
   agora?: number;
+  /**
+   * O texto da pessoa neste turno. Só serve para achar um negócio citado pelo
+   * NOME (`negocio-por-nome.ts`); o modelo continua sem escolher id nenhum.
+   */
+  texto?: string;
 }): Promise<{
   resultados: ResultadoDeTool[];
   trilha: ToolLogEntry[];
@@ -133,6 +153,8 @@ export async function despacharLeituras(params: {
   const resultados: ResultadoDeTool[] = [];
   const trilha: ToolLogEntry[] = [];
   let referencias = params.referencias;
+  const citado = params.texto ? nomeDeNegocioCitado(params.texto) : null;
+  let resolucaoPorNome: Promise<ResolucaoPorNome> | null = null;
 
   for (const chamada of params.chamadas) {
     const a = autorizarChamada({
@@ -169,11 +191,61 @@ export async function despacharLeituras(params: {
     const agora = params.agora ?? Date.now();
     const subjectKey = JSON.stringify([params.identity.orgId, subject]);
     const paginada = ["property.list", "activity.list", "notification.list"].includes(entrada.verb);
+    // Negócio citado pelo NOME: o nome vence o "numero" do modelo (que lia
+    // "TESTE1" como item 1) e o id nunca passa por ele. 0 casamentos com um
+    // nome explícito ou vários = pergunta, nunca palpite.
+    if (
+      citado &&
+      (entrada.verb === "pending.summary" || entrada.verb === "deal.pending" || entrada.verb === "contract.status" || entrada.verb === "deal.detail") &&
+      params.policy.includes("deal.list")
+    ) {
+      // Nome com letra E dígito ("TESTE1", "TESTE assinatura 4"): é código, nunca
+      // índice. Nos verbos que leem o "numero" do modelo, sem casamento a
+      // resposta é "não achei" / "não consegui", jamais outro negócio.
+      const usaNumeroDoModelo = ehCodigoComDigito(citado.frase) && (entrada.verb === "contract.status" || entrada.verb === "deal.detail");
+      resolucaoPorNome ??= resolverNegocioPorNome({ frase: citado.frase, identity: params.identity, fromPhone: params.fromPhone });
+      const res = await resolucaoPorNome;
+      if (res.tipo === "um") {
+        if (entrada.verb === "pending.summary") {
+          args = { ...args, negocio_id: res.negocio.id };
+        } else if (entrada.verb === "deal.pending") {
+          // `deal.pending` lista a carteira toda e não aceita id: a linha do
+          // negócio citado (etapa + pendências, já projetada pelo servidor
+          // para esta pessoa) JÁ está na listagem que acabou de ser lida.
+          const numerada = numerarLista({ items: [res.negocio.item], tipo: "negocio", anterior: referencias, turno: params.turno, agora });
+          referencias = numerada.mapa;
+          resultados.push({ tool: chamada.name, items: numerada.paraOModelo, truncated: false });
+          trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+          continue;
+        } else {
+          const numerada = numerarLista({ items: [{ id: res.negocio.id, titulo: res.negocio.titulo }], tipo: "negocio", anterior: referencias, turno: params.turno, agora });
+          referencias = numerada.mapa;
+          args = { ...args, numero: numerada.paraOModelo[0].n };
+        }
+      } else if (res.tipo === "varios") {
+        const numerada = numerarLista({ items: res.negocios.map((n) => ({ id: n.id, titulo: n.titulo })), tipo: "negocio", anterior: referencias, turno: params.turno, agora });
+        referencias = numerada.mapa;
+        resultados.push({ tool: chamada.name, items: numerada.paraOModelo, truncated: false, desambiguar: true });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "negocio_ambiguo" });
+        continue;
+      } else if (res.tipo === "nenhum" && (citado.explicita || usaNumeroDoModelo)) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false, motivo: "negocio_nao_encontrado" });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "negocio_nao_encontrado" });
+        continue;
+      } else if (res.tipo === "indisponivel" && usaNumeroDoModelo) {
+        // Sem a listagem não há como achar o negócio, e o "numero" do modelo
+        // leu o "1" de "TESTE1" como item de lista: nunca cai nele. Vira a
+        // resposta honesta de falha ("não consegui consultar agora").
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+    }
     if (entrada.verb === "property.detail" || entrada.verb === "contract.status") {
       const property = entrada.verb === "property.detail";
       const selected = resolverReferencia(referencias, args.numero, { agora, tipo: property ? "imovel" : "negocio" });
       if (!selected.ok) {
-        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        resultados.push({ tool: chamada.name, items: null, truncated: false, motivo: "referencia_invalida" });
         trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
         continue;
       }
@@ -186,7 +258,7 @@ export async function despacharLeituras(params: {
       const proposta = entrada.verb === "proposal.detail";
       const selected = resolverReferencia(referencias, args.numero, { agora, tipo: proposta ? "proposta" : "negocio" });
       if (!selected.ok) {
-        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        resultados.push({ tool: chamada.name, items: null, truncated: false, motivo: "referencia_invalida" });
         trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
         continue;
       }
@@ -199,7 +271,7 @@ export async function despacharLeituras(params: {
       // O modelo aponta pelo número da lista; o id interno nunca passa por ele.
       const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "atividade" });
       if (!selected.ok) {
-        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        resultados.push({ tool: chamada.name, items: null, truncated: false, motivo: "referencia_invalida" });
         trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
         continue;
       }

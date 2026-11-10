@@ -100,6 +100,7 @@ import { orgById } from "@/lib/orgs";
 import { conversationKey, phoneTag } from "@/lib/phone";
 import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
 import { rotaDoTurn } from "./rota";
+import { nomeDeNegocioCitado, resolverNegocioPorNome, textoDeNegocioExistente } from "./negocio-por-nome";
 import { tokenizar, destokenizarResposta, destokenizarArgs, redigir, redigirProfundo, redigirCredito, type MapaPii } from "@/lib/pii";
 import {
   assuntoBloqueado,
@@ -108,9 +109,9 @@ import {
   pedeLeituraDeAnexo,
   shouldSearch,
   textoSemLeituraDeMidia,
-  TEXTO_ASSUNTO_BLOQUEADO,
+  textoDeRecusa,
 } from "./prompt";
-import { limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
+import { corrigirVocativo, humanizarCodigosInternos, limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
 import {
   argsDaCriacao,
@@ -121,6 +122,7 @@ import {
 } from "./despachante";
 import { renderizarNegociosSelecionados, type MapaDeReferencias } from "./referencias";
 import {
+  citaOutraProposta,
   conduzirFluxo,
   fluxoExpirou,
   iniciarFluxo,
@@ -733,7 +735,7 @@ async function gate(state: MaxStateType): Promise<MaxUpdate> {
       googleRefs: null,
       restoDaResposta: null,
       fluxo: rebaixarFluxo(state.fluxo),
-      reply: TEXTO_ASSUNTO_BLOQUEADO,
+      reply: textoDeRecusa(bloqueado),
     };
   }
 
@@ -1267,6 +1269,10 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     (atual.kind === "negocio" && atual.etapa === "tipo" && !lerNatureza(userText)) ||
     (atual.kind === "proposta" && atual.etapa === "natureza" && !lerNatureza(userText)) ||
     (atual.kind === "proposta" && atual.etapa === "selecao_envio") ||
+    // Rascunho aberto para ajuste, e o pedido de envio cita OUTRA proposta (prod 10/11):
+    // o fluxo é da anterior, a citada se acha pela busca. Sem escrita em aberto (`chave`).
+    (atual.kind === "proposta" && !!atual.propostaId && !atual.chave && !atual.ajustePendente && ["ajustes", "metodo", "envio"].includes(atual.etapa) &&
+      citaOutraProposta(userText, atual.codigo)) ||
     (atual.kind === "gestao" && !atual.chave) ||
     (atual.kind === "assinatura" && !atual.chave);
   if (naoComecou && podeEscrever(state.identity) && pedeEnvio(userText)) {
@@ -1931,6 +1937,29 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
           piiMap: mapaTurno,
         };
       }
+      // Pedido que cita um negócio JÁ EXISTENTE pelo nome ("o formulário para o
+      // comprador do TESTE assinatura 1"): não abre outro com o mesmo nome. Só
+      // age quando o nome casa com um negócio da carteira; sem casamento o
+      // pedido segue (o nome pode ser de um cliente novo).
+      const citado = args.tipo === "captacao" ? null : nomeDeNegocioCitado(userText);
+      if (citado?.explicita && state.policy.includes("deal.list")) {
+        const res = await resolverNegocioPorNome({ frase: citado.frase, identity: state.identity, fromPhone: state.inbound.fromPhone, contido: false });
+        const texto = res.tipo === "um" || res.tipo === "varios" ? textoDeNegocioExistente(res) : null;
+        if (texto) {
+          return {
+            ...daOferta,
+            pendingAction: null,
+            messages: [
+              { role: "user", content: userText },
+              { role: "assistant", content: texto },
+            ],
+            reply: texto,
+            usage: usageDoTurn,
+            toolLog: [...trilha, { name: chamada.name, args: { tipo: args.tipo }, outcome: "negocio_existente" }],
+            piiMap: mapaTurno,
+          };
+        }
+      }
       const extra: LlmUsage[] = [];
       // `captacao` (P9, só com a flag) tem fluxo próprio, com gate de capability e `captacao.options`.
       let passo = args.tipo === "captacao"
@@ -2106,6 +2135,7 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
     fromPhone: state.inbound.fromPhone,
     referencias: state.referencias,
     turno: state.inbound.messageId,
+    texto: textoDoTurno(state),
   });
   let prepared = chamadas;
   const preflightLog: ToolLogEntry[] = [];
@@ -2193,7 +2223,17 @@ function afterAnswer(state: MaxStateType): "tools" | "compose" {
 async function compose(state: MaxStateType): Promise<MaxUpdate> {
   if (state.draft === null) return {};
 
-  const { texto, bloqueios } = sanitizar(TURNO_CRU.get(state.inbound.messageId)?.draft ?? state.draft);
+  const saneado = sanitizar(TURNO_CRU.get(state.inbound.messageId)?.draft ?? state.draft);
+  const { bloqueios } = saneado;
+  // Código interno copiado do resultado de consulta (sem_permissao, n=5) vira linguagem de pessoa.
+  const humano = humanizarCodigosInternos(saneado.texto);
+  // Vocativo: o nome de quem escreve é o do cadastro; nome de cliente do turno não serve de tratamento.
+  const contextoDoTurno = [
+    JSON.stringify(state.toolResults ?? []),
+    state.summary ?? "",
+    ...(state.messages ?? []).slice(-12).map((m) => (typeof m.content === "string" ? m.content : "")),
+  ].join("\n");
+  const texto = corrigirVocativo(humano, { nomeDaPessoa: displayName(state.identity), contexto: contextoDoTurno });
 
   if (bloqueios.length > 0) {
     // Nível de aviso e não de erro: o turno saiu, e o que se quer é o padrão

@@ -932,6 +932,16 @@ const VERBO_ENVIO = String.raw`(re)?(envi(a|e|ar|o)|mand(a|e|ar)|dispar(a|e|ar|o
 /** Só verbo de COMANDO aqui: "o envio para assinatura falhou" é relato. */
 const VERBO_COMANDO = String.raw`(re)?(envi(a|e|ar)|mand(a|e|ar)|dispar(a|e|ar)|encaminh(a|e|ar)|segue|seguir)`;
 const PEDE_ENVIO = new RegExp(String.raw`\b${VERBO_COMANDO}\b[^.?!]{0,40}\bassinatura\b`);
+/**
+ * "manda a PROP-2026-0003 pro comprador assinar" (prod 10/11): o verbo de comando
+ * e o INFINITIVO "assinar" (de quem vai assinar). "pra eu assinar" é o próprio
+ * corretor pedindo o documento, não é envio.
+ */
+const PEDE_ENVIO_PARA_ASSINAR = new RegExp(String.raw`\b${VERBO_COMANDO}\b[^.?!]{0,60}\bassinar\b`);
+const EU_ASSINAR = /\b(eu|a gente|nos)\s+assin/;
+/** Código de proposta citado ("PROP-2026-0003"): o objeto do envio. */
+const CODIGO_DE_PROPOSTA = /\bprop-\d{4}-\d+\b/g;
+const PEDE_ENVIO_DO_CODIGO = new RegExp(String.raw`\b${VERBO_COMANDO}\s+((a|o|da|do)\s+)?prop-\d{4}-\d+\b`);
 /** "envie essa", "envio da proposta", "manda o rascunho" — o OBJETO colado ao verbo. */
 const PEDE_ENVIO_DA_PROPOSTA = new RegExp(
   String.raw`\b${VERBO_ENVIO}\s+((a|o|essa|esta|da|do)\s+)?(proposta|essa|esta|ela|rascunho)\b`
@@ -958,12 +968,49 @@ export function pedeEnvio(texto: string): boolean {
   const t = normalizar(texto);
   if (NEGACAO.test(t) || PERGUNTA_DE_PROCESSO.test(t) || E_CRIACAO.test(t)) return false;
   if (PEDE_ENVIO.test(t) || SO_ENVIO.test(t)) return true;
-  return !RELATO.test(t) && PEDE_ENVIO_DA_PROPOSTA.test(t);
+  if (RELATO.test(t)) return false;
+  if (PEDE_ENVIO_PARA_ASSINAR.test(t) && !EU_ASSINAR.test(t)) return true;
+  return PEDE_ENVIO_DA_PROPOSTA.test(t) || PEDE_ENVIO_DO_CODIGO.test(t);
+}
+
+/**
+ * O pedido de envio cita um código de proposta DIFERENTE da do fluxo aberto (ou
+ * o fluxo não tem código). Nesse caso o envio não é da proposta do fluxo: o
+ * grafo retoma pela busca (`retomarEnvio`), que acha a citada.
+ */
+export function citaOutraProposta(texto: string, codigoDoFluxo: string | undefined): boolean {
+  const citados = normalizar(texto).match(CODIGO_DE_PROPOSTA) ?? [];
+  if (citados.length === 0) return false;
+  const atual = codigoDoFluxo ? normalizar(codigoDoFluxo) : null;
+  return citados.some((c) => c !== atual);
+}
+
+/** Palavra do dado da proposta: com ela, a mensagem é ajuste, não troca de assunto. */
+const CAMPO_DA_PROPOSTA = /@|\br\$|\d{4,}|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|rua|bairro|cidade|cpf|telefone|celular|e-?mail|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal|fiador\w*|clausula\w*)\b/;
+/** Quem vai assinar ("pro comprador assinar") não é dado novo da proposta. */
+const DESTINATARIO = /\b(pro|pra|para|ao|a)\s+(o\s+|a\s+)?(comprador\w*|inquilin\w*|locatari\w*|proponente|cliente|vendedor\w*|proprietari\w*|locador\w*)\b/g;
+/** Assunto de outra coisa (consulta de negócio, pendência, agenda): nunca é ajuste de rascunho. */
+const TEMA_FORA_DA_PROPOSTA = /\b(pendenci\w*|andamento|status|atividades?|agenda|tarefas?|negocios?|contratos?|formularios?|fichas?|certidao|certidoes|cobrancas?|relatorio|quantas|quantos)\b/;
+
+function semCodigoNemDestinatario(texto: string): string {
+  return normalizar(texto).replace(CODIGO_DE_PROPOSTA, " ").replace(DESTINATARIO, " ");
+}
+
+/** A mensagem traz dado da proposta? (códigos de proposta e destinatário não contam.) */
+function temDadoDeProposta(texto: string): boolean {
+  return CAMPO_DA_PROPOSTA.test(semCodigoNemDestinatario(texto));
+}
+
+function eTrocaDeAssunto(texto: string): boolean {
+  const t = semCodigoNemDestinatario(texto);
+  return TEMA_FORA_DA_PROPOSTA.test(t) && !CAMPO_DA_PROPOSTA.test(t);
 }
 
 const STOP = new Set([
   "proposta", "essa", "esta", "ela", "dela", "rascunho", "assinatura", "agora", "novamente", "favor",
   "whatsapp", "email", "e-mail", "mail", "novo", "mim", "venda", "locacao", "aluguel", "max", "sim", "selfie",
+  // Quem assina não é o nome do rascunho ("manda a PROP-2026-0003 pra comprador assinar").
+  "comprador", "compradora", "inquilino", "inquilina", "proponente", "cliente", "vendedor", "vendedora", "assinar",
 ]);
 
 /**
@@ -1169,6 +1216,23 @@ function tituloDeclarado(texto: string | undefined): string | undefined {
 }
 
 /**
+ * "proposta de compra", "proposta de venda", "proposta de locação/aluguel" no
+ * pedido, sem palavra de formulário/ficha/contrato/negócio que torne o pedido
+ * ambíguo. Devolve a natureza dita ou `null` (segue a pergunta de escolha).
+ */
+export function propostaExplicitaNoPedido(pedido: string | undefined): { natureza: "venda" | "locacao" | undefined } | null {
+  if (!pedido) return null;
+  const t = pedido
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase();
+  if (/\b(?:formulario|ficha|contrato|negocio)\b/.test(t)) return null;
+  const m = /\bproposta\s+(?:rapida\s+)?(?:de|para)\s+(compra(?:\s+e\s+venda)?|venda|locacao|aluguel)\b/.exec(t);
+  if (!m) return null;
+  return { natureza: m[1] === "locacao" || m[1] === "aluguel" ? "locacao" : "venda" };
+}
+
+/**
  * Pedido de criação reconhecido (a `propor_criacao` do turn). Pedido explícito
  * de formulário/ficha (`tipo` venda/locação) já é o fluxo de negócio; pedido de
  * "proposta" — a palavra ambígua da conversa de 06/10 — começa pela escolha.
@@ -1203,6 +1267,13 @@ export async function iniciarFluxo(
   const tituloDoPedido = tituloDeclarado(params.pedido) ?? params.nomeCliente;
   if (params.tipo !== "proposta" && podeNegocio) {
     return carregarCamposDoNegocio(params.tipo, params.agora, deps, tituloDoPedido);
+  }
+  // "Proposta de compra/venda/locação" dita por extenso é pedido de PROPOSTA:
+  // perguntar "1 proposta ou 2 formulário" de novo foi o que a pessoa reclamou
+  // em 10/11/2026. A pergunta fica só para o pedido ambíguo ("uma proposta").
+  const explicita = propostaExplicitaNoPedido(params.pedido);
+  if (podeProposta && explicita) {
+    return iniciarProposta(explicita.natureza ?? params.natureza, params.pedido, params.agora, deps);
   }
   if (podeProposta && podeNegocio) {
     return {
@@ -1664,6 +1735,16 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
       };
     }
     return { liberar: true, fluxo: f, evento: "envio_liberado" };
+  }
+
+  // Rascunho já criado, sem ajuste nem campo à espera (prod 10/11): a mensagem
+  // sem dado da proposta NÃO passa pelo extrator. Pedido de envio vai ao caminho
+  // determinístico (métodos → cartão do SIM, nunca envia aqui); troca de assunto
+  // (pendência, status, agenda) encerra o fluxo em vez de prender o turno.
+  if (f.etapa === "ajustes" && f.propostaId && !f.ajustePendente && !f.aguardaCampo && !f.pendenciaCpf && resposta === "nenhum" &&
+      !temDadoDeProposta(ctx.texto)) {
+    if (pedeEnvio(ctx.texto)) return oferecerMetodos(f, ctx, deps);
+    if (eTrocaDeAssunto(ctx.texto)) return { liberar: true, fluxo: null, evento: "proposta_encerrada_por_assunto" };
   }
 
   // Fluxo retomado: só o CPF pendente pode ser corrigido sem conhecer a
