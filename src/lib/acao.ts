@@ -39,6 +39,9 @@ export const VERBOS_DE_ACAO = [
   "proposal.cancel",
   // Lembrar os signatários pendentes (Passo 4, 25/10): capability `proposal.send`, RBAC `PROPOSAL_RESEND`.
   "proposal.remind",
+  // Enviar a via ao proprietário depois que o proponente assinou (14/11/2026): reusa a capability
+  // `proposal.send` (sem capability nova), RBAC `PROPOSAL_SEND`. Mesma posição no contractmaker.
+  "proposal.send_owner",
   "proposal.recreate",
   "proposal.convert",
   "proposal.complete",
@@ -86,7 +89,8 @@ export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
 /** Envio de proposta, de análise de crédito e de captação esperam mais; o resto, o teto comum. */
 export function timeoutDoVerbo(verb: VerboDeAcao): number {
   // `proposal.remind` notifica cada signatário na ClickSign: espera como o envio.
-  if (verb === "proposal.send" || verb === "proposal.remind") return IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS;
+  // `proposal.send_owner` cria envelope/libera a assinatura na ClickSign: espera como o envio.
+  if (verb === "proposal.send" || verb === "proposal.remind" || verb === "proposal.send_owner") return IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS;
   if (verb === "captacao.send") return captacaoSendTimeoutMs();
   if (verb === "credit.request") return IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS;
   return IMOBPRO_TIMEOUT_MS;

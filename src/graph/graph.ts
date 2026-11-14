@@ -21,6 +21,7 @@ import { resolverReferencia } from "./referencias";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
 import { iniciarAssinatura, pedeAssinatura } from "./assinatura";
+import { pedeProprietario, respostaAoAviso, sugestaoPendente } from "./proprietario";
 import {
   negaAcao, pedeAcaoForaDoMax, pedeCapacidades, pedeLeituraNaoLiberada, TEXTO_LEITURA_NAO_LIBERADA, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
   textoDoAndamentoDoContrato, textoForaDoMax,
@@ -1154,7 +1155,16 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   }
   // Lembrar quem falta assinar / cancelar a assinatura de uma proposta (Passo 4, 25/10): fluxo próprio.
   // "Cancela a proposta" nunca é "exclui a proposta" (gestão): as duas detecções são disjuntas.
-  let assinatura = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura" ? pedeAssinatura(userText) : null;
+  // Depois que o proponente assina, a decisão é "enviar ao proprietário" ou "encerrar" (14/11/2026): o pedido
+  // explícito (`pedeProprietario`) ou a resposta curta ao aviso que o próprio Max mandou (`respostaAoAviso`,
+  // só com o aviso como ÚLTIMA fala do assistente). "encerrar"/"enviar" soltos, sem aviso, não viram verbo.
+  const sugestao = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura" ? sugestaoPendente(state.messages) : null;
+  const doAviso = sugestao ? respostaAoAviso(userText, sugestao) : null;
+  let assinatura = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura"
+    ? (pedeAssinatura(userText) ?? pedeProprietario(userText) ?? doAviso)
+    : null;
+  // Resposta ao aviso: a proposta é a do aviso (a frase curta não a cita). Pedido explícito a cita por conta própria.
+  const termoDoAviso = assinatura && assinatura === doAviso && !pedeProprietario(userText) && !pedeAssinatura(userText) ? sugestao!.codigo : undefined;
   // Trocar o contato de quem assina (Passo 4c): só orienta quando a proposta JÁ foi enviada. Antes do envio
   // (ou sem proposta achada, sem política, leitura falhando) o pedido não é deste fluxo: `assinatura` volta a
   // null e TUDO abaixo (gestão/edição, escopo, modelo) roda como se a detecção não tivesse disparado.
@@ -1206,7 +1216,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
 
   if (assinatura && !escritaEmAberto) {
     const passo = await iniciarAssinatura(assinatura, { texto: userText, messageId: state.inbound.messageId,
-      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
+      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage), termoDoAviso);
     return { fluxo: passo.fluxo, reply: passo.reply,
       messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
       toolLog: [{ name: "fluxo", args: { kind: "assinatura", operacao: assinatura }, outcome: passo.evento }] };
