@@ -20,7 +20,6 @@
 import type { DepsDoFluxo } from "../fluxos";
 import { normalizar } from "../tools";
 import type { OpcaoDeAssinatura, OptionsV2, Pendencia, RegraDeTestemunhas, TipoDeAssinatura } from "./contrato";
-import { PAPEL_COMPRADOR, PAPEL_VENDEDOR } from "./partes";
 import { ehFluxoDesligado } from "./selecao";
 
 type DepsAcao = Pick<DepsDoFluxo, "acao">;
@@ -272,33 +271,54 @@ const GRUPO_DO_PAPEL: Record<string, "compradores" | "vendedores"> = {
   contraparte: "vendedores",
 };
 
-export type MotivoSemCaminho = "papel_nao_gravavel" | "varias_pessoas" | "nome_divergente";
+export type MotivoSemCaminho = "papel_nao_gravavel" | "varias_pessoas" | "nome_divergente" | "rascunho_indisponivel";
 
 /**
- * O caminho canônico do celular de quem assina (`vendedores[0].telefone`) (R24). Lado seguro:
+ * As pessoas do RASCUNHO por grupo, na ordem do `dataJson` (`compradores[i]`, `vendedores[i]`): a mesma fonte
+ * que o `proposal.update` indexa. Só o nome (nunca CPF, e-mail ou telefone).
+ */
+export interface RascunhoPorGrupo {
+  compradores: ReadonlyArray<{ nome: string }>;
+  vendedores: ReadonlyArray<{ nome: string }>;
+}
+
+/**
+ * O rascunho por grupo que o agente tem neste ponto (R25): NENHUM. O `proposal.options` só traz `signatarios`
+ * (= `signers.filter(included)`, só quem ASSINA) e `tiposDeAssinatura[].assinantesSemCelular` (o mesmo signer);
+ * `proposal.detail` não traz partes; o estado do fluxo não guarda nomes (regra de PII do checkpoint). Contar
+ * `signatarios` é o furo do R24: com um vendedor fora da assinatura o lado conta 1 e `vendedores[0]` pode ser o
+ * OUTRO. Então: `null`, e o celular do Aceite vai sempre para a tela (fail-closed).
+ * PENDÊNCIA: o CM expor no `options` os nomes do rascunho por grupo (PR em par) -> devolver aqui.
+ */
+export function rascunhoPorGrupo(_options: OptionsV2): RascunhoPorGrupo | null {
+  return null;
+}
+
+/**
+ * O caminho canônico do celular de quem assina (`vendedores[0].telefone`) (R25). Lado seguro:
  *
- * Só grava quando o papel tem EXATAMENTE uma pessoa no rascunho (`k` = 0, sem depender de ordem alguma) e o nome dela
- * bate com o do destinatário. Com duas ou mais no mesmo lado (`compradores`/`vendedores`) NUNCA grava: `signatarios`
- * sai na ordem física do banco e `dataJson.vendedores[k]` na de criação, então o índice não é confiável; o celular
- * é preenchido na tela. A `posicao` do servidor (global, outra ordenação) nem entra na conta.
- * PENDÊNCIA: o CM expor posição estável (orderBy createdAt,id) -> PR em par; só então dá para gravar por índice.
+ * Só grava quando o grupo tem EXATAMENTE uma pessoa no RASCUNHO (`k` = 0) e o nome normalizado dela é igual ao
+ * do destinatário. Rascunho desconhecido, duas ou mais pessoas no grupo, grupo vazio ou nome divergente: não
+ * grava, o celular é preenchido na tela. `signatarios` nunca entra na conta (só lista quem assina), nem a
+ * `posicao` do servidor (global, outra ordenação).
  */
 export function resolverCelular(
   s: { papel: string; nome: string },
-  signatarios: ReadonlyArray<{ nome: string; papel: string }>
+  rascunho: RascunhoPorGrupo | null | undefined
 ): { ok: true; path: string } | { ok: false; motivo: MotivoSemCaminho } {
   const grupo = GRUPO_DO_PAPEL[normalizar(s.papel)];
   if (!grupo) return { ok: false, motivo: "papel_nao_gravavel" };
-  const lado = grupo === "compradores" ? PAPEL_COMPRADOR : PAPEL_VENDEDOR;
-  const doLado = signatarios.filter((x) => lado.has(normalizar(x.papel)));
-  if (doLado.length > 1) return { ok: false, motivo: "varias_pessoas" };
+  if (!rascunho || !Array.isArray(rascunho[grupo])) return { ok: false, motivo: "rascunho_indisponivel" };
+  const doGrupo = rascunho[grupo];
+  if (doGrupo.length > 1) return { ok: false, motivo: "varias_pessoas" };
   const alvo = normalizar(s.nome);
-  if (doLado.length !== 1 || alvo === "" || normalizar(doLado[0]!.nome) !== alvo) return { ok: false, motivo: "nome_divergente" };
+  const unico = doGrupo[0];
+  if (!unico || alvo === "" || typeof unico.nome !== "string" || normalizar(unico.nome) !== alvo) return { ok: false, motivo: "nome_divergente" };
   return { ok: true, path: `${grupo}[0].telefone` };
 }
 
-export function caminhoDoCelular(s: { papel: string; nome: string; posicao?: number }, signatarios: ReadonlyArray<{ nome: string; papel: string }>): string | null {
-  const r = resolverCelular(s, signatarios);
+export function caminhoDoCelular(s: { papel: string; nome: string; posicao?: number }, rascunho: RascunhoPorGrupo | null | undefined): string | null {
+  const r = resolverCelular(s, rascunho);
   return r.ok ? r.path : null;
 }
 

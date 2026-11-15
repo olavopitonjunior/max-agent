@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   avisoDeRegerar,
   caminhoDoCelular,
+  rascunhoPorGrupo,
   resolverCelular,
   comObrigatorias,
   definirTestemunhas,
@@ -241,11 +242,12 @@ describe("T13: testemunhas e tipo de assinatura", () => {
     // O Aceite aparece na lista (o celular se pergunta DEPOIS da escolha, antes do preflight)...
     expect(opcoesDeTipo(o).map((x) => x.tipo)).toEqual(["email", "aceite"]);
     expect(textoDeTipos(opcoesDeTipo(o))).toContain("falta o celular de Letícia Gonçalves");
-    // ...e o caminho que o condutor vai perguntar é o canônico do comprador (pelo NOME, no rascunho do papel).
-    const ordem = [{ nome: "Letícia Gonçalves", papel: "proponente" }];
-    expect(caminhoDoCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, ordem)).toBe("compradores[0].telefone");
+    // ...mas sem o rascunho por grupo (R25: o `options` não o traz) não há caminho: a escolha manda para a tela.
+    expect(caminhoDoCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, rascunhoPorGrupo(o))).toBeNull();
+    // Com o rascunho (fonte futura do CM), o caminho seria o canônico do comprador.
+    expect(caminhoDoCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, { compradores: [{ nome: "Letícia Gonçalves" }], vendedores: [] })).toBe("compradores[0].telefone");
     // Cônjuge e testemunha o Max não grava, mas o Aceite NÃO some em silêncio: é oferecido, e a escolha explica.
-    expect(caminhoDoCelular({ papel: "conjuge", nome: "Letícia Gonçalves" }, [{ nome: "Letícia Gonçalves", papel: "conjuge" }])).toBeNull();
+    expect(caminhoDoCelular({ papel: "conjuge", nome: "Letícia Gonçalves" }, { compradores: [{ nome: "Letícia Gonçalves" }], vendedores: [] })).toBeNull();
     const semComoGravar = options({
       tiposDeAssinatura: [
         { tipo: "aceite", disponivel: false, motivo: "assinante_sem_celular", assinantesSemCelular: [{ posicao: 1, papel: "testemunha", nome: "Dora" }], texto: "Aceite" },
@@ -254,65 +256,59 @@ describe("T13: testemunhas e tipo de assinatura", () => {
     expect(opcoesDeTipo(semComoGravar).map((x) => x.tipo)).toEqual(["aceite"]);
   });
 
-  // C1 (R24): só grava com EXATAMENTE uma pessoa no papel (k=0, sem depender de ordem) e o nome batendo.
-  // Com duas ou mais no mesmo papel nunca grava: a ordem de `signatarios` não é a do `dataJson`.
-  describe("C1: o celular só é gravado quando o papel tem uma única pessoa no rascunho", () => {
-    const vendedores = [
-      { nome: "Valter Vendedor", papel: "vendedor" },
-      { nome: "Vera Vendedora", papel: "vendedor" },
-    ];
-    const proponente = { nome: "Letícia Gonçalves", papel: "proponente" };
+  // R25: a contagem e o nome são conferidos contra o RASCUNHO (a mesma fonte que o `proposal.update` indexa),
+  // nunca contra `signatarios` (só quem ASSINA: um vendedor fora da assinatura sumiria da conta).
+  describe("R25: o celular só é gravado com UMA pessoa no grupo do RASCUNHO e o nome batendo", () => {
+    const valter = { nome: "Valter Vendedor" };
+    const vera = { nome: "Vera Vendedora" };
+    const leticia = { nome: "Letícia Gonçalves" };
 
-    it("negado primeiro: dois vendedores não gravam, em qualquer ordem de `signatarios`, para qualquer um dos dois", () => {
-      const ordens = [
-        [proponente, vendedores[0]!, vendedores[1]!],
-        [proponente, vendedores[1]!, vendedores[0]!],
-        [vendedores[1]!, proponente, vendedores[0]!],
-        [vendedores[0]!, vendedores[1]!, proponente],
-      ];
-      for (const ordem of ordens) {
-        for (const quem of vendedores) {
-          expect(caminhoDoCelular({ papel: "vendedor", nome: quem.nome }, ordem)).toBeNull();
-          expect(resolverCelular({ papel: "vendedor", nome: quem.nome }, ordem)).toEqual({ ok: false, motivo: "varias_pessoas" });
-        }
+    it("negado primeiro: rascunho com 2 vendedores (só 1 incluído na assinatura) não grava, para nenhum dos dois", () => {
+      const rascunho = { compradores: [leticia], vendedores: [valter, vera] };
+      for (const quem of [valter, vera]) {
+        expect(resolverCelular({ papel: "vendedor", nome: quem.nome }, rascunho)).toEqual({ ok: false, motivo: "varias_pessoas" });
+        expect(caminhoDoCelular({ papel: "vendedor", nome: quem.nome }, rascunho)).toBeNull();
       }
     });
 
-    it("dois do mesmo papel com o mesmo nome também não gravam", () => {
-      const iguais = [
-        { nome: "Maria Silva", papel: "vendedor" },
-        { nome: "maria  silva", papel: "vendedor" },
-      ];
-      expect(resolverCelular({ papel: "vendedor", nome: "Maria Silva" }, iguais)).toEqual({ ok: false, motivo: "varias_pessoas" });
+    it("negado: rascunho indisponível (null/undefined) não grava, mesmo com um único signatário de nome igual", () => {
+      expect(resolverCelular({ papel: "vendedor", nome: "Valter Vendedor" }, null)).toEqual({ ok: false, motivo: "rascunho_indisponivel" });
+      expect(resolverCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, undefined)).toEqual({ ok: false, motivo: "rascunho_indisponivel" });
     });
 
-    it("dois compradores/proponentes: também não grava", () => {
-      const dois = [{ nome: "Ana", papel: "proponente" }, { nome: "Cris", papel: "comprador" }];
-      expect(caminhoDoCelular({ papel: "proponente", nome: "Ana" }, dois)).toBeNull();
+    it("negado: o agente não tem fonte do rascunho; `signatarios` NUNCA vira rascunho", () => {
+      const o = options({ signatarios: [{ nome: "Valter Vendedor", papel: "vendedor" }, { nome: "Letícia Gonçalves", papel: "proponente" }] });
+      expect(rascunhoPorGrupo(o)).toBeNull();
     });
 
-    it("vendedor único sem celular: grava em vendedores[0], com `signatarios` em qualquer ordem", () => {
-      expect(caminhoDoCelular({ papel: "vendedor", nome: "Valter Vendedor" }, [proponente, vendedores[0]!])).toBe("vendedores[0].telefone");
-      expect(caminhoDoCelular({ papel: "vendedor", nome: "Valter Vendedor" }, [vendedores[0]!, proponente])).toBe("vendedores[0].telefone");
-      expect(caminhoDoCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, [vendedores[0]!, proponente])).toBe("compradores[0].telefone");
+    it("negado: 1 vendedor no rascunho com nome divergente não grava", () => {
+      const rascunho = { compradores: [leticia], vendedores: [valter] };
+      expect(resolverCelular({ papel: "vendedor", nome: "Outro Nome" }, rascunho)).toEqual({ ok: false, motivo: "nome_divergente" });
+      expect(resolverCelular({ papel: "vendedor", nome: "" }, rascunho)).toEqual({ ok: false, motivo: "nome_divergente" });
     });
 
-    it("a posição do destinatário nem entra na conta (ignorada mesmo se vier errada)", () => {
-      expect(caminhoDoCelular({ posicao: 99, papel: "vendedor", nome: "Valter Vendedor" }, [proponente, vendedores[0]!])).toBe("vendedores[0].telefone");
+    it("negado: grupo vazio no rascunho não grava", () => {
+      expect(resolverCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, { compradores: [], vendedores: [valter] })).toEqual({ ok: false, motivo: "nome_divergente" });
     });
 
-    it("vendedor único com nome divergente, nome ausente ou rascunho vazio: não grava", () => {
-      expect(resolverCelular({ papel: "vendedor", nome: "Outro Nome" }, [proponente, vendedores[0]!])).toEqual({ ok: false, motivo: "nome_divergente" });
-      expect(resolverCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, [])).toEqual({ ok: false, motivo: "nome_divergente" });
+    it("negado: dois do mesmo grupo com o mesmo nome também não gravam", () => {
+      const rascunho = { compradores: [], vendedores: [{ nome: "Maria Silva" }, { nome: "maria  silva" }] };
+      expect(resolverCelular({ papel: "vendedor", nome: "Maria Silva" }, rascunho)).toEqual({ ok: false, motivo: "varias_pessoas" });
     });
 
-    it("mesmo nome em lados diferentes não atrapalha (conta só o papel)", () => {
-      const lados = [{ nome: "Maria Silva", papel: "proponente" }, { nome: "Maria Silva", papel: "vendedor" }];
-      expect(caminhoDoCelular({ papel: "vendedor", nome: "Maria Silva" }, lados)).toBe("vendedores[0].telefone");
+    it("1 vendedor no rascunho com o mesmo nome (normalizado): grava em vendedores[0]", () => {
+      const rascunho = { compradores: [leticia], vendedores: [valter] };
+      expect(caminhoDoCelular({ papel: "vendedor", nome: "valter  VENDEDOR" }, rascunho)).toBe("vendedores[0].telefone");
+      expect(caminhoDoCelular({ papel: "proprietario", nome: "Valter Vendedor" }, rascunho)).toBe("vendedores[0].telefone");
+      expect(caminhoDoCelular({ papel: "proponente", nome: "Leticia Goncalves" }, rascunho)).toBe("compradores[0].telefone");
+    });
+
+    it("a posição do destinatário nem entra na conta", () => {
+      expect(caminhoDoCelular({ posicao: 99, papel: "vendedor", nome: "Valter Vendedor" }, { compradores: [], vendedores: [valter] })).toBe("vendedores[0].telefone");
     });
 
     it("papel que o Max não grava (cônjuge, testemunha): não grava", () => {
-      expect(resolverCelular({ papel: "testemunha", nome: "Dora" }, [{ nome: "Dora", papel: "testemunha" }])).toEqual({ ok: false, motivo: "papel_nao_gravavel" });
+      expect(resolverCelular({ papel: "testemunha", nome: "Dora" }, { compradores: [], vendedores: [{ nome: "Dora" }] })).toEqual({ ok: false, motivo: "papel_nao_gravavel" });
     });
 
     it("sem como casar, o Aceite continua na lista (nada some em silêncio): a escolha é que explica", () => {

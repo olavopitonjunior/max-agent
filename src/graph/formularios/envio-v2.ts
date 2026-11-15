@@ -51,6 +51,7 @@ import {
 } from "../../lib/meta-flow";
 import { lerConfirmacao, normalizar } from "../tools";
 import {
+  rascunhoPorGrupo,
   resolverCelular,
   type MotivoSemCaminho,
   avisoDeRegerar,
@@ -459,18 +460,21 @@ const POR_QUE_NAO_GRAVA: Record<MotivoSemCaminho, string> = {
   papel_nao_gravavel: "esse é um papel (cônjuge ou testemunha) que eu não edito por aqui",
   varias_pessoas: "com mais de um vendedor ou comprador o celular é preenchido na tela",
   nome_divergente: "o nome não bate com o que está no rascunho, então não sei com segurança de quem é",
+  rascunho_indisponivel: "não consigo conferir no rascunho de quem é esse celular",
 };
 
 /**
- * O que fazer com o celular do Aceite (R24). Só se grava com UMA pessoa no papel e o nome batendo (`resolverCelular`);
+ * O que fazer com o celular do Aceite (R25). Só se grava com UMA pessoa no grupo do RASCUNHO e o nome batendo
+ * (`resolverCelular`); hoje o agente não tem o rascunho por grupo (`rascunhoPorGrupo` = null), então sempre tela;
  * se QUALQUER um não dá para gravar com segurança, nada é perguntado: explica e manda para a tela (sem metade feita).
  */
 function proximoCelular(options: OptionsV2, tipo: TipoDeAssinatura): ProximoCelular {
   if (tipo !== "aceite") return null;
   const aceite = (options.tiposDeAssinatura ?? []).find((o) => o.tipo === "aceite");
   const achados: Array<{ posicao: number; papel: string; nome: string; path: string }> = [];
+  const rascunho = rascunhoPorGrupo(options);
   for (const s of aceite?.assinantesSemCelular ?? []) {
-    const r = resolverCelular(s, options.signatarios ?? []);
+    const r = resolverCelular(s, rascunho);
     if (!r.ok) {
       return {
         tipo: "tela",
