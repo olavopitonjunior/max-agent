@@ -99,5 +99,18 @@ describe("I5: ficha selada no outbox", () => {
       expect(String(sql)).toContain(`starts_with(body, '${PREFIXO_DO_SELO}')`);
       expect(String(sql)).toMatch(/LIMIT \d+/);
     });
+
+    // Rodada 3 (M-A): o 131047 assíncrono devolve a linha `sent` a `pending` (delivery.ts) para o
+    // reenvio por template. Se o corpo já tivesse sido zerado, o reenvio sairia sem a ficha.
+    it("não zera o corpo de linha `sent` dentro da carência do 131047 (sent recente fica selada)", async () => {
+      ligar();
+      vi.mocked(query).mockClear();
+      vi.mocked(query).mockResolvedValueOnce([] as never);
+      await limparCorposSelados();
+      const sql = String(vi.mocked(query).mock.calls.at(-1)![0]);
+      expect(sql).toMatch(/status <> 'sent'\s+OR\s+sent_at IS NULL\s+OR\s+sent_at < now\(\) - interval '1 hour'/);
+      // dropped/failed não voltam a pending por esse caminho: seguem sem carência
+      expect(sql).toMatch(/status IN \('sent', 'dropped', 'failed'\)/);
+    });
   });
 });

@@ -226,6 +226,14 @@ export async function cancelarPendentesPorPrefixo(prefixo: string): Promise<numb
 const LOTE_DA_VARREDURA_DE_SELADOS = 200;
 
 /**
+ * Carência de uma linha `sent` antes de zerar o corpo selado. O 131047 assíncrono (delivery.ts,
+ * `applyFalhaDeEnvio`) devolve a linha `sent` a `pending` para o reenvio por template; com o corpo
+ * já zerado, o reenvio sairia sem a ficha. A Meta entrega esse `failed` em segundos a minutos, então
+ * uma hora cobre com folga (o corpo segue cifrado, nunca em claro, durante a carência).
+ */
+const CARENCIA_DO_131047 = "1 hour";
+
+/**
  * I5: zera o corpo SELADO (ficha com valor de documento) das linhas que já não vão
  * mais sair (`sent`, `dropped`, `failed`). Nunca toca `pending`/`sending`. Roda no
  * início de cada despacho; devolve quantas linhas limpou.
@@ -243,6 +251,7 @@ export async function limparCorposSelados(): Promise<number> {
       WHERE id IN (
         SELECT id FROM outbox
          WHERE status IN ('sent', 'dropped', 'failed') AND starts_with(body, '${PREFIXO_DO_SELO}')
+           AND (status <> 'sent' OR sent_at IS NULL OR sent_at < now() - interval '${CARENCIA_DO_131047}')
          LIMIT ${LOTE_DA_VARREDURA_DE_SELADOS}
          FOR UPDATE SKIP LOCKED
       )
