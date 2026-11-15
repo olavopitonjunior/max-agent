@@ -11,6 +11,20 @@
 
 export type VersaoDoFluxo = 1 | 2;
 
+/** Passo da revisão (T11/T12): um Flow (ou uma lista numerada) por passo. */
+export type PassoDeRevisao = "partes" | "imovel_valor" | "assinatura";
+
+/**
+ * A revisão em curso (T11/T12). Só caminhos canônicos do rascunho (`compradores[0].cpf`):
+ * nunca valor. `itens` é a numeração da lista ("2 Maria Souza" = o 2º caminho). `via`: `flow`
+ * (Max, o Flow do passo já foi enviado) ou `texto` (lista numerada: Newton, ou Max sem Flow).
+ */
+export interface RevisaoEmCurso {
+  passo: PassoDeRevisao;
+  via: "flow" | "texto";
+  itens: string[];
+}
+
 export type EtapaV2 = "entender" | "compor" | "ficha" | "revisar" | "assinatura" | "envio" | "correcao";
 
 /** O campo que a próxima resposta curta preenche ("123.456.789-09" sem dizer de quê). */
@@ -71,6 +85,13 @@ export interface FluxoFormularioV2 {
    * "é o mesmo, troca". Só grupo e posição; o nome vem do servidor a cada turno.
    */
   conflito?: { grupo: "compradores" | "vendedores"; posicao: number };
+  /** A revisão do rascunho em curso (T11/T12). Ausente = não está revisando. */
+  revisao?: RevisaoEmCurso;
+  /**
+   * Link da tela do rascunho, SÓ quando o servidor o deu (`documento.link` da gravação ou o
+   * `link` de `edicao_pela_tela`/`documento_proprio`). O Max nunca o monta (§18.13.5).
+   */
+  linkDaTela?: string;
   /** Todo `Fluxo` carrega isto: TTL e expiração. */
   atualizadoEm: number;
 }

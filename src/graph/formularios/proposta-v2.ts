@@ -595,8 +595,17 @@ function lerValor(tipo: TipoDeCampo, texto: string, def: CampoObrigatorio | unde
 export function lerRespostaAoCampo(f: FluxoFormularioV2, texto: string, obrigatorios?: CampoObrigatorio[]): RespostaAoCampo {
   const aguarda = f.aguardaCampo;
   if (!aguarda) return LIBERAR;
+  return lerCampoPorCaminho(aguarda.path, aguarda.parteRef, texto, obrigatorios);
+}
+
+/**
+ * A MESMA leitura da resposta ao campo, para um campo escolhido por caminho (T11/T12): o item
+ * numerado da revisão ("2 Maria Souza") e cada campo de uma resposta de Flow passam por aqui, então
+ * a validação (CPF/CNPJ com dígito, telefone, valor, data, opção do catálogo) é a do texto livre.
+ */
+export function lerCampoPorCaminho(path0: string, parteRef: string, texto: string, obrigatorios?: CampoObrigatorio[]): RespostaAoCampo {
   // Checkpoint antigo ou de outra origem: a chave do catálogo é convertida aqui, com a posição da `parteRef`.
-  const path = caminhoCanonico(aguarda.path, signatarioDaParteRef(aguarda.parteRef));
+  const path = caminhoCanonico(path0, signatarioDaParteRef(parteRef));
   const destino = destinoDoCampo(path);
   if (!destino) return LIBERAR;
   const def = obrigatorios?.find((o) => semIndice(caminhoCanonico(o.chave, null)) === semIndice(path));
@@ -607,7 +616,7 @@ export function lerRespostaAoCampo(f: FluxoFormularioV2, texto: string, obrigato
   if (!leitura) return LIBERAR;
   if ("invalido" in leitura) return { tipo: "invalida", reply: leitura.invalido };
   const patch = patchDe(destino, leitura.valor);
-  return patch ? { tipo: "preenche", patch, campo: { parteRef: aguarda.parteRef, path } } : LIBERAR;
+  return patch ? { tipo: "preenche", patch, campo: { parteRef, path } } : LIBERAR;
 }
 
 // ─── Retomada de rascunho ────────────────────────────────────────────────
