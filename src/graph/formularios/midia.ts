@@ -87,6 +87,12 @@ export interface DepsDaMidia {
   }): Promise<string | null>;
   /** `NEWTON_MEDIA_INBOUND`: sem ela, `zapi:` nem é baixado. */
   newtonMidiaAtiva(): boolean;
+  /**
+   * `MAX_OCR_TRANSCRIBE_FALLBACK` (T9): sem `document.read`, foto COM legenda é
+   * transcrita e vira texto. O custo da transcrição é registrado pelo servidor
+   * (AIUsage): este lado não reporta uso.
+   */
+  fallbackDeTranscricao?: boolean;
 }
 
 export interface ContextoDaMidia {
@@ -148,7 +154,15 @@ export async function lerMidia(
 
     // Portão barato: sem a capability não há o que mandar ao servidor, e baixar
     // a mídia só para descartá-la é custo e dado em trânsito à toa.
-    if (!deps.temDocumentRead) return naoLido("sem_leitura");
+    if (!deps.temDocumentRead) {
+      // T9: o único caminho de leitura sem a capability é a transcrição de IMAGEM com
+      // legenda. Sem legenda não há turno para o texto alimentar (os lidos vivem só no
+      // turno), então nem se paga a transcrição. PDF nunca: o transcribe é de imagem.
+      if (deps.fallbackDeTranscricao && m.kind === "image" && m.legenda?.trim() && deps.transcrever) {
+        return await lerImagemPorTranscricao(deps, m);
+      }
+      return naoLido("sem_leitura");
+    }
 
     const baixado = await baixarSeguro(deps, m.ref);
     if (!baixado) return naoLido("falha");
@@ -198,6 +212,27 @@ export async function lerMidia(
   } catch {
     return naoLido("falha");
   }
+}
+
+/** Prefixo do texto transcrito de uma imagem (T9): é DADO de documento, não fala do corretor. */
+const PREFIXO_TEXTO_NA_IMAGEM = "Texto na imagem: ";
+
+async function lerImagemPorTranscricao(deps: DepsDaMidia, m: MidiaRecebida): Promise<ResultadoDaMidia> {
+  const baixado = await baixarSeguro(deps, m.ref);
+  if (!baixado) return naoLido("falha");
+  if (baixado.data.length > TETO_DA_MIDIA_BYTES) return naoLido("tamanho");
+  const mime = sniffMime(baixado.data);
+  if (mime === "image/heic" || mime === "image/heif") return naoLido("heic");
+  if (mime !== "image/jpeg" && mime !== "image/png" && mime !== "image/webp") return naoLido("mime");
+  let texto: string | null | undefined;
+  try {
+    texto = await deps.transcrever!({ kind: "image", mimeType: mime, data: baixado.data });
+  } catch {
+    // A mensagem do erro pode trazer a URL de mídia: descartada de propósito.
+    return naoLido("falha");
+  }
+  const limpo = texto?.trim();
+  return limpo ? { tipo: "texto", texto: `${PREFIXO_TEXTO_NA_IMAGEM}${limpo}` } : naoLido("falha");
 }
 
 async function lerAudio(deps: DepsDaMidia, m: MidiaRecebida): Promise<ResultadoDaMidia> {

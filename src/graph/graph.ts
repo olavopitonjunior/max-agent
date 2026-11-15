@@ -27,6 +27,7 @@ import {
 } from "./capacidades";
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
+import { ocrTranscribeFallbackLigado } from "./captacao-flags";
 import { fraseDeNaoLido, lerMidia, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
 import {
   comoMensagemDaJanela,
@@ -217,8 +218,21 @@ export type { ResultadoDeTool };
  * Vive só durante o `invoke` (limpo no `finally` do `runTurn`). O fallback
  * `state.inbound.text` existe só para os testes que chamam `buildGraph` direto.
  */
-interface TurnoCru { texto?: string; reply?: string; draft?: string }
+interface TurnoCru {
+  texto?: string; reply?: string; draft?: string;
+  /** Texto lido de uma imagem (T9): DADO só deste turno, para a janela de extração. Nunca no state. */
+  lidos?: DocumentoLido[];
+}
 const TURNO_CRU = new Map<string, TurnoCru>();
+/** Põe (ou limpa, com `[]`) os documentos lidos deste turno. Para `runTurnCore` e para testes com `buildGraph`. */
+export function registrarLidosDoTurno(messageId: string, lidos: DocumentoLido[]): void {
+  const atual = TURNO_CRU.get(messageId) ?? {};
+  if (lidos.length) TURNO_CRU.set(messageId, { ...atual, lidos });
+  else if (atual.lidos) {
+    const { lidos: _l, ...resto } = atual;
+    TURNO_CRU.set(messageId, resto);
+  }
+}
 function textoDoTurno(state: { inbound: InboundMessage }): string {
   return TURNO_CRU.get(state.inbound.messageId)?.texto ?? state.inbound.text ?? "";
 }
@@ -921,7 +935,9 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
   // v2 (T4): só com a feature. Sem ela o objeto abaixo não ganha estes dois métodos.
   const janelaV2 = featureEnabled("formularios_v2", orgId)
     ? {
-        janelaDoTurno: (mensagensAnteriores: number, lidos: DocumentoLido[] = []) => {
+        janelaDoTurno: (mensagensAnteriores: number, lidosDoChamador?: DocumentoLido[]) => {
+          // Sem os seus, valem os documentos lidos NESTE turno (texto de imagem, T9).
+          const lidos = lidosDoChamador ?? TURNO_CRU.get(state.inbound.messageId)?.lidos ?? [];
           const doCorretor = state.messages.filter((m) => m.role === "user").map((m) => m.content);
           // `slice(-0)` devolveria tudo: 0 (ou negativo) é "nenhuma anterior".
           const n = Math.max(0, Math.floor(mensagensAnteriores));
@@ -2922,6 +2938,10 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
       });
     }
   }
+  // Texto lido de uma imagem (fallback T9, sempre com legenda): é DADO do turno para a janela
+  // de extração. Fica só em `TURNO_CRU`: nunca vira mensagem, memória nem checkpoint.
+  const lidosDoTurno: DocumentoLido[] =
+    daMidia?.tipo === "texto" && inbound.kind === "image" ? [{ ref: inbound.messageId, texto: daMidia.texto }] : [];
   if (daMidia?.tipo === "campos") {
     // A foto não é um "sim": nenhuma pendência de escrita sobrevive a este turno.
     await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
@@ -2991,7 +3011,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   // turn já faz. Em paralelo com o grafo (que só compila na primeira vez).
   const [facts, app] = await Promise.all([loadFacts(orgId, phone), getApp()]);
 
-  TURNO_CRU.set(inbound.messageId, { texto: turnText });
+  TURNO_CRU.set(inbound.messageId, lidosDoTurno.length ? { texto: turnText, lidos: lidosDoTurno } : { texto: turnText });
   let replyCru: string | undefined;
   const result = await comRastro(() => app.invoke(
     {
@@ -3244,6 +3264,9 @@ async function lerMidiaDoFluxoV2(identity: Candidate, inbound: InboundMessage): 
           ...(p.papelSugerido ? { papelSugerido: p.papelSugerido } : {}),
           ...(p.posicao ? { posicao: p.posicao } : {}),
         }),
+      // `transcribeMedia` é cobrado pelo servidor (AIUsage lá): nenhum `reportUsage` aqui.
+      transcrever: (m) => transcribeMedia(orgId, m),
+      fallbackDeTranscricao: ocrTranscribeFallbackLigado(),
       newtonMidiaAtiva: newtonMediaAtiva,
     };
     return await lerMidia(
