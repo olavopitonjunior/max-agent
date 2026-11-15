@@ -2249,6 +2249,8 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
     houveLeitura: state.toolResults.some((r) => r.items !== null),
     podeCriar: modoDeCriacao(state.identity, state.policy) === "disponivel",
     podeEnviar: podeEscrever(state.identity) && state.policy.includes("proposal.send"),
+    // W46: "ajusto o complemento" sem tool de escrita no turno é promessa vazia.
+    houveEscrita: (state.toolLog ?? []).some((t) => buscarNoRegistro(t.name)?.tipo === "escrita"),
   });
   if (trava.travou) {
     console.warn(`[compose] afirmação de criação/envio sem escrita em ${state.identity.orgId}`);

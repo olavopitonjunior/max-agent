@@ -490,6 +490,28 @@ function conferirCampo(
   if (candidatos.some((c) => igual(c, valor))) return valor;
   return candidatos.length === 1 ? candidatos[0] : undefined;
 }
+const UNIDADE = "apartamento|apto|ap|unidade|bloco|sala|casa|conjunto|conj|loja|andar|fundos|cobertura|torre";
+const COMPLEMENTO_DITADO = new RegExp(
+  `\\bcomplemento(?:\\s+d[oa]\\s+im[oó]vel)?(?:\\s*[:=]\\s*|\\s+(?:é|e|eh|será|sera|ficou|fica|para|pra|passa a ser|deve ser|vai ser)\\s+|\\s+(?=(?:${UNIDADE})\\b))(.{1,60}?)\\s*[.!]?\\s*$`,
+  "iu"
+);
+/**
+ * O complemento que a pessoa escreveu por extenso ("complemento é apartamento 1").
+ * Determinístico de propósito: é o que vale quando o extrator não devolve nada
+ * ou copia o valor antigo. Pergunta ("o que é complemento?") não casa.
+ */
+export function complementoDitado(texto: string): string | null {
+  const m = texto.trim().match(COMPLEMENTO_DITADO);
+  if (!m) return null;
+  const valor = m[1]
+    .split(/\s+e\s+(?:o|a)\s+(?:valor|preco|preço|telefone|celular|e-?mail|cpf|nome|endereco|endereço|sinal|comissao|comissão|prazo)\b/i)[0]
+    .replace(/[\s.,;!]+$/, "")
+    .trim();
+  if (!valor || /[?]/.test(valor) || valor.length > 40) return null;
+  if (/^(que|o que|quando|como|qual|quais)\b/i.test(valor)) return null;
+  return valor;
+}
+
 export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaProposta {
   // `(?<!\d)`: sem fronteira à esquerda o regex casava DENTRO do CPF ("52998224725"
   // → telefone "2998224725"; smoke 26/10).
@@ -1775,7 +1797,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
           : { reply: "Ainda preciso de um CPF válido do proponente. Me mande o CPF correto para ajustar o rascunho.", fluxo: f, evento: "cpf_pendente" };
       }
     }
-    const pareceAjuste = /\d|@|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|imovel|rua|bairro|cidade|numero|cpf|telefone|celular|e-?mail|nome|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal)\b/.test(
+    const pareceAjuste = /\d|@|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|imovel|rua|bairro|cidade|numero|complemento|cpf|telefone|celular|e-?mail|nome|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal)\b/.test(
       normalizar(ctx.texto)
     ) || !!campoSoNaTela(ctx.texto);
     // Com dado novo, o ajuste vem ANTES do envio: "corrige o e-mail e manda
@@ -1804,6 +1826,14 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // devolvia "WhatsApp" para "remove o fiador da proposta da X" (eval 09/10),
   // e o PATCH trocaria o canal sem ninguém pedir.
   if (parcial && novos.canal && !/\b(whats\w*|zap|e-?mail|canal|sms)\b/.test(normalizar(ctx.texto))) delete novos.canal;
+  // W46: "complemento é apartamento 1" é correção de UM campo, dita por extenso.
+  // O extrator às vezes devolve nada (ou copia o complemento antigo) e o fluxo
+  // liberava para o modelo, que prometia "ajusto" sem gravar. O que a pessoa
+  // escreveu vale — e o resumo é remontado para o SIM.
+  if (!avulso) {
+    const complemento = complementoDitado(ctx.texto);
+    if (complemento) novos.imovel = { ...novos.imovel, complemento };
+  }
   const dados = mesclarDados(f.dados, novos);
   if (novos.imovel?.complemento && !dados.imovel?.endereco) {
     return {

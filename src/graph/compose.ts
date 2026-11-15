@@ -499,23 +499,154 @@ export function afirmaCriacao(texto: string): boolean {
   return AFIRMA_EM_PRIMEIRA_PESSOA.test(t) || AFIRMA_OBJETO_CRIADO.test(t);
 }
 
+// ─── Promessa em presente/futuro que o turno não cumpriu ────────────────────
+
+/**
+ * W45–W46: "Perfeito, ajusto o complemento" / "vou ajustar" / "já atualizo" /
+ * "assim que tiver o status, eu te atualizo por aqui" — e nada foi gravado, nem
+ * há como o Max voltar a falar sozinho depois. É a mesma mentira do "criei", só
+ * que no futuro, e o `travarCriacaoFalsa` só enxergava o passado.
+ *
+ * Sem escrita no turno, a FRASE da promessa cai e entra um texto de template
+ * (o resto da resposta fica: o status que veio junto continua valendo). Três
+ * desfechos, por o que a frase prometia:
+ *  - aviso/atualização POSTERIOR → diz o que o Max não faz sozinho e onde ver;
+ *  - alteração de um campo conhecido → pergunta concreta que leva ao fluxo;
+ *  - alteração sem alvo → nada foi alterado, diga o que mudar.
+ *
+ * Estreito de propósito (mesma lição do #55): só primeira pessoa COMPROMETENDO-SE
+ * ("vou", "já", "perfeito, ajusto", "te aviso", "será ajustado"). "Quer que eu
+ * ajuste?", "posso ajustar" e "se confirmar, eu mostro" são oferta/pergunta e
+ * passam — o que leva a pessoa ao fluxo é exatamente a oferta.
+ */
+const VERBOS_DE_ALTERACAO =
+  "ajust\\w+|atualiz\\w+|alter\\w+|corrig\\w+|mud\\w+|troc\\w+|edit\\w+|anot\\w+|registr\\w+|salv\\w+|grav\\w+|aplic\\w+";
+const NORM = (s: string) => s.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+
+const PROMETE_FUTURO = new RegExp(
+  `\\b(?:vou|irei|vamos|iremos)\\s+(?:te\\s+|lhe\\s+)?(?:${VERBOS_DE_ALTERACAO}|avis\\w+|notific\\w+|retorn\\w+|cri\\w+|ger\\w+|cadastr\\w+)\\b`
+);
+/** "Ajusto…", "Já atualizo…", "Perfeito, ajusto…": presente comprometendo, no início da frase. */
+const PROMETE_PRESENTE_ANCORADO = new RegExp(
+  `^(?:(?:ja|agora|entao|perfeito|certo|ok|okay|beleza|combinado|pode deixar|claro|entendido)\\b[,.!;:]?\\s+)*(?:eu\\s+)?(?:ajusto|atualizo|altero|corrijo|mudo|troco|edito|anoto|aplico|notifico)\\b`
+);
+/** "Ajusto o valor e te aviso": a segunda metade também promete. */
+const PROMETE_PRESENTE_COORDENADO = /\b(?:e|depois)\s+(?:eu\s+)?(?:ajusto|atualizo|altero|corrijo|aviso|notifico)\b/;
+const PROMETE_AVISO = /\b(?:te|lhe)\s+(?:atualizo|aviso|notifico|retorno|informo)\b|\bavisarei\b|\batualizarei\b/;
+
+/** Passiva de alteração: "será ajustado/atualizado/corrigido…" (particípio, não "será feito pela imobiliária"). */
+const PROMETE_PASSIVA_ALTERACAO = /\b(?:sera|serao|ficara|ficarao)\s+(?:ajustad|atualizad|alterad|corrigid|mudad|trocad|editad|anotad|registrad|salv|gravad|aplicad)[oa]s?\b/;
+
+function frasesDe(texto: string): string[] {
+  return texto.match(/[^.!?\n]+(?:[.!?]+|$)|\n/g) ?? [texto];
+}
+
+function fraseEhPromessa(frase: string): boolean {
+  const t = NORM(frase).trim();
+  // Pergunta ou oferta não compromete: "quer que eu ajuste?", "posso ajustar".
+  if (/\?\s*$/.test(t.trim())) return false;
+  if (/\b(?:ainda )?nao\s+(?:vou|irei|ajust\w+|atualiz\w+|alter\w+|avis\w+)\b/.test(t)) return false;
+  if (/\b(?:quer|queira|posso|podemos|prefere|gostaria)\b/.test(t)) return false;
+  return (
+    PROMETE_FUTURO.test(t) ||
+    PROMETE_PRESENTE_ANCORADO.test(t) ||
+    PROMETE_PRESENTE_COORDENADO.test(t) ||
+    PROMETE_AVISO.test(t) ||
+    PROMETE_PASSIVA_ALTERACAO.test(t)
+  );
+}
+
+/** O texto do modelo PROMETE (presente/futuro) algo que não é conversa nem oferta? */
+export function promessaSemEfeito(texto: string): boolean {
+  return frasesDe(texto).some(fraseEhPromessa);
+}
+
+export const TEXTO_SEM_AVISO_POSTERIOR =
+  "Não consigo avisar depois por conta própria: só falo por aqui quando você escreve ou quando o sistema notifica. " +
+  "Para ver o status agora, me pergunte pelo negócio ou abra a proposta no sistema.";
+export const TEXTO_NADA_ALTERADO_PERGUNTE =
+  "Ainda não alterei nada por aqui. Me diga o que quer mudar e o novo valor, que eu mostro o resumo para você confirmar.";
+
+/** Campo que a frase promete mexer — o rótulo que a pessoa reconhece, com artigo. */
+const ALVOS_DE_CORRECAO: [RegExp, string][] = [
+  [/\bcomplemento\b/, "o complemento"],
+  [/\b(?:valor|preco|aluguel)\b/, "o valor"],
+  [/\b(?:telefone|celular|whatsapp)\b/, "o telefone"],
+  [/\be-?mail\b/, "o e-mail"],
+  [/\bcpf\b/, "o CPF"],
+  [/\bendereco\b/, "o endereço"],
+  [/\bbairro\b/, "o bairro"],
+  [/\bcidade\b/, "a cidade"],
+  [/\bsinal\b/, "o sinal"],
+  [/\bcomissao\b/, "a comissão"],
+  [/\bmatricula\b/, "a matrícula"],
+  [/\bprazo\b/, "o prazo"],
+  [/\bnome\b/, "o nome"],
+  [/\bcanal\b/, "o canal da assinatura"],
+];
+
+function alvoDeCorrecao(fraseNormalizada: string): string | null {
+  return ALVOS_DE_CORRECAO.find(([re]) => re.test(fraseNormalizada))?.[1] ?? null;
+}
+
+/**
+ * Cai a frase da promessa; entra o texto honesto UMA vez, no lugar da primeira.
+ * Sem escrita no turno e sem promessa, devolve o texto intacto.
+ */
+export function travarPromessaSemEfeito(
+  texto: string,
+  ctx: { houveEscrita?: boolean }
+): { texto: string; travou: boolean } {
+  if (ctx.houveEscrita) return { texto, travou: false };
+  const frases = frasesDe(texto);
+  if (!frases.some(fraseEhPromessa)) return { texto, travou: false };
+
+  let honesto: string | null = null;
+  const saida: string[] = [];
+  for (const frase of frases) {
+    if (!fraseEhPromessa(frase)) {
+      saida.push(frase);
+      continue;
+    }
+    if (honesto !== null) continue;
+    const t = NORM(frase);
+    const alvo = alvoDeCorrecao(t);
+    const prometeAviso = PROMETE_AVISO.test(t) || /\b(?:avis|notific|retorn)\w+/.test(t);
+    honesto = alvo
+      ? `Ainda não alterei nada. Quer que eu altere ${alvo}? Me confirme o novo valor.`
+      : prometeAviso
+        ? TEXTO_SEM_AVISO_POSTERIOR
+        : TEXTO_NADA_ALTERADO_PERGUNTE;
+    saida.push(`\n${honesto}\n`);
+  }
+  // A frase honesta ganha a própria linha; o resto da resposta segue como veio.
+  const corpo = saida.join("").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { texto: corpo, travou: true };
+}
+
 /**
  * Troca a afirmação falsa pelo texto honesto.
  *
  * Não troca quando o turn LEU dados com sucesso: "proposta criada em 05/10"
  * pode ser fato de um item listado. Leitura que FALHOU não conta — senão a
  * falha desligaria a trava justamente no turn em que o modelo improvisa.
+ *
+ * `houveEscrita` (opcional; ausente = sem escrita): a PROMESSA em
+ * presente/futuro só é trocada quando o turno não escreveu nada — e vale mesmo
+ * quando o turno leu (ler não é cumprir o "ajusto").
  */
 export function travarCriacaoFalsa(
   texto: string,
-  ctx: { houveLeitura: boolean; podeCriar: boolean; podeEnviar?: boolean }
+  ctx: { houveLeitura: boolean; podeCriar: boolean; podeEnviar?: boolean; houveEscrita?: boolean }
 ): { texto: string; travou: boolean } {
   if (encenaConfirmacao(texto)) return { texto: TEXTO_SEM_ENCENACAO, travou: true };
-  if (ctx.houveLeitura) return { texto, travou: false };
+  const promessa = travarPromessaSemEfeito(texto, ctx);
+  texto = promessa.texto;
+  if (ctx.houveLeitura) return { texto, travou: promessa.travou };
   if (afirmaEnvio(texto)) {
     return { texto: ctx.podeEnviar ? TEXTO_NADA_ENVIADO : TEXTO_NADA_ENVIADO_SEM_ENVIO, travou: true };
   }
-  if (!afirmaCriacao(texto)) return { texto, travou: false };
+  if (!afirmaCriacao(texto)) return { texto, travou: promessa.travou };
   return {
     texto: ctx.podeCriar ? TEXTO_NADA_CRIADO : TEXTO_NADA_CRIADO_SEM_CRIACAO,
     travou: true,
