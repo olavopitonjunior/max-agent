@@ -257,6 +257,18 @@ describe("idSintetico", () => {
     expect(idSintetico({ ...base, agoraMs: base.agoraMs + 30_000 })).toBe(a);
   });
 
+  it("mídia: sem ela (ausente, null ou vazia) o id é o de hoje; com ela muda, e dois arquivos não colidem", () => {
+    const a = idSintetico(base);
+    expect(idSintetico({ ...base, midia: null })).toBe(a);
+    expect(idSintetico({ ...base, midia: "" })).toBe(a);
+    const foto1 = idSintetico({ ...base, midia: "zapi:https://media.zapi.example/1.jpeg" });
+    const foto2 = idSintetico({ ...base, midia: "zapi:https://media.zapi.example/2.jpeg" });
+    expect(foto1).not.toBe(a);
+    expect(foto1).not.toBe(foto2);
+    expect(idSintetico({ ...base, midia: "zapi:https://media.zapi.example/1.jpeg" })).toBe(foto1);
+    expect(foto1).toMatch(/^newton:[0-9a-f]{40}$/);
+  });
+
   it("muda com minuto, texto, telefone, grupo ou anexos", () => {
     const a = idSintetico(base);
     expect(idSintetico({ ...base, agoraMs: base.agoraMs + 60_000 })).not.toBe(a);
