@@ -13,6 +13,8 @@ vi.mock("@/lib/inbound", () => ({
   processInboundNow: vi.fn().mockResolvedValue(undefined),
 }));
 
+import fixtureMidia from "./__fixtures__/newton-run-midia.json";
+
 const { POST } = await import("../agents/newton/run/route");
 const inbound = await import("@/lib/inbound");
 const { waitUntil } = await import("@vercel/functions");
@@ -198,6 +200,181 @@ describe("POST /api/agents/newton/run", () => {
     expect(waitUntil).not.toHaveBeenCalled();
     expect(err.mock.calls.flat().join(" ")).toContain("newton.fila_falhou");
     err.mockRestore();
+  });
+});
+
+/**
+ * Mídia por URL (`mediaUrl`/`mediaKind`/`mimeType`, plano de mídia do Newton).
+ * O fixture é o MESMO arquivo que a ponte tem em `__fixtures__/`: é ele que
+ * faz o papel do teste de paridade, já que aqui não há HMAC.
+ */
+describe("POST /api/agents/newton/run: mídia por URL", () => {
+  const fixture = fixtureMidia as Record<string, unknown>;
+  const { messageId: _semId, ...semMessageId } = fixture;
+  void _semId;
+  const URL_FOTO = "https://media.zapi.example/instances/X/foto.jpeg";
+
+  beforeEach(() => {
+    vi.stubEnv("NEWTON_MEDIA_HOSTS", "media.zapi.example");
+  });
+
+  function ligar() {
+    vi.stubEnv("NEWTON_MEDIA_INBOUND", "true");
+  }
+
+  it("flag desligada: o fixture inteiro vira unknown, igual a hoje (receptor inerte)", async () => {
+    const res = await POST(req(fixture));
+    expect(await res.json()).toEqual({ text: "", blocked: false });
+    expect(enqueue.mock.calls[0][0]).toMatchObject({
+      kind: "unknown",
+      text: null,
+      mediaUrl: null,
+      mimeType: null,
+      messageId: "3EB0A1B2C3D4E5F6",
+    });
+  });
+
+  it("flag desligada com qualquer valor que não seja 'true'", async () => {
+    vi.stubEnv("NEWTON_MEDIA_INBOUND", "1");
+    await POST(req(fixture));
+    vi.stubEnv("NEWTON_MEDIA_INBOUND", "false");
+    await POST(req(fixture));
+    for (const [m] of enqueue.mock.calls) expect(m).toMatchObject({ kind: "unknown", mediaUrl: null });
+  });
+
+  it("flag desligada: a mídia sem anexo e sem texto nem enfileira, como sempre", async () => {
+    await POST(req(corpoDM({ text: "", attachments: [], mediaUrl: URL_FOTO, mediaKind: "image", mimeType: "image/jpeg" })));
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("flag ligada com host fora da allowlist, http ou mime não permitido: cai em unknown", async () => {
+    ligar();
+    const ruins = [
+      { mediaUrl: "https://evil.example/foto.jpeg" },
+      { mediaUrl: "http://media.zapi.example/foto.jpeg" },
+      { mediaUrl: "https://127.0.0.1/foto.jpeg" },
+      { mediaUrl: "https://media.zapi.example@evil.example/foto.jpeg" },
+      { mimeType: "image/gif" },
+      { mimeType: "application/pdf" },
+      { mediaKind: "audio" },
+      { mediaKind: "video", mimeType: "video/mp4" },
+    ];
+    for (const ruim of ruins) {
+      const res = await POST(req({ ...fixture, ...ruim }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ text: "", blocked: false });
+    }
+    expect(enqueue).toHaveBeenCalledTimes(ruins.length);
+    for (const [m] of enqueue.mock.calls) expect(m).toMatchObject({ kind: "unknown", mediaUrl: null, mimeType: null });
+  });
+
+  it("flag ligada com a allowlist vazia: recusa tudo", async () => {
+    ligar();
+    vi.stubEnv("NEWTON_MEDIA_HOSTS", "");
+    await POST(req(fixture));
+    expect(enqueue.mock.calls[0][0]).toMatchObject({ kind: "unknown", mediaUrl: null });
+  });
+
+  it("flag ligada + grupo com mediaUrl: nada é enfileirado", async () => {
+    ligar();
+    const res = await POST(req({ ...fixture, groupId: "120363012345678901-group" }));
+    expect(await res.json()).toEqual({ text: "", blocked: false });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("flag ligada + fixture: imagem com a referência zapi:, sem o marcador como texto", async () => {
+    ligar();
+    const res = await POST(req(fixture));
+    expect(await res.json()).toEqual({ text: "", blocked: false });
+    expect(enqueue.mock.calls[0][0]).toMatchObject({
+      kind: "image",
+      mediaUrl: `zapi:${URL_FOTO}`,
+      mimeType: "image/jpeg",
+      text: null,
+      messageId: "3EB0A1B2C3D4E5F6",
+      groupId: null,
+      fromPhone: "5511900000001",
+    });
+    expect(waitUntil).toHaveBeenCalledTimes(1);
+  });
+
+  it("flag ligada + legenda: a legenda é o texto", async () => {
+    ligar();
+    await POST(req({ ...fixture, text: "segue o RG do comprador" }));
+    expect(enqueue.mock.calls[0][0]).toMatchObject({
+      kind: "image",
+      text: "segue o RG do comprador",
+      mediaUrl: `zapi:${URL_FOTO}`,
+    });
+  });
+
+  it("flag ligada + PDF: kind document, marcador não vira texto", async () => {
+    ligar();
+    await POST(
+      req({
+        ...fixture,
+        text: "[documento: matricula.pdf]",
+        attachments: [{ type: "document", mime: "application/pdf", filename: "matricula.pdf" }],
+        mediaUrl: "https://media.zapi.example/instances/X/matricula.pdf",
+        mediaKind: "document",
+        mimeType: "application/pdf",
+      })
+    );
+    expect(enqueue.mock.calls[0][0]).toMatchObject({
+      kind: "document",
+      text: null,
+      mimeType: "application/pdf",
+      mediaUrl: "zapi:https://media.zapi.example/instances/X/matricula.pdf",
+    });
+  });
+
+  it("flag ligada: mediaUrl vale mesmo sem o array attachments", async () => {
+    ligar();
+    await POST(req({ ...fixture, attachments: [], text: "" }));
+    expect(enqueue.mock.calls[0][0]).toMatchObject({ kind: "image", mediaUrl: `zapi:${URL_FOTO}` });
+  });
+
+  it("flag ligada: mimeType em maiúscula e com parâmetro chega normalizado", async () => {
+    ligar();
+    await POST(req({ ...fixture, mimeType: "IMAGE/JPEG; charset=binary" }));
+    expect(enqueue.mock.calls[0][0]).toMatchObject({ kind: "image", mimeType: "image/jpeg" });
+  });
+
+  it("sem messageId, duas fotos sem legenda no mesmo minuto não colidem; reentrega da mesma é igual", async () => {
+    ligar();
+    const outra = { ...semMessageId, mediaUrl: "https://media.zapi.example/instances/X/outra.jpeg" };
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-23T15:00:05Z"));
+      await POST(req(semMessageId));
+      vi.setSystemTime(new Date("2026-10-23T15:00:20Z"));
+      await POST(req(outra));
+      vi.setSystemTime(new Date("2026-10-23T15:00:40Z"));
+      await POST(req(semMessageId));
+    } finally {
+      vi.useRealTimers();
+    }
+    const ids = enqueue.mock.calls.map((c) => c[0].messageId);
+    expect(ids[0]).toMatch(/^newton:[0-9a-f]{40}$/);
+    expect(ids[1]).not.toBe(ids[0]);
+    expect(ids[2]).toBe(ids[0]);
+  });
+
+  it("a URL nunca vai para log, console nem para o que o motor registra de erro", async () => {
+    ligar();
+    const espioes = (["log", "info", "warn", "error"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+    try {
+      await POST(req(fixture)); // aceita
+      await POST(req({ ...fixture, mediaUrl: "https://evil.example/instances/X/foto.jpeg" })); // recusada
+      enqueue.mockRejectedValueOnce(new Error("pg down")); // falha de fila
+      await POST(req(fixture));
+      const saida = espioes.flatMap((s) => s.mock.calls.flat()).join(" ");
+      expect(saida).not.toContain("foto.jpeg");
+      expect(saida).not.toContain("instances/X");
+      expect(saida).toContain("newton.midia_recusada");
+    } finally {
+      espioes.forEach((s) => s.mockRestore());
+    }
   });
 });
 

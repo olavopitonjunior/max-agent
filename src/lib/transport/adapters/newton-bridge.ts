@@ -1,4 +1,6 @@
-import { fetchWithTimeout, NEWTON_BRIDGE_TIMEOUT_MS } from "../../http";
+import { fetchWithTimeout, NEWTON_BRIDGE_TIMEOUT_MS, NEWTON_MEDIA_TIMEOUT_MS } from "../../http";
+import { MAX_MEDIA_BYTES } from "../../meta";
+import { sniffMime, urlDeMidiaPermitida, ZAPI_MEDIA_PREFIX } from "../newton-media";
 import type { TransportAdapter } from "../types";
 
 /**
@@ -9,8 +11,9 @@ import type { TransportAdapter } from "../types";
  * `{provider, messageId, raw}`.
  *
  * Sem template e sem janela de 24h: a Z-API manda texto livre sempre. Sem
- * mídia e sem status por enquanto — o bridge descarta os callbacks de status
- * (fase 4.2 do plano).
+ * envio de mídia e sem status por enquanto — o bridge descarta os callbacks de
+ * status (fase 4.2 do plano). A mídia que CHEGA é outra coisa: o bridge repassa
+ * a URL da Z-API (`zapi:<url>` na fila) e `downloadMedia` baixa daqui.
  */
 
 /** Teto do bridge (ele mesmo corta em 4096 antes de mandar). */
@@ -66,7 +69,70 @@ export const newtonBridgeAdapter: TransportAdapter = {
   async connectionStatus() {
     return { connected: true, raw: { adapter: "newton-bridge" } };
   },
-  async downloadMedia() {
-    return null;
+  async downloadMedia(ref) {
+    return baixarMidiaZapi(ref);
   },
 };
+
+/**
+ * Baixa a mídia que o bridge repassou por URL. A URL vem num corpo e é link não
+ * adivinhável para documento de cliente, então: só `https` e host da allowlist
+ * (`urlDeMidiaPermitida`), sem seguir redirect, sem credencial no pedido, teto
+ * de `MAX_MEDIA_BYTES` conferido no cabeçalho e nos bytes lidos, e o tipo vale o
+ * dos bytes (`sniffMime`). Todo tropeço devolve `null` (o grafo trata mídia que
+ * não leu) e o log traz só o host e o motivo — nunca a URL nem a mensagem do
+ * erro, que o wrapper de timeout monta com o caminho.
+ */
+async function baixarMidiaZapi(ref: string): Promise<{ data: Buffer; contentType: string | null } | null> {
+  if (!ref.startsWith(ZAPI_MEDIA_PREFIX)) return null;
+  const url = urlDeMidiaPermitida(ref.slice(ZAPI_MEDIA_PREFIX.length));
+  if (!url) {
+    console.warn("[newton-bridge] mídia recusada: motivo=host");
+    return null;
+  }
+  const recusar = (motivo: string): null => {
+    console.warn(`[newton-bridge] mídia não baixada: host=${url.host} motivo=${motivo}`);
+    return null;
+  };
+  try {
+    const res = await fetchWithTimeout(url.href, { method: "GET", redirect: "manual", headers: {} }, NEWTON_MEDIA_TIMEOUT_MS);
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return recusar(`http_${res.status}`);
+    }
+    const declarado = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declarado) && declarado > MAX_MEDIA_BYTES) {
+      await res.body?.cancel().catch(() => {});
+      return recusar("tamanho");
+    }
+    const data = await lerAteOTeto(res);
+    if (!data || data.byteLength === 0) return recusar("tamanho");
+    const tipo = sniffMime(data);
+    if (!tipo) return recusar("tipo");
+    return { data, contentType: tipo };
+  } catch {
+    return recusar("erro");
+  }
+}
+
+/** Lê o corpo em pedaços e desiste ao passar do teto, sem materializar o excedente. `null` = passou. */
+async function lerAteOTeto(res: Response): Promise<Buffer | null> {
+  if (!res.body) {
+    const data = Buffer.from(await res.arrayBuffer());
+    return data.byteLength > MAX_MEDIA_BYTES ? null : data;
+  }
+  const reader = res.body.getReader();
+  const partes: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_MEDIA_BYTES) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    partes.push(value);
+  }
+  return Buffer.concat(partes, total);
+}

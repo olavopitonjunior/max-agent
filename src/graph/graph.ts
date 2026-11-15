@@ -82,6 +82,7 @@ import {
   type PendingAction,
 } from "./tools";
 import { downloadMedia, sendReaction, interativoDisponivel } from "@/lib/transport";
+import { ZAPI_MEDIA_PREFIX } from "@/lib/transport/newton-media";
 import {
   loadFacts,
   saveFacts,
@@ -2593,12 +2594,27 @@ export function getApp(): Promise<AppCompilado> {
   return appCompilado;
 }
 
+/**
+ * O `inbound` que o checkpoint guarda: sem o texto cru (os nós leem de
+ * `TURNO_CRU`) e sem a referência `zapi:<url>` da mídia do Newton. A URL é link
+ * não adivinhável para documento de cliente e o download já aconteceu antes do
+ * `invoke`: nenhum nó lê `inbound.mediaUrl`. O resto do `inbound` fica intacto;
+ * `meta:<id>` segue como está (não é credencial).
+ */
+export function inboundParaCheckpoint(inbound: InboundMessage): InboundMessage {
+  return {
+    ...inbound,
+    text: null,
+    mediaUrl: inbound.mediaUrl?.startsWith(ZAPI_MEDIA_PREFIX) ? null : inbound.mediaUrl,
+  };
+}
+
 /** Playground uses this exact compiled graph while raw text stays out of checkpoints. */
 export async function invokeIsolatedGraph(inbound: InboundMessage, identity: Candidate, threadId: string) {
   const app = await getApp();
   TURNO_CRU.set(inbound.messageId, { texto: inbound.text ?? "" });
   try {
-    const result = await app.invoke({ ...RESET_DO_TURN, identity, facts: {}, inbound: { ...inbound, text: null } }, { configurable: { thread_id: threadId } });
+    const result = await app.invoke({ ...RESET_DO_TURN, identity, facts: {}, inbound: inboundParaCheckpoint(inbound) }, { configurable: { thread_id: threadId } });
     return { ...result, reply: TURNO_CRU.get(inbound.messageId)?.reply ?? result.reply };
   } finally { TURNO_CRU.delete(inbound.messageId); }
 }
@@ -2937,7 +2953,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   const result = await comRastro(() => app.invoke(
     {
       // Sem texto: o checkpoint guarda o `inbound`; os nós leem o cru de `TURNO_CRU`.
-      inbound: { ...inbound, text: null },
+      inbound: inboundParaCheckpoint(inbound),
       identity: identity.candidate,
       fromMedia,
       facts,
