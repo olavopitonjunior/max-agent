@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { conduzirV2 } from "../condutor";
 import { novoFluxoV2, type FluxoFormularioV2 } from "../estado";
-import { itensDaRevisao } from "../revisao";
+import { TEXTO_EDITAR_PELA_TELA, itensDaRevisao } from "../revisao";
 import type { OptionsV2 } from "../contrato";
 import { consumirFlowDoTurno, flowDisponivel } from "../../../lib/meta-flow";
 import type { ContextoDoTurno, DepsDoFluxo, RespostaDoServidor } from "../../fluxos";
 
 /**
- * A revisão no Newton (PR-C2, T12): ficha numerada com o link da tela, nunca Flow. O Z-API não tem
+ * A revisão no Newton (PR-C2, T12): ficha numerada, nunca Flow, sem link (R20). O Z-API não tem
  * Flow, e a correção por número ou em frase passa pela mesma leitura e pelo mesmo SIM do Max.
  * O perfil é fixado aqui (`newton`), para valer também na suíte do Max; o config do Newton o repete.
  */
@@ -19,7 +19,6 @@ const THREAD = "thread-revisao-newton";
 const SUBJECT = JSON.stringify(["org-1", "u1"]);
 const CPF = "529.982.247-25";
 const CPF_DIGITOS = "52998224725";
-const LINK = "https://exemplo.test/propostas/prop-1";
 
 const OBRIGATORIOS = [
   { chave: "proponente.nome", rotulo: "Nome do comprador", grupo: "Partes", esteira: "venda", tipoCampo: "texto" },
@@ -66,7 +65,7 @@ function montar(texto: string, args: Record<string, unknown> | null = {}, messag
 const escritas = (acao: ReturnType<typeof montar>["acao"]) => acao.mock.calls.filter(([v]) => v === "proposal.create" || v === "proposal.update");
 
 function salvo(extra: Partial<FluxoFormularioV2> = {}): FluxoFormularioV2 {
-  return { ...novoFluxoV2({ esteira: "venda", agora: T0, schemaType: "compra_venda_v1" }), proposalId: "prop-1", etapa: "compor", linkDaTela: LINK, ...extra };
+  return { ...novoFluxoV2({ esteira: "venda", agora: T0, schemaType: "compra_venda_v1" }), proposalId: "prop-1", etapa: "compor", ...extra };
 }
 
 function emRevisao(): FluxoFormularioV2 {
@@ -85,23 +84,24 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("Newton: ficha numerada, link da tela, nunca Flow", () => {
-  it("Newton recebe ficha numerada e link da tela, nunca Flow", async () => {
+describe("Newton: ficha numerada, nunca Flow", () => {
+  it("Newton recebe ficha numerada e o aviso fixo para editar pela tela, nunca Flow", async () => {
     expect(flowDisponivel("partes")).toBeNull();
     const t = montar("revisar", {}, "wamid.NEWT");
     const passo = await conduzirV2(salvo(), t.ctx, t.deps);
     expect(passo.reply).toMatch(/^1\. Comprador 1 · Nome do comprador/m);
     expect(passo.reply).toMatch(/^2\. Vendedor 1 · Nome do vendedor/m);
-    expect(passo.reply).toContain(LINK);
+    expect(passo.reply).toContain(TEXTO_EDITAR_PELA_TELA);
+    expect(passo.reply).not.toMatch(/https?:\/\//);
     expect(passo.reply).not.toContain("Toque em *Revisar*");
     expect(consumirFlowDoTurno("wamid.NEWT")).toBeUndefined();
     expect((passo.fluxo as FluxoFormularioV2).revisao).toMatchObject({ passo: "partes", via: "texto" });
     expect(escritas(t.acao)).toHaveLength(0);
   });
 
-  it("sem link dado pelo servidor, a ficha diz para abrir a proposta no sistema (o link nunca é inventado)", async () => {
+  it("mesmo que o estado traga um link no checkpoint antigo, a ficha nunca o mostra (I4/R20)", async () => {
     const t = montar("revisar");
-    const passo = await conduzirV2(salvo({ linkDaTela: undefined }), t.ctx, t.deps);
+    const passo = await conduzirV2(salvo({ linkDaTela: "https://exemplo.test/doc" } as never), t.ctx, t.deps);
     expect(passo.reply).not.toMatch(/https?:\/\//);
     expect(passo.reply).toContain("abra a proposta no sistema");
   });

@@ -3,8 +3,8 @@
  *
  *  - `itensDaRevisao`: a lista NUMERADA dos campos a conferir, gerada do `obrigatorios[]` do
  *    servidor e das partes que o rascunho já tem (nada escrito à mão, nada de valor);
- *  - `textoDaRevisao`: a ficha numerada que vai ao Newton (com o link da tela) e serve de corpo
- *    e de reserva ao Flow no Max. Sem CPF, sem valor: só rótulo e ✅/⬜;
+ *  - `textoDaRevisao`: a ficha numerada que vai ao Newton e serve de corpo e de reserva ao Flow no
+ *    Max. Sem CPF, sem valor: só rótulo e ✅/⬜. Nunca leva link da tela (R20: texto fixo);
  *  - `lerCorrecaoNumerada`: "2 Maria Souza" corrige o item 2, pela MESMA leitura do texto livre.
  *
  * Nada aqui grava. A correção vira campo lido, ficha com cartão e o "sim" de sempre (o condutor).
@@ -14,24 +14,21 @@ import { normalizar } from "../tools";
 import { LIMITE_DA_FICHA } from "./ficha";
 import { caminhoCanonico, lerCampoPorCaminho, type RespostaAoCampo } from "./proposta-v2";
 import type { CampoObrigatorio, OptionsV2, Pendencia } from "./contrato";
+import { signatariosPorLado, type LadoDaParte } from "./partes";
 
-const PAPEL_COMPRADOR = new Set(["comprador", "locatario", "proponente", "inquilino"]);
-const PAPEL_VENDEDOR = new Set(["vendedor", "locador", "proprietario", "contraparte"]);
-
-export type LadoDaParte = "compradores" | "vendedores";
+export type { LadoDaParte };
 
 /** Quantas partes por lado o rascunho tem (mínimo 1: o item da primeira parte sempre existe) e o papel dito. */
-export function partesDaRevisao(options: OptionsV2): Record<LadoDaParte, { quantas: number; nomes: string[]; papel: string }> {
-  const lado = { compradores: { quantas: 1, nomes: [] as string[], papel: "Comprador" }, vendedores: { quantas: 1, nomes: [] as string[], papel: "Vendedor" } };
-  for (const s of options.signatarios ?? []) {
-    const papel = normalizar(s.papel ?? "");
-    const alvo = PAPEL_COMPRADOR.has(papel) ? lado.compradores : PAPEL_VENDEDOR.has(papel) ? lado.vendedores : null;
-    if (!alvo) continue;
-    alvo.nomes.push(s.nome);
-    alvo.quantas = Math.max(alvo.quantas, alvo.nomes.length);
-    if (alvo.nomes.length === 1 && papel) alvo.papel = papel.charAt(0).toUpperCase() + papel.slice(1);
-  }
-  return lado;
+export function partesDaRevisao(options: OptionsV2): Record<LadoDaParte, { quantas: number; papel: string }> {
+  const por = signatariosPorLado(options);
+  const rotulo = (lado: LadoDaParte, padrao: string): string => {
+    const papel = por[lado][0]?.papel;
+    return papel ? papel.charAt(0).toUpperCase() + papel.slice(1) : padrao;
+  };
+  return {
+    compradores: { quantas: Math.max(1, por.compradores.length), papel: rotulo("compradores", "Comprador") },
+    vendedores: { quantas: Math.max(1, por.vendedores.length), papel: rotulo("vendedores", "Vendedor") },
+  };
 }
 
 const LADO_DO_PREFIXO: Record<string, LadoDaParte> = { proponente: "compradores", contraparte: "vendedores" };
@@ -84,13 +81,14 @@ export interface EntradaDoTexto {
   itens: string[];
   /** O que o servidor ainda pede DEPOIS da última gravação; `null` = não sei (sem ✅/⬜). */
   faltando: Pendencia[] | null;
-  /** Só quando o SERVIDOR o deu (`documento.link`, `edicao_pela_tela.link`). Nunca montado aqui. */
-  link?: string;
   /** Texto antes da lista (o "salvei" da gravação); entra no orçamento de caracteres. */
   prefixo?: string;
   /** O Flow vai junto: o texto convida a tocar nele; a lista continua como reserva. */
   comFlow?: boolean;
 }
+
+/** R20: texto fixo. O link do Google Doc (`documento_proprio`) convida à edição à mão e trava a gravação. */
+export const TEXTO_EDITAR_PELA_TELA = "Para editar pela tela, abra a proposta no sistema.";
 
 export const TEXTO_CORRIJA_ASSIM =
   'Para corrigir, mande o número e o valor (ex.: "2 Maria Souza") ou diga em frase. Nada é gravado sem o seu SIM.';
@@ -103,10 +101,7 @@ export function textoDaRevisao(a: EntradaDoTexto): string {
   const faltam = a.faltando ? caminhosFaltando(a.faltando) : null;
   const marca = (path: string): string => (faltam === null ? "" : faltam.has(path) ? " ⬜" : " ✅");
   const cabecalho = a.comFlow ? "📋 Revisão da proposta. Toque em *Revisar* para conferir pelo formulário." : "📋 Revisão da proposta";
-  const rodape = [
-    TEXTO_CORRIJA_ASSIM,
-    a.link ? `Para editar pela tela: ${a.link}` : "Para editar pela tela, abra a proposta no sistema.",
-  ].join("\n");
+  const rodape = [TEXTO_CORRIJA_ASSIM, TEXTO_EDITAR_PELA_TELA].join("\n");
   const prefixo = a.prefixo ? `${a.prefixo}\n\n` : "";
   const RESERVA = 40; // "…e mais NN itens" com folga
   const orcamento = LIMITE_DA_FICHA - prefixo.length - cabecalho.length - rodape.length - 4 - RESERVA;

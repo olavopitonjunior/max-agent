@@ -16,13 +16,19 @@ export type PassoDeRevisao = "partes" | "imovel_valor" | "assinatura";
 
 /**
  * A revisão em curso (T11/T12). Só caminhos canônicos do rascunho (`compradores[0].cpf`):
- * nunca valor. `itens` é a numeração da lista ("2 Maria Souza" = o 2º caminho). `via`: `flow`
- * (Max, o Flow do passo já foi enviado) ou `texto` (lista numerada: Newton, ou Max sem Flow).
+ * nunca valor. `itens` é a numeração da lista ("2 Maria Souza" = o 2º caminho).
+ *
+ * `via`: `texto` (lista numerada) até o Flow PROVAR ter chegado: vira `flow` só quando uma resposta
+ * de Flow com o token deste envio é aceita (o condutor decide antes do envio e não sabe se a Meta
+ * entregou o Flow ou o texto de reserva). `nonce`: o segredo deste envio de Flow, parte do
+ * `flow_token` (`fv2:<passo>:<nonce>`); sem ele (revisão só em texto) nenhuma resposta de Flow vale.
+ * Não é dado pessoal.
  */
 export interface RevisaoEmCurso {
   passo: PassoDeRevisao;
   via: "flow" | "texto";
   itens: string[];
+  nonce?: string;
 }
 
 export type EtapaV2 = "entender" | "compor" | "ficha" | "revisar" | "assinatura" | "envio" | "correcao";
@@ -87,11 +93,6 @@ export interface FluxoFormularioV2 {
   conflito?: { grupo: "compradores" | "vendedores"; posicao: number };
   /** A revisão do rascunho em curso (T11/T12). Ausente = não está revisando. */
   revisao?: RevisaoEmCurso;
-  /**
-   * Link da tela do rascunho, SÓ quando o servidor o deu (`documento.link` da gravação ou o
-   * `link` de `edicao_pela_tela`/`documento_proprio`). O Max nunca o monta (§18.13.5).
-   */
-  linkDaTela?: string;
   /** Todo `Fluxo` carrega isto: TTL e expiração. */
   atualizadoEm: number;
 }

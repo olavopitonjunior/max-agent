@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { conduzirV2 } from "../condutor";
 import { novoFluxoV2, type FluxoFormularioV2 } from "../estado";
-import { itensDaRevisao, lerCorrecaoNumerada, pedeRevisao, textoDaRevisao, TEXTO_CORRIJA_ASSIM } from "../revisao";
+import { itensDaRevisao, lerCorrecaoNumerada, pedeRevisao, textoDaRevisao, TEXTO_CORRIJA_ASSIM, TEXTO_EDITAR_PELA_TELA } from "../revisao";
 import { LIMITE_DA_FICHA } from "../ficha";
 import type { OptionsV2 } from "../contrato";
 import { consumirFlowDoTurno } from "../../../lib/meta-flow";
@@ -20,6 +20,7 @@ const THREAD = "thread-revisao";
 const SUBJECT = JSON.stringify(["org-1", "u1"]);
 const CPF = "529.982.247-25";
 const CPF_DIGITOS = "52998224725";
+const NONCE = "NONCE_DA_REVISAO";
 
 const OBRIGATORIOS = [
   { chave: "proponente.nome", rotulo: "Nome do comprador", grupo: "Partes", esteira: "venda", tipoCampo: "texto" },
@@ -52,6 +53,8 @@ interface Montagem {
   escrita?: RespostaDoServidor | null;
   messageId?: string;
   agora?: number;
+  /** `button_payload` do turno (`flow:<token>` quando é resposta de Flow). */
+  botao?: string | null;
 }
 
 function montar(m: Montagem = {}) {
@@ -76,6 +79,7 @@ function montar(m: Montagem = {}) {
     thread: THREAD,
     subjectKey: SUBJECT,
     podeEscrever: true,
+    botao: m.botao ?? null,
   };
   return { acao, extrairComJanela, pausa, deps, ctx };
 }
@@ -87,9 +91,12 @@ function salvo(extra: Partial<FluxoFormularioV2> = {}): FluxoFormularioV2 {
 }
 
 /** Uma revisão já aberta nos itens do `options` de teste. */
-function emRevisao(via: "flow" | "texto", passo: "partes" | "imovel_valor" = "partes"): FluxoFormularioV2 {
-  return salvo({ etapa: "revisar", revisao: { passo, via, itens: itensDaRevisao(opcoesTipadas()) } });
+function emRevisao(via: "flow" | "texto", passo: "partes" | "imovel_valor" = "partes", nonce = NONCE): FluxoFormularioV2 {
+  return salvo({ etapa: "revisar", revisao: { passo, via, nonce, itens: itensDaRevisao(opcoesTipadas()) } });
 }
+
+/** O `button_payload` que o Meta grava quando o `flow_token` é o do Flow enviado (I1). */
+const botaoDoFlow = (passo: "partes" | "imovel_valor" = "partes", nonce = NONCE) => `flow:fv2:${passo}:${nonce}`;
 
 beforeEach(() => {
   vi.stubEnv("AGENT_DEPLOY_PROFILE", "max");
@@ -129,18 +136,16 @@ describe("lista numerada (a parte pura)", () => {
   it("muitos itens: corta em 'e mais N' e continua dentro do limite", () => {
     const muitos = Array.from({ length: 80 }, (_, i) => ({ chave: `imovel.campo_${i}`, rotulo: `Um rótulo bem comprido do campo número ${i}`, grupo: "Imóvel", esteira: "venda", tipoCampo: "texto" }));
     const o = opcoesTipadas({ obrigatorios: muitos });
-    const t = textoDaRevisao({ options: o, itens: itensDaRevisao(o), faltando: null, link: "https://exemplo.test/p/1" });
+    const t = textoDaRevisao({ options: o, itens: itensDaRevisao(o), faltando: null });
     expect(t.length).toBeLessThanOrEqual(LIMITE_DA_FICHA);
     expect(t).toMatch(/…e mais \d+ itens/);
   });
 
-  it("o link só aparece quando o servidor o deu; nunca é montado aqui", () => {
+  it("a ficha nunca leva link: sempre o aviso fixo de abrir a proposta no sistema (I4/R20)", () => {
     const o = opcoesTipadas();
-    const sem = textoDaRevisao({ options: o, itens: itensDaRevisao(o), faltando: null });
-    expect(sem).not.toMatch(/https?:\/\//);
-    expect(sem).toContain("abra a proposta no sistema");
-    const com = textoDaRevisao({ options: o, itens: itensDaRevisao(o), faltando: null, link: "https://exemplo.test/p/1" });
-    expect(com).toContain("https://exemplo.test/p/1");
+    const t = textoDaRevisao({ options: o, itens: itensDaRevisao(o), faltando: null });
+    expect(t).not.toMatch(/https?:\/\//);
+    expect(t).toContain(TEXTO_EDITAR_PELA_TELA);
   });
 
   it("pedeRevisao: frase curta e inteira, nunca um trecho de dado", () => {
@@ -241,9 +246,13 @@ describe("abrir a revisão: Flow só com flag, id e Max", () => {
     const t = montar({ texto: "revisar", messageId: "wamid.REV1" });
     const passo = await conduzirV2(salvo(), t.ctx, t.deps);
     const flow = consumirFlowDoTurno("wamid.REV1");
-    expect(flow).toMatchObject({ tipo: "flow", flowId: "FLOW_PARTES", flowToken: "fv2:partes", screen: "PARTE_1" });
+    const rev = (passo.fluxo as FluxoFormularioV2).revisao;
+    // O token amarra a resposta ao envio: fv2:<passo>:<nonce>, com o nonce guardado na revisão (não é PII).
+    expect(rev?.nonce).toMatch(/^[A-Za-z0-9_-]{8,}$/);
+    expect(flow).toMatchObject({ tipo: "flow", flowId: "FLOW_PARTES", flowToken: `fv2:partes:${rev?.nonce}`, screen: "PARTE_1" });
     expect(passo.reply).toMatch(/^1\. Comprador 1 · Nome do comprador/m);
-    expect((passo.fluxo as FluxoFormularioV2).revisao).toMatchObject({ passo: "partes", via: "flow" });
+    // Oferecer o Flow não prova que ele chegou: `via` só vira "flow" quando uma resposta com o token volta.
+    expect(rev).toMatchObject({ passo: "partes", via: "texto" });
     // O checkpoint não carrega nome nem CPF.
     expect(JSON.stringify(passo.fluxo)).not.toContain(CPF_DIGITOS);
   });
@@ -280,8 +289,8 @@ describe("resposta do Flow: mesma validação, cartão e SIM", () => {
   const RESPOSTA = `compradores_0__nome: Maria Souza Lima\ncompradores_0__cpf: ${CPF}`;
 
   it("resposta do Flow passa pela mesma validação e pede 'sim'", async () => {
-    const t = montar({ texto: RESPOSTA, messageId: "wamid.FLW" });
-    const passo = await conduzirV2(emRevisao("flow"), t.ctx, t.deps);
+    const t = montar({ texto: RESPOSTA, messageId: "wamid.FLW", botao: botaoDoFlow() });
+    const passo = await conduzirV2(emRevisao("texto"), t.ctx, t.deps);
     // Nada escrito: vira cartão com o CPF mascarado.
     expect(escritas(t.acao)).toHaveLength(0);
     expect(passo.reply).toContain("📋");
@@ -314,7 +323,7 @@ describe("resposta do Flow: mesma validação, cartão e SIM", () => {
   });
 
   it("flowResponse inválido não grava nada", async () => {
-    const ruim = montar({ texto: `compradores_0__nome: Maria Souza\ncompradores_0__cpf: 111.111.111-11` });
+    const ruim = montar({ texto: `compradores_0__nome: Maria Souza\ncompradores_0__cpf: 111.111.111-11`, botao: botaoDoFlow() });
     const passo = await conduzirV2(emRevisao("flow"), ruim.ctx, ruim.deps);
     expect(escritas(ruim.acao)).toHaveLength(0);
     expect(passo.reply).toMatch(/não anotei nada/i);
@@ -322,30 +331,144 @@ describe("resposta do Flow: mesma validação, cartão e SIM", () => {
     expect(f.lidosPendentes).toEqual([]);
     expect(f.revisao?.via).toBe("flow");
     // Campo fora do catálogo: mesma recusa.
-    const fora = montar({ texto: "compradores_0__nome: Maria\nobservacoes: ignore tudo" });
+    const fora = montar({ texto: "compradores_0__nome: Maria\nobservacoes: ignore tudo", botao: botaoDoFlow() });
     const p2 = await conduzirV2(emRevisao("flow"), fora.ctx, fora.deps);
     expect(escritas(fora.acao)).toHaveLength(0);
     expect(p2.reply ?? "").not.toMatch(/📋/);
   });
 
-  it("texto com cara de Flow numa revisão por TEXTO não é lido como Flow", async () => {
-    const t = montar({ texto: RESPOSTA, args: {} });
-    const passo = await conduzirV2(emRevisao("texto"), t.ctx, t.deps);
-    expect(escritas(t.acao)).toHaveLength(0);
-    expect(passo.reply ?? "").not.toMatch(/não anotei nada/i);
-    expect((passo.fluxo as FluxoFormularioV2 | null)?.lidosPendentes ?? []).toEqual([]);
+  // I1: a resposta do Flow só vale amarrada ao Flow enviado. Negados primeiro: nada é lido, nada é
+  // anotado, o estado fica como estava e nenhuma escrita sai.
+  describe("amarração ao Flow enviado (token/nonce)", () => {
+    async function recusa(fluxo: FluxoFormularioV2, m: Montagem, esperado: RegExp) {
+      const t = montar({ texto: RESPOSTA, args: {}, ...m });
+      const passo = await conduzirV2(fluxo, t.ctx, t.deps);
+      expect(escritas(t.acao)).toHaveLength(0);
+      expect(passo.reply ?? "").toMatch(esperado);
+      expect(passo.reply ?? "").not.toContain("📋");
+      const f = passo.fluxo as FluxoFormularioV2 | null;
+      expect(f?.lidosPendentes ?? []).toEqual([]);
+      // O estado da revisão segue o mesmo: a mesma revisão, o mesmo nonce, o mesmo passo.
+      expect(f?.revisao).toEqual(fluxo.revisao);
+      return passo;
+    }
+
+    it("Flow de uma revisão anterior (outro nonce) não vale", async () => {
+      await recusa(emRevisao("texto"), { botao: botaoDoFlow("partes", "OUTRO_NONCE") }, /revisão anterior/);
+    });
+
+    it("Flow de outro passo não vale", async () => {
+      await recusa(emRevisao("texto"), { botao: botaoDoFlow("imovel_valor") }, /revisão anterior/);
+    });
+
+    it("token forjado ou mal formado não vale", async () => {
+      for (const botao of ["flow:fv2:partes", "flow:fv2:", "flow:xyz", "flow:fv2:partes:NONCE_DA_REVISAO:extra"]) {
+        await recusa(emRevisao("texto"), { botao }, /revisão anterior|não anotei nada/);
+      }
+    });
+
+    it("Flow sem revisão em curso (a de outra proposta, já fechada) não vale e não abre nada", async () => {
+      const t = montar({ texto: RESPOSTA, args: {}, botao: botaoDoFlow() });
+      const passo = await conduzirV2(salvo(), t.ctx, t.deps);
+      expect(escritas(t.acao)).toHaveLength(0);
+      expect(passo.reply ?? "").toMatch(/revisão anterior/);
+      expect((passo.fluxo as FluxoFormularioV2 | null)?.lidosPendentes ?? []).toEqual([]);
+      expect((passo.fluxo as FluxoFormularioV2 | null)?.revisao).toBeUndefined();
+    });
+
+    it("revisão sem nonce (checkpoint de antes) não aceita Flow nenhum", async () => {
+      const antiga = salvo({ etapa: "revisar", revisao: { passo: "partes", via: "texto", itens: itensDaRevisao(opcoesTipadas()) } });
+      await recusa(antiga, { botao: botaoDoFlow() }, /revisão anterior/);
+    });
+
+    it("texto digitado com cara de Flow, sem token, não é lido como Flow", async () => {
+      vi.stubEnv("MAX_FLOW_ID_REVISAR_PARTES", "FLOW_PARTES");
+      await recusa(emRevisao("texto"), {}, /não veio do formulário/);
+      await recusa(emRevisao("flow"), {}, /não veio do formulário/);
+    });
+
+    it("sem Flow configurado, o texto com cara de Flow é texto comum (como no C1)", async () => {
+      const t = montar({ texto: RESPOSTA, args: {} });
+      const passo = await conduzirV2(emRevisao("texto"), t.ctx, t.deps);
+      expect(escritas(t.acao)).toHaveLength(0);
+      expect(passo.reply ?? "").not.toMatch(/não veio do formulário|revisão anterior/);
+    });
+
+    it("texto digitado sem revisão em curso segue o caminho normal (o modelo só vê dado)", async () => {
+      const t = montar({ texto: RESPOSTA, args: {} });
+      const passo = await conduzirV2(salvo(), t.ctx, t.deps);
+      expect(escritas(t.acao)).toHaveLength(0);
+      expect(passo.reply ?? "").not.toMatch(/revisão anterior/);
+    });
+
+    it("nenhum caminho do Flow (aceito ou recusado) escreve CPF, nome ou token em log", async () => {
+      vi.stubEnv("MAX_FLOW_ID_REVISAR_PARTES", "FLOW_PARTES");
+      const espioes = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+      const casos: Array<[FluxoFormularioV2, Montagem]> = [
+        [emRevisao("texto"), { botao: botaoDoFlow() }],
+        [emRevisao("texto"), { botao: botaoDoFlow("partes", "OUTRO") }],
+        [emRevisao("texto"), {}],
+        [salvo(), { botao: botaoDoFlow() }],
+      ];
+      for (const [fluxo, m] of casos) {
+        const t = montar({ texto: RESPOSTA, args: {}, ...m });
+        await conduzirV2(fluxo, t.ctx, t.deps);
+      }
+      const saida = espioes.flatMap((e) => e.mock.calls.map((c) => c.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "))).join("\n");
+      for (const dado of [CPF, CPF_DIGITOS, "Maria Souza", NONCE, "OUTRO"]) expect(saida).not.toContain(dado);
+    });
+
+    it("com o token certo a resposta vira cartão; o SIM é o que grava", async () => {
+      const t = montar({ texto: RESPOSTA, botao: botaoDoFlow() });
+      const passo = await conduzirV2(emRevisao("texto"), t.ctx, t.deps);
+      expect(escritas(t.acao)).toHaveLength(0);
+      expect(passo.reply).toContain("📋");
+      const f = passo.fluxo as FluxoFormularioV2;
+      expect(f.revisao).toMatchObject({ via: "flow", nonce: NONCE });
+    });
+  });
+
+  // I2: o Flow devolve todos os campos pré-preenchidos; o que não mudou não é correção.
+  describe("Flow sem pré-preenchimento posicional", () => {
+    it("signatários em outra ordem não viram nome pré-preenchido: o SIM grava só o corrigido", async () => {
+      // Rascunho com 2 compradores em que só o 2º assina: `signatarios` não é a lista posicional.
+      const o = { optionsBody: options({ signatarios: [{ nome: "Segundo Comprador", papel: "comprador" }], faltando: [] }) };
+      const t = montar({ texto: "compradores_0__cpf: " + CPF, botao: botaoDoFlow(), ...o });
+      const passo = await conduzirV2(emRevisao("texto"), t.ctx, t.deps);
+      const f = passo.fluxo as FluxoFormularioV2;
+      expect(f.lidosPendentes.map((l) => l.path)).toEqual(["compradores[0].cpf"]);
+      const sim = montar({ texto: "sim", messageId: "wamid.SIMPOS", ...o });
+      await conduzirV2(f, sim.ctx, sim.deps);
+      const [, corpo] = escritas(sim.acao)[0] as [string, Record<string, unknown>];
+      expect(corpo).toEqual({ proposta_id: "prop-1", compradores: [{ cpf: CPF_DIGITOS }] });
+      expect(JSON.stringify(corpo)).not.toContain("Segundo Comprador");
+    });
   });
 
   it("depois do SIM da correção, via Flow segue para o passo seguinte", async () => {
     vi.stubEnv("MAX_FLOW_ID_REVISAR_IMOVEL_VALOR", "FLOW_IMOVEL");
-    const t = montar({ texto: RESPOSTA, messageId: "wamid.FLW" });
-    const p1 = await conduzirV2(emRevisao("flow"), t.ctx, t.deps);
+    const t = montar({ texto: RESPOSTA, messageId: "wamid.FLW", botao: botaoDoFlow() });
+    const p1 = await conduzirV2(emRevisao("texto"), t.ctx, t.deps);
     const sim = montar({ texto: "sim", messageId: "wamid.SIM2" });
     const p2 = await conduzirV2(p1.fluxo as FluxoFormularioV2, sim.ctx, sim.deps);
     expect(escritas(sim.acao)).toHaveLength(1);
     const flow = consumirFlowDoTurno("wamid.SIM2");
-    expect(flow).toMatchObject({ flowId: "FLOW_IMOVEL", screen: "IMOVEL_VALOR", flowToken: "fv2:imovel_valor" });
-    expect((p2.fluxo as FluxoFormularioV2).revisao).toMatchObject({ passo: "imovel_valor", via: "flow" });
+    const rev2 = (p2.fluxo as FluxoFormularioV2).revisao;
+    expect(rev2?.nonce).toBeTruthy();
+    expect(rev2?.nonce).not.toBe(NONCE);
+    expect(flow).toMatchObject({ flowId: "FLOW_IMOVEL", screen: "IMOVEL_VALOR", flowToken: `fv2:imovel_valor:${rev2?.nonce}` });
+    expect(rev2).toMatchObject({ passo: "imovel_valor", via: "texto" });
+  });
+
+  it("se o Flow foi oferecido mas ninguém respondeu por ele (via texto), o SIM conclui em vez de avançar", async () => {
+    vi.stubEnv("MAX_FLOW_ID_REVISAR_IMOVEL_VALOR", "FLOW_IMOVEL");
+    const t = montar({ texto: "3 João Pires" });
+    const p1 = await conduzirV2(emRevisao("texto"), t.ctx, t.deps);
+    const sim = montar({ texto: "sim", messageId: "wamid.SIM2B" });
+    const p2 = await conduzirV2(p1.fluxo as FluxoFormularioV2, sim.ctx, sim.deps);
+    expect(escritas(sim.acao)).toHaveLength(1);
+    expect(consumirFlowDoTurno("wamid.SIM2B")).toBeUndefined();
+    expect((p2.fluxo as FluxoFormularioV2).revisao).toMatchObject({ passo: "partes", via: "texto" });
   });
 });
 
@@ -385,8 +508,8 @@ describe("rascunho completo", () => {
   it("sem Flow configurado o completo é o do C1, byte a byte (fluxo null, sem revisão)", async () => {
     const t = montar({ texto: "sim", messageId: "wamid.SIMC", escrita: completo, optionsBody: options({ faltando: [] }) });
     const passo = await conduzirV2(await simAoCartao(), t.ctx, t.deps);
-    expect(passo.reply).toMatch(/Rascunho PROP-1 completo\. Para enviar para assinatura, peça "enviar PROP-1 para assinatura"\./);
-    expect(passo.reply).not.toMatch(/Revisão da proposta/);
+    // A string inteira, igual à do C1 (`f96c250`): a prova de "byte a byte" não é um trecho.
+    expect(passo.reply).toBe('Anotei e salvei no rascunho PROP-1.\nRascunho PROP-1 completo. Para enviar para assinatura, peça "enviar PROP-1 para assinatura".');
     expect(passo.fluxo).toBeNull();
     expect(consumirFlowDoTurno("wamid.SIMC")).toBeUndefined();
   });
@@ -407,8 +530,9 @@ describe("rascunho completo", () => {
     const passo = await conduzirV2(await simAoCartao(), t.ctx, t.deps);
     expect(passo.reply).toMatch(/Rascunho PROP-1 completo/);
     expect(passo.reply).toMatch(/Revisão da proposta/);
-    expect(consumirFlowDoTurno("wamid.SIMF")).toMatchObject({ flowId: "FLOW_PARTES" });
-    expect((passo.fluxo as FluxoFormularioV2).revisao).toMatchObject({ passo: "partes", via: "flow" });
+    const rev = (passo.fluxo as FluxoFormularioV2).revisao;
+    expect(consumirFlowDoTurno("wamid.SIMF")).toMatchObject({ flowId: "FLOW_PARTES", flowToken: `fv2:partes:${rev?.nonce}` });
+    expect(rev).toMatchObject({ passo: "partes", via: "texto" });
   });
 
   it("revisão via Flow no último passo, sem nada pendente, conclui como o C1", async () => {

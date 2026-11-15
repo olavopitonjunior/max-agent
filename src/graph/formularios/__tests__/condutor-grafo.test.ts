@@ -302,3 +302,65 @@ describe("condutor v2 no grafo", () => {
     expect(r.replyGravado).toBeUndefined();
   });
 });
+
+describe("revisão e Flow (C2) com formularios_v2 OFF: o v1 de antes, sem Flow nem condutor", () => {
+  const RESPOSTA_DE_FLOW = `compradores_0__nome: ${NOME}\ncompradores_0__cpf: ${CPF}`;
+
+  async function turnoV1(texto: string, extra: Partial<Parameters<typeof runTurn>[0]> = {}, fluxo?: unknown) {
+    const thread = `condutor-v2-off-${Math.random()}`;
+    const app = await getApp();
+    if (fluxo) await app.updateState({ configurable: { thread_id: thread } }, { fluxo: fluxo as never });
+    const mensagem = { ...msg(texto), ...extra } as Parameters<typeof runTurn>[0];
+    const r = await withExecution(
+      {
+        orgId: ORG, subject: { kind: "user", userId: "u1" }, conversationId: thread,
+        taskId: "00000000-0000-4000-8000-000000000005", mode: "live", workflowVersion: "max-v1",
+        controlVersion: 0, deadline: Date.now() + 30_000, budgetUsd: 0.25, maxConcurrency: 1,
+      },
+      () => runTurn(mensagem)
+    );
+    return { r, mensagem };
+  }
+
+  const emRevisao = () => ({
+    ...novoFluxoV2({ esteira: "venda", agora: Date.now(), schemaType: "compra_venda_v1" }),
+    proposalId: "prop-1",
+    etapa: "revisar",
+    revisao: { passo: "partes", via: "texto", nonce: "NONCE", itens: ["compradores[0].nome"] },
+  });
+
+  function flowLigado() {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "max");
+    vi.stubEnv("MAX_INTERACTIVE", "");
+    vi.stubEnv("MAX_FLOW_ID_REVISAR_PARTES", "FLOW_PARTES");
+    vi.stubEnv("MAX_FLOW_ID_REVISAR_IMOVEL_VALOR", "FLOW_IMOVEL");
+  }
+
+  const escritasNoServidor = () => acao.mock.calls.filter(([p]) => p.verb === "proposal.create" || p.verb === "proposal.update");
+
+  it("NEGADO: 'revisar' com a flag OFF e o Flow configurado não abre revisão nem registra Flow", async () => {
+    featureV2(false);
+    flowLigado();
+    llm.mockResolvedValue({ text: "Não tenho como revisar isso.", toolCalls: [], usage: { model: "x", promptTokens: 1, completionTokens: 1, latencyMs: 1, success: true } } as never);
+    const { r, mensagem } = await turnoV1("revisar");
+    const { espiarFlowDoTurno } = await import("@/lib/meta-flow");
+    expect(espiarFlowDoTurno(mensagem.messageId)).toBeUndefined();
+    expect(acao.mock.calls.some(([p]) => p.verb === "proposal.options")).toBe(false);
+    expect(escritasNoServidor()).toHaveLength(0);
+    expect(fila).not.toHaveBeenCalled();
+    expect(r.reply ?? "").not.toMatch(/Revisão da proposta|Toque em \*Revisar\*/);
+  });
+
+  it("NEGADO: resposta de Flow com token, flag OFF, não vira cartão nem escrita (o v1 de antes)", async () => {
+    featureV2(false);
+    flowLigado();
+    const { r, mensagem } = await turnoV1(RESPOSTA_DE_FLOW, { buttonPayload: "flow:fv2:partes:NONCE" } as never, emRevisao());
+    const { espiarFlowDoTurno } = await import("@/lib/meta-flow");
+    expect(espiarFlowDoTurno(mensagem.messageId)).toBeUndefined();
+    expect(escritasNoServidor()).toHaveLength(0);
+    expect(acao.mock.calls.some(([p]) => p.verb === "proposal.options")).toBe(false);
+    expect(fila).not.toHaveBeenCalled();
+    expect(r.reply ?? "").not.toContain("📋");
+    expect(r.reply ?? "").not.toMatch(/revisão anterior|não veio do formulário/);
+  });
+});
