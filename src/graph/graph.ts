@@ -27,6 +27,7 @@ import {
 } from "./capacidades";
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
+import { fraseDeNaoLido, lerMidia, type DepsDaMidia } from "./formularios/midia";
 import {
   comoMensagemDaJanela,
   INSTRUCAO_DA_JANELA,
@@ -82,7 +83,7 @@ import {
   type PendingAction,
 } from "./tools";
 import { downloadMedia, sendReaction, interativoDisponivel } from "@/lib/transport";
-import { ZAPI_MEDIA_PREFIX } from "@/lib/transport/newton-media";
+import { newtonMediaAtiva, ZAPI_MEDIA_PREFIX } from "@/lib/transport/newton-media";
 import {
   loadFacts,
   saveFacts,
@@ -2901,6 +2902,24 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
    * Com legenda, a LEGENDA é a mensagem (como sempre foi) — a mídia continua
    * não lida, e o prompt diz ao modelo que ele não lê anexo.
    */
+  /**
+   * v2 (T7): foto e PDF no meio de uma proposta v2 ABERTA vão para a entrada
+   * única de mídia, não para a frase fixa. Só com a feature da org e um fluxo
+   * `proposta_v2` vivo; fora disso o G5 abaixo segue byte a byte. A legenda
+   * continua sendo a mensagem (`turnText`): ela vai à janela de extração, a
+   * foto vai à leitura.
+   */
+  const daMidia = await lerMidiaDoFluxoV2(identity.candidate, inbound);
+  if (daMidia?.tipo === "nao_lido" && !(daMidia.motivo === "sem_leitura" && inbound.kind === "image")) {
+    if (!turnText) {
+      await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
+      return sair(fraseDeNaoLido(daMidia.motivo, inbound.kind as "image" | "document"), {
+        orgId: identity.candidate.orgId,
+        error: `sem_leitura_${inbound.kind}_${daMidia.motivo}`,
+      });
+    }
+  }
+
   if (!turnText && (inbound.kind === "image" || inbound.kind === "document")) {
     await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
     return sair(textoSemLeituraDeMidia(null), {
@@ -3124,6 +3143,60 @@ async function descartarPendencias(orgId: string, phone: string, identity: Candi
       "[graph] não consegui descartar a pendência na saída antecipada:",
       err instanceof Error ? err.message : String(err)
     );
+  }
+}
+
+/**
+ * O sujeito tem esta capability na política da org? Mesma resolução do `gate`
+ * (perfil + chave de papel), repetida aqui porque a mídia é tratada ANTES do
+ * grafo. Qualquer falha é `false`: sem certeza, sem leitura (menor privilégio).
+ */
+async function sujeitoTemCapability(identity: Candidate, phone: string, capability: string): Promise<boolean> {
+  try {
+    const [profile, chave] = await Promise.all([
+      fetchProfile(identity.orgId).catch(() => null),
+      identity.kind === "user" ? chaveDePolitica(identity.orgId, phone).catch(() => null) : Promise.resolve<string | null>(null),
+    ]);
+    const politica: readonly string[] = resolverPolitica({ politica: profile?.maxPolicy, sujeito: identity, role: chave });
+    return politica.includes(capability);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Lê a mídia de um turno de proposta v2 (T7). `null` = não se aplica: feature
+ * desligada, sem fluxo `proposta_v2` vivo, ou mensagem que não é foto/PDF. Nunca
+ * lança. A referência da mídia não vai a log nem a erro.
+ */
+async function lerMidiaDoFluxoV2(identity: Candidate, inbound: InboundMessage): Promise<Awaited<ReturnType<typeof lerMidia>> | null> {
+  const orgId = identity.orgId;
+  if (!featureEnabled("formularios_v2", orgId)) return null;
+  if (inbound.kind !== "image" && inbound.kind !== "document") return null;
+  if (!inbound.mediaUrl) return null;
+  try {
+    const app = await getApp();
+    const config = { configurable: { thread_id: currentExecution()?.context.conversationId ?? liveNamespaceFor(orgId, inbound.fromPhone, subjectDe(identity)) } };
+    const fluxo = ((await app.getState(config)).values as Partial<MaxStateType> | undefined)?.fluxo;
+    if (!fluxo || fluxo.kind !== "proposta_v2" || fluxoExpirou(fluxo, Date.now())) return null;
+
+    const deps: DepsDaMidia = {
+      baixar: (ref) => downloadMedia(ref),
+      temDocumentRead: await sujeitoTemCapability(identity, inbound.fromPhone, "document.read"),
+      newtonMidiaAtiva: newtonMediaAtiva,
+    };
+    return await lerMidia(
+      deps,
+      {
+        kind: inbound.kind,
+        ref: inbound.mediaUrl,
+        ...(inbound.mimeType ? { mimeType: inbound.mimeType } : {}),
+        ...(inbound.text ? { legenda: inbound.text } : {}),
+      },
+      { orgId, messageId: inbound.messageId, alvo: "proposta", tipo: fluxo.esteira, ...(fluxo.schemaType ? { schemaType: fluxo.schemaType } : {}) }
+    );
+  } catch {
+    return null;
   }
 }
 
