@@ -1106,7 +1106,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // sistema, nunca do modelo (prod 09/10). O fluxo em curso fica como está.
   // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
   const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha" || atual?.kind === "credito" ||
-    atual?.kind === "captacao" || atual?.kind === "atividade" || atual?.kind === "preferencias";
+    atual?.kind === "captacao" || atual?.kind === "atividade" || atual?.kind === "preferencias" || atual?.kind === "correcao_texto";
   // Continuidade e gestão vêm antes: "converte a proposta… pra gerar o contrato" é conversão.
   // Rascunho aberto para ajuste (sem escrita pendente) não prende o turno: pedido
   // sobre OUTRA proposta ("muda o valor da proposta do João…"), consulta ou
@@ -1515,7 +1515,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
       messages: [{ role: "user", content: userText }],
       ...(usage.length > 0 ? { usage } : {}),
       // I5: coletou valor de documento; este turno não vai para resumo, memória nem log com valor.
-      toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "proposta_v2" ? { sensivel: true } : {}) }, outcome: passo.evento }],
+      toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "proposta_v2" || atual.kind === "correcao_texto" ? { sensivel: true } : {}) }, outcome: passo.evento }],
     };
   }
   // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
@@ -1531,7 +1531,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     ...(usage.length > 0 ? { usage } : {}),
     // Sem os DADOS: o que a pessoa ditou (CPF, telefone) não vai para o log.
     // I5: v2 = a resposta pode ser a ficha com valor de documento: turno sensível.
-    toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "proposta_v2" ? { sensivel: true } : {}) }, outcome: passo.evento }],
+    // PR-E (R29): a correção de texto mostra o antes/depois do documento: mesmo tratamento.
+    toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "proposta_v2" || atual.kind === "correcao_texto" ? { sensivel: true } : {}) }, outcome: passo.evento }],
   };
 }
 
@@ -2488,7 +2489,7 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
  * memória nem log com o valor; a resposta real só chega ao corretor.
  */
 function turnoV2Sensivel(toolLog: readonly ToolLogEntry[] | undefined): boolean {
-  return (toolLog ?? []).some((t) => t.name === "fluxo" && t.args.kind === "proposta_v2" && t.args.sensivel === true);
+  return (toolLog ?? []).some((t) => t.name === "fluxo" && (t.args.kind === "proposta_v2" || t.args.kind === "correcao_texto") && t.args.sensivel === true);
 }
 
 /** O turno passou pela ficha de crédito? Então não vai para resumo nem memória. */
