@@ -5,6 +5,7 @@ import { derivarInterativo } from "@/lib/interativo";
 import { novoFluxoV2 } from "../estado";
 import type { CampoObrigatorio, Pendencia } from "../contrato";
 import {
+  caminhoCanonico,
   chaveDaPergunta,
   lerRespostaAoCampo,
   pendenciasIniciais,
@@ -444,5 +445,47 @@ describe("M8: a oferta diz quantos ficaram de fora", () => {
     expect(t).toMatch(/e mais 3/);
     expect(t).not.toMatch(/6\) /);
     expect(derivarInterativo(t)?.tipo).toBe("lista");
+  });
+});
+
+describe("Rodada 2: N1 (recusa só em texto livre), Pará e proprietarios[].documento", () => {
+  const simNao: CampoObrigatorio[] = [
+    {
+      chave: "imovel.exclusiva", rotulo: "Exclusividade", grupo: "Imóvel", esteira: "ambas", tipoCampo: "opcao",
+      opcoes: [{ id: "sim", rotulo: "Sim" }, { id: "nao", rotulo: "Não" }],
+    },
+  ];
+
+  it("N1: em campo de opção com Sim/Não, a resposta 'sim' preenche o campo (não libera)", () => {
+    const f = comAguarda("imovel", "imovel.exclusiva");
+    expect(lerRespostaAoCampo(f, "sim", simNao)).toMatchObject({ tipo: "preenche", patch: { imovel: { exclusiva: "sim" } } });
+    expect(lerRespostaAoCampo(f, "Não", simNao)).toMatchObject({ tipo: "preenche", patch: { imovel: { exclusiva: "nao" } } });
+  });
+
+  it("N1: a recusa continua valendo em texto livre", () => {
+    expect(lerRespostaAoCampo(comAguarda("corretor", "corretor.nome"), "sim").tipo).toBe("liberar");
+  });
+
+  it("N1: opção que não casa com nenhuma libera (o fluxo não sequestra)", () => {
+    expect(lerRespostaAoCampo(comAguarda("imovel", "imovel.exclusiva"), "cancela", simNao).tipo).toBe("liberar");
+  });
+
+  it("Pará (UF ou cidade) é resposta de texto; 'para' sozinho continua sendo o verbo", () => {
+    expect(lerRespostaAoCampo(comAguarda("imovel", "imovel.uf"), "Pará")).toMatchObject({ tipo: "preenche", patch: { imovel: { uf: "Pará" } } });
+    expect(lerRespostaAoCampo(comAguarda("imovel", "imovel.cidade"), "Belém, Pará")).toMatchObject({ tipo: "preenche" });
+    expect(lerRespostaAoCampo(comAguarda("imovel", "imovel.uf"), "para").tipo).toBe("liberar");
+    expect(lerRespostaAoCampo(comAguarda("imovel", "imovel.uf"), "Para").tipo).toBe("liberar");
+    expect(lerRespostaAoCampo(comAguarda("imovel", "imovel.uf"), "pera aí").tipo).toBe("liberar");
+    expect(lerRespostaAoCampo(comAguarda("imovel", "imovel.uf"), "perai").tipo).toBe("liberar");
+  });
+
+  it("proprietarios[].documento vira o caminho do estado com cpf, como o comprador", () => {
+    const p = proximaPergunta([pend("proprietarios[].documento", { signatario: { posicao: 2, papel: "proprietario" } })], new Set())!;
+    expect(p.aguarda).toEqual({ parteRef: "proprietario:2", path: "proprietarios[1].cpf" });
+    expect(caminhoCanonico("proprietarios[].documento", { posicao: 1, papel: "conjuge" })).toBe("conjuges[0].cpf");
+    // idempotente e aceita o caminho do estado já com `documento` (checkpoint de outra origem)
+    expect(caminhoCanonico("proprietarios[1].documento", null)).toBe("proprietarios[1].cpf");
+    const r = lerRespostaAoCampo(comAguarda("proprietario:2", "proprietarios[].documento"), CPF_VALIDO);
+    expect(r).toMatchObject({ tipo: "preenche", campo: { path: "proprietarios[1].cpf" }, patch: { proprietarios: [{}, { cpf: "12345678909" }] } });
   });
 });

@@ -336,8 +336,8 @@ export function caminhoCanonico(campo: string, signatario: { posicao: number; pa
   let m = /^(proponente|contraparte)\.([a-z_]+)$/.exec(campo);
   if (m) return `${m[1] === "proponente" ? "compradores" : "vendedores"}[${idx}].${CAMPO_CANONICO[m[2]!] ?? m[2]}`;
   m = /^([a-z]+)\[\]\.([a-z_0-9]+)$/.exec(campo);
-  if (m) return `${(signatario && LISTA_DO_PAPEL[signatario.papel]) || m[1]}[${idx}].${m[2]}`;
-  m = /^(compradores|vendedores)\[(\d+)\]\.([a-z_0-9]+)$/.exec(campo);
+  if (m) return `${(signatario && LISTA_DO_PAPEL[signatario.papel]) || m[1]}[${idx}].${CAMPO_CANONICO[m[2]!] ?? m[2]}`;
+  m = /^(compradores|vendedores|proprietarios|conjuges|representantes)\[(\d+)\]\.([a-z_0-9]+)$/.exec(campo);
   if (m) return `${m[1]}[${m[2]}].${CAMPO_CANONICO[m[3]!] ?? m[3]}`;
   return campo;
 }
@@ -482,7 +482,18 @@ function patchDe(d: Destino, valor: string | number): PatchV2 | PatchDeCaptacao 
  * ("Pereira" e "Paraná" seguem valendo como nome e endereço).
  */
 const RECUSA_DE_CAMPO =
-  /^(oi|ola|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|tchau|ok|certo|beleza|blz|claro|sim|nao|talvez|cancela|cancelar|cancele|para|pare|parar|espera|espere|aguarda|aguarde|pera|peraí|um (?:segundo|minuto|momento)|manda|mande|envia|envie|deixa|deixe|volta|voltar|esquece|esqueca|desisto|chega|continua|continue|segue|siga|refaz|refaca|apaga|apague|exclui|exclua|mostra|mostre|abre|abra|cria|crie|pode|vai|vamos|me (?:manda|mande|envia|envie|mostra|mostre|diz|diga|fala|fale))\b/;
+  /^(oi|ola|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|tchau|ok|certo|beleza|blz|claro|sim|nao|talvez|cancela|cancelar|cancele|pare|parar|espera|espere|aguarda|aguarde|um (?:segundo|minuto|momento)|manda|mande|envia|envie|deixa|deixe|volta|voltar|esquece|esqueca|desisto|chega|continua|continue|segue|siga|refaz|refaca|apaga|apague|exclui|exclua|mostra|mostre|abre|abra|cria|crie|pode|vai|vamos|me (?:manda|mande|envia|envie|mostra|mostre|diz|diga|fala|fale))\b/;
+
+/**
+ * "para" e "pera" (o verbo) são testados SEM normalizar: "Pará" (UF/cidade) tem acento
+ * e não é o verbo. `(?![\p{L}\p{N}])` em vez de `\b`, que trata a letra acentuada como borda.
+ */
+const VERBO_SEM_ACENTO = /^(?:para|pera|perai|peraí)(?![\p{L}\p{N}])/u;
+
+/** A recusa vale só para texto livre: em campo de opção "sim"/"não" É a resposta. */
+function recusadoComoComando(texto: string): boolean {
+  return RECUSA_DE_CAMPO.test(normalizar(texto)) || VERBO_SEM_ACENTO.test(texto.trim().toLowerCase());
+}
 
 const PARECE_DINHEIRO = /r\$|\d\.\d{3}|\d,\d{1,2}\b|\bmil\b|milhao|milhoes|\d\s?k\b|^\s*\d{4,}\s*$/;
 
@@ -562,13 +573,15 @@ function lerValor(tipo: TipoDeCampo, texto: string, def: CampoObrigatorio | unde
 export function lerRespostaAoCampo(f: FluxoFormularioV2, texto: string, obrigatorios?: CampoObrigatorio[]): RespostaAoCampo {
   const aguarda = f.aguardaCampo;
   if (!aguarda) return LIBERAR;
-  if (RECUSA_DE_CAMPO.test(normalizar(texto))) return LIBERAR;
   // Checkpoint antigo ou de outra origem: a chave do catálogo é convertida aqui, com a posição da `parteRef`.
   const path = caminhoCanonico(aguarda.path, signatarioDaParteRef(aguarda.parteRef));
   const destino = destinoDoCampo(path);
   if (!destino) return LIBERAR;
   const def = obrigatorios?.find((o) => semIndice(caminhoCanonico(o.chave, null)) === semIndice(path));
-  const leitura = lerValor(tipoDoCampo(path, def), texto, def, ultimoSegmento(path));
+  const tipo = tipoDoCampo(path, def);
+  // N1: comando/sim/não só é recusado onde a resposta é texto livre; antes do tipo, "sim" nunca preencheria uma opção.
+  if (tipo === "texto" && recusadoComoComando(texto)) return LIBERAR;
+  const leitura = lerValor(tipo, texto, def, ultimoSegmento(path));
   if (!leitura) return LIBERAR;
   if ("invalido" in leitura) return { tipo: "invalida", reply: leitura.invalido };
   const patch = patchDe(destino, leitura.valor);
