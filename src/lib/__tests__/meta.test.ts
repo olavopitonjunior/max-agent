@@ -839,6 +839,37 @@ describe("chamadas à Graph API", () => {
     });
   });
 
+  it("sendInteractive Flow: type flow, navigate, tela e data pré-preenchidos, corpo e cta cortados", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.FLW" }] }));
+    const res = await sendInteractive({
+      to: "5511987654321",
+      quoteMessageId: "wamid.Q",
+      interativo: {
+        tipo: "flow",
+        flowId: "FLOW123",
+        screen: "PARTE_1",
+        data: { compradores_0__nome: "Maria Souza" },
+        corpo: "x".repeat(1100),
+        cta: "Revisar a proposta inteira agora mesmo",
+        flowToken: "fv2:partes",
+      },
+    });
+    expect(res).toEqual({ messageId: "wamid.FLW" });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.type).toBe("interactive");
+    expect(body.context).toEqual({ message_id: "wamid.Q" });
+    expect(body.interactive.type).toBe("flow");
+    expect(body.interactive.body.text).toHaveLength(1024);
+    expect(body.interactive.action.name).toBe("flow");
+    const par = body.interactive.action.parameters;
+    expect(par.flow_message_version).toBe("3");
+    expect(par.flow_id).toBe("FLOW123");
+    expect(par.flow_cta.length).toBeLessThanOrEqual(30);
+    expect(par.flow_token).toBe("fv2:partes");
+    expect(par.flow_action).toBe("navigate");
+    expect(par.flow_action_payload).toEqual({ screen: "PARTE_1", data: { compradores_0__nome: "Maria Souza" } });
+  });
+
   it("sendInteractive lista: uma seção, descrição só quando existe, sem citação se não pedida", async () => {
     fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.LST" }] }));
     await sendInteractive({

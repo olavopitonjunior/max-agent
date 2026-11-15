@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../meta", async (orig) => ({
   ...(await orig<typeof import("../meta")>()),
@@ -126,6 +126,56 @@ describe("sendText com interativo", () => {
     const res = await sendText(params);
     expect(res.messageId).toMatch(/^log-/);
     expect(meta.sendInteractive).not.toHaveBeenCalled();
+  });
+});
+
+describe("sendText com Flow (revisão v2)", () => {
+  const flow = {
+    tipo: "flow" as const,
+    flowId: "FLOW123",
+    screen: "PARTE_1",
+    data: { compradores_0__nome: "Maria Souza" },
+    corpo: "Revisão da proposta",
+  };
+  const params = { to: "5511999990000", body: "ficha numerada", quoteMessageId: "Q", interativo: flow };
+
+  // O config do Newton roda a suíte com o perfil `newton`: o Max é fixado aqui, e o Newton no último caso.
+  beforeEach(() => vi.stubEnv("AGENT_DEPLOY_PROFILE", "max"));
+
+  it("transporte log nunca recebe Flow: só o texto", async () => {
+    vi.stubEnv("AGENT_TRANSPORT", "log");
+    const res = await sendText(params);
+    expect(res.messageId).toMatch(/^log-/);
+    expect(meta.sendInteractive).not.toHaveBeenCalled();
+  });
+
+  it("MAX_INTERACTIVE=off manda o texto numerado, sem Flow", async () => {
+    vi.stubEnv("MAX_INTERACTIVE", "off");
+    vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.T" });
+    await sendText(params);
+    expect(meta.sendInteractive).not.toHaveBeenCalled();
+    expect(meta.sendText).toHaveBeenCalledWith({ to: "5511999990000", body: "ficha numerada", quoteMessageId: "Q" });
+  });
+
+  it("na Meta o Flow sai como interactive/flow, com a citação", async () => {
+    vi.mocked(meta.sendInteractive).mockResolvedValue({ messageId: "wamid.F" });
+    expect(await sendText(params)).toEqual({ messageId: "wamid.F" });
+    expect(meta.sendInteractive).toHaveBeenCalledWith({ to: "5511999990000", interativo: flow, quoteMessageId: "Q" });
+    expect(meta.sendText).not.toHaveBeenCalled();
+  });
+
+  it("400 da Meta (Flow recusado: id inválido, não publicado) cai no texto numerado", async () => {
+    vi.mocked(meta.sendInteractive).mockRejectedValue(new MetaHttpError("/1/messages", 400, '{"error":{"code":131009}}'));
+    vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.T" });
+    expect(await sendText(params)).toEqual({ messageId: "wamid.T" });
+    expect(meta.sendText).toHaveBeenCalledWith({ to: "5511999990000", body: "ficha numerada", quoteMessageId: "Q" });
+  });
+
+  it("Newton (bridge) nunca manda Flow à Meta nem ao bridge", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    await sendText(params).catch(() => undefined);
+    expect(meta.sendInteractive).not.toHaveBeenCalled();
+    expect(meta.sendText).not.toHaveBeenCalled();
   });
 });
 

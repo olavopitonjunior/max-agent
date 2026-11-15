@@ -27,6 +27,7 @@ import type {
   ConnectionState,
   DownloadMediaFn,
   Interativo,
+  InterativoFlow,
   OpcoesDeDownload,
   ProviderName,
   SendResult,
@@ -40,6 +41,7 @@ export type {
   InboundKind,
   InboundMessage,
   Interativo,
+  InterativoFlow,
   MidiaBaixada,
   MidiaGrandeDemais,
   OpcaoInterativa,
@@ -131,7 +133,7 @@ export async function sendText(params: {
   to: string;
   body: string;
   quoteMessageId?: string;
-  interativo?: Interativo | null;
+  interativo?: Interativo | InterativoFlow | null;
 }): Promise<SendResult> {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
@@ -139,9 +141,15 @@ export async function sendText(params: {
   // Ponto único de saída de texto (Max e Newton): negrito de markdown vira o do WhatsApp.
   const { interativo: bruto, ...cru } = params;
   const texto = { ...cru, body: paraFormatoWhatsapp(cru.body) };
-  const interativo = bruto ? { ...bruto, corpo: paraFormatoWhatsapp(bruto.corpo) } : bruto;
+  const interativo = bruto
+    ? bruto.tipo === "flow"
+      ? { ...bruto, ...(bruto.corpo ? { corpo: paraFormatoWhatsapp(bruto.corpo) } : {}) }
+      : { ...bruto, corpo: paraFormatoWhatsapp(bruto.corpo) }
+    : bruto;
   const a = adapter();
-  if (interativo && a.sendInteractive && interativoDisponivel()) {
+  // Flow é da Cloud API da Meta: nenhum outro provedor (Newton/Z-API, log) o recebe, mesmo que alguém peça.
+  const formaPermitida = !interativo || interativo.tipo !== "flow" || a.name === "meta";
+  if (interativo && formaPermitida && a.sendInteractive && interativoDisponivel()) {
     try {
       return await a.sendInteractive({ to: texto.to, interativo, quoteMessageId: texto.quoteMessageId });
     } catch (err) {

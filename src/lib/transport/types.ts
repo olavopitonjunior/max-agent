@@ -40,8 +40,9 @@ export interface InboundMessage {
   buttonPayload?: string | null;
   /**
    * Campos de uma resposta de WhatsApp Flow (`nfm_reply`), sem o `flow_token`.
-   * O `text` já traz a versão legível; este é o objeto bruto. Opcional e
-   * ainda sem consumidor: não é persistido na fila.
+   * O `text` já traz a versão legível ("campo: valor" por linha); este é o objeto bruto.
+   * Opcional e NÃO persistido na fila (guardaria CPF em jsonb): quem consome a resposta do
+   * Flow (revisão v2, `lib/meta-flow.ts::flowDoTexto`) relê o `text`, sempre validado.
    */
   flowResponse?: Record<string, unknown>;
 }
@@ -64,6 +65,23 @@ export interface OpcaoInterativa {
 export type Interativo =
   | { tipo: "botoes"; corpo: string; opcoes: OpcaoInterativa[]; imagemUrl?: string }
   | { tipo: "lista"; corpo: string; botao: string; opcoes: OpcaoInterativa[] };
+
+/**
+ * WhatsApp Flow (só Meta, `lib/meta-flow.ts`): `screen` + `data` pré-preenchidos, de um Flow
+ * publicado na WABA (`flowId`, env `MAX_FLOW_ID_*`). `corpo` é o texto da mensagem (a ficha
+ * numerada); quando a Meta recusa a forma, o texto equivalente vai no lugar. Nunca vai ao Newton.
+ * Tipo à parte de `Interativo` de propósito: botões/lista são derivados do texto e todo consumidor
+ * deles lê `opcoes`; o Flow só entra por quem o monta de propósito.
+ */
+export interface InterativoFlow {
+  tipo: "flow";
+  flowId: string;
+  screen: string;
+  data: Record<string, unknown>;
+  corpo?: string;
+  cta?: string;
+  flowToken?: string;
+}
 
 /** Botão preenchido na hora do envio, na ordem em que o template os declara. */
 export type BotaoEnviado =
@@ -146,7 +164,7 @@ export interface TransportAdapter {
     imagemCabecalho?: string;
   }): Promise<SendResult>;
   /** Ausente quando `capabilities.interactive` é `false`. */
-  sendInteractive?(params: { to: string; interativo: Interativo; quoteMessageId?: string }): Promise<SendResult>;
+  sendInteractive?(params: { to: string; interativo: Interativo | InterativoFlow; quoteMessageId?: string }): Promise<SendResult>;
   /** Ausente quando `capabilities.reactions` é `false`. Lança em erro do provedor. */
   sendReaction?(params: { to: string; messageId: string; emoji: string }): Promise<SendResult>;
   /**

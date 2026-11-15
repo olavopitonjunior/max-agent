@@ -38,6 +38,7 @@ import type {
   InboundKind,
   InboundMessage,
   Interativo,
+  InterativoFlow,
   MidiaBaixada,
   MidiaGrandeDemais,
   OpcoesDeDownload,
@@ -120,13 +121,29 @@ export async function sendText(params: {
  */
 export async function sendInteractive(params: {
   to: string;
-  interativo: Interativo;
+  interativo: Interativo | InterativoFlow;
   quoteMessageId?: string;
 }): Promise<{ messageId: string | null }> {
   assertWhatsAppPilotRecipient(params.to);
   const i = params.interativo;
   const interactive =
-    i.tipo === "botoes"
+    i.tipo === "flow"
+      ? {
+          type: "flow",
+          body: { text: (i.corpo ?? "Revise os dados da proposta.").slice(0, 1024) },
+          action: {
+            name: "flow",
+            parameters: {
+              flow_message_version: "3",
+              flow_id: i.flowId,
+              flow_cta: (i.cta ?? "Revisar").slice(0, 30),
+              flow_token: i.flowToken ?? `fv2:${i.screen}`,
+              flow_action: "navigate",
+              flow_action_payload: { screen: i.screen, data: i.data },
+            },
+          },
+        }
+      : i.tipo === "botoes"
       ? {
           type: "button",
           body: { text: i.corpo },
