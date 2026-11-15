@@ -6,6 +6,8 @@ import { sendText, sendTemplate, connectionStatus, capabilities, interativoDispo
 import { janelaAberta } from "./janela24h";
 import { reservarAvisoNeutro } from "./atividades-pendentes";
 import { seedNotification } from "@/graph/graph";
+import { abrirCorpo, estaSelado, PREFIXO_DO_SELO } from "@/graph/formularios/selo";
+import { MARCADOR_DOCUMENTO_LIDO } from "@/graph/formularios/midia";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
 import { deployProfile } from "./deploy-profile";
@@ -210,13 +212,41 @@ export const MARCA_CANCELADO_PELO_AUTOR = "cancelado: o autor da linha a retirou
 export async function cancelarPendentesPorPrefixo(prefixo: string): Promise<number> {
   if (!prefixo) return 0;
   const r = await query<{ id: string }>(
+    // `body = ''`: a ficha derrubada não deixa valor de documento para trás (I5).
     `UPDATE outbox
-        SET status = 'dropped', last_error = $2, send_started_at = NULL
+        SET status = 'dropped', last_error = $2, send_started_at = NULL, body = ''
       WHERE status = 'pending' AND starts_with(dedupe_key, $1)
       RETURNING id`,
     [prefixo, MARCA_CANCELADO_PELO_AUTOR]
   );
   return r.length;
+}
+
+/**
+ * I5: zera o corpo SELADO (ficha com valor de documento) das linhas que já não vão
+ * mais sair (`sent`, `dropped`, `failed`). Nunca toca `pending`/`sending`. Roda no
+ * início de cada despacho; devolve quantas linhas limpou.
+ */
+export async function limparCorposSelados(): Promise<number> {
+  const r = await query<{ id: string }>(
+    `UPDATE outbox
+        SET body = ''
+      WHERE status IN ('sent', 'dropped', 'failed') AND starts_with(body, $1)
+      RETURNING id`,
+    [PREFIXO_DO_SELO]
+  );
+  return r.length;
+}
+
+/** Corpo mostrado quando a ficha selada não pode ser aberta (chave rotacionada, linha copiada). */
+export const TEXTO_FICHA_INDISPONIVEL = "Tem uma ficha do seu rascunho esperando. Mande *ficha* para ver.";
+
+/**
+ * Texto que vai para o thread (semente) de uma linha enviada: corpo selado = valor de
+ * documento, então entra só o marcador (nunca o valor), como no resto do fluxo.
+ */
+export function textoDeSemente(row: Parameters<typeof renderMessage>[0]): string {
+  return estaSelado(row.body) ? MARCADOR_DOCUMENTO_LIDO : renderMessage(row);
 }
 
 /**
@@ -316,7 +346,20 @@ export function renderMessage(row: {
   params?: Record<string, string> | null;
   /** Contrato `aviso` v1: quando existe, o texto é todo dele (title/body ficam de reserva). */
   aviso?: Aviso | null;
+  /** AAD do corpo selado (I5): `org_id|phone`. Sem eles, um corpo selado não abre. */
+  org_id?: string;
+  phone?: string;
 }): string {
+  // I5: ficha selada (valor de documento) só abre aqui, na hora do envio. Falhou = texto genérico.
+  if (estaSelado(row.body)) {
+    let aberto: string | null = null;
+    try {
+      if (row.org_id && row.phone) aberto = abrirCorpo(row.body, `${row.org_id}|${row.phone}`);
+    } catch {
+      aberto = null;
+    }
+    row = { ...row, body: aberto ?? TEXTO_FICHA_INDISPONIVEL };
+  }
   if (row.aviso) {
     return renderAvisoTexto(row.aviso, {
       recipientName: row.recipient_name,
@@ -850,6 +893,12 @@ export async function dispatchDue(
 ): Promise<DispatchTotals> {
   const totals: DispatchTotals = { claimed: 0, sent: 0, failed: 0, blocked: 0, held: 0, expired: 0, coalesced: 0 };
   if (process.env.MAX_OUTBOUND_KILL === "true") return totals;
+  // I5: nenhuma linha que já não vai sair guarda ficha selada (best-effort; nunca trava o despacho).
+  try {
+    await limparCorposSelados();
+  } catch (err) {
+    log.warn("outbox.limpar_selados_falhou", { erro: err instanceof Error ? err.message : String(err) });
+  }
   // Transporte mal configurado lança AQUI, antes do claim: depois dele, cada
   // linha reivindicada queimaria uma tentativa e ficaria presa em `sending`.
   const caps = capabilities();
@@ -1029,7 +1078,7 @@ export async function dispatchDue(
         );
         if (emVoo.length > 0) return;
 
-        await seedNotification(row.org_id, row.phone, texto ?? renderMessage(row),{id:row.id,fence:deliveryFence??await captureDispatchFence(row.phone),subject:identity.candidate.kind==='user'?{kind:'user',userId:identity.candidate.userId}:{kind:'broker',splitRecipientId:identity.candidate.splitRecipientId}});
+        await seedNotification(row.org_id, row.phone, texto ?? textoDeSemente(row),{id:row.id,fence:deliveryFence??await captureDispatchFence(row.phone),subject:identity.candidate.kind==='user'?{kind:'user',userId:identity.candidate.userId}:{kind:'broker',splitRecipientId:identity.candidate.splitRecipientId}});
       } catch (err) {
         console.warn(
           `[outbox] thread não semeado (${row.id}) — o envio ficou de pé:`,

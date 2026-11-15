@@ -68,6 +68,10 @@ const { TOOL_PATCH_V2 } = await import("../extracao");
 const { resolveIdentity } = await import("@/lib/identity");
 const { executarAcao } = await import("@/lib/acao");
 const { sendReaction } = await import("@/lib/transport");
+const { abrirCorpo, estaSelado } = await import("../selo");
+const { MARCADOR_DOCUMENTO_LIDO } = await import("../midia");
+const { registrarTurn } = await import("@/lib/turnlog");
+const { extractFacts, saveFacts } = await import("@/lib/memory");
 const { enqueue } = await import("@/lib/outbox");
 const { complete } = await import("@/lib/llm");
 
@@ -214,8 +218,14 @@ describe("condutor v2 no grafo", () => {
     const agendada = fila.mock.calls[0]![0];
     expect(agendada.dedupeKey).toMatch(/^ficha:/);
     expect(agendada.deliverAfter).toBeInstanceOf(Date);
-    expect(agendada.body).toContain("***.982.247-**");
+    // I5: o corpo no outbox vai SELADO (org|telefone): nenhum valor do documento em claro.
+    expect(estaSelado(agendada.body)).toBe(true);
+    expect(agendada.body).not.toContain(NOME);
+    expect(agendada.body).not.toContain("982.247");
     expect(agendada.body).not.toContain(CPF);
+    const aberta = abrirCorpo(agendada.body, `${ORG}|5511987654321`);
+    expect(aberta).toContain("***.982.247-**");
+    expect(aberta).not.toContain(CPF);
     // O modelo só foi chamado para extrair (nada de resposta livre).
     expect(llm).toHaveBeenCalledTimes(1);
     // Checkpoint: o fluxo guarda caminhos e referência, nunca o valor lido.
@@ -227,5 +237,68 @@ describe("condutor v2 no grafo", () => {
     expect(cp).not.toContain("52998224725");
     expect(cp).not.toContain(CPF);
     expect(cp).not.toContain(NOME);
+  });
+
+  // I5: a ficha mostrada NO turno (o corretor pediu "ficha") traz o valor do documento. Ele chega ao
+  // corretor, mas não fica no checkpoint, no log do turno, na fila de entrada nem na memória.
+  it("I5: ficha mostrada no turno vai ao corretor, mas o resto (checkpoint, log, memória) só vê o marcador", async () => {
+    featureV2(true);
+    const thread = `condutor-v2-i5-${Math.random()}`;
+    const app = await getApp();
+    await app.updateState(
+      { configurable: { thread_id: thread } },
+      { fluxo: novoFluxoV2({ esteira: "venda", agora: Date.now(), schemaType: "compra_venda_v1" }) as never }
+    );
+    const exec = (texto: string) =>
+      withExecution(
+        {
+          orgId: ORG, subject: { kind: "user", userId: "u1" }, conversationId: thread,
+          taskId: "00000000-0000-4000-8000-000000000003", mode: "live", workflowVersion: "max-v1",
+          controlVersion: 0, deadline: Date.now() + 30_000, budgetUsd: 0.25, maxConcurrency: 1,
+        },
+        () => runTurn(msg(texto))
+      );
+    await exec(`Comprador ${NOME} CPF ${CPF}`);
+    vi.mocked(registrarTurn).mockClear();
+    const r = await exec("ficha");
+    await r.afterReply();
+
+    // O corretor VÊ o valor.
+    expect(r.reply).toContain(NOME);
+    // Fila de entrada: só o marcador (`sensivel` apaga o texto e grava `replyGravado`).
+    expect(r.sensivel).toBe(true);
+    expect(r.replyGravado).toBe(MARCADOR_DOCUMENTO_LIDO);
+    // Checkpoint: a resposta do assistente é o marcador, e o campo `reply` não guarda o valor.
+    const values = (await app.getState({ configurable: { thread_id: thread } })).values as {
+      messages: { role: string; content: string }[];
+      reply: string | null;
+    };
+    const doAssistente = values.messages.filter((m) => m.role === "assistant").map((m) => m.content).join("\n");
+    expect(doAssistente).not.toContain(NOME);
+    expect(doAssistente).toContain(MARCADOR_DOCUMENTO_LIDO);
+    expect(values.reply ?? "").not.toContain(NOME);
+    // Log do turno: nada do valor.
+    const log = vi.mocked(registrarTurn).mock.calls.at(-1)![0];
+    expect(JSON.stringify(log)).not.toContain(NOME);
+    expect(JSON.stringify(log)).not.toContain("982.247");
+    // Memória: o turno do formulário v2 não alimenta `memory_facts`.
+    expect(extractFacts).not.toHaveBeenCalled();
+    expect(saveFacts).not.toHaveBeenCalled();
+  });
+
+  it("I5 (negado): turno comum, sem fluxo v2, segue como antes (resposta gravada, memória rodando)", async () => {
+    featureV2(false);
+    llm.mockResolvedValue({ text: "Olá!", toolCalls: [], usage: { model: "x", promptTokens: 1, completionTokens: 1, latencyMs: 1, success: true } } as never);
+    const thread = `condutor-v2-i5n-${Math.random()}`;
+    const r = await withExecution(
+      {
+        orgId: ORG, subject: { kind: "user", userId: "u1" }, conversationId: thread,
+        taskId: "00000000-0000-4000-8000-000000000004", mode: "live", workflowVersion: "max-v1",
+        controlVersion: 0, deadline: Date.now() + 30_000, budgetUsd: 0.25, maxConcurrency: 1,
+      },
+      () => runTurn(msg("oi, tudo bem?"))
+    );
+    expect(r.sensivel).toBeFalsy();
+    expect(r.replyGravado).toBeUndefined();
   });
 });

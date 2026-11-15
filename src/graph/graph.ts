@@ -288,6 +288,26 @@ function blindarCredito(state: MaxStateType, update: MaxUpdate): MaxUpdate {
   return out;
 }
 
+/**
+ * I5: turno sensível do formulário v2. A resposta real (a ficha, com nome e endereço lidos do
+ * documento) fica só em `TURNO_CRU`, de onde o `runTurn` a lê para responder; o state (e o
+ * checkpoint) guarda o marcador, tanto em `reply` quanto na mensagem do assistente. A fala do
+ * CORRETOR continua como está: a janela de extração precisa dela.
+ */
+function blindarFormularioV2(state: MaxStateType, update: MaxUpdate): MaxUpdate {
+  if (!turnoV2Sensivel(update.toolLog as ToolLogEntry[] | undefined)) return update;
+  const id = state.inbound.messageId;
+  const cru: TurnoCru = TURNO_CRU.get(id) ?? {};
+  const out: MaxUpdate = { ...update };
+  if (typeof update.reply === "string") { cru.reply = update.reply; out.reply = MARCADOR_DOCUMENTO_LIDO; }
+  const msgs = update.messages as MessagesUpdate | undefined;
+  if (msgs && Array.isArray(msgs)) {
+    out.messages = msgs.map((m) => (m.role === "assistant" ? { ...m, content: MARCADOR_DOCUMENTO_LIDO } : m));
+  }
+  TURNO_CRU.set(id, cru);
+  return out;
+}
+
 export const MaxState = Annotation.Root({
   queryOptions: Annotation<QueryOptions | null>({ reducer: (_p,n) => n, default: () => null }),
   selectedDealQuery: Annotation<string | null>({ reducer: (_p,n) => n, default: () => null }),
@@ -984,6 +1004,9 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
         pausa: {
           agendar: async (p: { chave: string; dedupeKey: string; quando: Date; texto: string }) => {
             const { enqueue } = await import("@/lib/outbox");
+            // I5: a ficha tem valor de documento; vai SELADA (org|telefone) para o outbox.
+            // Sem chave, lança: `agendarFicha` devolve false e a ficha vai no próprio turno.
+            const { selarCorpo } = await import("./formularios/selo");
             await enqueue({
               orgId,
               dedupeKey: p.dedupeKey,
@@ -991,7 +1014,7 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
               phone: state.inbound.fromPhone,
               recipientName: displayName(state.identity) ?? "corretor",
               title: "Ficha do rascunho",
-              body: p.texto,
+              body: selarCorpo(p.texto, `${orgId}|${state.inbound.fromPhone}`),
               linkUrl: null,
               dealId: null,
               orgName: state.identity.orgName,
@@ -1484,7 +1507,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
       pendingAction: null,
       messages: [{ role: "user", content: userText }],
       ...(usage.length > 0 ? { usage } : {}),
-      toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
+      // I5: coletou valor de documento; este turno não vai para resumo, memória nem log com valor.
+      toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "proposta_v2" ? { sensivel: true } : {}) }, outcome: passo.evento }],
     };
   }
   // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
@@ -1499,7 +1523,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     reply: resposta,
     ...(usage.length > 0 ? { usage } : {}),
     // Sem os DADOS: o que a pessoa ditou (CPF, telefone) não vai para o log.
-    toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
+    // I5: v2 = a resposta pode ser a ficha com valor de documento: turno sensível.
+    toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "proposta_v2" ? { sensivel: true } : {}) }, outcome: passo.evento }],
   };
 }
 
@@ -2450,6 +2475,15 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   };
 }
 
+/**
+ * I5: o turno do formulário v2 trouxe (ou pode ter trazido) valor lido de documento na resposta
+ * (a ficha "lido — confira"). Marcado pelo `conduzir` no toolLog. Esse turno não vai para resumo,
+ * memória nem log com o valor; a resposta real só chega ao corretor.
+ */
+function turnoV2Sensivel(toolLog: readonly ToolLogEntry[] | undefined): boolean {
+  return (toolLog ?? []).some((t) => t.name === "fluxo" && t.args.kind === "proposta_v2" && t.args.sensivel === true);
+}
+
 /** O turno passou pela ficha de crédito? Então não vai para resumo nem memória. */
 function turnoDeCredito(toolLog: readonly ToolLogEntry[] | undefined): boolean {
   // Captação (P9) entra aqui: CPF, telefone e e-mail de proprietário não vão ao
@@ -2475,7 +2509,7 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
   // suspendia o resumo por até 24h (TTL do rascunho) mesmo nos turnos em que a
   // pessoa só falava de outro negócio ou de crédito. `turnoDeCredito` já olha
   // só o toolLog DESTE turno (e ignora o turno "liberado").
-  if (state.fluxo?.kind === "credito" || turnoDeCredito(state.toolLog)) return {};
+  if (state.fluxo?.kind === "credito" || turnoDeCredito(state.toolLog) || turnoV2Sensivel(state.toolLog)) return {};
 
   const keep = state.messages.slice(-KEEP_AFTER_COMPACT);
   const older = state.messages.slice(0, -KEEP_AFTER_COMPACT);
@@ -2607,7 +2641,7 @@ function cronometrar(
   return async (state) => {
     const iniciadoEm = Date.now();
     runEvent("agent.started", no);
-    const update = blindarCredito(state, await fn(state));
+    const update = blindarFormularioV2(state, blindarCredito(state, await fn(state)));
     const specialized = (update.fluxo as {kind?:string}|null|undefined)?.kind ?? (no === "conduzir" ? state.fluxo?.kind : undefined);
     if (specialized) { runEvent("specialist.completed", specialized, { implementation: "deterministic-flow", model: null }); }
     runEvent("agent.completed", no, { durationMs: Date.now() - iniciadoEm });
@@ -3167,6 +3201,8 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   // Turno de crédito: o state tem a resposta redigida; a real veio de `TURNO_CRU`.
   const reply = replyCru ?? result.reply ?? null;
   const deCredito = turnoSensivel(result, {});
+  // I5: turno do formulário v2 (a resposta pode ser a ficha com valor de documento).
+  const deFormularioV2 = turnoV2Sensivel(result.toolLog);
   const usage = result.usage ?? [];
   const tools = result.toolLog ?? [];
   const timings = result.timings ?? [];
@@ -3191,7 +3227,8 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
 
   return {
     reply,
-    sensivel: deCredito,
+    sensivel: deCredito || deFormularioV2,
+    ...(deFormularioV2 && !deCredito ? { replyGravado: MARCADOR_DOCUMENTO_LIDO } : {}),
     // Só vale extrair de um turn que teve as duas pontas: sem resposta não há
     // conversa da qual aprender, e um turn que falhou no modelo ensinaria o
     // erro.
@@ -3210,11 +3247,12 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
         messageId: inbound.messageId,
         kind: inbound.kind,
         // Crédito: auditoria também sem valores (renda, aluguel).
-        inboundText: (deCredito ? redigirCredito(turnText) : turnText) || null,
+        inboundText: (deCredito || deFormularioV2 ? redigirCredito(turnText) : turnText) || null,
         // Só quando houve mídia: repetir o texto digitado nas duas colunas
         // encheria a tabela sem acrescentar informação.
-        transcript: fromMedia ? (deCredito ? redigirCredito(turnText) : turnText) : null,
-        replyText: deCredito && reply ? redigirCredito(reply) : reply,
+        transcript: fromMedia ? (deCredito || deFormularioV2 ? redigirCredito(turnText) : turnText) : null,
+        // I5: a ficha v2 traz valor de documento: no log vai só o marcador.
+        replyText: deFormularioV2 && reply ? MARCADOR_DOCUMENTO_LIDO : deCredito && reply ? redigirCredito(reply) : reply,
         tools,
         usage,
         timings,
@@ -3240,7 +3278,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
        */
       if (!(reply && turnText) || result.halt) return;
       // Turno da ficha de crédito não alimenta a memória (CPF, renda).
-      if (deCredito) return;
+      if (deCredito || deFormularioV2) return;
       await (async () => {
             // M1 (PII, corrigido em review) — `redigir`, não `tokenizar`: mesmo
             // motivo do `compact` (ver o cabeçalho ali). `extractFacts` grava
