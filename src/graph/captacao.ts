@@ -1184,8 +1184,8 @@ const MARCAS: [RegExp, string][] = [
 const semPercentualEPrazo = (s: string) =>
   s.replace(/\d+(?:[.,]\d+)?\s*(?:%|por cento)/g, " ").replace(/\d+\s*(?:dias?|meses|mes)\b/g, " ");
 
-/** Valor que se anuncia: "R$ 800.000", "R$800 mil", "R$ 1,2 milhão" ou "800 mil" (texto já normalizado). */
-const RE_VALOR_MARCADO = /r\$\s*\d[\d.,]*(?:\s*(?:mil|milhoes?|milhao|k)\b)?|\d[\d.,]*\s*(?:mil|milhoes?|milhao)\b/g;
+/** Valor que se anuncia: "R$ 800.000", "R$800 mil", "R$ 1,2 milhão", "800 mil", "800k" ou "800000 reais" (texto já normalizado). */
+const RE_VALOR_MARCADO = /r\$\s*\d[\d.,]*(?:\s*(?:mil|milhoes?|milhao|k)\b)?|\d[\d.,]*\s*(?:mil|milhoes?|milhao|reais)\b|\d[\d.,]*k\b/g;
 /** Rótulos cujo "R$" é de OUTRO campo (condomínio, IPTU, taxa, aluguel já lido): não viram o valor principal. */
 const MARCAS_DE_OUTRO_VALOR = new Set(["aluguel", "condominio", "iptu", "taxa", "valor"]);
 
@@ -1203,6 +1203,21 @@ function valorMarcado(t: string, marcas: { campo: string; ini: number }[]): numb
     if (v !== undefined && v > 0) achados.add(v);
   }
   return achados.size === 1 ? [...achados][0] : undefined;
+}
+
+/**
+ * Tira do texto (já normalizado) os números que são do endereço ou de um
+ * documento/contato — número da rua, "nº 88", apto/bloco, CEP, telefone, CPF.
+ * Só vale para o valor SOLTO (sem R$/mil/milhão nem rótulo): "Rua X, 5" sem
+ * preço nunca vira "valor R$ 5,00".
+ */
+function semNumerosQueNaoSaoPreco(t: string): string {
+  return t
+    .replace(/\b(?:rua|r\.|avenida|av\.?|alameda|al\.|travessa|tv\.|rodovia|estrada|praca|largo|viela)\s+[^,\n\d]*?(?:,\s*|\s+)(?:n[o.º°]?\s*|numero\s*)?\d+[a-z]?\b/g, " ")
+    .replace(/\b(?:n[º°.]|no\.|numero|apto?\.?|apartamento|bloco|bl\.?|casa|lote|quadra|qd\.?|sala|cj\.?|conjunto|andar)\s*\d+[a-z]?\b/g, " ")
+    .replace(/\bcep\s*:?\s*\d{5}-?\d{3}\b|\b\d{5}-\d{3}\b/g, " ")
+    .replace(/\b(?:tel(?:efone)?|cel(?:ular)?|fone|whats(?:app)?|zap|cpf|cnpj|rg)\b\.?\s*:?\s*[\d\s().+\-/]+/g, " ")
+    .replace(/\+?\(?\d{2}\)?\s*9?\d{4}-?\d{4}\b/g, (m) => (m.replace(/\D/g, "").length >= 10 ? " " : m));
 }
 
 function prazoEmDias(segmento: string): number | null {
@@ -1264,10 +1279,12 @@ export function lerCondicoes(texto: string, tipo: TipoDeCaptacao): CondicoesLida
     const marcado = valorMarcado(t, achadas);
     if (marcado !== undefined) setMoeda("valor", marcado);
     else {
+      // Com endereço/contato no texto, número solto não é preço: só vale com marcador (acima).
+      const temOutrosNumeros = semNumerosQueNaoSaoPreco(t) !== t;
       const primeiraMarca = achadas[0]?.ini ?? t.length;
-      const solto = valoresNoTexto(semPercentualEPrazo(t.slice(0, primeiraMarca)));
+      const solto = temOutrosNumeros ? [] : valoresNoTexto(semPercentualEPrazo(t.slice(0, primeiraMarca)));
       if (solto.length === 1) setMoeda("valor", solto[0]);
-      else if (!achadas.length) {
+      else if (!achadas.length && !temOutrosNumeros) {
         const todos = valoresNoTexto(semPercentualEPrazo(t));
         if (todos.length === 1) setMoeda("valor", todos[0]);
       }

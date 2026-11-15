@@ -2223,6 +2223,26 @@ describe("lerCondicoes: valor com R$ / mil / milhão, mesmo com outros números 
     expect(venda("Rua A, 10, apto 52")).toBeUndefined();
   });
 
+  it("pedido sem preço: o número da rua nunca vira valor", () => {
+    expect(venda("nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999990000, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda")).toBeUndefined();
+    expect(venda("Rua TESTE Captação, 5, São Paulo/SP")).toBeUndefined();
+    expect(venda("Avenida Paulista 1000, venda")).toBeUndefined();
+    expect(venda("Rua A, nº 88, CEP 01310-100")).toBeUndefined();
+  });
+
+  it.each([
+    ["nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999990000, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, por 800 mil", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, valor 1,2 milhão", 1200000],
+    ["850000", 850000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, 800000 reais", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, 800k", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, preço 800000", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, valor 800000", 800000],
+  ])("com marcador (ou só o valor) continua: %s → %d", (texto, esperado) => {
+    expect(venda(texto)).toBe(esperado);
+  });
+
   it("dois valores marcados diferentes: não chuta", () => {
     expect(venda("Rua A, 10, R$ 800.000 ou R$ 750.000")).toBeUndefined();
   });
@@ -2455,6 +2475,17 @@ describe("captação fluida: pendências dos proprietários numa mensagem só", 
     return fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
   }
 
+  it("pedido sem preço: não grava o número da rua como valor e pede as condições na mesma resposta", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    const r = await fala("nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999990000, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda");
+    for (const c of verbos("captacao.create")) {
+      expect((c.args.dados as { condicoes?: { valor?: unknown } } | undefined)?.condicoes?.valor).toBeUndefined();
+    }
+    expect(r.reply).not.toContain("R$ 5,00");
+    expect(r.reply).toContain("valor pretendido");
+  });
+
   it("sem MAX_ENCRYPTION_KEY: nada do dono fica em claro nem cifrado, e o fluxo volta a pedir os proprietários", async () => {
     const antiga = process.env.MAX_ENCRYPTION_KEY;
     try {
@@ -2485,7 +2516,8 @@ describe("captação fluida: pendências dos proprietários numa mensagem só", 
     expect(atual.etapa).toBe("natureza");
     const deOutraThread = cap.cifrarCofreCaptacao(JSON.stringify([{ id: "p1", nome: "Pedro TESTE Captação" }]), "thread-que-nao-e-esta");
     await app.updateState({ configurable: { thread_id: thread } }, { fluxo: { ...atual, pessoasCifradas: deOutraThread } });
-    const r = await fala("venda");
+    await fala("venda");
+    const r = await fala("valor 800 mil, comissão 6%, prazo 180 dias, com exclusividade");
     const create = ultimo("captacao.create");
     expect(create).toBeDefined();
     expect((create!.args.dados as { proprietarios?: unknown } | undefined)?.proprietarios).toBeUndefined();
