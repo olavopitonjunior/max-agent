@@ -318,6 +318,8 @@ const CATALOGO_DO_IMOBPRO = [
   "google.calendar.read",
   "google.calendar.write",
   "google.tasks.write",
+  // Avisos da fila no pending.summary (2.8b, 15/11/2026): posição 33 (0-based), ao FIM, fora do padrão.
+  "pending.avisos",
 ];
 
 describe("paridade do catálogo de capabilities", () => {
