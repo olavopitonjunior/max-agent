@@ -1690,13 +1690,15 @@ async function seguirParaNomeOuImovel(f: FluxoCaptacao, ctx: ContextoDoTurno, de
 function fecharPessoas(itens: Record<string, unknown>[], ctx: ContextoDoTurno): string | undefined {
   try { return cifrarCofreCaptacao(JSON.stringify(itens), threadDaCaptacao(ctx)); } catch { return undefined; }
 }
-function abrirPessoas(f: FluxoCaptacao, ctx: ContextoDoTurno): Record<string, unknown>[] {
+/** `null` = havia cofre e ele não abriu (chave trocada, thread errada, adulterado): quem chama avisa e pede os donos de novo. */
+function abrirPessoas(f: FluxoCaptacao, ctx: ContextoDoTurno): Record<string, unknown>[] | null {
   if (!f.pessoasCifradas) return [];
   try {
     const v: unknown = JSON.parse(decifrarCofreCaptacao(f.pessoasCifradas, threadDaCaptacao(ctx)));
-    return Array.isArray(v) ? v.map(obj).filter((x) => Object.keys(x).length > 0) : [];
-  } catch { return []; }
+    return Array.isArray(v) ? v.map(obj).filter((x) => Object.keys(x).length > 0) : null;
+  } catch { return null; }
 }
+const TEXTO_DONOS_ILEGIVEIS = "Não consegui ler os proprietários do seu pedido; mande de novo, por favor.";
 
 // Sem "apto" solto: "Apto da Dona Maria" é NOME da captação, não endereço — só
 // dispara a extração (que custa um LLM) com sinal forte de rua/CEP de verdade.
@@ -1725,7 +1727,7 @@ async function aproveitarPedidoOriginal(fOriginal: FluxoCaptacao, ctx: ContextoD
   // Sem nome dito: deriva de "<proprietário> — <rua>, <número>" (ou só um deles). Só pergunta se não há nenhum dos dois.
   let derivado: string | undefined;
   if (!fOriginal.nome) {
-    const dono = abrirPessoas(fOriginal, ctx)[0];
+    const dono = (abrirPessoas(fOriginal, ctx) ?? [])[0];
     derivado = nomeDerivado(str(dono?.nome) ?? str(dono?.razao_social), imovel) ?? undefined;
     // O pedido NÃO é consumido aqui: segue no estado para a próxima tentativa (depois do nome dito).
     if (!derivado) return resposta(g(fOriginal, ctx, { etapa: "nome" }), `${prefixo}${TEXTO_NOME}`, "captacao_nome");
@@ -2146,7 +2148,8 @@ async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, 
   const guardado: FluxoCaptacao = g(f, ctx, { etapa: "condicoes", criacao: { chave, dados } });
   // Os proprietários do 1º pedido entram só nos args desta chamada (nunca em `f.criacao.dados`, que o
   // checkpoint guarda): o replay com a mesma chave reabre o mesmo cofre e manda exatamente o mesmo corpo.
-  const donosLidos = abrirPessoas(f, ctx);
+  const abertos = abrirPessoas(f, ctx);
+  const donosLidos = abertos ?? [];
   const dadosEnviados: DadosDeCaptacao = donosLidos.length ? { ...dados, proprietarios: donosLidos } : dados;
   const args: Record<string, unknown> = {
     tipo: f.tipo, nome: f.nome, ...(f.modeloId ? { modeloId: f.modeloId } : {}),
@@ -2169,7 +2172,7 @@ async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, 
       donosEmAberto: donosLidos.map((d) => ({ id: str(d.id) ?? "p1", falta: faltaDoDono(d) })).filter((x) => x.falta.length),
       ...(donosLidos.length && f.canalDito ? { canalAplicado: f.canalDito } : {}),
     });
-    const anotados = donosLidos.length ? `\n${anoteiDosDonos(donosLidos)}` : "";
+    const anotados = donosLidos.length ? `\n${anoteiDosDonos(donosLidos)}` : abertos === null ? `\n${TEXTO_DONOS_ILEGIVEIS}` : "";
     const texto = `${prefixo}Criei o rascunho${lembrete(criado)} ("${f.nome}", ${nomeDaEsteira(f)}).${anotados}`;
     // Item 6: o modelo diz uma exclusividade e a pessoa disse outra — avisa UMA vez e pergunta qual vale.
     const doModelo = exclusivaDoServidor(r.body) ?? f.modeloExclusiva;

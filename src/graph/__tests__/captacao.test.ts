@@ -2455,6 +2455,46 @@ describe("captação fluida: pendências dos proprietários numa mensagem só", 
     return fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
   }
 
+  it("sem MAX_ENCRYPTION_KEY: nada do dono fica em claro nem cifrado, e o fluxo volta a pedir os proprietários", async () => {
+    const antiga = process.env.MAX_ENCRYPTION_KEY;
+    try {
+      delete process.env.MAX_ENCRYPTION_KEY;
+      const fala = conversa();
+      extracao = RUA_DO_PEDIDO;
+      const r = await fala(MSG);
+      expect(JSON.stringify(r.fluxo ?? {})).not.toContain("999063228");
+      expect((r.fluxo as { pessoasCifradas?: string } | null)?.pessoasCifradas).toBeUndefined();
+      expect(semDadosPessoais(r.fluxo)).toBe(true);
+      const create = ultimo("captacao.create");
+      expect(create).toBeDefined();
+      expect((create!.args.dados as { proprietarios?: unknown } | undefined)?.proprietarios).toBeUndefined();
+      expect(r.reply).toContain("um por linha");
+    } finally {
+      process.env.MAX_ENCRYPTION_KEY = antiga;
+    }
+  });
+
+  it("cofre dos donos que não abre: não some em silêncio — avisa e pede os proprietários de novo", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala("nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999063228, imóvel Rua TESTE Captação, 5, São Paulo/SP");
+    const app = (fala as unknown as { app: { getState: Function; updateState: Function } }).app;
+    const thread = (fala as unknown as { thread: string }).thread;
+    const estado = await app.getState({ configurable: { thread_id: thread } });
+    const atual = (estado as { values: { fluxo: Record<string, unknown> } }).values.fluxo;
+    expect(atual.etapa).toBe("natureza");
+    const deOutraThread = cap.cifrarCofreCaptacao(JSON.stringify([{ id: "p1", nome: "Pedro TESTE Captação" }]), "thread-que-nao-e-esta");
+    await app.updateState({ configurable: { thread_id: thread } }, { fluxo: { ...atual, pessoasCifradas: deOutraThread } });
+    const r = await fala("venda");
+    const create = ultimo("captacao.create");
+    expect(create).toBeDefined();
+    expect((create!.args.dados as { proprietarios?: unknown } | undefined)?.proprietarios).toBeUndefined();
+    expect(JSON.stringify(r.fluxo ?? {})).not.toContain("999063228");
+    expect(r.reply).toContain("Não consegui ler os proprietários do seu pedido");
+    expect(r.reply).toContain("um por linha");
+    expect((r.fluxo as { pessoasCifradas?: string } | null)?.pessoasCifradas).toBeUndefined();
+  });
+
   it("o pedido de proprietários não é mais 'um por mensagem': aceita todos de uma vez, um por linha", async () => {
     const fala = conversa();
     const r = await ateOProprietario(fala);
