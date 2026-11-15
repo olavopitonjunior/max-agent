@@ -58,7 +58,8 @@ export interface AssinaturaEmCurso {
   testemunhasOk?: boolean;
   /** O canal escolhido já foi gravado (`proposal.update`): o preflight que ainda difere vira aviso, não novo cartão. */
   canalGravado?: boolean;
-  mostrado?: { instrumento: "envelope" | "aceite"; tipoEfetivo: "email" | "whatsapp" | "aceite" };
+  /** O resumo que o corretor viu. `mostradoEm` (ms) dá a validade do SIM (R22): passados 15 min o preflight é refeito. */
+  mostrado?: { instrumento: "envelope" | "aceite"; tipoEfetivo: "email" | "whatsapp" | "aceite"; mostradoEm?: number };
   nonce?: string;
 }
 

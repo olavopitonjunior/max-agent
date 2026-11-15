@@ -116,6 +116,9 @@ const TEXTO_DO_BLOQUEIO_DO_PREFLIGHT: Record<string, string> = {
 /** "manter" e variações: a escolha é o que a lista mostra marcado (e não o padrão do cadastro). */
 const MANTER = /^(manter|mantem|mantenho|deixa assim|deixar assim|padrao|o padrao|igual|igual ao padrao)$/;
 
+/** R22: quanto tempo o resumo do envio vale para um "sim". */
+const VALIDADE_DO_RESUMO_MS = 15 * 60 * 1000;
+
 const ROTULO_DO_TIPO: Record<TipoDeAssinatura, string> = { email: "e-mail", whatsapp: "WhatsApp", aceite: "Aceite no celular" };
 const PAPEIS_QUE_O_MAX_EDITA = new Set(["proponente", "comprador", "vendedor", "proprietario", "locatario", "inquilino", "locador", "contraparte"]);
 
@@ -528,12 +531,34 @@ function lerPreflightPronto(body: Record<string, unknown>): Preflight | null {
   };
 }
 
+/** Códigos do servidor em português (`conjuge` → "cônjuge"). Código desconhecido não aparece: nunca cru. */
+const ROTULO_DO_PAPEL: Record<string, string> = {
+  proponente: "proponente",
+  comprador: "comprador",
+  vendedor: "vendedor",
+  proprietario: "proprietário",
+  locatario: "locatário",
+  inquilino: "inquilino",
+  locador: "locador",
+  contraparte: "contraparte",
+  conjuge: "cônjuge",
+  testemunha: "testemunha",
+};
+const ROTULO_DO_CANAL: Record<string, string> = { email: "e-mail", "e-mail": "e-mail", whatsapp: "WhatsApp", celular: "celular" };
+
+function linhaDoAssinante(s: { nome: string; papel: string; canal?: string; via?: string }): string {
+  const papel = ROTULO_DO_PAPEL[normalizar(s.papel)];
+  const canal = s.canal ? ROTULO_DO_CANAL[normalizar(s.canal)] : undefined;
+  const como = normalizar(s.via ?? "") === "aceite" ? "pelo celular (Aceite)" : canal ? `por ${canal}` : "";
+  return `   - ${s.nome}${papel ? ` (${papel})` : ""}${como ? `, ${como}` : ""}`;
+}
+
 function textoDoResumo(p: Preflight): string {
   const linhas = [
     "Antes de enviar, confira:",
     `• Instrumento: ${p.instrumento === "aceite" ? "Aceite no celular" : "envelope de assinatura digital"}`,
     `• Tipo: ${ROTULO_DO_TIPO[p.tipoEfetivo]}`,
-    ...(p.assinantes.length > 0 ? ["• Assinantes:", ...p.assinantes.map((s) => `   - ${s.nome}${s.papel ? ` (${s.papel})` : ""}${s.canal ? `, ${s.canal}` : ""}${s.via ? ` via ${s.via}` : ""}`)] : []),
+    ...(p.assinantes.length > 0 ? ["• Assinantes:", ...p.assinantes.map(linhaDoAssinante)] : []),
     // Envelope nunca mostra preço em reais: o que consome é o limite do plano. Só o Aceite tem custo.
     ...(p.consomeEnvioDoPlano ? ["• Consome 1 envio do plano da conta."] : []),
     ...(p.instrumento === "aceite" && p.custoCentavos !== undefined ? [`• Custo: ${moeda(p.custoCentavos)}${p.semLembrete ? ", sem lembrete" : ""}.`] : []),
@@ -573,7 +598,7 @@ async function preflightEResumo(e: E): Promise<Resposta> {
       "assinatura_canal_cartao"
     );
   }
-  const f = noPasso(e, { passo: "envio_cartao", mostrado: { instrumento: p.instrumento, tipoEfetivo: p.tipoEfetivo } });
+  const f = noPasso(e, { passo: "envio_cartao", mostrado: { instrumento: p.instrumento, tipoEfetivo: p.tipoEfetivo, mostradoEm: e.ctx.agora } });
   return dizer(e, f, textoDoResumo(p), "envio_resumo");
 }
 
@@ -677,9 +702,20 @@ async function passoEnvio(e: E, as: AssinaturaEmCurso, conf: ReturnType<typeof l
   if (e.ctx.podeEscrever === false) return dizer(e, semAssinatura(e.f), textoSemPermissao(), "sem_permissao");
   const mostrado = as.mostrado;
   if (!mostrado || !as.tipo) return perguntarTipo({ ...e, prefixo: "Preciso refazer o resumo antes de enviar." });
+  // R22: o resumo vale 15 minutos. Depois, a lista de assinantes pode ter mudado na tela sem mudar o instrumento
+  // (o `instrumento_confirmado` não cobre isso): refaz o preflight, mostra o resumo e pede NOVO "sim". Nunca envia.
+  // Um "sim" que já tentou enviar e ficou sem resposta (`f.chave`) repete a MESMA chave: o servidor deduplica.
+  const reenvio = e.f.chave?.verbo === "proposal.send";
+  if (!reenvio && (mostrado.mostradoEm === undefined || e.ctx.agora - mostrado.mostradoEm > VALIDADE_DO_RESUMO_MS)) {
+    return preflightEResumo({
+      ...e,
+      f: { ...noPasso(e, { passo: "tipo", mostrado: undefined }), chave: undefined },
+      prefixo: "O resumo tem mais de 15 minutos, então conferi de novo antes de enviar e não enviei nada.",
+    });
+  }
   const chave = chaveDe(e, "proposal.send");
-  // `tipo_assinatura` bate com o `tipoEfetivo` MOSTRADO; a única divergência aceita é WhatsApp pedido que sai como Aceite.
-  const tipoDoEnvio: TipoDeAssinatura = as.tipo === "whatsapp" && mostrado.tipoEfetivo === "aceite" ? "whatsapp" : mostrado.tipoEfetivo;
+  // §18.13.7: o envio leva os MESMOS parâmetros do preflight que o corretor viu (`tipo_assinatura` = o do preflight).
+  const tipoDoEnvio: TipoDeAssinatura = as.tipo;
   const r = await e.deps.acao(
     "proposal.send",
     { proposta_id: e.f.proposalId, instrumento_confirmado: mostrado.instrumento, tipo_assinatura: tipoDoEnvio },

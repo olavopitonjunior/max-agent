@@ -124,7 +124,12 @@ function montar(m: Montagem = {}) {
   } as unknown as DepsDoFluxo;
 
   let n = 0;
+  let desvio = 0;
   const t = {
+    /** Faz o relógio do turno andar (o resumo mostrado envelhece). */
+    passa(ms: number) {
+      desvio += ms;
+    },
     acao,
     deps,
     chamadas,
@@ -137,7 +142,7 @@ function montar(m: Montagem = {}) {
         texto,
         messageId: messageId ?? `wamid.${n}`,
         policy: (m.policy ?? ["proposal.create", "proposal.send"]) as ContextoDoTurno["policy"],
-        agora: T0 + n * 1000,
+        agora: T0 + n * 1000 + desvio,
         thread: "thread-envio",
         subjectKey: JSON.stringify([ORG, "u1"]),
         podeEscrever: m.podeEscrever ?? true,
@@ -408,7 +413,7 @@ describe("T14: resumo, envio e idempotência", () => {
     const r1 = env.ultima!.reply!;
     expect(r1).toContain("Instrumento: envelope de assinatura digital");
     expect(r1).toContain("Tipo: e-mail");
-    expect(r1).toContain("Letícia Gonçalves (proponente), e-mail");
+    expect(r1).toContain("Letícia Gonçalves (proponente), por e-mail");
     expect(r1).toContain("Consome 1 envio do plano da conta.");
     expect(r1).not.toContain("R$");
 
@@ -438,6 +443,118 @@ describe("T14: resumo, envio e idempotência", () => {
     expect(envios[0]!.args).toEqual({ proposta_id: "prop-1", instrumento_confirmado: "envelope", tipo_assinatura: "email" });
     expect(p.reply).toContain("Proposta enviada para assinatura (envelope de assinatura).");
     expect(p.fluxo).toBeNull();
+  });
+
+  // I3 (R22): o resumo mostrado vale 15 minutos. Depois disso o SIM refaz o preflight e pede um SIM novo.
+  describe("I3: o resumo do envio tem validade (R22, 15 min)", () => {
+    const QUINZE_MIN = 15 * 60 * 1000;
+
+    it("SIM depois de 15 min NUNCA envia: refaz o preflight, mostra o resumo de novo e pede novo SIM", async () => {
+      const t = montar();
+      await ateResumo(t);
+      expect(t.de("proposal.preflight")).toHaveLength(1);
+      t.passa(QUINZE_MIN + 1000);
+      const p = await t.fala("sim", "wamid.sim-velho");
+      expect(t.de("proposal.send")).toHaveLength(0);
+      expect(t.de("proposal.preflight")).toHaveLength(2);
+      expect(p.reply).toMatch(/mais de 15 minutos/);
+      expect(p.reply).toContain("Antes de enviar, confira:");
+      expect(p.reply).toContain("Responda *SIM* para enviar.");
+      expect(t.assinatura()).toMatchObject({ passo: "envio_cartao" });
+      expect((t.fluxo as FluxoFormularioV2).chave).toBeUndefined();
+      // O SIM novo (chave nova) é que envia, com o instrumento do resumo refeito.
+      await t.fala("sim", "wamid.sim-novo");
+      const envios = t.de("proposal.send");
+      expect(envios).toHaveLength(1);
+      expect(envios[0]!.chave).toBe("wamid.sim-novo");
+    });
+
+    it("SIM dentro dos 15 min envia normalmente (sem refazer o preflight)", async () => {
+      const t = montar();
+      await ateResumo(t);
+      t.passa(QUINZE_MIN - 5000);
+      await t.fala("sim", "wamid.sim-fresco");
+      expect(t.de("proposal.preflight")).toHaveLength(1);
+      expect(t.de("proposal.send")).toHaveLength(1);
+    });
+
+    it("o resumo refeito que agora tem pendência volta para a ficha e não envia", async () => {
+      const t = montar({ fila: { "proposal.preflight": [{ status: 200, body: PRONTO_ENVELOPE }, { status: 200, body: { ...PRONTO_ENVELOPE, faltando: [falta("proponente.documento")] } }] } });
+      await ateResumo(t);
+      t.passa(QUINZE_MIN + 1000);
+      await t.fala("sim", "wamid.sim-velho");
+      expect(t.de("proposal.send")).toHaveLength(0);
+      expect(t.assinatura()).toBeUndefined();
+    });
+
+    it("reenvio de um SIM que ficou sem resposta (mesma chave) não refaz o preflight por causa do tempo", async () => {
+      const t = montar({ fila: { "proposal.send": [null] } });
+      await ateResumo(t);
+      await t.fala("sim", "wamid.sim-1");
+      expect(t.de("proposal.send")).toHaveLength(1);
+      t.passa(QUINZE_MIN + 60_000);
+      await t.fala("sim", "wamid.sim-2");
+      const envios = t.de("proposal.send");
+      expect(envios).toHaveLength(2);
+      expect(envios[1]!.chave).toBe(envios[0]!.chave);
+      expect(t.de("proposal.preflight")).toHaveLength(1);
+    });
+  });
+
+  // M2: o send leva os MESMOS parâmetros do preflight (§18.13.7), mesmo depois de gravar o canal.
+  it("M2: o send usa o tipo_assinatura do preflight (e não o tipoEfetivo) depois de gravar o canal", async () => {
+    const t = montar();
+    await ateCartaoDeTestemunhas(t);
+    await t.fala("sim", "wamid.sim-testemunhas");
+    await t.fala("whatsapp");
+    await t.fala("sim", "wamid.sim-canal"); // grava o canal; o preflight seguinte ainda diz e-mail (aviso, não novo cartão)
+    expect(t.assinatura()).toMatchObject({ passo: "envio_cartao", mostrado: { tipoEfetivo: "email" } });
+    await t.fala("sim", "wamid.sim-envio");
+    const preflights = t.de("proposal.preflight");
+    const ultimo = preflights[preflights.length - 1]!.args.tipo_assinatura;
+    expect(ultimo).toBe("whatsapp");
+    expect(t.de("proposal.send")[0]!.args).toEqual({ proposta_id: "prop-1", instrumento_confirmado: "envelope", tipo_assinatura: ultimo });
+  });
+
+  // M1: nada de código cru do servidor no resumo.
+  it("M1: o resumo fala em português (papel, canal e instrumento), sem códigos crus", async () => {
+    const t = montar({
+      fila: {
+        "proposal.preflight": [
+          {
+            status: 200,
+            body: {
+              ...PRONTO_ENVELOPE,
+              assinantes: [
+                { nome: "Letícia Gonçalves", papel: "proponente", canal: "whatsapp", via: "assinatura" },
+                { nome: "Valter Vendedor", papel: "vendedor", canal: "email", via: "assinatura" },
+                { nome: "Cora Cônjuge", papel: "conjuge", canal: "email", via: "assinatura" },
+                { nome: "Dora Testemunha", papel: "testemunha", canal: "email", via: "assinatura" },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    await ateResumo(t);
+    const r = t.ultima!.reply!;
+    expect(r).toContain("Letícia Gonçalves (proponente), por WhatsApp");
+    expect(r).toContain("Valter Vendedor (vendedor), por e-mail");
+    expect(r).toContain("Cora Cônjuge (cônjuge)");
+    expect(r).toContain("Dora Testemunha (testemunha)");
+    expect(r).not.toMatch(/\bvia\b/);
+    expect(r).not.toMatch(/conjuge|whatsapp|assinatura\b.*assinatura/);
+    expect(r).not.toContain("email");
+  });
+
+  it("M1: o Aceite mostra 'Aceite no celular' por assinante, sem 'via aceite'", async () => {
+    const t = montar({
+      fila: { "proposal.preflight": [{ status: 200, body: { ...PRONTO_ACEITE, assinantes: [{ nome: "Letícia Gonçalves", papel: "proponente", canal: "whatsapp", via: "aceite" }] } }] },
+    });
+    await ateResumo(t, "aceite");
+    const r = t.ultima!.reply!;
+    expect(r).toContain("Letícia Gonçalves (proponente), pelo celular (Aceite)");
+    expect(r).not.toMatch(/\bvia\b|whatsapp/);
   });
 
   it("whatsapp pedido que sai como Aceite é a divergência aceita: confirma o instrumento mostrado", async () => {
