@@ -86,6 +86,8 @@ export type ResultadoParcial =
       testemunhasSemeadas?: number;
       pdfIndisponivel?: string;
       documento?: { descartado: boolean; link?: string };
+      /** §18.13.5: o servidor gravou, mas diz que algo impede o próximo passo. Nunca o código ao corretor. */
+      bloqueio?: { codigo: string; mensagem?: string };
       /** O fluxo já apontando para o rascunho e sem chave presa. */
       fluxo: FluxoFormularioV2;
     }
@@ -209,7 +211,14 @@ export async function salvarParcial(
   }
 
   const doc = r.body?.documento as { descartado?: unknown; link?: unknown } | undefined;
+  const bl = r.body?.bloqueio as { codigo?: unknown; mensagem?: unknown; message?: unknown } | undefined;
+  const fraseDoBloqueio = bl && typeof bl === "object" ? frase({ message: bl.mensagem ?? bl.message, motivo: (bl as { motivo?: unknown }).motivo }) : undefined;
+  const bloqueio =
+    bl && typeof bl === "object" && typeof bl.codigo === "string" && bl.codigo.length > 0
+      ? { codigo: bl.codigo, ...(fraseDoBloqueio ? { mensagem: fraseDoBloqueio } : {}) }
+      : undefined;
   return {
+    ...(bloqueio ? { bloqueio } : {}),
     ok: true,
     criou: criando,
     proposalId,

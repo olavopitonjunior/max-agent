@@ -54,6 +54,16 @@ export interface FluxoFormularioV2 {
    * desalinha (só pode encurtar a janela). Ausente em checkpoint antigo = 0.
    */
   mensagensDoFluxo?: number;
+  /**
+   * Quando a ficha agendada na pausa (T10) sai pelo outbox. Só vale o "sim" depois
+   * dele: antes, o corretor ainda não viu o que vai ser gravado. Sem dado pessoal.
+   */
+  fichaAgendadaEm?: number;
+  /**
+   * Parte já gravada que a leitura nova contradiz (N1): aguarda o "é um novo" ou o
+   * "é o mesmo, troca". Só grupo e posição; o nome vem do servidor a cada turno.
+   */
+  conflito?: { grupo: "compradores" | "vendedores"; posicao: number };
   /** Todo `Fluxo` carrega isto: TTL e expiração. */
   atualizadoEm: number;
 }
