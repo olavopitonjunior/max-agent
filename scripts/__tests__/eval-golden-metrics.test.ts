@@ -31,6 +31,15 @@ describe('promessaSemEfeito', () => {
     expect(promessasNoTexto('Vou ajustar na proposta PROP-1:\n- Complemento: apto 1\n\nResponda SIM para confirmar.')).toEqual([]);
     expect(promessasNoTexto('Vou ajustar o complemento. Confirma?')).toEqual([]);
   });
+  it('SIM no texto não isenta "ajusto" nem "te aviso" (defeito W46)', () => {
+    expect(promessasNoTexto('Ajusto o complemento. Responda SIM.')).toEqual(['ajusto']);
+    expect(promessasNoTexto('Te aviso quando sair. Responda SIM.')).toEqual(['te aviso']);
+    expect(promessasNoTexto('Já atualizo. Confirma?')).toEqual(['já atualizo']);
+  });
+  it('negação curta também não é promessa', () => {
+    expect(promessasNoTexto('Não te aviso por aqui.')).toEqual([]);
+    expect(promessasNoTexto('Ainda não ajusto nada.')).toEqual([]);
+  });
   it('texto neutro não é promessa', () => {
     expect(promessasNoTexto('A proposta PROP-2026-0012 está em rascunho.')).toEqual([]);
   });
@@ -47,6 +56,9 @@ describe('formato', () => {
     const v = violacoesDeFormato('**Negrito**\n## Título\n⟨x⟩ n=3 sem_permissao deal.list');
     expect(v).toEqual(expect.arrayContaining(['**', '##', '⟨', '⟩', 'n=3', 'sem_permissao', 'deal.list']));
     expect(v.filter((x) => x === '**')).toHaveLength(2);
+  });
+  it('snake_case colado a @, / ou . não conta (e-mail, caminho, arquivo)', () => {
+    expect(violacoesDeFormato('Mande para renato_lima@exemplo.com ou veja docs/meu_arquivo e foto.meu_anexo')).toEqual([]);
   });
   it('WhatsApp normal passa: negrito de uma estrela, URL e prosa', () => {
     expect(violacoesDeFormato('Responda *SIM* para confirmar.\nVeja https://app.imobpro.test/p/rascunho_final.pdf e o item #1.')).toEqual([]);
@@ -70,6 +82,7 @@ describe('vocativo', () => {
   it('citar o cliente no meio da frase não é vocativo', () => {
     expect(vocativoErrado('A proposta do João está em rascunho.', ['João'])).toBeNull();
     expect(vocativoErrado('Pronto, Olavo!', ['João'])).toBeNull();
+    expect(vocativoErrado('Signatários:\nCarlos: pendente', ['Carlos'])).toBeNull();
   });
 });
 

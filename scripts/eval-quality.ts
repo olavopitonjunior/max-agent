@@ -92,14 +92,26 @@ export function checkCreationRouting(calls:Array<{name:string;args:Record<string
 // Heurísticas de texto (sem modelo): sinais, não prova semântica.
 
 /** Promessa em presente/futuro de um efeito que o Max só produz com uma escrita. */
-const PROMESSAS=[/\bajusto\b/i,/\bvou (ajustar|atualizar|gerar|criar)\b/i,/\bj[aá] (atualizo|ajusto)\b/i,/\bte (atualizo|aviso)\b/i,/\bser[aá] criad[oa]s?\b/i];
-/** Pergunta de confirmação: "Vou ajustar ... Confirma?" é o card que pede o SIM, não promessa solta. */
+/**
+ * `condicional`: promessa que vira card legítimo quando o texto pede o SIM
+ * ("Vou ajustar ...: Confirma?"). As outras nunca são isentas: "Ajusto. Responda SIM"
+ * é exatamente o defeito W46 (promete sem mostrar o resumo atualizado).
+ */
+const PROMESSAS:{re:RegExp;condicional:boolean}[]=[
+  {re:/\bajusto\b/i,condicional:false},
+  {re:/\bvou (ajustar|atualizar|gerar|criar)\b/i,condicional:true},
+  {re:/\bj[aá] (atualizo|ajusto)\b/i,condicional:false},
+  {re:/\bte (atualizo|aviso)\b/i,condicional:false},
+  {re:/\bser[aá] criad[oa]s?\b/i,condicional:true},
+];
+/** Pergunta de confirmação: o card que pede o SIM. */
 const PEDE_CONFIRMACAO=/\b[Cc]onfirma\?|\bSIM\b/;
-/** Trechos de promessa no texto; vazio se há negação logo antes ("não vou gerar") ou se o texto pede o SIM. */
+/** Trechos de promessa no texto; ignora negação logo antes ("não vou gerar") e, só nas condicionais, o card com SIM. */
 export function promessasNoTexto(text:string):string[]{
-  if(PEDE_CONFIRMACAO.test(text))return [];
+  const pedeSim=PEDE_CONFIRMACAO.test(text);
   const found:string[]=[];
-  for(const re of PROMESSAS){
+  for(const {re,condicional} of PROMESSAS){
+    if(condicional&&pedeSim)continue;
     const m=re.exec(text);
     if(!m)continue;
     if(/\bn[aã]o\s+(?:\S+\s+)?$/i.test(text.slice(Math.max(0,m.index-16),m.index)))continue;
@@ -122,7 +134,8 @@ export function violacoesDeFormato(text:string):string[]{
   for(const m of t.matchAll(/^\s*#{2,}\s/gm))out.push('##');
   for(const m of t.matchAll(/[⟨⟩]/g))out.push(m[0]);
   for(const m of t.matchAll(/\bn=\d+/g))out.push(m[0]);
-  for(const m of t.matchAll(/\b[a-z]+(?:_[a-z]+)+\b/g))out.push(m[0]);
+  // snake_case colado a @, / ou . é e-mail, caminho ou arquivo, não código interno.
+  for(const m of t.matchAll(/(?<![@/.\w])[a-z]+(?:_[a-z]+)+(?![\w@/]|\.\w)/g))out.push(m[0]);
   const v=VERBOS_INTERNOS.exec(t);
   if(v)out.push(v[0]);
   return out;
@@ -132,7 +145,7 @@ export function violacoesDeFormato(text:string):string[]{
 export function vocativoErrado(text:string,terceiros:string[]):string|null{
   for(const nome of terceiros){
     const n=nome.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-    const re=new RegExp(`(?:^|[\\n.!?]\\s*|\\b(?:oi|ol[aá]|ok|certo|pronto|beleza|valeu|obrigad[oa]|bom dia|boa tarde|boa noite)[,!]?\\s+)${n}\\s*[,!:]`,'i');
+    const re=new RegExp(`(?:^|[\\n.!?]\\s*|\\b(?:oi|ol[aá]|ok|certo|pronto|beleza|valeu|obrigad[oa]|bom dia|boa tarde|boa noite)[,!]?\\s+)${n}\\s*[,!]`,'i');
     if(re.test(text))return nome;
   }
   return null;
