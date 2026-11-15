@@ -223,6 +223,9 @@ export function camposSemPapel(campos: CampoLido[], papelSugerido: string | unde
   return !papelSugerido && campos.some((c) => CAMINHO_DE_PESSOA.test(c.path));
 }
 
+/** Marcador do que se grava/loga no lugar da ficha com valores lidos de documento. */
+export const MARCADOR_DOCUMENTO_LIDO = "[documento lido: valores omitidos do log]";
+
 /** Frase honesta por motivo. Sem código interno, sem URL. */
 export function fraseDeNaoLido(motivo: MotivoNaoLido, kind: MidiaRecebida["kind"]): string {
   switch (motivo) {

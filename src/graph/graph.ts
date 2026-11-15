@@ -30,7 +30,7 @@ import { toleranteNaOrg } from "./formularios/intencao";
 import { ocrTranscribeFallbackLigado } from "./captacao-flags";
 import { cancelarFicha } from "./formularios/pausa";
 import { rebaixarParaV1 } from "./formularios/selecao";
-import { camposSemPapel, derivarPapel, fraseDeNaoLido, lerMidia, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
+import { camposSemPapel, derivarPapel, fraseDeNaoLido, lerMidia, MARCADOR_DOCUMENTO_LIDO, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
 import {
   comoMensagemDaJanela,
   INSTRUCAO_DA_JANELA,
@@ -2770,8 +2770,6 @@ export interface TurnResult {
   replyGravado?: string;
 }
 
-/** Marcador do que se grava/loga no lugar da ficha com valores lidos de documento. */
-const MARCADOR_DOCUMENTO_LIDO = "[documento lido: valores omitidos do log]";
 
 /**
  * O que é zerado a CADA turn — o contrato que o checkpointer obriga a manter.

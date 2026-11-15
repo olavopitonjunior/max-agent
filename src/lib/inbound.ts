@@ -9,6 +9,7 @@ import { abrirJanela } from "./janela24h";
 import { log } from "./log";
 import { redigir, CAMPOS_DA_AUDITORIA, redigirCredito } from "./pii";
 import { runTurn, type TurnResult } from "@/graph/graph";
+import { MARCADOR_DOCUMENTO_LIDO } from "@/graph/formularios/midia";
 import { remetenteConhecido } from "./identity";
 
 /**
@@ -347,6 +348,15 @@ async function toqueEmMensagemAntiga(row: InboundRow): Promise<boolean> {
 export const TEXTO_REENVIO_SENSIVEL =
   "Tive um problema para enviar sua resposta. Mande *RESUMO* para ver a ficha de novo.";
 
+/** Turno que leu um documento: não há "ficha" a pedir de volta; reenviar o documento ou digitar resolve. */
+export const TEXTO_REENVIO_DOCUMENTO =
+  "Tive um problema para enviar a resposta sobre o documento. Mande o documento de novo ou digite os dados.";
+
+/** A frase fixa do reenvio de uma linha sensível: a de documento quando o `reply_text` é o marcador dele. */
+export function textoDeReenvioSensivel(replyGravado: string | null): string {
+  return replyGravado === MARCADOR_DOCUMENTO_LIDO ? TEXTO_REENVIO_DOCUMENTO : TEXTO_REENVIO_SENSIVEL;
+}
+
 export async function runQueued(row: InboundRow): Promise<SettleStatus> {
   if (process.env.MAX_OUTBOUND_KILL === "true") {
     await query(`UPDATE inbound_queue SET status='pending',attempts=GREATEST(attempts-1,0),last_error='outbound_disabled: held without attempt' WHERE id=$1`,[row.id]);
@@ -416,7 +426,7 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
 
     // Retentativa de turno de crédito: o `reply_text` gravado está redigido
     // ("⟨VALOR⟩") e não pode ir à pessoa. Vai a frase fixa.
-    if (afterReply === undefined && row.sensivel && reply) reply = TEXTO_REENVIO_SENSIVEL;
+    if (afterReply === undefined && row.sensivel && reply) reply = textoDeReenvioSensivel(row.reply_text ?? null);
 
     let replyMessageId: string | null = null;
     if (reply) {
