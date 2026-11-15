@@ -1,0 +1,323 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Identity } from "@/lib/identity";
+import { withExecution } from "@/lib/runtime/context";
+
+/**
+ * PR-E (T17): o roteamento do pedido de correção de texto (R30), determinístico e sem modelo.
+ * Negado primeiro: sem a feature ou sem a capability o roteamento é exatamente o de antes.
+ * Só dado sintético.
+ */
+
+process.env.MAX_ENCRYPTION_KEY ||= Buffer.alloc(32, 7).toString("base64");
+
+vi.mock("@langchain/langgraph-checkpoint-postgres", async () => {
+  const { MemorySaver } = await import("@langchain/langgraph");
+  return { PostgresSaver: class extends MemorySaver { async setup() {} } };
+});
+vi.mock("@/lib/db", async (orig) => ({
+  ...(await orig<typeof import("@/lib/db")>()),
+  checkpointerPool: vi.fn(),
+}));
+vi.mock("@/lib/cm", async (orig) => ({
+  ...(await orig<typeof import("@/lib/cm")>()),
+  fetchProfile: vi.fn(),
+  chaveDePolitica: vi.fn().mockResolvedValue("admin"),
+  searchKnowledge: vi.fn().mockResolvedValue([]),
+  reportUsage: vi.fn().mockResolvedValue(undefined),
+  transcribeMedia: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("@/lib/acao", async (orig) => ({
+  ...(await orig<typeof import("@/lib/acao")>()),
+  executarAcao: vi.fn(),
+}));
+vi.mock("@/lib/transport", async (orig) => ({
+  ...(await orig<typeof import("@/lib/transport")>()),
+  downloadMedia: vi.fn().mockResolvedValue(null),
+  sendReaction: vi.fn().mockResolvedValue(true),
+}));
+vi.mock("@/lib/outbox", async (orig) => ({
+  ...(await orig<typeof import("@/lib/outbox")>()),
+  enqueue: vi.fn().mockResolvedValue({ status: "queued", id: "o1", deliverAfter: new Date() }),
+  cancelarPendentesPorPrefixo: vi.fn().mockResolvedValue(0),
+}));
+vi.mock("@/lib/llm", () => ({
+  DEFAULT_MODEL: "openai/gpt-5.4-nano",
+  complete: vi.fn(),
+}));
+vi.mock("@/lib/memory", async (orig) => ({
+  ...(await orig<typeof import("@/lib/memory")>()),
+  loadFacts: vi.fn().mockResolvedValue([]),
+  saveFacts: vi.fn().mockResolvedValue(0),
+  extractFacts: vi.fn().mockResolvedValue([]),
+}));
+vi.mock("@/lib/identity", async (orig) => ({
+  ...(await orig<typeof import("@/lib/identity")>()),
+  resolveIdentity: vi.fn(),
+  saveChoice: vi.fn().mockResolvedValue(undefined),
+  markGreeted: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/lib/aceite", () => ({ interceptar: vi.fn().mockResolvedValue(null), repassarDesconhecido: vi.fn().mockResolvedValue(null) }));
+vi.mock("@/lib/turnlog", async (orig) => ({
+  ...(await orig<typeof import("@/lib/turnlog")>()),
+  registrarTurn: vi.fn().mockResolvedValue(undefined),
+}));
+
+const { runTurn, getApp } = await import("../../graph");
+const { pedeCorrecaoDeTexto } = await import("../correcao-roteamento");
+const { resolveIdentity } = await import("@/lib/identity");
+const { executarAcao } = await import("@/lib/acao");
+const { fetchProfile } = await import("@/lib/cm");
+const { MARCADOR_DOCUMENTO_LIDO } = await import("../midia");
+const { complete } = await import("@/lib/llm");
+
+const acao = vi.mocked(executarAcao);
+const perfil = vi.mocked(fetchProfile);
+const llm = vi.mocked(complete);
+
+const ORG = "org-correcao-rota";
+const CANDIDATO = { orgId: ORG, orgName: "RE/MAX Trio", kind: "user" as const, userId: "u1", userName: "Marcia" };
+const ANTES = "ANTES-MARCADOR multa de 20 por cento";
+const DEPOIS = "DEPOIS-MARCADOR multa de 10 por cento";
+const CODIGO = "PROP-2026-0001";
+let seq = 0;
+
+function msg(text: string) {
+  return {
+    messageId: `wamid.RT${++seq}`, fromPhone: "5511987654321", groupId: null, kind: "text", text,
+    mediaUrl: null, mimeType: null, timestampMs: null, senderName: "Marcia", replyToMessageId: null,
+  } as Parameters<typeof runTurn>[0];
+}
+
+const politica = (...caps: string[]) => ({
+  enabled: true, model: "x", instructions: null,
+  maxPolicy: { byRole: { "*": caps }, byRecipient: {}, brokerDefault: [] },
+}) as never;
+
+function ligar(feature: boolean) {
+  vi.stubEnv("MAX_FORMULARIOS_V2", feature ? "true" : "false");
+  vi.stubEnv("MAX_ROLLOUT_ORGS", feature ? JSON.stringify({ [ORG]: ["formularios_v2"] }) : "{}");
+  vi.stubEnv("MAX_CAPTACAO", "true");
+}
+
+const SUGESTAO = { estado: "sugestao", sugestaoId: "sug-1", paragrafoId: "p4", hashParagrafo: "h".repeat(16), antes: ANTES, depois: DEPOIS };
+
+/** O servidor sintético: uma proposta achada por código, e a sugestão de texto. */
+function servidor(extra: Record<string, unknown> = {}) {
+  acao.mockImplementation((async ({ verb }: { verb: string }) => {
+    if (verb === "proposal.status") return { status: 200, body: { proposta: { id: "prop-1", codigo: CODIGO, titulo: "Apto 12", status: "rascunho", signatarios: [] } } };
+    if (verb === "proposal.text.suggest" || verb === "captacao.text.suggest") return { status: 200, body: { ...SUGESTAO, ...extra } };
+    return { status: 200, body: { items: [], total: 0 } };
+  }) as never);
+}
+
+async function turno(texto: string, fluxo?: unknown) {
+  const thread = `correcao-rota-${Math.random()}`;
+  const app = await getApp();
+  if (fluxo) await app.updateState({ configurable: { thread_id: thread } }, { fluxo: fluxo as never });
+  const r = await withExecution(
+    {
+      orgId: ORG, subject: { kind: "user", userId: "u1" }, conversationId: thread,
+      taskId: "00000000-0000-4000-8000-0000000000d1", mode: "live", workflowVersion: "max-v1",
+      controlVersion: 0, deadline: Date.now() + 30_000, budgetUsd: 0.25, maxConcurrency: 1,
+    },
+    () => runTurn(msg(texto))
+  );
+  await r.afterReply();
+  const values = (await app.getState({ configurable: { thread_id: thread } })).values as Record<string, unknown>;
+  return { r, values };
+}
+
+const verbos = () => acao.mock.calls.map(([p]) => String(p.verb));
+const CAPS = ["proposal.list", "proposal.create", "proposal.update", "document.text.edit"];
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.unstubAllEnvs();
+  const resolved: Identity = { kind: "resolved", candidate: CANDIDATO, org: { orgId: ORG, orgName: "RE/MAX Trio", apiToken: "t" } };
+  vi.mocked(resolveIdentity).mockResolvedValue(resolved);
+  perfil.mockResolvedValue(politica(...CAPS));
+  llm.mockResolvedValue({ text: "ok", toolCalls: [], usage: { model: "x", promptTokens: 1, completionTokens: 1, latencyMs: 1, success: true } } as never);
+  servidor();
+});
+
+describe("pedeCorrecaoDeTexto: o detector lexical", () => {
+  it.each([
+    ["muda a cláusula de multa da proposta para 10%", "proposta"],
+    ["Max, troca o parágrafo da rescisão na proposta PROP-2026-0001", "proposta"],
+    ["corrige a redação da cláusula 5 da proposta", "proposta"],
+    ["reescreve o trecho do prazo da captação", "captacao"],
+    ["altera a cláusula de multa", "indefinido"],
+    ["pode mudar a cláusula da multa na proposta?", "proposta"],
+    ["corrige o contrato", "contrato"],
+    ["muda a cláusula de multa do contrato", "contrato"],
+  ])("'%s' é correção de texto (%s)", (texto, alvo) => {
+    expect(pedeCorrecaoDeTexto(texto)).toBe(alvo);
+  });
+
+  it.each([
+    "corrige o CPF da proposta",
+    "muda o valor da proposta do João para 480 mil",
+    "troca o e-mail do comprador na proposta PROP-2026-0001",
+    "atualiza o telefone da captação",
+    "não muda a cláusula de multa da proposta",
+    "como mudo a cláusula da proposta?",
+    "qual a cláusula de multa da proposta?",
+    "o texto da proposta está certo?",
+    "quero criar uma proposta",
+    "oi",
+    "",
+  ])("'%s' NÃO é correção de texto", (texto) => {
+    expect(pedeCorrecaoDeTexto(texto)).toBeNull();
+  });
+});
+
+describe("T17: negado primeiro (sem feature ou capability, o roteamento é o de antes)", () => {
+  const PEDIDO = `muda a cláusula de multa da proposta ${CODIGO} para 10%`;
+
+  it("feature desligada: nunca chama text.suggest; o pedido segue para a gestão (editar), como hoje", async () => {
+    ligar(false);
+    await turno(PEDIDO);
+    expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+    expect(verbos()).toContain("proposal.status");
+  });
+
+  it("sem a capability document.text.edit: nunca chama text.suggest; o pedido segue para a gestão", async () => {
+    ligar(true);
+    perfil.mockResolvedValue(politica("proposal.list", "proposal.create", "proposal.update"));
+    await turno(PEDIDO);
+    expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+    expect(verbos()).toContain("proposal.status");
+  });
+
+  it("sem capability, 'corrige o contrato' segue a recusa de hoje (nada do roteamento novo)", async () => {
+    ligar(true);
+    perfil.mockResolvedValue(politica("proposal.list"));
+    const { r } = await turno("corrige o contrato");
+    expect(r.reply).toMatch(/Contrato eu não gero, não edito/);
+  });
+
+  it("feature desligada, 'corrige o contrato' segue a recusa de hoje", async () => {
+    ligar(false);
+    const { r } = await turno("corrige o contrato");
+    expect(r.reply).toMatch(/Contrato eu não gero, não edito/);
+  });
+});
+
+describe("T17: com feature e capability", () => {
+  it("proposta citada por código: abre o fluxo, sugere e mostra antes/depois (sem o modelo)", async () => {
+    ligar(true);
+    const { r, values } = await turno(`muda a cláusula de multa da proposta ${CODIGO} para 10%`);
+    expect(verbos()).toEqual(["proposal.status", "proposal.text.suggest"]);
+    const suggest = acao.mock.calls.find(([p]) => p.verb === "proposal.text.suggest")![0];
+    expect(suggest.args).toMatchObject({ proposta_id: "prop-1" });
+    expect(suggest.args).not.toHaveProperty("aceita_cancelar");
+    expect(r.reply).toContain(ANTES);
+    expect(r.reply).toContain(DEPOIS);
+    expect(r.reply).toMatch(/1\. Aplicar/);
+    expect(llm).not.toHaveBeenCalled();
+    // Sensível: o corretor vê o texto, o checkpoint só o marcador (R29).
+    expect(r.sensivel).toBe(true);
+    expect(r.replyGravado).toBe(MARCADOR_DOCUMENTO_LIDO);
+    const fluxo = values.fluxo as { kind: string; etapa: string; id: string };
+    expect(fluxo).toMatchObject({ kind: "correcao_texto", etapa: "sugestao", id: "prop-1" });
+    expect(JSON.stringify(values)).not.toContain("MARCADOR multa");
+  });
+
+  it("'corrige o CPF da proposta' é DADO: nunca vira text.suggest, segue em proposal.update (gestão)", async () => {
+    ligar(true);
+    await turno(`corrige o CPF da proposta ${CODIGO} para 529.982.247-25`);
+    expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+    expect(verbos()).toContain("proposal.status");
+  });
+
+  it("proposta sem citação e sem fluxo aberto: pergunta qual, não chama o servidor, não adivinha", async () => {
+    ligar(true);
+    const { r } = await turno("muda a cláusula de multa da proposta para 10%");
+    expect(acao).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/Qual proposta devo corrigir/);
+  });
+
+  it("proposta com mais de uma achada: lista os códigos e pede o código; nada é sugerido", async () => {
+    ligar(true);
+    acao.mockImplementation((async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.list") {
+        return { status: 200, body: { total: 2, busca: "joao", items: [
+          { id: "a", codigo: "PROP-2026-0001", titulo: "Joao Silva", status: "rascunho", signatarios: [{ nome: "Joao Silva", status: "pendente" }] },
+          { id: "b", codigo: "PROP-2026-0002", titulo: "Joao Souza", status: "rascunho", signatarios: [{ nome: "Joao Souza", status: "pendente" }] },
+        ] } };
+      }
+      return { status: 200, body: {} };
+    }) as never);
+    const { r } = await turno("muda a cláusula de multa da proposta do João para 10%");
+    expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+    expect(r.reply).toContain("PROP-2026-0001");
+    expect(r.reply).toContain("PROP-2026-0002");
+    expect(r.reply).toMatch(/Me diga o código/);
+  });
+
+  it("proposta do fluxo aberto (ajuste de rascunho) vale como contexto quando o pedido não cita outra", async () => {
+    ligar(true);
+    const fluxo = { kind: "proposta", etapa: "ajustes", dados: {}, propostaId: "prop-9", codigo: "PROP-2026-0009", atualizadoEm: Date.now() };
+    await turno("muda a cláusula de multa da proposta para 10%", fluxo);
+    expect(verbos()).toEqual(["proposal.text.suggest"]);
+    expect(acao.mock.calls[0]![0].args).toMatchObject({ proposta_id: "prop-9" });
+  });
+
+  it("captação COM o captacaoId do fluxo aberto: usa captacao.text.suggest com esse id", async () => {
+    ligar(true);
+    const fluxo = { kind: "captacao", versao: 2, etapa: "revisao", captacaoId: "cap-7", codigo: "CAP-7", atualizadoEm: Date.now() };
+    const { values } = await turno("muda a cláusula de multa da captação para 10%", fluxo);
+    expect(verbos()).toEqual(["captacao.text.suggest"]);
+    expect(acao.mock.calls[0]![0].args).toMatchObject({ captacaoId: "cap-7" });
+    expect(values.fluxo).toMatchObject({ kind: "correcao_texto", alvo: "captacao", id: "cap-7" });
+  });
+
+  it("captação SEM captacaoId no contexto: pergunta qual / manda para a tela, nunca adivinha", async () => {
+    ligar(true);
+    const { r } = await turno("muda a cláusula de multa da captação para 10%");
+    expect(acao).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/Qual captação devo corrigir/);
+  });
+
+  it("captação em fluxo SEM id (ainda colhendo): não usa esse fluxo como alvo", async () => {
+    ligar(true);
+    const fluxo = { kind: "captacao", versao: 2, etapa: "imovel", atualizadoEm: Date.now() };
+    const { r } = await turno("muda a cláusula de multa da captação para 10%", fluxo);
+    expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+    expect(r.reply).not.toContain(ANTES);
+  });
+
+  it("contrato: responde com o caminho da tela (sem recusa genérica), sem tocar no servidor", async () => {
+    ligar(true);
+    const { r } = await turno("corrige a cláusula de multa do contrato");
+    expect(acao).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/editor do documento, pela tela do negócio/);
+    expect(r.reply).not.toMatch(/Contrato eu não gero/);
+    expect(r.sensivel).toBeFalsy();
+  });
+
+  it("'corrige o contrato' (sem palavra de texto) também responde com o caminho da tela", async () => {
+    ligar(true);
+    const { r } = await turno("corrige o contrato");
+    expect(r.reply).toMatch(/pela tela do negócio/);
+    expect(r.reply).not.toMatch(/Contrato eu não gero/);
+  });
+
+  it("recurso desligado no servidor (403 fluxo_desligado): o turno segue como se a detecção não tivesse disparado", async () => {
+    ligar(true);
+    acao.mockImplementation((async ({ verb }: { verb: string }) => {
+      if (verb === "proposal.status") return { status: 200, body: { proposta: { id: "prop-1", codigo: CODIGO, titulo: "Apto 12", status: "rascunho", signatarios: [] } } };
+      if (verb === "proposal.text.suggest") return { status: 403, body: { error: "fluxo_desligado" } };
+      return { status: 200, body: { items: [], total: 0 } };
+    }) as never);
+    const { values } = await turno(`muda a cláusula de multa da proposta ${CODIGO} para 10%`);
+    expect((values.fluxo as { kind?: string } | undefined)?.kind).not.toBe("correcao_texto");
+  });
+
+  it("política indisponível: o roteamento novo nem dispara (cai no caminho de hoje)", async () => {
+    ligar(true);
+    perfil.mockRejectedValue(new Error("fora do ar"));
+    await turno(`muda a cláusula de multa da proposta ${CODIGO} para 10%`);
+    expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+  });
+});

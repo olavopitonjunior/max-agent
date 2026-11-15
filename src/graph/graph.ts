@@ -27,6 +27,7 @@ import {
 } from "./capacidades";
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
+import { pedeCorrecaoDeTexto, rotearCorrecaoDeTexto } from "./formularios/correcao-roteamento";
 import { ocrTranscribeFallbackLigado } from "./captacao-flags";
 import { cancelarFicha } from "./formularios/pausa";
 import { rebaixarParaV1 } from "./formularios/selecao";
@@ -1309,6 +1310,34 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
         toolLog: [{ name: "fluxo", args: { kind: "assinatura", operacao: "trocar" }, outcome: troca.evento }] };
     }
     assinatura = null;
+  }
+  // PR-E (T17): corrigir o TEXTO de um documento ("muda a cláusula de multa da proposta") vem ANTES da gestão,
+  // que leria o mesmo pedido como edição de DADO. Determinístico (sem modelo) e atrás da feature `formularios_v2`
+  // E da capability `document.text.edit`: sem as duas, nada daqui roda e o roteamento é o de antes. Captação só
+  // com o `captacaoId` do fluxo aberto (R30); o dado ("corrige o CPF") segue em `proposal.update`.
+  const captacaoComId = atual?.kind === "captacao" && !!atual.captacaoId && !atual.chave;
+  const correcaoLigada = !assinatura && !escritaEmAberto && podeEscrever(state.identity) && (livre || captacaoComId) &&
+    featureEnabled("formularios_v2", state.identity.orgId) && state.policy.includes("document.text.edit");
+  const alvoDaCorrecao = correcaoLigada ? pedeCorrecaoDeTexto(userText) : null;
+  if (alvoDaCorrecao) {
+    const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
+    const roteado = await rotearCorrecaoDeTexto(
+      { alvo: alvoDaCorrecao, texto: userText, atual, linkDoNegocio: resultado?.match(/Negócio: (\S+)/)?.[1] ?? null },
+      ctxDoTurno, depsDoFluxo(state, usage)
+    );
+    if (roteado && !roteado.passo.liberar) {
+      const { passo, orienta } = roteado;
+      // Resposta que só orienta não mexe no fluxo aberto (fica rebaixado); a que abre a correção o substitui.
+      const fluxo = orienta ? (atual ? rebaixarFluxo(atual) : vencido ? null : undefined) : passo.fluxo;
+      return {
+        ...(fluxo !== undefined ? { fluxo } : {}),
+        reply: passo.reply,
+        messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
+        ...(usage.length > 0 ? { usage } : {}),
+        // O antes/depois é texto de documento: o turno que abre a correção é sensível (R29).
+        toolLog: [{ name: "fluxo", args: orienta ? { kind: "escopo" } : { kind: "correcao_texto", sensivel: true }, outcome: passo.evento }],
+      };
+    }
   }
   const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText, { tolerante: toleranteNaOrg(state.identity.orgId, await fluxoV2DoServidor(state)) }) : null;
   // "Não converte a proposta da X" é o contrário do pedido: a negação vem antes.
