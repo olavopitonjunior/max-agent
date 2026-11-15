@@ -79,9 +79,34 @@ describe("urlDeMidiaPermitida: o que é recusado", () => {
 });
 
 describe("urlDeMidiaPermitida: o que passa", () => {
-  it("aceita o host e o subdomínio", () => {
+  it("aceita o host exato", () => {
     expect(urlDeMidiaPermitida("https://media.zapi.example/instances/X/foto.jpeg")?.host).toBe("media.zapi.example");
-    expect(urlDeMidiaPermitida("https://cdn.media.zapi.example/a.jpg")?.host).toBe("cdn.media.zapi.example");
+  });
+
+  it("sem curinga, subdomínio NÃO passa (host exato por padrão)", () => {
+    expect(urlDeMidiaPermitida("https://cdn.media.zapi.example/a.jpg")).toBeNull();
+  });
+
+  it("domínio de nuvem na lista vale só para ele mesmo, não para o bucket de terceiro", () => {
+    vi.stubEnv("NEWTON_MEDIA_HOSTS", "s3.amazonaws.com");
+    expect(urlDeMidiaPermitida("https://s3.amazonaws.com/a.jpg")).not.toBeNull();
+    expect(urlDeMidiaPermitida("https://bucket-de-terceiro.s3.amazonaws.com/a.jpg")).toBeNull();
+  });
+
+  it("`*.dominio` aceita subdomínio e recusa o apex", () => {
+    vi.stubEnv("NEWTON_MEDIA_HOSTS", "*.zapi.example");
+    expect(urlDeMidiaPermitida("https://media.zapi.example/a.jpg")?.host).toBe("media.zapi.example");
+    expect(urlDeMidiaPermitida("https://a.b.zapi.example/a.jpg")?.host).toBe("a.b.zapi.example");
+    expect(urlDeMidiaPermitida("https://zapi.example/a.jpg")).toBeNull();
+    expect(urlDeMidiaPermitida("https://xzapi.example/a.jpg")).toBeNull();
+    expect(urlDeMidiaPermitida("https://zapi.example.evil.example/a.jpg")).toBeNull();
+  });
+
+  it("curinga e host exato convivem na mesma lista", () => {
+    vi.stubEnv("NEWTON_MEDIA_HOSTS", "*.zapi.example, exato.example");
+    expect(urlDeMidiaPermitida("https://media.zapi.example/a.jpg")).not.toBeNull();
+    expect(urlDeMidiaPermitida("https://exato.example/a.jpg")).not.toBeNull();
+    expect(urlDeMidiaPermitida("https://sub.exato.example/a.jpg")).toBeNull();
   });
 
   it("lista separada por vírgula, sem diferença de caixa", () => {

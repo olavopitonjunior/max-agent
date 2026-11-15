@@ -42,8 +42,11 @@ function hostsPermitidos(): string[] {
 }
 
 /**
- * `https` sem usuário/senha nem porta, host igual a um item de
- * `NEWTON_MEDIA_HOSTS` ou subdomínio dele. Env vazia recusa tudo. IP literal e
+ * `https` sem usuário/senha nem porta, host IGUAL a um item de
+ * `NEWTON_MEDIA_HOSTS`. Subdomínio só vale com entrada explícita `*.dominio`
+ * (que não cobre o apex). Por isso a lista deve ter só hosts do storage da
+ * Z-API, nunca um domínio de nuvem compartilhado com curinga. Env vazia recusa
+ * tudo. IP literal e
  * `localhost` caem mesmo que alguém os ponha na lista: a mídia vem de storage
  * público, nunca de rede interna.
  */
@@ -63,7 +66,7 @@ export function urlDeMidiaPermitida(v: unknown): URL | null {
   if (!host || host === "localhost" || host.endsWith(".localhost")) return null;
   // `[::1]` chega com colchetes em `hostname`.
   if (isIP(host.replace(/^\[|\]$/g, "")) !== 0) return null;
-  const permitido = hosts.some((h) => host === h || host.endsWith(`.${h}`));
+  const permitido = hosts.some((h) => (h.startsWith("*.") ? host.endsWith(h.slice(1)) : host === h));
   return permitido ? url : null;
 }
 

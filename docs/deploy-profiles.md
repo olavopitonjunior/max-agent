@@ -71,7 +71,7 @@ A foto e o PDF que o corretor manda pelo Z-API chegam ao motor como `InboundMess
 
 | Campo | Tipo | Regra |
 |---|---|---|
-| `mediaUrl` | `string` | `https://` do storage da Z-API, até 2048 caracteres, sem usuário, senha ou porta, host em `NEWTON_MEDIA_HOSTS` (o host ou subdomínio dele); IP literal e `localhost` são recusados |
+| `mediaUrl` | `string` | `https://` do storage da Z-API, até 2048 caracteres, sem usuário, senha ou porta, host IGUAL a um item de `NEWTON_MEDIA_HOSTS` (subdomínio só com `*.dominio` explícito); IP literal e `localhost` são recusados |
 | `mediaKind` | `"image" \| "document"` | `image` aceita `image/jpeg`, `image/png`, `image/webp`, `image/heic`, `image/heif`; `document` aceita `application/pdf` |
 | `mimeType` | `string` | o da Z-API, em minúsculas e sem parâmetros (`;...`) |
 
@@ -81,7 +81,7 @@ Tamanho: 3 MB (`MAX_MEDIA_BYTES`), conferido no `Content-Length` e nos bytes lid
 
 **Flags**, ambas desligadas por padrão e lidas a cada chamada:
 - `NEWTON_MEDIA_INBOUND`: `true` (texto exato) liga a rota a aceitar `mediaUrl`. Ausente ou outro valor: o corpo de mídia é ignorado e o comportamento é idêntico ao de antes.
-- `NEWTON_MEDIA_HOSTS`: hosts permitidos, separados por vírgula. Vazia recusa tudo, mesmo com a flag ligada.
+- `NEWTON_MEDIA_HOSTS`: hosts permitidos, separados por vírgula. Vale o host exato; subdomínio só com entrada `*.dominio` (que não cobre o apex). Listar só hosts do storage da Z-API, nunca um domínio de nuvem compartilhado (`s3.amazonaws.com` ou `*.amazonaws.com` abririam qualquer bucket de terceiro). Vazia recusa tudo, mesmo com a flag ligada.
 - `NEWTON_V2_MEDIA` é a flag espelho **na ponte** (`whatsapp-newton-bridge`); só vale para telefones em `NEWTON_V2_PHONES`.
 
 Fixture do corpo, idêntico nos dois repos (faz o papel do teste de paridade, já que entre a ponte e a rota não há HMAC, só `Bearer NEWTON_INBOUND_TOKEN`): `src/app/api/__tests__/__fixtures__/newton-run-midia.json` aqui, `__fixtures__/newton-run-midia.json` na ponte.
