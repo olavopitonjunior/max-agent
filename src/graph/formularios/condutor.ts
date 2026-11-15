@@ -16,8 +16,12 @@
  * "sim" como idempotencyKey). O que o servidor diz que falta (`faltando`) é a autoridade:
  * o Max não recalcula pendência.
  *
- * Fora do escopo deste PR (T11/T12): revisão final, escolha do canal de assinatura,
- * envio e correção pós-envio.
+ * PR-C2 (T11/T12): a REVISÃO do rascunho. Max com Flow publicado (`MAX_FLOW_ID_*`, flag e provedor):
+ * um Flow por passo, pré-preenchido; sem Flow, e sempre no Newton, a ficha numerada com o link da
+ * tela. A resposta do Flow ("nfm_reply") é DADO: passa por zod e pela mesma leitura do texto livre,
+ * vira campo lido, ficha com cartão e o "sim" de sempre. Nunca grava sozinha.
+ *
+ * Fora do escopo: escolha do canal de assinatura, envio e correção pós-envio (T13/C3).
  */
 
 import {
@@ -29,9 +33,10 @@ import {
   type DepsDoFluxo,
   type PassoDoFluxo,
 } from "../fluxos";
+import { flowDisponivel, flowDoTexto, lerRespostaDoFlow, montarEnvioDoFlow, registrarFlowDoTurno } from "../../lib/meta-flow";
 import { lerConfirmacao, normalizar } from "../tools";
 import type { CampoObrigatorio, OptionsV2, Pendencia } from "./contrato";
-import { contarEntradaDoFluxo, novoFluxoV2, type FluxoFormularioV2 } from "./estado";
+import { contarEntradaDoFluxo, novoFluxoV2, type FluxoFormularioV2, type PassoDeRevisao } from "./estado";
 import { camposDoPatchExtraido, TOOL_PATCH_V2 } from "./extracao";
 import { deveMostrarFicha, montarResumo, pediuAFicha, renderizarFicha } from "./ficha";
 import {
@@ -56,6 +61,7 @@ import {
   registrarPergunta,
   textoDoParcial,
 } from "./proposta-v2";
+import { itensDaRevisao, lerCorrecaoNumerada, partesDaRevisao, pedeRevisao, textoDaRevisao } from "./revisao";
 import { escolherVersao, rebaixarParaV1 } from "./selecao";
 
 const TEXTO_SEM_SISTEMA = "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
@@ -395,6 +401,10 @@ export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, de
     if (conf === "nao") return descartar(f0, ctx, cancelar, fecha);
   }
 
+  // 4b. a revisão (T11/T12): pedido, resposta do Flow, correção numerada, "sim" sem mudança
+  const revisao = await conduzirRevisao({ f0, options, obrigatorios, faltandoDoServidor, ctx, deps, cancelar, fecha, thread, conf, temPendencia, pendentes0 });
+  if (revisao) return revisao;
+
   // 5. o que o corretor disse neste turno: resposta ao campo ou extração da janela
   let novos: CampoLido[] = [];
   let respondeuCampo = false;
@@ -428,7 +438,8 @@ export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, de
 
   // "sim"/"ok" sem a ficha ter sido vista: mostra a ficha em vez de gravar às cegas
   const midiaDoTurno = f.lidosPendentes.some((l) => l.ref === ctx.messageId);
-  const forcarFicha = pediu || midiaDoTurno || ((conf === "sim" || conf === "vago") && pendentes.length > 0);
+  // Em revisão a correção em frase ("o CPF dela é…") mostra o cartão já, como a numerada e a do Flow.
+  const forcarFicha = pediu || midiaDoTurno || ((conf === "sim" || conf === "vago") && pendentes.length > 0) || (!!f0.revisao && novos.length > 0);
   if (novos.length === 0 && !forcarFicha) {
     // Não era do fluxo. O turno segue o atendimento normal; o rascunho (se houver) fica.
     const manter = pendentes.length > 0 || !!f0.proposalId;
@@ -471,6 +482,158 @@ export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, de
     fluxo: { ...proximo, fichaAgendadaEm: proximo.ultimaEntradaEm + PAUSA_DA_FICHA_MS },
     evento: "formulario_coletando",
   };
+}
+
+// ─── Revisão (T11/T12) ──────────────────────────────────────────────────────
+
+const TEXTO_FLOW_ILEGIVEL =
+  "Não consegui ler o formulário, então não anotei nada. Confira os campos e envie de novo, ou me diga em texto o que mudar.";
+const TEXTO_REVISAO_ENCERRADA = "Certo, parei a revisão. O rascunho segue salvo, sem envio.";
+const PROXIMO_PASSO: Record<PassoDeRevisao, PassoDeRevisao | null> = { partes: "imovel_valor", imovel_valor: null, assinatura: null };
+
+/** O que o Flow já sabe das partes (só o nome, vindo do servidor); o resto o corretor preenche. */
+function valoresDoFlow(options: OptionsV2): Record<string, string> {
+  const partes = partesDaRevisao(options);
+  const out: Record<string, string> = {};
+  partes.compradores.nomes.forEach((n, i) => (out[`compradores[${i}].nome`] = n));
+  partes.vendedores.nomes.forEach((n, i) => (out[`vendedores[${i}].nome`] = n));
+  return out;
+}
+
+/**
+ * Abre (ou reabre) a revisão num passo. Max com Flow disponível: o Flow do passo sai junto, com a
+ * ficha numerada de corpo e de reserva. Senão (Newton, sem `MAX_FLOW_ID_*`, `MAX_INTERACTIVE=off`):
+ * só a ficha numerada com o link da tela, que o Max ainda entende em frase ("2 Maria Souza").
+ */
+function abrirRevisao(a: {
+  f: FluxoFormularioV2;
+  options: OptionsV2;
+  faltando: Pendencia[] | null;
+  ctx: ContextoDoTurno;
+  fecha: (f: FluxoFormularioV2) => FluxoFormularioV2;
+  passo: PassoDeRevisao;
+  prefixo?: string;
+  link?: string;
+  /** Texto numerado mesmo com Flow disponível (a revisão já está em texto). */
+  soTexto?: boolean;
+  recomecarJanela?: boolean;
+}): Extract<Passo, { reply: string }> {
+  const itens = itensDaRevisao(a.options);
+  const link = a.link ?? a.f.linkDaTela;
+  const comFlow = !a.soTexto && a.passo !== "assinatura" && flowDisponivel(a.passo) !== null;
+  const reply = textoDaRevisao({ options: a.options, itens, faltando: a.faltando, link, prefixo: a.prefixo, comFlow });
+  const flow = comFlow ? montarEnvioDoFlow(a.passo, a.options, valoresDoFlow(a.options), reply) : null;
+  if (flow) registrarFlowDoTurno(a.ctx.messageId, flow);
+  const fluxo: FluxoFormularioV2 = a.fecha({
+    ...a.f,
+    etapa: "revisar",
+    aguardaCampo: undefined,
+    fichaAgendadaEm: undefined,
+    revisao: { passo: a.passo, via: flow ? "flow" : "texto", itens },
+    ...(link ? { linkDaTela: link } : {}),
+  });
+  return { reply, fluxo: a.recomecarJanela ? recomecaJanela(fluxo) : fluxo, evento: "formulario_revisao" };
+}
+
+/** A revisão acabou: completo = fecha como o C1; faltando = segue perguntando. */
+function concluirRevisao(a: {
+  f: FluxoFormularioV2;
+  faltando: Pendencia[] | null;
+  obrigatorios: CampoObrigatorio[];
+  ctx: ContextoDoTurno;
+  fecha: (f: FluxoFormularioV2) => FluxoFormularioV2;
+  codigo?: string;
+}): Extract<Passo, { reply: string }> {
+  const base: FluxoFormularioV2 = { ...a.f, etapa: "compor", revisao: undefined, aguardaCampo: undefined, fichaAgendadaEm: undefined, conflito: undefined };
+  if (a.faltando && a.faltando.length === 0) {
+    return { reply: textoDeCompleto(a.codigo), fluxo: null, evento: "formulario_completo" };
+  }
+  const p = a.faltando ? proximaPergunta(a.faltando, new Set(base.perguntados), a.obrigatorios) : null;
+  const fluxo = p ? registrarPergunta(base, p, a.ctx.agora) : base;
+  return { reply: `Revisão concluída.${p ? `\n${p.pergunta}` : "\nO que mais você tem?"}`, fluxo: a.fecha(fluxo), evento: "formulario_salvo" };
+}
+
+function textoDeCompleto(codigo?: string): string {
+  return `Rascunho${codigo ? ` ${codigo}` : ""} completo. Para enviar para assinatura, peça "enviar${codigo ? ` ${codigo}` : ""} para assinatura".`;
+}
+
+/**
+ * O turno da revisão. `null` = não é da revisão, o condutor segue (extração, ficha). A correção
+ * (Flow ou "2 Maria Souza") NUNCA grava: vira campo lido, ficha com cartão e o "sim".
+ */
+async function conduzirRevisao(a: {
+  f0: FluxoFormularioV2;
+  options: OptionsV2;
+  obrigatorios: CampoObrigatorio[];
+  faltandoDoServidor: Pendencia[];
+  ctx: ContextoDoTurno;
+  deps: DepsDoFluxo;
+  cancelar: () => Promise<void>;
+  fecha: (f: FluxoFormularioV2) => FluxoFormularioV2;
+  thread: string;
+  conf: ReturnType<typeof lerConfirmacao>;
+  temPendencia: boolean;
+  pendentes0: CampoLido[];
+}): Promise<Passo | null> {
+  const { f0, options, obrigatorios, faltandoDoServidor, ctx, cancelar, fecha, thread, conf, temPendencia } = a;
+  const rev = f0.revisao;
+
+  // Pedido explícito, com rascunho salvo: o que está pendente de "sim" vem antes (a revisão lê o servidor).
+  if (pedeRevisao(ctx.texto) && f0.proposalId && !f0.chave) {
+    if (temPendencia) {
+      return mostrarFicha({ f: { ...f0, etapa: "ficha" }, pendentes: a.pendentes0, options, obrigatorios, faltandoDoServidor, ctx, deps: a.deps, cancelar, fecha, thread, comPergunta: false });
+    }
+    await cancelar();
+    return abrirRevisao({ f: f0, options, faltando: faltandoDoServidor, ctx, fecha, passo: "partes" });
+  }
+  if (!rev) return null;
+
+  /** A correção vira campo lido pendente e a ficha mostra o cartão; o "sim" grava. */
+  const corrigir = async (campos: CampoLido[]): Promise<Passo> => {
+    const r = registrarLidos(f0, { ref: `txt:${ctx.messageId}`, campos }, thread);
+    if (!r.ok) return { reply: TEXTO_SEM_COFRE, fluxo: fecha(f0), evento: "formulario_sem_cofre" };
+    const f = { ...r.fluxo, etapa: "ficha" as const, conflito: undefined };
+    return mostrarFicha({ f, pendentes: lidosDoCofre(f, thread), options, obrigatorios, faltandoDoServidor, ctx, deps: a.deps, cancelar, fecha, thread, comPergunta: false });
+  };
+
+  if (conf === "nenhum") {
+    // A resposta do Flow chega como linhas "campo: valor" (o `meta.ts` a deixa no texto). DADO, nunca instrução.
+    if (rev.via === "flow" && rev.passo !== "assinatura") {
+      const bruto = flowDoTexto(ctx.texto);
+      if (bruto) {
+        const r = lerRespostaDoFlow(bruto, rev.passo, obrigatorios);
+        if ("erro" in r) return { reply: TEXTO_FLOW_ILEGIVEL, fluxo: fecha(f0), evento: "formulario_flow_invalido" };
+        return corrigir(camposDoPatch(r));
+      }
+    }
+    const c = lerCorrecaoNumerada(ctx.texto, rev.itens, obrigatorios);
+    if (c.tipo === "item") {
+      if (c.leitura.tipo === "invalida") return { reply: c.leitura.reply, fluxo: fecha(f0), evento: "formulario_resposta_invalida" };
+      if (c.leitura.tipo === "preenche") {
+        const campos = camposDoPatch(c.leitura.patch);
+        if (campos.length > 0) return corrigir(campos);
+      }
+    }
+    return null;
+  }
+
+  // Sem nada pendente: "sim" segue para o próximo passo (ou conclui), "não" sai. "ok"/"blz" são `vago`: nada.
+  if (!temPendencia) {
+    if (conf === "sim") {
+      const proximo = rev.via === "flow" ? PROXIMO_PASSO[rev.passo] : null;
+      if (proximo) {
+        await cancelar();
+        return abrirRevisao({ f: f0, options, faltando: faltandoDoServidor, ctx, fecha, passo: proximo });
+      }
+      await cancelar();
+      return concluirRevisao({ f: f0, faltando: faltandoDoServidor, obrigatorios, ctx, fecha });
+    }
+    if (conf === "nao") {
+      await cancelar();
+      return { reply: TEXTO_REVISAO_ENCERRADA, fluxo: fecha({ ...f0, revisao: undefined, etapa: "compor" }), evento: "formulario_revisao_encerrada" };
+    }
+  }
+  return null;
 }
 
 // ─── Ficha ──────────────────────────────────────────────────────────────────
@@ -571,13 +734,40 @@ async function gravar(a: {
     }
     const partes = [textoDoParcial(r, {})];
     if (g.descartados.length > 0) partes.push(textoDosDescartados(g.descartados));
+    // O link da tela só vale quando o SERVIDOR o deu (`documento.link`); o Max nunca o monta.
+    const link = r.documento?.link;
     const base: FluxoFormularioV2 = {
       ...g.fluxo,
       etapa: "compor",
       aguardaCampo: undefined,
       fichaAgendadaEm: undefined,
       conflito: undefined,
+      ...(link ? { linkDaTela: link } : {}),
     };
+    const completo = !!faltando && faltando.length === 0;
+
+    // T11/T12: revisão em curso (a gravação foi uma correção dela) ou rascunho completo no Max COM Flow.
+    // Sem Flow disponível o completo é o do C1, byte a byte (`fluxo: null`).
+    const emRevisao = base.revisao;
+    if (emRevisao || (completo && flowDisponivel("partes"))) {
+      const o2 = await consultarOptions(deps, { alvo: { proposalId: r.proposalId } });
+      const agora: OptionsV2 | null = o2 && o2.fluxoV2 === true ? o2 : null;
+      if (agora) {
+        const falta = faltandoV2(agora) ?? faltando;
+        const prefixo = partes.join("\n");
+        if (emRevisao) {
+          // Via Flow: gravou a correção do passo, segue para o próximo; no último, conclui. Via texto: a lista de novo.
+          const proximo = emRevisao.via === "flow" ? PROXIMO_PASSO[emRevisao.passo] : null;
+          if (proximo) return abrirRevisao({ f: base, options: agora, faltando: falta, ctx, fecha, passo: proximo, prefixo, link, recomecarJanela: true });
+          if (emRevisao.via === "texto") {
+            return abrirRevisao({ f: base, options: agora, faltando: falta, ctx, fecha, passo: emRevisao.passo, prefixo, link, soTexto: true, recomecarJanela: true });
+          }
+          const fim = concluirRevisao({ f: base, faltando: falta, obrigatorios, ctx, fecha, codigo: r.codigo });
+          return { ...fim, reply: [prefixo, fim.reply].join("\n") };
+        }
+        return abrirRevisao({ f: base, options: agora, faltando: falta, ctx, fecha, passo: "partes", prefixo: `${prefixo}\nRascunho${r.codigo ? ` ${r.codigo}` : ""} completo.`, link, recomecarJanela: true });
+      }
+    }
     if (faltando && faltando.length === 0) {
       const codigo = r.codigo ?? "";
       partes.push(`Rascunho${codigo ? ` ${codigo}` : ""} completo. Para enviar para assinatura, peça "enviar${codigo ? ` ${codigo}` : ""} para assinatura".`);

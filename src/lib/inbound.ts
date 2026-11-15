@@ -1,8 +1,9 @@
 import { captureDispatchFence, DispatchFenceSchema, withCapturedPrivacy, withDeliveryFence, withTransportFence, TransportAcceptedCommitError, type DispatchFence } from "./runtime/delivery-fence";
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
-import { sendText, connectionStatus, markReadTyping, type InboundMessage } from "./transport";
+import { sendText, connectionStatus, markReadTyping, type InboundMessage, type InterativoFlow } from "./transport";
 import { derivarInterativo, PREFIXO_OPCAO } from "./interativo";
+import { consumirFlowDoTurno } from "./meta-flow";
 import { falhaDaMensagemMeta, inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
 import { abrirJanela } from "./janela24h";
@@ -439,7 +440,7 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
           await client.query(`UPDATE inbound_queue SET last_send_started_at=now() WHERE id=$1`,[row.id]);
         });
         res=await withTransportFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},()=>
-          sendText({to:row.from_phone,body:reply!,quoteMessageId:row.message_id,...comInterativo(reply!)}));
+          sendText({to:row.from_phone,body:reply!,quoteMessageId:row.message_id,...comInterativo(reply!,row.message_id)}));
       } catch (err) {
         if(err instanceof TransportAcceptedCommitError)throw err;
         /**
@@ -776,7 +777,11 @@ export async function podarTextoDaFila(dias = 30): Promise<number> {
  * numerado (`lib/interativo.ts`). Só entra no envio quando existe, para que
  * a chamada sem botão continue idêntica à de antes.
  */
-function comInterativo(reply: string): { interativo?: NonNullable<ReturnType<typeof derivarInterativo>> } {
+function comInterativo(reply: string, messageId?: string): { interativo?: NonNullable<ReturnType<typeof derivarInterativo>> | InterativoFlow } {
+  // Revisão v2 no Max (T11): o condutor deixou o Flow do passo para este turno. Só existe com a flag, o id do Flow
+  // e o provedor; sem ele (inclusive na retentativa) segue o texto, com botões/lista derivados como sempre.
+  const flow = messageId ? consumirFlowDoTurno(messageId) : undefined;
+  if (flow) return { interativo: { ...flow, corpo: flow.corpo ?? reply } };
   const interativo = derivarInterativo(reply);
   return interativo ? { interativo } : {};
 }
