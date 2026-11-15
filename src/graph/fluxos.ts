@@ -218,9 +218,12 @@ export interface DepsDoFluxo {
    * v2 (T4): a janela das últimas mensagens do corretor + documentos lidos, para
    * o extrator juntar o que veio em pedaços. SÓ existe com a feature
    * `formularios_v2` (sem ela o v1 roda como sempre, sem estes dois métodos).
+   * `mensagensAnteriores` = quantas mensagens do corretor ANTES da atual são deste
+   * fluxo (`FluxoFormularioV2.mensagensDoFluxo`): o que veio antes de o fluxo abrir
+   * nunca entra na janela.
    * Tudo que vai ao modelo sai tokenizado; os `args` voltam destokenizados.
    */
-  janelaDoTurno?(lidos?: DocumentoLido[]): JanelaDeExtracao;
+  janelaDoTurno?(mensagensAnteriores: number, lidos?: DocumentoLido[]): JanelaDeExtracao;
   extrairComJanela?(
     janela: JanelaDeExtracao,
     tool: { name: string; description: string; parameters: Record<string, unknown> }

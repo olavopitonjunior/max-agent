@@ -285,10 +285,24 @@ describe("janela de extração (v2) — tokeniza tudo, cerca como dado, não esc
       return { text: "", toolCalls: [{ name: "preencher_proposta", args: { comprador: { nome: "Maria Teste", cpf: "⟨CPF_1⟩" } } }], usage: uso };
     });
     const d = await deps(estado());
-    const janela = d.janelaDoTurno!();
+    const janela = d.janelaDoTurno!(2); // as 2 mensagens do corretor que são deste fluxo
     expect(janela.anteriores).toHaveLength(2); // só as do corretor
     const args = await d.extrairComJanela!(janela, tool as never);
     expect(args).toEqual({ comprador: { nome: "Maria Teste", cpf: CPF_SINTETICO } });
+  });
+
+  it("I3: mensagem ANTERIOR ao fluxo não entra na janela (a proposta nova não herda o comprador da antiga)", async () => {
+    vi.stubEnv("MAX_FORMULARIOS_V2", "true");
+    vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [ORG_V2]: ["formularios_v2"] }));
+    const d = await deps(estado());
+    // Só a última mensagem do corretor é deste fluxo; "Maria Teste" é da proposta anterior.
+    const so1 = d.janelaDoTurno!(1);
+    expect(so1.anteriores).toEqual(["500 mil, tel 11 98888-7777"]);
+    expect(JSON.stringify(so1)).not.toContain("Maria Teste");
+    // Fluxo recém-aberto (a mensagem de abertura é a atual): nenhuma anterior.
+    expect(d.janelaDoTurno!(0).anteriores).toEqual([]);
+    // Contagem maior que o histórico não inventa mensagem.
+    expect(d.janelaDoTurno!(50).anteriores).toHaveLength(2);
   });
 
   it("documento lido com instrução injetada: cercado, escapado, e a tool oferecida é sempre a mesma", async () => {
@@ -307,7 +321,7 @@ describe("janela de extração (v2) — tokeniza tudo, cerca como dado, não esc
       return { text: "", toolCalls: [{ name: "apagar_proposta", args: { id: "x" } }], usage: uso };
     });
     const d = await deps(estado());
-    const janela = d.janelaDoTurno!([{ ref: "meta:wamid.ZZ9", texto: injecao }]);
+    const janela = d.janelaDoTurno!(2, [{ ref: "meta:wamid.ZZ9", texto: injecao }]);
     const args = await d.extrairComJanela!(janela, tool as never);
     expect(args).toEqual({});
     expect(llm).toHaveBeenCalledTimes(1);
@@ -318,6 +332,6 @@ describe("janela de extração (v2) — tokeniza tudo, cerca como dado, não esc
     vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [ORG_V2]: ["formularios_v2"] }));
     llm.mockRejectedValue(new Error("timeout"));
     const d = await deps(estado());
-    expect(await d.extrairComJanela!(d.janelaDoTurno!(), tool as never)).toBeNull();
+    expect(await d.extrairComJanela!(d.janelaDoTurno!(2), tool as never)).toBeNull();
   });
 });

@@ -918,12 +918,16 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
   // v2 (T4): só com a feature. Sem ela o objeto abaixo não ganha estes dois métodos.
   const janelaV2 = featureEnabled("formularios_v2", orgId)
     ? {
-        janelaDoTurno: (lidos: DocumentoLido[] = []) =>
-          montarJanela({
+        janelaDoTurno: (mensagensAnteriores: number, lidos: DocumentoLido[] = []) => {
+          const doCorretor = state.messages.filter((m) => m.role === "user").map((m) => m.content);
+          // `slice(-0)` devolveria tudo: 0 (ou negativo) é "nenhuma anterior".
+          const n = Math.max(0, Math.floor(mensagensAnteriores));
+          return montarJanela({
             atual: textoDoTurno(state).trim(),
-            anteriores: state.messages.filter((m) => m.role === "user").map((m) => m.content),
+            anteriores: n === 0 ? [] : doCorretor.slice(-n),
             lidos,
-          }),
+          });
+        },
         extrairComJanela: async (janela: JanelaDeExtracao, tool: ToolDeExtracao) => {
           const { texto, mapa } = comoMensagemDaJanela(janela, state.piiMap);
           return chamarExtracao(SYSTEM_DA_EXTRACAO + INSTRUCAO_DA_JANELA, texto, mapa, tool);

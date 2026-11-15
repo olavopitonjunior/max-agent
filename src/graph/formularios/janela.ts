@@ -22,7 +22,7 @@
  */
 
 import { tokenizar, type MapaPii } from "@/lib/pii";
-import { escaparDelimitadores } from "../prompt";
+import { escaparDelimitadores, ETIQUETA_REMOVIDA } from "../prompt";
 
 export interface DocumentoLido {
   /** Referência opaca da mídia (id da mensagem), sem conteúdo. */
@@ -89,6 +89,45 @@ export function montarJanela(args: {
 const REF_OPACA = /[^A-Za-z0-9:._-]/g;
 
 /**
+ * As cercas que SÓ a janela usa. Ficam aqui (e não na lista global do `prompt.ts`)
+ * para o escape do v1 seguir exatamente como era: um texto com `<mensagem` no
+ * fluxo antigo não muda. Mesma disciplina do escape global: texto canônico
+ * (NFKC, sem `\p{Cf}`, entidades HTML decodificadas) e `<`/`>` parecidos.
+ */
+const RE_CERCA_DA_JANELA = new RegExp(
+  "[<‹〈⟨《«˂]\\s*/?\\s*(?:mensagem|documento[\\s_\\-.]*lido)(?![\\p{L}\\p{N}])" +
+    "(?:[^<>‹›˂˃\\n]{0,80}?[>›〉⟩》»˃])?",
+  "giu"
+);
+
+function decodificarEntidades(t: string): string {
+  let atual = t;
+  for (let i = 0; i < 10; i++) {
+    const prox = atual
+      .replace(/&amp;?/gi, "&")
+      .replace(/&lt;?/gi, "<")
+      .replace(/&gt;?/gi, ">")
+      .replace(/&quot;?/gi, '"')
+      .replace(/&#0*60;?|&#x0*3c;?/gi, "<")
+      .replace(/&#0*62;?|&#x0*3e;?/gi, ">")
+      .replace(/&#0*38;?|&#x0*26;?/gi, "&");
+    if (prox === atual) break;
+    atual = prox;
+  }
+  return atual;
+}
+
+/** As cercas do projeto (global) e as da janela, nessa ordem. Sem ocorrência, o texto volta intacto. */
+function escaparNaJanela(texto: string): string {
+  const base = escaparDelimitadores(texto);
+  const canonico = decodificarEntidades(base.normalize("NFKC").replace(/\p{Cf}/gu, ""));
+  RE_CERCA_DA_JANELA.lastIndex = 0;
+  if (!RE_CERCA_DA_JANELA.test(canonico)) return base;
+  RE_CERCA_DA_JANELA.lastIndex = 0;
+  return canonico.replace(RE_CERCA_DA_JANELA, ETIQUETA_REMOVIDA);
+}
+
+/**
  * A janela como o modelo a recebe: tokenizada, escapada e cercada. Devolve o
  * mapa (o do turno + o que foi achado aqui) para destokenizar os `args` da
  * tool, e só eles.
@@ -98,7 +137,7 @@ export function comoMensagemDaJanela(j: JanelaDeExtracao, piiMap: MapaPii): { te
   const passar = (t: string): string => {
     const r = tokenizar(t, mapa);
     mapa = r.mapa;
-    return escaparDelimitadores(r.texto);
+    return escaparNaJanela(r.texto);
   };
 
   const blocos: string[] = [];

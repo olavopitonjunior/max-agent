@@ -39,6 +39,15 @@ export interface FluxoFormularioV2 {
   perguntados: string[];
   /** A escrita em curso: a `messageId` do primeiro "sim" (Global Constraint 5). */
   chave?: { verbo: string; valor: string };
+  /**
+   * Quantas mensagens do corretor, ANTES da atual, pertencem a este fluxo. Começa em 0
+   * (a mensagem que abriu é a atual daquele turno) e sobe 1 a cada turno tratado
+   * (`contarEntradaDoFluxo`). A janela de extração só olha para essa quantidade de
+   * mensagens: o que o corretor disse antes de o fluxo abrir (outra proposta, outro
+   * comprador) não entra. Contagem, não índice: a compactação do histórico não a
+   * desalinha (só pode encurtar a janela). Ausente em checkpoint antigo = 0.
+   */
+  mensagensDoFluxo?: number;
   /** Todo `Fluxo` carrega isto: TTL e expiração. */
   atualizadoEm: number;
 }
@@ -57,6 +66,12 @@ export function novoFluxoV2(args: {
     ultimaEntradaEm: args.agora,
     lidosPendentes: [],
     perguntados: [],
+    mensagensDoFluxo: 0,
     atualizadoEm: args.agora,
   };
+}
+
+/** Chamado uma vez por turno em que o fluxo tratou uma fala do corretor (a atual vira "anterior" no próximo). */
+export function contarEntradaDoFluxo(f: FluxoFormularioV2): FluxoFormularioV2 {
+  return { ...f, mensagensDoFluxo: (f.mensagensDoFluxo ?? 0) + 1 };
 }
