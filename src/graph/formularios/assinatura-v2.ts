@@ -136,12 +136,28 @@ export function catalogoDeTestemunhas(options: OptionsV2): TestemunhaDoCatalogo[
   return (regraDeTestemunhas(options)?.padrao ?? []).map((t) => ({ id: t.idPadrao, nome: t.nome, obrigatoria: t.obrigatoria === true }));
 }
 
+/** O par que o servidor semeia na criação (`semearItens`: obrigatórias, depois o padrão até completar o par). */
+const TAMANHO_DO_PAR = 2;
+
 /**
- * O padrão POR ESCOPO: as testemunhas do cadastro da organização para este tipo de proposta, todas
- * marcadas. Não existe padrão por corretor (D5): a função só lê o `options`.
+ * O padrão POR ESCOPO, como o servidor o semeia (§18.13.12.3): as obrigatórias do cadastro e, depois,
+ * o padrão na ordem do cadastro até completar o par, sem passar do `maximo`. NÃO é "o cadastro inteiro":
+ * com 4 no cadastro e a testemunha-corretor (que o Max não vê e conta no teto), marcar tudo dava 422
+ * `teto_testemunhas` em laço. Não existe padrão por corretor (D5): a função só lê o `options`.
  */
 export function marcadasPorPadrao(options: OptionsV2): string[] {
-  return catalogoDeTestemunhas(options).map((t) => t.id);
+  const cat = catalogoDeTestemunhas(options);
+  const maximo = regraDeTestemunhas(options)?.maximo ?? 4;
+  const obrigatorias = cat.filter((t) => t.obrigatoria).length;
+  let vagas = Math.max(0, Math.min(TAMANHO_DO_PAR, maximo) - obrigatorias);
+  return cat
+    .filter((t) => {
+      if (t.obrigatoria) return true;
+      if (vagas <= 0) return false;
+      vagas -= 1;
+      return true;
+    })
+    .map((t) => t.id);
 }
 
 /** A escolha mais as obrigatórias (que nunca saem), na ordem do cadastro e sem repetir. */
@@ -217,13 +233,21 @@ export function lerEscolhaDeTestemunhas(texto: string, options: OptionsV2): Esco
   return { tipo: "nenhuma_leitura" };
 }
 
-/** O cartão das testemunhas: o "sim" grava. Só nomes do cadastro (sem CPF, e-mail ou celular). */
+/**
+ * O cartão das testemunhas: o "sim" grava. Só nomes do cadastro (sem CPF, e-mail ou celular). A
+ * regravação SUBSTITUI o conjunto da proposta (o servidor apaga as comuns e cria as pedidas): o que foi
+ * adicionado ou tirado na tela se perde, e o cartão diz isso antes do "sim" (I2). A do corretor não muda.
+ */
 export function textoDoCartaoDeTestemunhas(options: OptionsV2, ids: string[], codigo?: string): string {
   const nomes = catalogoDeTestemunhas(options)
     .filter((t) => ids.includes(t.id))
     .map((t) => t.nome);
   const quais = nomes.length > 0 ? `estas testemunhas: ${nomes.join(", ")}` : "a proposta sem testemunhas";
-  return `Vou deixar ${quais}${codigo ? ` na proposta ${codigo}` : ""}.\n\nConfirma? Responda *SIM* para gravar.`;
+  return (
+    `Vou deixar ${quais}${codigo ? ` na proposta ${codigo}` : ""}.\n` +
+    "Isso substitui as testemunhas atuais da proposta, inclusive as adicionadas na tela (a testemunha do corretor, se houver, não muda).\n\n" +
+    "Confirma? Responda *SIM* para gravar."
+  );
 }
 
 // ─── Os tipos de assinatura ─────────────────────────────────────────────────

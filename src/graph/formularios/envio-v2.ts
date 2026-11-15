@@ -113,6 +113,9 @@ const TEXTO_DO_BLOQUEIO_DO_PREFLIGHT: Record<string, string> = {
   no_signers: TEXTO_DO_BLOQUEIO.sem_signatarios ?? "",
 };
 
+/** "manter" e variações: a escolha é o que a lista mostra marcado (e não o padrão do cadastro). */
+const MANTER = /^(manter|mantem|mantenho|deixa assim|deixar assim|padrao|o padrao|igual|igual ao padrao)$/;
+
 const ROTULO_DO_TIPO: Record<TipoDeAssinatura, string> = { email: "e-mail", whatsapp: "WhatsApp", aceite: "Aceite no celular" };
 const PAPEIS_QUE_O_MAX_EDITA = new Set(["proponente", "comprador", "vendedor", "proprietario", "locatario", "inquilino", "locador", "contraparte"]);
 
@@ -357,11 +360,15 @@ function perguntarTestemunhas(e: E): Resposta {
       nonce = n;
     }
   }
-  return dizer(e, noPasso(e, { passo: "testemunhas", testemunhas: undefined, nonce }), reply, "assinatura_testemunhas");
+  return dizer(e, noPasso(e, { passo: "testemunhas", testemunhas: e.f.assinatura?.testemunhas, nonce }), reply, "assinatura_testemunhas");
 }
 
 async function passoTestemunhas(e: E, as: AssinaturaEmCurso, conf: ReturnType<typeof lerConfirmacao>): Promise<Resposta | null> {
-  const escolha = conf === "sim" ? ({ tipo: "escolha", ids: comObrigatorias(e.options, marcadasPorPadrao(e.options)) } as const) : lerEscolhaDeTestemunhas(e.ctx.texto, e.options);
+  // "sim"/"manter" valem o que a lista mostra marcado: as marcadas do estado (depois de um 422 de teto, só as
+  // obrigatórias) ou, na primeira vez, o padrão semeado. Nunca o cadastro inteiro.
+  const marcadas = comObrigatorias(e.options, as.testemunhas ?? marcadasPorPadrao(e.options));
+  const lida = conf === "sim" ? null : lerEscolhaDeTestemunhas(e.ctx.texto, e.options);
+  const escolha = lida === null || (lida.tipo === "escolha" && MANTER.test(normalizar(e.ctx.texto))) ? ({ tipo: "escolha", ids: marcadas } as const) : lida;
   switch (escolha.tipo) {
     case "salvar_padrao":
       return dizer(e, e.f, textoSalvarComoPadrao(e.options), "assinatura_salvar_padrao");
@@ -398,6 +405,12 @@ async function passoCartaoDeTestemunhas(e: E, as: AssinaturaEmCurso, conf: Retur
     case "fluxo_desligado":
       return paraOV1(e);
     case "teto_testemunhas":
+      // Não repete o mesmo conjunto (laço de 422): volta à lista explicando o teto, só com as obrigatórias marcadas.
+      return perguntarTestemunhas({
+        ...e,
+        f: { ...noPasso(e, { passo: "testemunhas", testemunhas: comObrigatorias(e.options, []) }), chave: undefined },
+        prefixo: textoDoErroDeTestemunhas(r.erro, { maximo: r.maximo ?? regraDeTestemunhas(e.options)?.maximo }),
+      });
     case "testemunha_obrigatoria":
     case "dados_invalidos":
       return perguntarTestemunhas({

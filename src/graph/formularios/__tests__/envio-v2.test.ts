@@ -573,6 +573,69 @@ describe("T13 ligado ao condutor", () => {
     expect(t.assinatura()).toMatchObject({ passo: "testemunhas" });
   });
 
+  // I1: com 4 no cadastro (e a testemunha-corretor que o Max não vê), marcar tudo dava 422 em laço.
+  const quatroNoCadastro = () =>
+    optionsBody({
+      testemunhas: {
+        minimo: 2,
+        maximo: 4,
+        padrao: [
+          { idPadrao: "c-1", nome: "Ana Testemunha", obrigatoria: true, podeAceite: true },
+          { idPadrao: "c-2", nome: "Beto Testemunha", obrigatoria: false, podeAceite: true },
+          { idPadrao: "c-3", nome: "Caio Testemunha", obrigatoria: false, podeAceite: true },
+          { idPadrao: "c-4", nome: "Dora Testemunha", obrigatoria: false, podeAceite: true },
+        ],
+        linkConfiguracoes: LINK,
+      },
+    });
+
+  it("I1: cadastro de 4 — a lista marca o par semeado e o SIM grava só o par (não as 4)", async () => {
+    const t = montar({ options: quatroNoCadastro() });
+    const lista = await t.fala("Envie a proposta");
+    expect(lista.reply).toContain("1. ✅ Ana Testemunha (obrigatória)");
+    expect(lista.reply).toContain("2. ✅ Beto Testemunha");
+    expect(lista.reply).toContain("3. ⬜ Caio Testemunha");
+    expect(lista.reply).toContain("4. ⬜ Dora Testemunha");
+    await t.fala("manter");
+    await t.fala("sim", "wamid.sim-testemunhas");
+    const w = t.de("proposal.witnesses.set");
+    expect(w).toHaveLength(1);
+    expect(w[0]!.args).toEqual({ proposta_id: "prop-1", testemunhas: [{ idPadrao: "c-1" }, { idPadrao: "c-2" }] });
+  });
+
+  it("I1: o 422 teto_testemunhas não repete o mesmo envio em laço — volta explicando o teto, só com as obrigatórias", async () => {
+    const t = montar({
+      options: quatroNoCadastro(),
+      fila: { "proposal.witnesses.set": [{ status: 422, body: { error: "teto_testemunhas", maximo: 4 } }] },
+    });
+    await t.fala("Envie a proposta");
+    await t.fala("manter");
+    const recusa = await t.fala("sim", "wamid.sim-1");
+    expect(recusa.reply).toContain("máximo é de 4 testemunhas");
+    expect(t.assinatura()).toMatchObject({ passo: "testemunhas" });
+    // A lista que volta já não traz o mesmo conjunto marcado: só a obrigatória.
+    expect(recusa.reply).toContain("1. ✅ Ana Testemunha (obrigatória)");
+    expect(recusa.reply).toContain("2. ⬜ Beto Testemunha");
+    // "manter" outra vez monta o cartão com o conjunto reduzido, nunca com o que acabou de falhar.
+    const cartao = await t.fala("manter");
+    expect(cartao.reply).toContain("Ana Testemunha");
+    expect(cartao.reply).not.toContain("Beto Testemunha");
+    await t.fala("sim", "wamid.sim-2");
+    const w = t.de("proposal.witnesses.set");
+    expect(w).toHaveLength(2);
+    expect(w[1]!.args).toEqual({ proposta_id: "prop-1", testemunhas: [{ idPadrao: "c-1" }] });
+    expect(w[1]!.chave).toBe("wamid.sim-2");
+  });
+
+  it("I2: o cartão das testemunhas avisa que substitui as atuais, inclusive as da tela", async () => {
+    const t = montar();
+    await t.fala("Envie a proposta");
+    const cartao = await t.fala("sim");
+    expect(cartao.reply).toContain("substitui as testemunhas atuais");
+    expect(cartao.reply).toContain("adicionadas na tela");
+    expect(t.de("proposal.witnesses.set")).toHaveLength(0);
+  });
+
   it("testemunha_obrigatoria volta para a lista", async () => {
     const t = montar({ fila: { "proposal.witnesses.set": [{ status: 422, body: { error: "testemunha_obrigatoria" } }] } });
     await ateCartaoDeTestemunhas(t);

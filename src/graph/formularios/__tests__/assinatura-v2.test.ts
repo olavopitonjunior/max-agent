@@ -10,6 +10,7 @@ import {
   opcoesDeTipo,
   textoDeTestemunhas,
   textoDeTipos,
+  textoDoCartaoDeTestemunhas,
   textoDoErroDeTestemunhas,
   textoSalvarComoPadrao,
 } from "../assinatura-v2";
@@ -94,27 +95,84 @@ describe("negados: a escrita das testemunhas", () => {
 });
 
 describe("T13: testemunhas e tipo de assinatura", () => {
-  it("padrão por escopo vem marcado; não existe padrão por corretor", () => {
+  it("padrão por escopo vem marcado como o servidor semeia (obrigatórias + completa o par); não existe padrão por corretor", () => {
     const o = options();
-    // Todas as do cadastro vêm marcadas; a obrigatória nunca sai da escolha.
-    expect(marcadasPorPadrao(o)).toEqual(["t-1", "t-2", "t-3"]);
+    // Obrigatória t-1 + completa o par com a primeira do cadastro (t-2). t-3 fica de fora.
+    expect(marcadasPorPadrao(o)).toEqual(["t-1", "t-2"]);
     expect(comObrigatorias(o, [])).toEqual(["t-1"]);
     expect(comObrigatorias(o, ["t-3"])).toEqual(["t-1", "t-3"]);
     // O padrão é lido só do `options` (por escopo): outro options (outro escopo) dá outro padrão, sem estado de corretor.
     const outroEscopo = options({ testemunhas: { minimo: 0, maximo: 4, padrao: [{ idPadrao: "x-9", nome: "Dora", obrigatoria: false, podeAceite: true }], linkConfiguracoes: LINK } });
     expect(marcadasPorPadrao(outroEscopo)).toEqual(["x-9"]);
-    expect(marcadasPorPadrao(o)).toEqual(["t-1", "t-2", "t-3"]);
+    expect(marcadasPorPadrao(o)).toEqual(["t-1", "t-2"]);
     // A lista mostra as marcadas e a obrigatória.
     const texto = textoDeTestemunhas(o, marcadasPorPadrao(o));
     expect(texto).toContain("1. ✅ Ana Testemunha (obrigatória)");
     expect(texto).toContain("2. ✅ Beto Testemunha");
+    expect(texto).toContain("3. ⬜ Caio Testemunha");
+  });
+
+  // I1 (revisão): o padrão marcado espelha a semeadura do servidor, para "SIM"/"manter" nunca estourar o teto.
+  describe("I1: o padrão marcado não passa do que o servidor semeia", () => {
+    const quatro = (obrig: boolean[]) =>
+      options({
+        testemunhas: {
+          minimo: 2,
+          maximo: 4,
+          padrao: obrig.map((ob, i) => ({ idPadrao: `c-${i + 1}`, nome: `Pessoa ${i + 1}`, obrigatoria: ob, podeAceite: true })),
+          linkConfiguracoes: LINK,
+        },
+      });
+
+    it("cadastro de 4 sem obrigatória: marca só o par (as 2 primeiras), não as 4", () => {
+      expect(marcadasPorPadrao(quatro([false, false, false, false]))).toEqual(["c-1", "c-2"]);
+    });
+
+    it("cadastro de 4 com 1 obrigatória (a última): ela + a primeira completam o par", () => {
+      expect(marcadasPorPadrao(quatro([false, false, false, true]))).toEqual(["c-1", "c-4"]);
+    });
+
+    it("2 obrigatórias: só elas; 3 obrigatórias: as 3 (nunca corta obrigatória)", () => {
+      expect(marcadasPorPadrao(quatro([true, false, true, false]))).toEqual(["c-1", "c-3"]);
+      expect(marcadasPorPadrao(quatro([true, true, true, false]))).toEqual(["c-1", "c-2", "c-3"]);
+    });
+
+    it("cadastro com 1 só: marca 1 (o par não inventa testemunha)", () => {
+      expect(marcadasPorPadrao(quatro([false]))).toEqual(["c-1"]);
+    });
+
+    it("nunca passa do `maximo` do servidor", () => {
+      const o = options({
+        testemunhas: {
+          minimo: 2,
+          maximo: 2,
+          padrao: [1, 2, 3].map((n) => ({ idPadrao: `c-${n}`, nome: `P${n}`, obrigatoria: false, podeAceite: true })),
+          linkConfiguracoes: LINK,
+        },
+      });
+      expect(marcadasPorPadrao(o).length).toBeLessThanOrEqual(2);
+    });
+
+    it("'manter' e 'sim' na lista valem o padrão semeado, não o cadastro inteiro", () => {
+      const o = quatro([false, false, false, false]);
+      expect(lerEscolhaDeTestemunhas("manter", o)).toEqual({ tipo: "escolha", ids: ["c-1", "c-2"] });
+    });
+  });
+
+  // I2 (revisão): regravar SUBSTITUI o conjunto da proposta, inclusive o que foi mexido na tela.
+  it("I2: o cartão diz que a escolha substitui as testemunhas atuais, inclusive as da tela", () => {
+    const texto = textoDoCartaoDeTestemunhas(options(), ["t-1", "t-2"], "PROP-1");
+    expect(texto).toMatch(/substitui as testemunhas atuais/);
+    expect(texto).toMatch(/adicionadas na tela/);
+    expect(texto).toContain("Responda *SIM* para gravar.");
+    expect(texto).not.toMatch(/\d{11}/);
   });
 
   it("lê números, manter e nenhuma; número fora da lista é recusa e a obrigatória nunca sai", () => {
     const o = options();
     expect(lerEscolhaDeTestemunhas("2", o)).toEqual({ tipo: "escolha", ids: ["t-1", "t-2"] });
     expect(lerEscolhaDeTestemunhas("2 3", o)).toEqual({ tipo: "escolha", ids: ["t-1", "t-2", "t-3"] });
-    expect(lerEscolhaDeTestemunhas("manter", o)).toEqual({ tipo: "escolha", ids: ["t-1", "t-2", "t-3"] });
+    expect(lerEscolhaDeTestemunhas("manter", o)).toEqual({ tipo: "escolha", ids: ["t-1", "t-2"] });
     expect(lerEscolhaDeTestemunhas("nenhuma", o)).toEqual({ tipo: "escolha", ids: ["t-1"] });
     expect(lerEscolhaDeTestemunhas("9", o)).toEqual({ tipo: "invalida", motivo: "numero_fora" });
     expect(lerEscolhaDeTestemunhas("ok", o)).toEqual({ tipo: "nenhuma_leitura" });
