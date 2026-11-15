@@ -134,30 +134,33 @@ describe("formulário para o comprador de um negócio que já existe", () => {
     expect(t).toContain("/deals/cd9");
   });
 
-  it("ambiguidade: mostra no máximo 3 opções numeradas e pede o nome completo", async () => {
+  it("ambiguidade: lista no máximo 3 negócios (sem numeração) e pede para dizer qual pelo nome", async () => {
     escopo.mockResolvedValue({
       items: [1, 2, 3, 4, 5].map((n) => ({ id: `d${n}`, titulo: `TESTE assinatura 1 - variante ${n}`, etapa: "Formulário" })),
       truncated: false,
     });
     const s = await run("manda o formulário do comprador do TESTE assinatura 1");
     const reply = s.reply ?? "";
-    const numeradas = reply.split("\n").filter((l) => /^\d+\. /.test(l));
-    expect(numeradas).toHaveLength(3);
-    expect(reply).toMatch(/nome completo/i);
+    const itens = reply.split("\n").filter((l) => l.startsWith("• "));
+    expect(itens).toHaveLength(3);
+    expect(reply.split("\n").some((l) => /^\d+[.)] /.test(l))).toBe(false);
+    expect(reply).toMatch(/Me diga qual pelo nome/);
+    expect(reply).not.toMatch(/\b(responda|diga) (o )?n[uú]mero/i);
     expect(reply).not.toContain("variante 4");
     expect(s.fluxo ?? null).toBeNull();
     expect(s.pendingAction ?? null).toBeNull();
     expect(vi.mocked(executarAcao)).not.toHaveBeenCalled();
   });
 
-  it("ambiguidade com 2 negócios: lista os 2, sem criar", async () => {
+  it("ambiguidade com 2 negócios: lista os 2 sem número, sem criar", async () => {
     escopo.mockResolvedValue({
       items: [{ id: "a", titulo: "TESTE assinatura 1 - à vista", etapa: "Formulário" }, { id: "b", titulo: "TESTE assinatura 1 - financiado", etapa: "Formulário" }],
       truncated: false,
     });
     const s = await run("manda o formulário do comprador do TESTE assinatura 1");
-    const numeradas = (s.reply ?? "").split("\n").filter((l) => /^\d+\. /.test(l));
-    expect(numeradas).toHaveLength(2);
+    const linhas = (s.reply ?? "").split("\n");
+    expect(linhas.filter((l) => l.startsWith("• "))).toHaveLength(2);
+    expect(linhas.some((l) => /^\d+[.)] /.test(l))).toBe(false);
     expect(vi.mocked(executarAcao)).not.toHaveBeenCalled();
   });
 });

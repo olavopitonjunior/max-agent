@@ -133,11 +133,13 @@ export function textoDeNegocioExistente(res: Extract<ResolucaoPorNome, { tipo: "
     ].join("\n");
   }
   const mostrados = res.negocios.slice(0, MAX_OPCOES);
-  const lista = mostrados.map((n, i) => `${i + 1}. ${n.titulo.length > 80 ? `${n.titulo.slice(0, 77)}...` : n.titulo}`).join("\n");
-  return `Achei mais de um negócio com esse nome. Qual deles?\n${lista}\nMe diga o nome completo do que você quer.`;
+  // Sem numeração: o Max não resolve "2" para um negócio (nada guarda a lista), então
+  // ele não oferece número. A pessoa responde pelo nome, que a próxima busca resolve.
+  const lista = mostrados.map((n) => `• ${n.titulo.length > 80 ? `${n.titulo.slice(0, 77)}...` : n.titulo}`).join("\n");
+  return `Achei mais de um negócio com esse nome:\n${lista}\nMe diga qual pelo nome.`;
 }
 
-/** Opções numeradas na pergunta de ambiguidade (o resto some: "nome completo"). */
+/** Negócios listados na pergunta de ambiguidade (o resto some: a pessoa diz o nome). */
 const MAX_OPCOES = 3;
 
 /** Páginas de `deal.list` varridas para achar o nome (limite do servidor por página). */
