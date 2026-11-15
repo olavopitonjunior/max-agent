@@ -1046,17 +1046,23 @@ function cidadeDoPrefixo(prefixo: string): string | null {
  * alta). Só vale com sigla das 27 e um trecho que pareça cidade.
  */
 export function cidadeUfNoTexto(texto: string): { cidade: string; uf: string } | null {
+  const r = lerCidadeUfNoTexto(texto);
+  return r ? { cidade: r.cidade, uf: r.uf } : null;
+}
+
+/** Igual a `cidadeUfNoTexto`, dizendo se veio com barra ("Cidade/UF" é cidade; ", UF"/"- UF" pode ser bairro). */
+function lerCidadeUfNoTexto(texto: string): { cidade: string; uf: string; barra: boolean } | null {
   const formas = [
     /([^\n,;/\d]*?)\s*\/\s*([A-Za-z]{2})(?![\p{L}\d])/gu,
     /([^\n,;/\d–—-]*?)\s+[-–—]\s+([A-Z]{2})(?![\p{L}\d])/gu,
     /([^\n,;/\d–—-]*?)\s*,\s*([A-Z]{2})(?![\p{L}\d])/gu,
   ];
-  for (const re of formas) {
+  for (const [i, re] of formas.entries()) {
     for (const m of texto.matchAll(re)) {
       const uf = m[2]!.toUpperCase();
       if (!SIGLAS_UF.has(uf)) continue;
       const cidade = cidadeDoPrefixo(m[1]!);
-      if (cidade) return { cidade, uf };
+      if (cidade) return { cidade, uf, barra: i === 0 };
     }
   }
   return null;
@@ -1075,8 +1081,17 @@ function aplicarCidadeUf(dados: Record<string, unknown>, texto: string): void {
   let uf = typeof dados.uf === "string" ? dados.uf : undefined;
   const daCidade = cidade ? separarCidadeUf(cidade) : null;
   if (daCidade) { cidade = daCidade.cidade; uf ??= daCidade.uf; }
-  const naMensagem = cidadeUfNoTexto(texto);
-  if (naMensagem) {
+  // "Bela Vista, SP" no bairro do extrator: sem barra, é bairro com a sigla grudada — limpa e guarda a sigla.
+  const bairroLido = typeof dados.bairro === "string" ? dados.bairro : undefined;
+  const bairroSemUf = bairroLido && !bairroLido.includes("/") ? separarCidadeUf(bairroLido) : null;
+  if (bairroSemUf) { dados.bairro = bairroSemUf.cidade; uf ??= bairroSemUf.uf; }
+  const naMensagem = lerCidadeUfNoTexto(texto);
+  // Sem barra, o trecho antes da sigla só é cidade se o extrator não o leu como bairro ("…, Bela Vista, SP").
+  const ehOBairro = !!naMensagem && !naMensagem.barra && typeof dados.bairro === "string" &&
+    chaveDeTexto(dados.bairro) === chaveDeTexto(naMensagem.cidade);
+  if (naMensagem && ehOBairro) {
+    uf = naMensagem.uf;
+  } else if (naMensagem) {
     uf = naMensagem.uf;
     const doTexto = ` ${chaveDeTexto(naMensagem.cidade)}`;
     // O extrator costuma acertar a cidade mesmo sem vírgula ("Vila X São Paulo/SP"): se ela fecha com o fim do trecho, fica a dele.

@@ -2268,10 +2268,26 @@ describe("lerImovel: Cidade/UF, Cidade - UF, Cidade, UF vão para cidade e uf, n
     expect(sem.dados.bairro).toBeUndefined();
   });
 
-  it("bairro igual à cidade (ou 'cidade UF') é descartado", async () => {
-    const a = await ler("Rua TESTE Captação, 5, São Paulo, SP", { ...RUA, bairro: "São Paulo" });
+  it("bairro igual à cidade escrita com barra ('Cidade/UF') é descartado", async () => {
+    const a = await ler("Rua TESTE Captação, 5, São Paulo/SP", { ...RUA, bairro: "São Paulo" });
     expect(a.dados.bairro).toBeUndefined();
     expect(a.dados).toMatchObject({ cidade: "São Paulo", uf: "SP" });
+  });
+
+  it.each([
+    ["Rua Augusta, 1250, Bela Vista, SP", "Bela Vista"],
+    ["Rua Augusta, 1250, Centro, SP", "Centro"],
+    ["Rua Augusta, 1250 - Bela Vista - SP", "Bela Vista"],
+  ])("'Bairro, UF' / 'Bairro - UF': %s mantém o bairro, grava a uf e deixa a cidade faltando", async (texto, bairro) => {
+    const r = await ler(texto, { rua: "Rua Augusta", numero: "1250", bairro });
+    expect(r.dados).toMatchObject({ bairro, uf: "SP" });
+    expect(r.dados.cidade).toBeUndefined();
+  });
+
+  it("bairro do extrator já com ', UF' grudado: bairro limpo, uf gravada, cidade faltando", async () => {
+    const r = await ler("Rua Augusta, 1250, Bela Vista, SP", { rua: "Rua Augusta", numero: "1250", bairro: "Bela Vista, SP" });
+    expect(r.dados).toMatchObject({ bairro: "Bela Vista", uf: "SP" });
+    expect(r.dados.cidade).toBeUndefined();
   });
 
   it("cidade do extrator no formato 'Cidade/UF' é dividida", async () => {
