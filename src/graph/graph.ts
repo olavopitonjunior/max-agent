@@ -26,6 +26,7 @@ import {
   textoDoAndamentoDoContrato, textoForaDoMax, pedeProcessoDeAssinatura, textoDoProcesso, TEXTO_TIPOS_DE_ASSINATURA,
 } from "./capacidades";
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
+import { toleranteNaOrg } from "./formularios/intencao";
 import {
   conduzirCredito, continuacaoCredito, creditoLigado, iniciarCredito, pedeCredito, responderStatusCredito,
   toolExtrairCredito, TEXTO_APROVAR, TEXTO_SCORE,
@@ -1173,7 +1174,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     }
     assinatura = null;
   }
-  const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText) : null;
+  const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText, { tolerante: toleranteNaOrg(state.identity.orgId) }) : null;
   // "Não converte a proposta da X" é o contrário do pedido: a negação vem antes.
   const negada = !atual ? negaAcao(userText) : null;
   const continuidade = podeEscrever(state.identity) && !negada && pedeContinuidade(userText);
@@ -1249,7 +1250,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // Ajuste curto de uma lista ("Que sou responsável", "Todos") herda o pedido anterior.
   const textoConsulta = textoDaConsulta(userText, state.messages);
   if (livre && !emSelecao && podeEscrever(state.identity) &&
-      !pedeEnvio(userText) && pedeConsulta(textoConsulta)) {
+      !pedeEnvio(userText) && pedeConsulta(textoConsulta, { tolerante: toleranteNaOrg(state.identity.orgId) })) {
     // Reconhecer a consulta independe da permissão: sem leitura, recusa aqui.
     // Deixar passar ao modelo oferece criação e pode converter o código citado
     // em continuidade de proposta, mesmo quando a pessoa pediu só o status.
@@ -1649,7 +1650,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
 
   // Pedido EXPLÍCITO de criação a quem não pode criar agora: template, sem
   // modelo — é onde o nano mais tende a encenar a ação. Só na volta 0.
-  if (state.toolRounds === 0 && criacao !== "disponivel" && ehPedidoDeCriacao(pedidoBruto)) {
+  if (state.toolRounds === 0 && criacao !== "disponivel" && ehPedidoDeCriacao(pedidoBruto, { tolerante: toleranteNaOrg(state.identity.orgId) })) {
     const texto = textoCriacaoIndisponivel(criacao, state.politicaIndisponivel);
     return {
       toolsOferecidas: [],
