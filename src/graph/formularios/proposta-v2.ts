@@ -30,11 +30,16 @@ import { ehFluxoDesligado, rebaixarParaV1 } from "./selecao";
 
 type DepsAcao = Pick<DepsDoFluxo, "acao">;
 
-/** O `faltando` do servidor: a resposta da gravação vence o do `options`; nenhum = `[]`, nunca inventado. */
-export function faltandoV2(options: OptionsV1 | OptionsV2, resposta?: { faltando?: Pendencia[] } | null): Pendencia[] {
+/**
+ * O `faltando` do servidor: a resposta da gravação vence o do `options`. Nenhum dos
+ * dois traz = `null` (DESCONHECIDO: a flag da esteira pode estar desligada ou o
+ * servidor ser antigo), nunca `[]`: lista vazia só vale quando o servidor a mandou.
+ * Quem recebe `null` consulta `proposal.options` com alvo / o preflight.
+ */
+export function faltandoV2(options: OptionsV1 | OptionsV2, resposta?: { faltando?: Pendencia[] } | null): Pendencia[] | null {
   if (resposta && Array.isArray(resposta.faltando)) return resposta.faltando;
   const doOptions = "faltando" in options ? options.faltando : undefined;
-  return Array.isArray(doOptions) ? doOptions : [];
+  return Array.isArray(doOptions) ? doOptions : null;
 }
 
 /**
@@ -58,6 +63,7 @@ export async function consultarOptions(
 
 export type ErroDoParcial =
   | "dados_invalidos"
+  | "sem_confirmacao"
   | "documento_proprio"
   | "edicao_pela_tela"
   | "fluxo_desligado"
@@ -75,8 +81,8 @@ export type ResultadoParcial =
       criou: boolean;
       proposalId: string;
       codigo?: string;
-      /** Do servidor, depois da gravação. */
-      faltando: Pendencia[];
+      /** Do servidor, depois da gravação; `null` = o servidor não disse (consultar o options). */
+      faltando: Pendencia[] | null;
       testemunhasSemeadas?: number;
       pdfIndisponivel?: string;
       documento?: { descartado: boolean; link?: string };
@@ -115,15 +121,24 @@ function idDe(obj: unknown): { id?: string; codigo?: string } {
  * Grava o que o corretor disse. Sem `proposalId` no fluxo: `proposal.create`
  * (exige `schemaType`, sem `canal`). Com `proposalId`: `proposal.update`, PATCH
  * completo (partes por POSIÇÃO, a lista nunca encolhe; `substituir:true` só com
- * nome novo, R38). `idempotencyKey` é a messageId do turno; uma chave já
- * guardada no fluxo para o MESMO verbo vence (a retentativa não duplica).
+ * nome novo, R38).
+ *
+ * Escrita só com prova de confirmação (GC5): `confirmacao.messageIdDoSim` é a
+ * messageId do PRIMEIRO "sim" do corretor ao cartão e vira a idempotencyKey
+ * (um "sim" repetido não vira escrita nova). Sem ela a função recusa antes de
+ * chamar o servidor. Uma chave já guardada no fluxo para o MESMO verbo vence
+ * (a retentativa não duplica).
  */
 export async function salvarParcial(
   deps: DepsAcao,
   f: FluxoFormularioV2,
   patch: PatchV2,
-  opts: { idempotencyKey: string; agora?: number; extraido?: DadosDaProposta }
+  opts: { confirmacao: { messageIdDoSim: string }; agora?: number; extraido?: DadosDaProposta }
 ): Promise<ResultadoParcial> {
+  const messageIdDoSim = opts?.confirmacao?.messageIdDoSim;
+  if (typeof messageIdDoSim !== "string" || messageIdDoSim.trim().length === 0) {
+    return { ok: false, erro: "sem_confirmacao", fluxo: f };
+  }
   const criando = !f.proposalId;
   const verbo = criando ? "proposal.create" : "proposal.update";
   const agora = opts.agora ?? Date.now();
@@ -148,7 +163,7 @@ export async function salvarParcial(
     corpo.proposta_id = f.proposalId;
   }
 
-  const chave = f.chave?.verbo === verbo ? f.chave : { verbo, valor: opts.idempotencyKey };
+  const chave = f.chave?.verbo === verbo ? f.chave : { verbo, valor: messageIdDoSim };
   const r: RespostaDoServidor | null = await deps.acao(verbo, corpo, chave.valor);
 
   if (!r || (r.status === 409 && r.body?.error === "em_andamento")) {
@@ -170,12 +185,17 @@ export async function salvarParcial(
         return { ok: false, erro: "envio_em_andamento", mensagem: frase(r.body), fluxo: semChave };
       case "signatarios_duplicados":
         return { ok: false, erro: "signatarios_duplicados", fluxo: semChave };
-      default:
-        // `nao_editavel` e qualquer outro 409: a proposta saiu do rascunho.
+      case "nao_editavel":
         return { ok: false, erro: "nao_editavel", fluxo: null };
+      default:
+        // Código que o contrato (§18.13.5) não lista: não sabemos o que houve, então
+        // não encerramos o fluxo nem afirmamos "saiu do rascunho". Mantém a chave.
+        return { ok: false, erro: "indisponivel", fluxo: { ...f, chave, atualizadoEm: agora } };
     }
   }
-  if (r.status === 422 || r.status === 400) {
+  // 400 `invalid_body` é defeito do NOSSO corpo, não dado inválido do corretor.
+  if (r.status === 400) return { ok: false, erro: "indisponivel", fluxo: semChave };
+  if (r.status === 422) {
     const campos = Array.isArray(r.body?.campos) ? r.body.campos.filter((c): c is string => typeof c === "string") : undefined;
     return { ok: false, erro: "dados_invalidos", mensagem: frase(r.body), ...(campos?.length ? { campos } : {}), fluxo: semChave };
   }
@@ -216,6 +236,8 @@ export function textoDoParcial(r: ResultadoParcial, ctx: { codigo?: string }): s
       return `${r.mensagem ?? "Algum dado não foi aceito pelo sistema."}\nMe mande e eu ajusto.`;
     case "fluxo_desligado":
       return "";
+    case "sem_confirmacao":
+      return "Antes de gravar preciso do seu SIM no resumo. Confirma pra eu salvar?";
     case "incerta":
       return TEXTO_ESCRITA_INCERTA;
     case "sem_permissao":

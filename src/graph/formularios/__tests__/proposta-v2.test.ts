@@ -41,9 +41,14 @@ describe("faltandoV2: a fonte é o servidor", () => {
     expect(faltandoV2({ ...optionsV2, faltando: [pend("imovel.endereco")] })).toEqual([pend("imovel.endereco")]);
   });
 
-  it("nenhum dos dois traz a lista: vazio, nunca inventado", () => {
-    expect(faltandoV2(optionsV2)).toEqual([]);
-    expect(faltandoV2(optionsV2, {})).toEqual([]);
+  it("nenhum dos dois traz a lista: null (desconhecido), nunca [] — flag desligada no servidor não vira 'nada falta'", () => {
+    expect(faltandoV2(optionsV2)).toBeNull();
+    expect(faltandoV2(optionsV2, {})).toBeNull();
+    expect(faltandoV2(optionsV2, null)).toBeNull();
+  });
+
+  it("lista vazia VINDA do servidor é diferente de ausente: nada falta", () => {
+    expect(faltandoV2(optionsV2, { faltando: [] })).toEqual([]);
   });
 
   it("o módulo não usa a conta local de pendências do v1", () => {
@@ -87,10 +92,63 @@ describe("consultarOptions", () => {
 });
 
 describe("salvarParcial: negados primeiro", () => {
+  it("I2: sem a confirmação do SIM não grava e não chama o servidor", async () => {
+    const d = deps({ status: 201, body: { proposal: { id: "prop-1" }, faltando: [] } });
+    // @ts-expect-error o tipo exige `confirmacao`; o teste prova que a guarda vale também em runtime
+    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, {});
+    expect(d.acao).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ ok: false, erro: "sem_confirmacao" });
+    if (r.ok) return;
+    expect(textoDoParcial(r, {}).toLowerCase()).not.toContain("anotei");
+  });
+
+  it("I2: confirmação sem messageId do SIM também é recusada", async () => {
+    const d = deps({ status: 201, body: { proposal: { id: "prop-1" }, faltando: [] } });
+    const r = await salvarParcial(d, fluxo(), { observacoes: "x" }, { confirmacao: { messageIdDoSim: "" } });
+    expect(d.acao).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ ok: false, erro: "sem_confirmacao" });
+  });
+
+  it("I2: a idempotencyKey é a messageId do SIM, não a do turno", async () => {
+    const d = deps({ status: 201, body: { proposal: { id: "prop-1" }, faltando: [] } });
+    await salvarParcial(d, fluxo(), { observacoes: "x" }, { confirmacao: { messageIdDoSim: "wamid-sim-1" } });
+    expect(d.acao.mock.calls[0]![2]).toBe("wamid-sim-1");
+  });
+
+  it("I1: resposta de gravação sem faltando devolve faltando null (consultar o options), não []", async () => {
+    const d = deps({ status: 201, body: { proposal: { id: "prop-1" } } });
+    const r = await salvarParcial(d, fluxo(), { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.faltando).toBeNull();
+  });
+
+  it("M6: 409 desconhecido NÃO vira nao_editavel (o fluxo não é encerrado por um código que não conhecemos)", async () => {
+    const d = deps({ status: 409, body: { error: "codigo_novo_do_servidor" } });
+    const r = await salvarParcial(d, fluxo({ proposalId: "prop-1" }), { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
+    expect(r).toMatchObject({ ok: false, erro: "indisponivel" });
+    if (r.ok) return;
+    expect(r.fluxo).not.toBeNull();
+    expect(textoDoParcial(r, {})).not.toContain("saiu do rascunho");
+  });
+
+  it("M6: 400 invalid_body é erro nosso (indisponivel), não 'dado inválido' do corretor", async () => {
+    const d = deps({ status: 400, body: { error: "invalid_body" } });
+    const r = await salvarParcial(d, fluxo({ proposalId: "prop-1" }), { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
+    expect(r).toMatchObject({ ok: false, erro: "indisponivel" });
+    if (r.ok) return;
+    expect(textoDoParcial(r, {})).not.toContain("invalid_body");
+  });
+
+  it("M6: 409 nao_editavel segue encerrando o fluxo (código do contrato)", async () => {
+    const d = deps({ status: 409, body: { error: "nao_editavel", estado: "enviada" } });
+    const r = await salvarParcial(d, fluxo({ proposalId: "prop-1" }), { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
+    expect(r).toMatchObject({ ok: false, erro: "nao_editavel", fluxo: null });
+  });
+
   it("sem schemaType não chama o servidor: o create v2 exige", async () => {
     const d = deps({ status: 201, body: {} });
     const f = novoFluxoV2({ esteira: "venda", agora }); // sem schemaType
-    const r = await salvarParcial(d, f, { compradores: [{ nome: "Maria Teste" }] }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, f, { compradores: [{ nome: "Maria Teste" }] }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(d.acao).not.toHaveBeenCalled();
     expect(r).toMatchObject({ ok: false, erro: "dados_invalidos", campos: ["schemaType"] });
   });
@@ -100,7 +158,7 @@ describe("salvarParcial: negados primeiro", () => {
       status: 422,
       body: { error: "dados_invalidos", message: "Preciso de pelo menos um dado da proposta para abrir o rascunho." },
     });
-    const r = await salvarParcial(d, fluxo(), { observacoes: "" }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo(), { observacoes: "" }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.erro).toBe("dados_invalidos");
@@ -114,14 +172,14 @@ describe("salvarParcial: negados primeiro", () => {
 
   it("o código do erro nunca vai para o corretor", async () => {
     const d = deps({ status: 422, body: { error: "dados_invalidos" } });
-    const r = await salvarParcial(d, fluxo(), { observacoes: "x" }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo(), { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
     if (r.ok) throw new Error("esperava recusa");
     expect(textoDoParcial(r, {})).not.toContain("dados_invalidos");
   });
 
   it("sem resposta (rede): incerta, guarda a chave e não afirma nada", async () => {
     const d = deps(null);
-    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { idempotencyKey: "msg-7" });
+    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { confirmacao: { messageIdDoSim: "msg-7" } });
     expect(r).toMatchObject({ ok: false, erro: "incerta" });
     if (r.ok) return;
     expect(r.fluxo && "chave" in r.fluxo ? r.fluxo.chave : null).toEqual({ verbo: "proposal.create", valor: "msg-7" });
@@ -130,33 +188,33 @@ describe("salvarParcial: negados primeiro", () => {
 
   it("409 em_andamento é tão incerto quanto a falta de resposta", async () => {
     const d = deps({ status: 409, body: { error: "em_andamento" } });
-    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(r).toMatchObject({ ok: false, erro: "incerta" });
   });
 
   it("a retentativa reusa a chave guardada, não a da mensagem nova", async () => {
     const d = deps({ status: 201, body: { proposal: { id: "prop-1", codigo: "PROP-1" }, faltando: [] } });
     const f = fluxo({ chave: { verbo: "proposal.create", valor: "msg-7" } });
-    await salvarParcial(d, f, { compradores: [{ nome: "Maria Teste" }] }, { idempotencyKey: "msg-9" });
+    await salvarParcial(d, f, { compradores: [{ nome: "Maria Teste" }] }, { confirmacao: { messageIdDoSim: "msg-9" } });
     expect(d.acao.mock.calls[0]![2]).toBe("msg-7");
   });
 
   it("chave guardada de OUTRO verbo não é reaproveitada", async () => {
     const d = deps({ status: 201, body: { proposal: { id: "prop-1" }, faltando: [] } });
     const f = fluxo({ chave: { verbo: "proposal.update", valor: "msg-3" } });
-    await salvarParcial(d, f, { compradores: [{ nome: "Maria Teste" }] }, { idempotencyKey: "msg-9" });
+    await salvarParcial(d, f, { compradores: [{ nome: "Maria Teste" }] }, { confirmacao: { messageIdDoSim: "msg-9" } });
     expect(d.acao.mock.calls[0]![2]).toBe("msg-9");
   });
 
   it("403 que não é o gate da flag é falta de permissão, sem rebaixar para o v1", async () => {
     const d = deps({ status: 403, body: { error: "politica_nao_concede" } });
-    const r = await salvarParcial(d, fluxo(), { observacoes: "x" }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo(), { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(r).toMatchObject({ ok: false, erro: "sem_permissao", fluxo: null });
   });
 
   it("403 fluxo_desligado rebaixa para o v1 no mesmo turno, sem erro para o corretor", async () => {
     const d = deps({ status: 403, body: { error: "fluxo_desligado" } });
-    const r = await salvarParcial(d, fluxo(), { observacoes: "x" }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo(), { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(r).toMatchObject({ ok: false, erro: "fluxo_desligado" });
     if (r.ok) return;
     expect(r.fluxo).toMatchObject({ kind: "proposta", etapa: "coleta", natureza: "venda" });
@@ -166,7 +224,7 @@ describe("salvarParcial: negados primeiro", () => {
   it("404 no update: não encontrei, fluxo encerrado", async () => {
     const d = deps({ status: 404, body: { error: "Not Found" } });
     const f = fluxo({ proposalId: "prop-x" });
-    const r = await salvarParcial(d, f, { negociacao: { valor: 500000 } }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, f, { negociacao: { valor: 500000 } }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(r).toMatchObject({ ok: false, erro: "nao_encontrada", fluxo: null });
   });
 });
@@ -175,7 +233,7 @@ describe("salvarParcial: create", () => {
   it("o create não leva canal, mesmo que o patch traga um (D4: o rascunho nasce sem canal)", async () => {
     const d = deps({ status: 201, body: { proposal: { id: "prop-1", codigo: "PROP-2026-1" }, faltando: [], testemunhasSemeadas: 2 } });
     const patch = { compradores: [{ nome: "Maria Teste" }], canal: "whatsapp" } as Parameters<typeof salvarParcial>[2];
-    const r = await salvarParcial(d, fluxo(), patch, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo(), patch, { confirmacao: { messageIdDoSim: "m1" } });
     const [verbo, args, chave] = d.acao.mock.calls[0]!;
     expect(verbo).toBe("proposal.create");
     expect(args).not.toHaveProperty("canal");
@@ -188,14 +246,14 @@ describe("salvarParcial: create", () => {
   it("o faltando devolvido é o do servidor, item por item", async () => {
     const doServidor = [pend("comprador.cpf"), { signatario: null, campo: "corretor.creci", motivo: "obrigatorio_da_org" } as Pendencia];
     const d = deps({ status: 201, body: { proposal: { id: "prop-1" }, faltando: doServidor } });
-    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { confirmacao: { messageIdDoSim: "m1" } });
     if (!r.ok) throw new Error("esperava ok");
     expect(r.faltando).toEqual(doServidor);
   });
 
   it("'anotei' só depois do 201, e o fluxo passa a apontar para o rascunho sem chave presa", async () => {
     const d = deps({ status: 201, body: { proposal: { id: "prop-1", codigo: "PROP-2026-1" }, faltando: [] } });
-    const r = await salvarParcial(d, fluxo({ chave: { verbo: "proposal.create", valor: "msg-7" } }), { compradores: [{ nome: "Maria Teste" }] }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo({ chave: { verbo: "proposal.create", valor: "msg-7" } }), { compradores: [{ nome: "Maria Teste" }] }, { confirmacao: { messageIdDoSim: "m1" } });
     if (!r.ok) throw new Error("esperava ok");
     expect(textoDoParcial(r, {})).toMatch(/anotei/i);
     expect(r.fluxo).toMatchObject({ kind: "proposta_v2", proposalId: "prop-1" });
@@ -204,7 +262,7 @@ describe("salvarParcial: create", () => {
 
   it("201 sem id utilizável: não afirma que gravou", async () => {
     const d = deps({ status: 201, body: {} });
-    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(textoDoParcial(r, {}).toLowerCase()).not.toContain("anotei");
@@ -212,7 +270,7 @@ describe("salvarParcial: create", () => {
 
   it("sem modelo ativo: grava e avisa, sem PDF", async () => {
     const d = deps({ status: 201, body: { proposal: { id: "prop-1", codigo: "P-1" }, pdfIndisponivel: "sem_modelo", faltando: [] } });
-    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo(), { compradores: [{ nome: "Maria Teste" }] }, { confirmacao: { messageIdDoSim: "m1" } });
     if (!r.ok) throw new Error("esperava ok");
     expect(r.pdfIndisponivel).toBe("sem_modelo");
   });
@@ -226,7 +284,7 @@ describe("salvarParcial: update", () => {
       d,
       f,
       { compradores: [{ nome: "Maria Teste", cpf: CPF }, { nome: "João Teste" }], negociacao: { valor: 520000 } },
-      { idempotencyKey: "m2" }
+      { confirmacao: { messageIdDoSim: "m2" } }
     );
     const [verbo, args] = d.acao.mock.calls[0]!;
     expect(verbo).toBe("proposal.update");
@@ -242,14 +300,14 @@ describe("salvarParcial: update", () => {
   it("troca de pessoa só com substituir:true e nome novo (R38): o patch passa como veio", async () => {
     const d = deps({ status: 200, body: { proposta: { id: "prop-1" }, faltando: [] } });
     const f = fluxo({ proposalId: "prop-1" });
-    await salvarParcial(d, f, { compradores: [{ nome: "Pedro Novo", substituir: true }] }, { idempotencyKey: "m3" });
+    await salvarParcial(d, f, { compradores: [{ nome: "Pedro Novo", substituir: true }] }, { confirmacao: { messageIdDoSim: "m3" } });
     expect((d.acao.mock.calls[0]![1].compradores as Array<Record<string, unknown>>)[0]).toEqual({ nome: "Pedro Novo", substituir: true });
   });
 
   it("409 edicao_pela_tela encerra o fluxo e manda ajustar pela tela", async () => {
     const d = deps({ status: 409, body: { error: "edicao_pela_tela" } });
     const f = fluxo({ proposalId: "prop-1" });
-    const r = await salvarParcial(d, f, { negociacao: { valor: 1 } }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, f, { negociacao: { valor: 1 } }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(r).toMatchObject({ ok: false, erro: "edicao_pela_tela", fluxo: null });
     if (r.ok) return;
     const texto = textoDoParcial(r, { codigo: "PROP-2026-1" });
@@ -260,7 +318,7 @@ describe("salvarParcial: update", () => {
 
   it("409 edicao_pela_tela repassa o link quando o servidor manda um", async () => {
     const d = deps({ status: 409, body: { error: "edicao_pela_tela", link: "https://app.exemplo/propostas/prop-1" } });
-    const r = await salvarParcial(d, fluxo({ proposalId: "prop-1" }), { negociacao: { valor: 1 } }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo({ proposalId: "prop-1" }), { negociacao: { valor: 1 } }, { confirmacao: { messageIdDoSim: "m1" } });
     if (r.ok) throw new Error("esperava recusa");
     expect(r.link).toBe("https://app.exemplo/propostas/prop-1");
     expect(textoDoParcial(r, {})).toContain("https://app.exemplo/propostas/prop-1");
@@ -270,7 +328,7 @@ describe("salvarParcial: update", () => {
     const link = "https://docs.google.com/document/d/abc/edit";
     const d = deps({ status: 409, body: { error: "documento_proprio", link } });
     const f = fluxo({ proposalId: "prop-1" });
-    const r = await salvarParcial(d, f, { negociacao: { valor: 1 } }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, f, { negociacao: { valor: 1 } }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(r).toMatchObject({ ok: false, erro: "documento_proprio", link });
     if (r.ok) return;
     expect(r.fluxo).toMatchObject({ kind: "proposta_v2", proposalId: "prop-1" });
@@ -279,25 +337,25 @@ describe("salvarParcial: update", () => {
 
   it("regerar_documento:true vai no patch quando o corretor autorizou", async () => {
     const d = deps({ status: 200, body: { proposta: { id: "prop-1" }, faltando: [], documento: { descartado: true } } });
-    const r = await salvarParcial(d, fluxo({ proposalId: "prop-1" }), { negociacao: { valor: 1 }, regerar_documento: true }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo({ proposalId: "prop-1" }), { negociacao: { valor: 1 }, regerar_documento: true }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(d.acao.mock.calls[0]![1].regerar_documento).toBe(true);
     if (r.ok) expect(r.documento).toEqual({ descartado: true });
   });
 
   it("409 nao_editavel, envio_em_andamento e signatarios_duplicados têm resposta própria", async () => {
     const f = fluxo({ proposalId: "prop-1" });
-    const naoEditavel = await salvarParcial(deps({ status: 409, body: { error: "nao_editavel", estado: "enviada" } }), f, { observacoes: "x" }, { idempotencyKey: "m1" });
+    const naoEditavel = await salvarParcial(deps({ status: 409, body: { error: "nao_editavel", estado: "enviada" } }), f, { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(naoEditavel).toMatchObject({ ok: false, erro: "nao_editavel", fluxo: null });
-    const emEnvio = await salvarParcial(deps({ status: 409, body: { error: "envio_em_andamento", message: "x" } }), f, { observacoes: "x" }, { idempotencyKey: "m1" });
+    const emEnvio = await salvarParcial(deps({ status: 409, body: { error: "envio_em_andamento", message: "x" } }), f, { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(emEnvio).toMatchObject({ ok: false, erro: "envio_em_andamento" });
-    const dup = await salvarParcial(deps({ status: 409, body: { error: "signatarios_duplicados" } }), f, { observacoes: "x" }, { idempotencyKey: "m1" });
+    const dup = await salvarParcial(deps({ status: 409, body: { error: "signatarios_duplicados" } }), f, { observacoes: "x" }, { confirmacao: { messageIdDoSim: "m1" } });
     expect(dup).toMatchObject({ ok: false, erro: "signatarios_duplicados" });
     if (!dup.ok) expect(dup.fluxo).toMatchObject({ kind: "proposta_v2", proposalId: "prop-1" });
   });
 
   it("422 do update mostra a frase do servidor e não diz 'anotei'", async () => {
     const d = deps({ status: 422, body: { error: "dados_invalidos", message: "Preciso do nome do comprador 2 para incluir na proposta." } });
-    const r = await salvarParcial(d, fluxo({ proposalId: "prop-1" }), { compradores: [{}, { cpf: CPF }] }, { idempotencyKey: "m1" });
+    const r = await salvarParcial(d, fluxo({ proposalId: "prop-1" }), { compradores: [{}, { cpf: CPF }] }, { confirmacao: { messageIdDoSim: "m1" } });
     if (r.ok) throw new Error("esperava recusa");
     const texto = textoDoParcial(r, {});
     expect(texto).toContain("Preciso do nome do comprador 2");
