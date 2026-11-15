@@ -30,6 +30,8 @@ export type ErroDeTestemunhas =
   | "teto_testemunhas"
   | "testemunha_obrigatoria"
   | "nao_editavel"
+  /** 409 `envio_em_andamento`: há um Aceite em emissão numa testemunha atual. Não é "saiu do rascunho". */
+  | "envio_em_andamento"
   | "ja_enviada"
   /** 403 `fluxo_desligado`: a flag da esteira desligou; quem chama rebaixa para o v1 sem mensagem de erro. */
   | "fluxo_desligado"
@@ -77,7 +79,8 @@ export async function definirTestemunhas(
   if (r.status === 404) return { ok: false, erro: "nao_encontrada" };
   if (r.status === 409) {
     if (erro === "ja_enviada") return { ok: false, erro: "ja_enviada", ...(typeof r.body.estado === "string" ? { estado: r.body.estado } : {}) };
-    if (erro === "nao_editavel" || erro === "envio_em_andamento") return { ok: false, erro: "nao_editavel" };
+    if (erro === "nao_editavel") return { ok: false, erro: "nao_editavel" };
+    if (erro === "envio_em_andamento") return { ok: false, erro: "envio_em_andamento" };
     if (erro === "signatarios_duplicados") return { ok: false, erro: "signatarios_duplicados" };
     // `ja_enviando` / `em_andamento`: a mesma chave ainda está em voo no servidor.
     if (erro === "ja_enviando" || erro === "em_andamento") return { ok: false, erro: "incerta" };
@@ -101,6 +104,8 @@ export function textoDoErroDeTestemunhas(erro: ErroDeTestemunhas, extra: { maxim
       return "Não gravei: há testemunha obrigatória do cadastro que não pode ficar de fora. Me diga de novo quais ficam, mantendo as obrigatórias.";
     case "nao_editavel":
       return "Não gravei: essa proposta não está mais em rascunho, então as testemunhas não mudam por aqui.";
+    case "envio_em_andamento":
+      return "Não gravei: o envio desta proposta já está em andamento (há um Aceite sendo emitido para uma testemunha), então as testemunhas não mudam agora. Aguarde o resultado do envio e me peça de novo.";
     case "ja_enviada":
       return "Essa proposta já foi enviada para assinatura, então as testemunhas não mudam mais.";
     case "sem_permissao":

@@ -83,12 +83,21 @@ describe("negados: a escrita das testemunhas", () => {
     expect(await definirTestemunhas(enviada.deps, "p", [], "k")).toEqual({ ok: false, erro: "ja_enviada", estado: "Enviada" });
     const naoEditavel = depsCom({ status: 409, body: { error: "nao_editavel" } });
     expect(await definirTestemunhas(naoEditavel.deps, "p", [], "k")).toEqual({ ok: false, erro: "nao_editavel" });
+    // M4: `envio_em_andamento` não é "saiu do rascunho": tem erro e frase próprios.
     const emAndamento = depsCom({ status: 409, body: { error: "envio_em_andamento" } });
-    expect(await definirTestemunhas(emAndamento.deps, "p", [], "k")).toEqual({ ok: false, erro: "nao_editavel" });
+    expect(await definirTestemunhas(emAndamento.deps, "p", [], "k")).toEqual({ ok: false, erro: "envio_em_andamento" });
+  });
+
+  it("M4: envio_em_andamento diz que o envio está em andamento, não que saiu do rascunho", () => {
+    const texto = textoDoErroDeTestemunhas("envio_em_andamento");
+    expect(texto).toMatch(/envio .*em andamento/);
+    expect(texto).not.toMatch(/rascunho/);
+    expect(texto).toMatch(/n[aã]o gravei/i);
+    expect(textoDoErroDeTestemunhas("nao_editavel")).toMatch(/rascunho/);
   });
 
   it("nenhum texto de erro afirma que gravou", () => {
-    for (const erro of ["teto_testemunhas", "testemunha_obrigatoria", "nao_editavel", "sem_permissao", "dados_invalidos", "incerta"] as const) {
+    for (const erro of ["teto_testemunhas", "testemunha_obrigatoria", "nao_editavel", "envio_em_andamento", "sem_permissao", "dados_invalidos", "incerta"] as const) {
       expect(textoDoErroDeTestemunhas(erro)).toMatch(/n[aã]o gravei|n[aã]o consegui|n[aã]o tem permiss/i);
     }
   });
