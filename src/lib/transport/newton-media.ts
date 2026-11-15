@@ -93,7 +93,8 @@ export function midiaDoBridge(corpo: {
   if (!permitidos.has(mimeType)) return null;
   const url = urlDeMidiaPermitida(corpo.mediaUrl);
   if (!url) return null;
-  return { ref: `${ZAPI_MEDIA_PREFIX}${corpo.mediaUrl as string}`, kind, mimeType };
+  // `url.href` é o que foi validado; a string crua poderia diferir dele.
+  return { ref: `${ZAPI_MEDIA_PREFIX}${url.href}`, kind, mimeType };
 }
 
 const MARCAS_HEIC = new Set(["heic", "heix", "hevc"]);

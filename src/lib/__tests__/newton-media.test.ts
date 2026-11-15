@@ -148,6 +148,23 @@ describe("midiaDoBridge: o que passa", () => {
     expect(m?.ref.startsWith("zapi:")).toBe(true);
   });
 
+  it("a referência usa a URL normalizada (url.href), não a string crua", () => {
+    const cruas = [
+      "https://MEDIA.zapi.example/instances/X/a b.jpg",
+      "https://media.zapi.example/instances/X/../Y/foto.jpg",
+      "https://media.zapi.example/./a.jpg?x=1#frag",
+    ];
+    for (const crua of cruas) {
+      const m = midiaDoBridge({ mediaUrl: crua, mediaKind: "image", mimeType: "image/jpeg" });
+      expect(m?.ref).toBe(`${ZAPI_MEDIA_PREFIX}${new URL(crua).href}`);
+      expect(m?.ref).not.toBe(`${ZAPI_MEDIA_PREFIX}${crua}`);
+    }
+  });
+
+  it("URL já normalizada fica igual", () => {
+    expect(midiaDoBridge({ mediaUrl: url, mediaKind: "image", mimeType: "image/jpeg" })?.ref).toBe(`zapi:${url}`);
+  });
+
   it("aceita os cinco tipos de imagem e o PDF", () => {
     for (const mime of ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]) {
       expect(midiaDoBridge({ mediaUrl: url, mediaKind: "image", mimeType: mime })?.mimeType).toBe(mime);
