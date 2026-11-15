@@ -51,7 +51,8 @@ import {
 } from "../../lib/meta-flow";
 import { lerConfirmacao, normalizar } from "../tools";
 import {
-  caminhoDoCelular,
+  resolverCelular,
+  type MotivoSemCaminho,
   avisoDeRegerar,
   comObrigatorias,
   definirTestemunhas,
@@ -332,8 +333,9 @@ async function avancar(e: E): Promise<Resposta> {
 
   if (!as.testemunhasOk && testemunhasAplicam(e)) return perguntarTestemunhas(e);
   if (!as.tipo) return perguntarTipo(e);
-  const semCelular = assinanteSemCelular(options, as.tipo);
-  if (semCelular) return perguntarCelular(e, semCelular);
+  const celular = proximoCelular(options, as.tipo);
+  if (celular?.tipo === "tela") return perguntarTipo({ ...e, f: noPasso(e, { passo: "tipo", tipo: undefined, mostrado: undefined }), prefixo: celular.texto });
+  if (celular) return perguntarCelular(e, celular.s);
   return preflightEResumo(e);
 }
 
@@ -448,15 +450,39 @@ async function passoTipo(e: E, conf: ReturnType<typeof lerConfirmacao>): Promise
 
 // Celular (Aceite) ...........................................................
 
-/** O primeiro assinante sem celular que o Max sabe gravar, quando o tipo escolhido é o Aceite. */
-function assinanteSemCelular(options: OptionsV2, tipo: TipoDeAssinatura): { posicao: number; papel: string; nome: string; path: string } | null {
+type ProximoCelular =
+  | { tipo: "pergunta"; s: { posicao: number; papel: string; nome: string; path: string } }
+  | { tipo: "tela"; texto: string }
+  | null;
+
+const POR_QUE_NAO_GRAVA: Record<MotivoSemCaminho, string> = {
+  papel_nao_gravavel: "esse é um papel (cônjuge ou testemunha) que eu não edito por aqui",
+  nome_repetido: "há mais de uma pessoa com esse nome nessa parte da proposta, e não consigo saber qual é",
+  nome_ausente: "não achei essa pessoa no rascunho para gravar no lugar certo",
+};
+
+/**
+ * O que fazer com o celular do Aceite (R23). Cada assinante sem celular é achado pelo NOME no rascunho do papel;
+ * se QUALQUER um não dá para gravar com segurança, nada é perguntado: explica e manda para a tela (sem metade feita).
+ */
+function proximoCelular(options: OptionsV2, tipo: TipoDeAssinatura): ProximoCelular {
   if (tipo !== "aceite") return null;
   const aceite = (options.tiposDeAssinatura ?? []).find((o) => o.tipo === "aceite");
+  const achados: Array<{ posicao: number; papel: string; nome: string; path: string }> = [];
   for (const s of aceite?.assinantesSemCelular ?? []) {
-    const path = caminhoDoCelular(s, options.signatarios ?? []);
-    if (path) return { ...s, path };
+    const r = resolverCelular(s, options.signatarios ?? []);
+    if (!r.ok) {
+      return {
+        tipo: "tela",
+        texto:
+          `Para o Aceite falta o celular de *${s.nome}*, mas ${POR_QUE_NAO_GRAVA[r.motivo]}, então não gravei nada. ` +
+          "Complete pela tela do sistema, ou escolha outro tipo de assinatura.",
+      };
+    }
+    achados.push({ ...s, path: r.path });
   }
-  return null;
+  const primeiro = achados[0];
+  return primeiro ? { tipo: "pergunta", s: primeiro } : null;
 }
 
 function perguntarCelular(e: E, s: { posicao: number; papel: string; nome: string; path: string }): Resposta {
@@ -490,8 +516,8 @@ async function conduzirCelular(e: E, temPendencia: boolean, conf: ReturnType<typ
   if (temPendencia || e.f.aguardaCampo) return null;
   if (conf === "nenhum" && texto.trim().split(/\s+/).length > 5) return null;
   await cancelar();
-  const s = assinanteSemCelular(e.options, "aceite");
-  return s ? perguntarCelular(e, s) : avancar(e);
+  const celular = proximoCelular(e.options, "aceite");
+  return celular?.tipo === "pergunta" ? perguntarCelular(e, celular.s) : avancar(e);
 }
 
 // Preflight e resumo ..........................................................
@@ -704,12 +730,13 @@ async function passoEnvio(e: E, as: AssinaturaEmCurso, conf: ReturnType<typeof l
   if (!mostrado || !as.tipo) return perguntarTipo({ ...e, prefixo: "Preciso refazer o resumo antes de enviar." });
   // R22: o resumo vale 15 minutos. Depois, a lista de assinantes pode ter mudado na tela sem mudar o instrumento
   // (o `instrumento_confirmado` não cobre isso): refaz o preflight, mostra o resumo e pede NOVO "sim". Nunca envia.
-  // Um "sim" que já tentou enviar e ficou sem resposta (`f.chave`) repete a MESMA chave: o servidor deduplica.
-  const reenvio = e.f.chave?.verbo === "proposal.send";
-  if (!reenvio && (mostrado.mostradoEm === undefined || e.ctx.agora - mostrado.mostradoEm > VALIDADE_DO_RESUMO_MS)) {
+  // R23: se um envio anterior ficou sem resposta (`f.chave` de `proposal.send`), a chave pendente SEGUE no estado e é a
+  // que o próximo send usa: se aquele primeiro chegou ao servidor, ele deduplica em vez de enviar duas vezes.
+  if (mostrado.mostradoEm === undefined || e.ctx.agora - mostrado.mostradoEm > VALIDADE_DO_RESUMO_MS) {
+    const pendente = e.f.chave?.verbo === "proposal.send" ? e.f.chave : undefined;
     return preflightEResumo({
       ...e,
-      f: { ...noPasso(e, { passo: "tipo", mostrado: undefined }), chave: undefined },
+      f: { ...noPasso(e, { passo: "tipo", mostrado: undefined }), chave: pendente },
       prefixo: "O resumo tem mais de 15 minutos, então conferi de novo antes de enviar e não enviei nada.",
     });
   }

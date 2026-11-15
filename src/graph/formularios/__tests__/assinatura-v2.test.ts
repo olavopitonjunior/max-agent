@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   avisoDeRegerar,
   caminhoDoCelular,
+  resolverCelular,
   comObrigatorias,
   definirTestemunhas,
   lerEscolhaDeTestemunhas,
@@ -240,61 +241,73 @@ describe("T13: testemunhas e tipo de assinatura", () => {
     // O Aceite aparece na lista (o celular se pergunta DEPOIS da escolha, antes do preflight)...
     expect(opcoesDeTipo(o).map((x) => x.tipo)).toEqual(["email", "aceite"]);
     expect(textoDeTipos(opcoesDeTipo(o))).toContain("falta o celular de Letícia Gonçalves");
-    // ...e o caminho que o condutor vai perguntar é o canônico do comprador.
+    // ...e o caminho que o condutor vai perguntar é o canônico do comprador (pelo NOME, no rascunho do papel).
     const ordem = [{ nome: "Letícia Gonçalves", papel: "proponente" }];
-    expect(caminhoDoCelular({ posicao: 1, papel: "proponente", nome: "Letícia Gonçalves" }, ordem)).toBe("compradores[0].telefone");
-    // Cônjuge e testemunha o Max não grava: o Aceite com um assim faltando não é oferecido.
-    expect(caminhoDoCelular({ posicao: 1, papel: "conjuge", nome: "Letícia Gonçalves" }, [{ nome: "Letícia Gonçalves", papel: "conjuge" }])).toBeNull();
+    expect(caminhoDoCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, ordem)).toBe("compradores[0].telefone");
+    // Cônjuge e testemunha o Max não grava, mas o Aceite NÃO some em silêncio: é oferecido, e a escolha explica.
+    expect(caminhoDoCelular({ papel: "conjuge", nome: "Letícia Gonçalves" }, [{ nome: "Letícia Gonçalves", papel: "conjuge" }])).toBeNull();
     const semComoGravar = options({
       tiposDeAssinatura: [
         { tipo: "aceite", disponivel: false, motivo: "assinante_sem_celular", assinantesSemCelular: [{ posicao: 1, papel: "testemunha", nome: "Dora" }], texto: "Aceite" },
       ],
     });
-    expect(opcoesDeTipo(semComoGravar)).toEqual([]);
+    expect(opcoesDeTipo(semComoGravar).map((x) => x.tipo)).toEqual(["aceite"]);
   });
 
-  // C1 (revisão): `posicao` do servidor é GLOBAL (i+1 sobre todos os incluídos, na ordem de assinatura),
-  // não o índice dentro do papel. O índice de `vendedores[k]` é a contagem de quem tem o MESMO papel antes.
-  describe("C1: o celular vai para a pessoa que falta, não para a posição global", () => {
-    const ordem = [
+  // C1 (R23): o índice vem do NOME no rascunho do papel (`vendedores`/`compradores`), nunca da posição
+  // do servidor (global, em outra ordem que `signatarios`). Só grava com EXATAMENTE um nome igual.
+  describe("C1: o celular vai para a pessoa que falta, achada pelo nome no rascunho do papel", () => {
+    const rascunho = [
       { nome: "Letícia Gonçalves", papel: "proponente" },
       { nome: "Valter Vendedor", papel: "vendedor" },
       { nome: "Vera Vendedora", papel: "vendedor" },
     ];
 
-    it("proponente + V1 sem celular + V2: grava em vendedores[0] e nunca em vendedores[1]", () => {
-      expect(caminhoDoCelular({ posicao: 2, papel: "vendedor", nome: "Valter Vendedor" }, ordem)).toBe("vendedores[0].telefone");
-      expect(caminhoDoCelular({ posicao: 3, papel: "vendedor", nome: "Vera Vendedora" }, ordem)).toBe("vendedores[1].telefone");
+    it("caminho feliz: V1 sem celular e V2 com celular grava em vendedores[0]", () => {
+      expect(caminhoDoCelular({ papel: "vendedor", nome: "Valter Vendedor" }, rascunho)).toBe("vendedores[0].telefone");
+      expect(caminhoDoCelular({ papel: "vendedor", nome: "Vera Vendedora" }, rascunho)).toBe("vendedores[1].telefone");
     });
 
-    it("um vendedor só: nunca aponta para um índice que não existe (sem laço de 422)", () => {
-      const um = [ordem[0]!, ordem[1]!];
-      expect(caminhoDoCelular({ posicao: 2, papel: "vendedor", nome: "Valter Vendedor" }, um)).toBe("vendedores[0].telefone");
+    it("não depende da ordem de `signatarios`: embaralhado, o índice segue o do rascunho do papel e o nome", () => {
+      // Cenário A da re-revisão: o proponente foi parar no fim da leitura. A posição global (1) não importa.
+      const embaralhado = [rascunho[1]!, rascunho[2]!, rascunho[0]!];
+      expect(caminhoDoCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, embaralhado)).toBe("compradores[0].telefone");
+      // Cenário B: V1 foi para o fim; o nome acha V1 no seu lugar de lista, e nenhuma posição global é consultada.
+      expect(caminhoDoCelular({ papel: "vendedor", nome: "Valter Vendedor" }, [rascunho[0]!, rascunho[2]!, rascunho[1]!])).toBe("vendedores[1].telefone");
     });
 
-    it("dois proponentes: o segundo é compradores[1], contando só o mesmo papel", () => {
-      const dois = [
-        { nome: "Ana", papel: "proponente" },
-        { nome: "Bia", papel: "vendedor" },
-        { nome: "Cris", papel: "proponente" },
+    it("a posição do destinatário nem entra na conta (ignorada mesmo se vier errada)", () => {
+      const comPosicaoErrada = { posicao: 99, papel: "vendedor", nome: "Valter Vendedor" };
+      expect(caminhoDoCelular(comPosicaoErrada, rascunho)).toBe("vendedores[0].telefone");
+    });
+
+    it("dois do mesmo papel com o mesmo nome: não grava (ambíguo)", () => {
+      const iguais = [
+        { nome: "Maria Silva", papel: "vendedor" },
+        { nome: "maria  silva", papel: "vendedor" },
       ];
-      expect(caminhoDoCelular({ posicao: 3, papel: "proponente", nome: "Cris" }, dois)).toBe("compradores[1].telefone");
+      expect(caminhoDoCelular({ papel: "vendedor", nome: "Maria Silva" }, iguais)).toBeNull();
+      expect(resolverCelular({ papel: "vendedor", nome: "Maria Silva" }, iguais)).toEqual({ ok: false, motivo: "nome_repetido" });
     });
 
-    it("nome que não confere na posição: não grava (a tela resolve)", () => {
-      expect(caminhoDoCelular({ posicao: 2, papel: "vendedor", nome: "Outro Nome" }, ordem)).toBeNull();
+    it("mesmo nome em lados diferentes não é ambiguidade (conta só o papel)", () => {
+      const lados = [
+        { nome: "Maria Silva", papel: "proponente" },
+        { nome: "Maria Silva", papel: "vendedor" },
+      ];
+      expect(caminhoDoCelular({ papel: "vendedor", nome: "Maria Silva" }, lados)).toBe("vendedores[0].telefone");
     });
 
-    it("papel que não confere na posição: não grava", () => {
-      expect(caminhoDoCelular({ posicao: 1, papel: "vendedor", nome: "Letícia Gonçalves" }, ordem)).toBeNull();
+    it("nome ausente do rascunho, ou rascunho vazio: não grava", () => {
+      expect(resolverCelular({ papel: "vendedor", nome: "Outro Nome" }, rascunho)).toEqual({ ok: false, motivo: "nome_ausente" });
+      expect(resolverCelular({ papel: "proponente", nome: "Letícia Gonçalves" }, [])).toEqual({ ok: false, motivo: "nome_ausente" });
     });
 
-    it("posição fora da lista, ou lista vazia: não grava", () => {
-      expect(caminhoDoCelular({ posicao: 9, papel: "vendedor", nome: "Valter Vendedor" }, ordem)).toBeNull();
-      expect(caminhoDoCelular({ posicao: 1, papel: "proponente", nome: "Letícia Gonçalves" }, [])).toBeNull();
+    it("papel que o Max não grava (cônjuge, testemunha): não grava", () => {
+      expect(resolverCelular({ papel: "testemunha", nome: "Dora" }, [{ nome: "Dora", papel: "testemunha" }])).toEqual({ ok: false, motivo: "papel_nao_gravavel" });
     });
 
-    it("sem como casar com segurança, o Aceite não é oferecido (o corretor segue pela tela)", () => {
+    it("sem como casar, o Aceite continua na lista (nada some em silêncio): a escolha é que explica", () => {
       const o = options({
         signatarios: [{ nome: "Letícia Gonçalves", papel: "proponente" }],
         tiposDeAssinatura: [
@@ -302,7 +315,7 @@ describe("T13: testemunhas e tipo de assinatura", () => {
           { tipo: "aceite", disponivel: false, motivo: "assinante_sem_celular", assinantesSemCelular: [{ posicao: 2, papel: "vendedor", nome: "Valter Vendedor" }], texto: "Aceite" },
         ],
       });
-      expect(opcoesDeTipo(o).map((x) => x.tipo)).toEqual(["email"]);
+      expect(opcoesDeTipo(o).map((x) => x.tipo)).toEqual(["email", "aceite"]);
     });
   });
 

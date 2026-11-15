@@ -20,6 +20,7 @@
 import type { DepsDoFluxo } from "../fluxos";
 import { normalizar } from "../tools";
 import type { OpcaoDeAssinatura, OptionsV2, Pendencia, RegraDeTestemunhas, TipoDeAssinatura } from "./contrato";
+import { PAPEL_COMPRADOR, PAPEL_VENDEDOR } from "./partes";
 import { ehFluxoDesligado } from "./selecao";
 
 type DepsAcao = Pick<DepsDoFluxo, "acao">;
@@ -271,38 +272,41 @@ const GRUPO_DO_PAPEL: Record<string, "compradores" | "vendedores"> = {
   contraparte: "vendedores",
 };
 
+export type MotivoSemCaminho = "papel_nao_gravavel" | "nome_repetido" | "nome_ausente";
+
 /**
- * O caminho canônico do celular de quem assina (`vendedores[0].telefone`), ou `null` se o Max não o
- * grava com segurança.
+ * O caminho canônico do celular de quem assina (`vendedores[1].telefone`), achado pelo NOME (R23).
  *
- * `posicao` do servidor é GLOBAL: `i+1` sobre TODOS os incluídos, na ordem de assinatura (proponente,
- * vendedores, cônjuges, testemunhas juntos), não o índice dentro do papel. Já o `vendedores[k]` do
- * `dataJson` conta só o mesmo papel. Por isso a pessoa é achada em `signatarios` (a mesma lista de
- * `options`) pela posição global, conferindo papel E nome; o `k` é a contagem de quem tem o MESMO papel
- * antes dela. Se o papel ou o nome não conferem (lista fora de ordem, nome repetido, posição fora),
- * não grava: o corretor resolve na tela, nunca na pessoa errada.
+ * Nunca pela `posicao` do servidor: ela é GLOBAL (proponente, vendedores, cônjuges e testemunhas juntos, ordenada por
+ * grupo de assinatura), e `signatarios` sai noutra ordem (a física do banco), então as duas listas não se cruzam. O
+ * `k` é o índice, no rascunho do papel (`compradores`/`vendedores`, a mesma lista que o condutor usa para indexar o
+ * `proposal.update`), da pessoa cujo nome normalizado bate com o do destinatário. Só grava com EXATAMENTE um nome
+ * igual naquele lado; nome repetido, nome ausente ou papel que o Max não edita = não grava (o corretor resolve na tela).
  */
-export function caminhoDoCelular(
-  s: { posicao: number; papel: string; nome: string },
+export function resolverCelular(
+  s: { papel: string; nome: string },
   signatarios: ReadonlyArray<{ nome: string; papel: string }>
-): string | null {
+): { ok: true; path: string } | { ok: false; motivo: MotivoSemCaminho } {
   const papel = normalizar(s.papel);
   const grupo = GRUPO_DO_PAPEL[papel];
-  if (!grupo || !Number.isInteger(s.posicao) || s.posicao < 1) return null;
-  const alvo = signatarios[s.posicao - 1];
-  if (!alvo || normalizar(alvo.papel) !== papel || normalizar(alvo.nome) !== normalizar(s.nome)) return null;
-  const k = signatarios.slice(0, s.posicao - 1).filter((x) => normalizar(x.papel) === papel).length;
-  return `${grupo}[${k}].telefone`;
+  if (!grupo) return { ok: false, motivo: "papel_nao_gravavel" };
+  const lado = grupo === "compradores" ? PAPEL_COMPRADOR : PAPEL_VENDEDOR;
+  const nomes = signatarios.filter((x) => lado.has(normalizar(x.papel))).map((x) => normalizar(x.nome));
+  const alvo = normalizar(s.nome);
+  const indices = nomes.flatMap((n, i) => (alvo !== "" && n === alvo ? [i] : []));
+  if (indices.length === 0) return { ok: false, motivo: "nome_ausente" };
+  if (indices.length > 1) return { ok: false, motivo: "nome_repetido" };
+  return { ok: true, path: `${grupo}[${indices[0]}].telefone` };
 }
 
-function celularSeraPerguntado(o: OpcaoDeAssinatura, signatarios: ReadonlyArray<{ nome: string; papel: string }>): boolean {
-  return (
-    o.tipo === "aceite" &&
-    !o.disponivel &&
-    o.motivo === "assinante_sem_celular" &&
-    !!o.assinantesSemCelular?.length &&
-    o.assinantesSemCelular.every((s) => caminhoDoCelular(s, signatarios) !== null)
-  );
+export function caminhoDoCelular(s: { papel: string; nome: string; posicao?: number }, signatarios: ReadonlyArray<{ nome: string; papel: string }>): string | null {
+  const r = resolverCelular(s, signatarios);
+  return r.ok ? r.path : null;
+}
+
+/** O Aceite que só espera o celular de quem assina é oferecido sempre: se não der para gravar, a ESCOLHA explica (nada some em silêncio). */
+function celularSeraPerguntado(o: OpcaoDeAssinatura): boolean {
+  return o.tipo === "aceite" && !o.disponivel && o.motivo === "assinante_sem_celular" && !!o.assinantesSemCelular?.length;
 }
 
 /**
@@ -312,7 +316,7 @@ function celularSeraPerguntado(o: OpcaoDeAssinatura, signatarios: ReadonlyArray<
  */
 export function opcoesDeTipo(options: OptionsV2): OpcaoDeAssinatura[] {
   if (options.assinaturaConfigurada === false) return [];
-  return (options.tiposDeAssinatura ?? []).filter((o) => (o.disponivel || celularSeraPerguntado(o, options.signatarios ?? [])) && o.tipo in ROTULO_DO_TIPO);
+  return (options.tiposDeAssinatura ?? []).filter((o) => (o.disponivel || celularSeraPerguntado(o)) && o.tipo in ROTULO_DO_TIPO);
 }
 
 /** `R$ 0,99` a partir de centavos inteiros. */
