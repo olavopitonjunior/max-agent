@@ -19,6 +19,7 @@
  */
 import { it, vi, expect } from "vitest";
 import { summarizeQuality, responseSignals, checkSingleAction, type QualityRow } from "./eval-quality";
+import { S, reiniciar, lista, imobpro, type EnvioSim } from "./eval-simulador";
 import type { LlmUsage } from "../src/lib/llm";
 import { writeFileSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -56,113 +57,7 @@ const { executarAcao } = await import("../src/lib/acao");
 const { consultarEscopo } = await import("../src/lib/scope");
 const { MemorySaver } = await import("@langchain/langgraph");
 
-// ─── O ImobPro simulado ─────────────────────────────────────────────────────
-
-type Prop = { id: string; codigo: string; titulo: string; status: string; estado: string; signatarios: { nome: string; status: string }[] };
-const BASE: Prop[] = [
-  { id: "p1", codigo: "PROP-2026-0011", titulo: "Apto 302 Rua das Flores", status: "assinada_proponente", estado: "Assinada pelo proponente", signatarios: [{ nome: "Letícia Moraes", status: "assinou" }] },
-  { id: "p2", codigo: "PROP-2026-0012", titulo: "Casa Jardim Europa", status: "rascunho", estado: "Rascunho", signatarios: [{ nome: "Letícia Andrade", status: "pendente" }] },
-  { id: "p3", codigo: "PROP-2026-0013", titulo: "Sala comercial Centro", status: "enviada", estado: "Enviada", signatarios: [{ nome: "Carlos Pereira", status: "pendente" }] },
-  { id: "p4", codigo: "PROP-2026-0014", titulo: "Cobertura Av. Atlântica 1500", status: "rascunho", estado: "Rascunho", signatarios: [{ nome: "Renato Lima", status: "pendente" }] },
-];
-const EDITAVEIS = new Set(["rascunho", "aguardando_aprovacao", "falha_envio"]);
-let props: Prop[] = [];
-let seq = 0;
-const norm = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
-const palavras = (p: Prop) => norm(`${p.codigo} ${p.titulo} ${p.signatarios.map((s) => s.nome).join(" ")}`).split(/[^a-z0-9]+/).filter(Boolean);
-const semZeros = (x: string) => x.replace(/^0+(?=\d)/, "");
-const casa = (p: Prop, busca: string) => norm(busca).split(/[^a-z0-9]+/).filter(Boolean).every((w) =>
-  palavras(p).some((q) => (/^\d+$/.test(w) ? /^\d+$/.test(q) && semZeros(q) === semZeros(w) : q === w || (w.length >= 4 && q.startsWith(w)))));
-const achar = (a: Record<string, unknown>) => props.find((p) => p.id === a.proposta_id || p.id === a.id || p.codigo === String(a.codigo ?? "").toUpperCase());
-const pdf = { link: "https://app.imobpro.test/p/rascunho.pdf", expiraEm: new Date(Date.now() + 2 * 3600e3).toISOString() };
-const lista = (a: Record<string, unknown>) => {
-  const b = typeof a.busca === "string" ? a.busca : null;
-  const items = b ? props.filter((p) => casa(p, b)) : props;
-  return { items: items.slice(0, 10), total: items.length, ...(b ? { busca: norm(b) } : {}) };
-};
-
-// Crédito (M2): leads da ficha, simulados como o C5 responde.
-type LeadSim = { id: string; nome: string; cpf: string; credito: Record<string, Record<string, unknown>> };
-let leadsCredito: LeadSim[] = [];
-let envioSim: Conversa["envio"] | null = null;
-const ORDEM_FICHA: [string, string, string][] = [
-  ["pretendente", "documento", "CPF do pretendente"], ["pretendente", "nomeCompleto", "Nome completo do pretendente"],
-  ["pretendente", "vinculoEmpregaticio", "Vínculo empregatício do pretendente"], ["pretendente", "profissao", "Profissão do pretendente"],
-  ["pretendente", "rendaMensal", "Renda mensal do pretendente"], ["locacao", "valorAluguel", "Valor do aluguel"],
-  ["locacao", "valorCondominio", "Valor do condomínio"], ["locacao", "valorIptu", "Valor do IPTU"],
-  ["locacao", "vaiMorar", "Se o pretendente vai morar no imóvel"],
-];
-const faltantesSim = (c: LeadSim["credito"]) => ORDEM_FICHA.filter(([g, k]) => c[g]?.[k] === undefined).map(([, , r]) => r);
-function creditoSim(verb: string, a: Record<string, unknown>): { status: number; body: Record<string, unknown> } | null {
-  if (verb === "credit.preflight") {
-    const l = leadsCredito.find((x) => x.id === a.leaseClientId);
-    return { status: 200, body: { configurado: true, orgLigada: true, custoCents: 1500, consentimento: !!l, faltantes: l ? faltantesSim(l.credito) : faltantesSim({}), avisos: [], lead: l ? { id: l.id, nome: l.nome, status: "novo" } : null } };
-  }
-  if (verb === "lead.upsert") {
-    const cpf = String(a.cpf ?? "").replace(/\D/g, "");
-    if (cpf.length !== 11) return { status: 422, body: { error: "documento_invalido" } };
-    let l = leadsCredito.find((x) => x.cpf === cpf);
-    if (!l) {
-      if (typeof a.nome !== "string") return { status: 422, body: { error: "nome_obrigatorio" } };
-      l = { id: `lc${leadsCredito.length + 1}`, nome: a.nome, cpf, credito: {} };
-      leadsCredito.push(l);
-    }
-    for (const [g, v] of Object.entries((a.campos ?? {}) as Record<string, unknown>)) {
-      if (v && typeof v === "object" && !Array.isArray(v)) l.credito[g] = { ...(l.credito[g] ?? {}), ...(v as Record<string, unknown>) };
-    }
-    return { status: 200, body: { id: l.id, status: "novo", faltantes: faltantesSim(l.credito) } };
-  }
-  if (verb === "credit.request") {
-    // Simulado (M3): nada sai daqui; a decisão é fixa.
-    return { status: 200, body: { requestId: "r1", decision: "aprovado", rotulo: "Aprovado", justificativa: "Bom histórico de pagamentos",
-      podePedirHumanizada: false, leadLink: `/locacao/pessoas/clientes/${String(a.leaseClientId ?? "lc1")}` } };
-  }
-  if (verb === "credit.status") {
-    const nome = String(a.nome ?? "").toLowerCase();
-    if (!nome.startsWith("let")) return { status: 404, body: { error: "nao_encontrada" } };
-    return { status: 200, body: { lead: { id: "lc9", nome: "Letícia Andrade", status: "em_analise" },
-      ultima: { rotulo: "Em análise", createdAt: "2026-10-10T15:00:00.000Z", completedAt: null }, link: "/locacao/pessoas/clientes/lc9" } };
-  }
-  return null;
-}
-
-async function imobpro({ verb, args = {} }: { verb: string; args?: Record<string, unknown> }): Promise<{ status: number; body: Record<string, unknown> }> {
-  const credito = creditoSim(verb, args);
-  if (credito) return credito;
-  const p = achar(args);
-  switch (verb) {
-    case "proposal.list": return { status: 200, body: lista(args) };
-    case "proposal.status": return p ? { status: 200, body: { proposta: p } } : { status: 404, body: { error: "nao_encontrada" } };
-    case "proposal.complete": return { status: 200, body: { status: "completa" } };
-    case "proposal.convert": return { status: 201, body: { negocio: { id: "d1", link: "https://app.imobpro.test/deals/d1" }, formulario: { id: "f1", link: "https://app.imobpro.test/f/abc" } } };
-    case "proposal.delete":
-      if (!p) return { status: 404, body: { error: "nao_encontrada" } };
-      if (p.status === "enviada") return { status: 409, body: { error: "ja_enviada" } };
-      props = props.filter((x) => x !== p);
-      return { status: 200, body: { ok: true, proposta: { codigo: p.codigo } } };
-    case "proposal.duplicate": {
-      if (!p) return { status: 404, body: { error: "nao_encontrada" } };
-      const novo = { ...p, id: `n${++seq}`, codigo: `PROP-2026-00${20 + seq}`, status: "rascunho", estado: "Rascunho" };
-      props.push(novo);
-      return { status: 201, body: { proposta: { id: novo.id, codigo: novo.codigo, status: "rascunho" }, origem: { codigo: p.codigo } } };
-    }
-    case "proposal.update":
-      if (!p) return { status: 404, body: { error: "nao_encontrada" } };
-      if (!EDITAVEIS.has(p.status)) return { status: 409, body: { error: "nao_editavel", estado: p.estado } };
-      return { status: 200, body: { proposta: { id: p.id, codigo: p.codigo }, pdf } };
-    case "proposal.create": {
-      const novo: Prop = { id: `c${++seq}`, codigo: `PROP-2026-00${40 + seq}`, titulo: "Nova", status: "rascunho", estado: "Rascunho", signatarios: [] };
-      props.push(novo);
-      return { status: 201, body: { proposal: { id: novo.id, code: novo.codigo }, proposta: { id: novo.id, codigo: novo.codigo }, pdf } };
-    }
-    case "proposal.options":
-      return { status: 200, body: { assinaturaConfigurada: true, metodos: [{ valor: "whatsapp", rotulo: "WhatsApp" }, { valor: "email", rotulo: "E-mail" }], signatarios: p?.signatarios.map((s) => ({ nome: s.nome, papel: "proponente" })) ?? [] } };
-    case "proposal.preflight": return { status: 200, body: { ok: true, modelo: true, assinaturaConfigurada: true } };
-    case "form.options": return { status: 200, body: { campos: [], gerente:{obrigatorio:false}, titulo:{padrao:false} } };
-    case "form.create": return { status:201,body:{formulario:{id:"f-eval",link:"https://app.imobpro.test/f/eval"},negocio:{id:"d-eval",link:"https://app.imobpro.test/deals/d-eval"}} };
-    default: return { status: 501, body: { error: `nao_simulado:${verb}` } };
-  }
-}
+// O ImobPro simulado mora em `./eval-simulador` (compartilhado com o golden).
 
 // ─── Cenários ───────────────────────────────────────────────────────────────
 
@@ -181,7 +76,7 @@ type Espera = {
 };
 type Turno = { fala: string } & Espera;
 /** `envio`: liga `MAX_CREDITO_ENVIO` e simula o `credit.request` (M3) — "sem_resposta" = timeout/5xx. */
-type Conversa = { nome: string; categoria: string; turnos: Turno[]; envio?: "aprovado" | "sem_resposta" };
+type Conversa = { nome: string; categoria: string; turnos: Turno[]; envio?: EnvioSim };
 
 const ESCRITAS = ["proposal.delete", "proposal.update", "proposal.duplicate", "proposal.convert", "proposal.send", "proposal.create", "form.create", "lead.upsert", "credit.request"];
 const CREDITO = ["credit.preflight", "credit.status", "lead.upsert", "credit.request"];
@@ -533,7 +428,7 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
   const verbos: { verbo: string; args: Record<string, unknown> }[] = [];
   vi.mocked(executarAcao).mockImplementation((async (p: { verb: string; args?: Record<string, unknown> }) => {
     verbos.push({ verbo: p.verb, args: p.args ?? {} });
-    if (p.verb === "credit.request" && envioSim === "sem_resposta") return null;
+    if (p.verb === "credit.request" && S.envio === "sem_resposta") return null;
     return imobpro(p);
   }) as never);
   vi.mocked(consultarEscopo).mockImplementation((async (p: { verb: string; args?: Record<string, unknown> }) => {
@@ -553,15 +448,12 @@ it("bateria de respostas", { timeout: 30 * 60_000 }, async () => {
   for (let rodada = 1; rodada <= n; rodada++) {
     for (const c of CONVERSAS) {
       if (filtro && !filtro.test(c.nome) && !filtro.test(c.categoria)) continue;
-      props = BASE.map((p) => ({ ...p, signatarios: p.signatarios.map((s) => ({ ...s })) }));
-      leadsCredito = [];
-      envioSim = c.envio ?? null;
+      reiniciar({ envio: c.envio ?? null });
       if (c.envio) process.env.MAX_CREDITO_ENVIO = "true";
       else delete process.env.MAX_CREDITO_ENVIO;
       // A flag de crédito só neste grupo: nos outros, o Max segue como em produção.
       if (c.categoria === "credito") process.env.MAX_CREDITO = "true";
       else delete process.env.MAX_CREDITO;
-      seq = 0;
       const app = buildGraph().compile({ checkpointer: new MemorySaver() });
       const thread = `eval-${rodada}-${c.nome}`;
       let historico = "";
