@@ -23,7 +23,7 @@ import { iniciarGestao, pedeGestao } from "./gestao";
 import { iniciarAssinatura, pedeAssinatura } from "./assinatura";
 import {
   negaAcao, pedeAcaoForaDoMax, pedeCapacidades, pedeLeituraNaoLiberada, TEXTO_LEITURA_NAO_LIBERADA, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
-  textoDoAndamentoDoContrato, textoForaDoMax,
+  textoDoAndamentoDoContrato, textoForaDoMax, pedeProcessoDeAssinatura, textoDoProcesso, TEXTO_TIPOS_DE_ASSINATURA,
 } from "./capacidades";
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import {
@@ -1191,6 +1191,13 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     return { reply: TEXTO_LEITURA_NAO_LIBERADA, pendingAction: null,
       messages: [{ role: "user", content: userText }, { role: "assistant", content: TEXTO_LEITURA_NAO_LIBERADA }],
       toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: `leitura_nao_liberada_${leituraNegada}` }] };
+  }
+  // Processo e assinatura são escopo de qualquer perfil (Newton recusava como "foge do que eu faço"): template, sem modelo.
+  const processo = !coletando && !gestao && !assinatura && !continuidade && !foraDoMax && !contratoPergunta && !negada ? pedeProcessoDeAssinatura(userText) : null;
+  if (processo) {
+    const reply = processo === "tipos" ? TEXTO_TIPOS_DE_ASSINATURA : textoDoProcesso();
+    return { reply, pendingAction: null, messages: [{ role: "user", content: userText }, { role: "assistant", content: reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: `processo_${processo}` }] };
   }
   if (!coletando && !gestao && !assinatura && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
     const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;

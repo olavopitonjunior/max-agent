@@ -261,7 +261,8 @@ describe("propor", () => {
   });
 
   it("pergunta sobre processo não expõe a ferramenta", async () => {
-    await run("como funciona a assinatura do contrato?");
+    // "como funciona a assinatura do contrato?" agora é template (processo-assinatura.test.ts) e nem chega ao modelo.
+    await run("como funciona o prazo para o cliente assinar o contrato?");
 
     expect(llm).toHaveBeenCalledWith(
       expect.objectContaining({ tools: undefined })
