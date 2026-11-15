@@ -457,12 +457,12 @@ type ProximoCelular =
 
 const POR_QUE_NAO_GRAVA: Record<MotivoSemCaminho, string> = {
   papel_nao_gravavel: "esse é um papel (cônjuge ou testemunha) que eu não edito por aqui",
-  nome_repetido: "há mais de uma pessoa com esse nome nessa parte da proposta, e não consigo saber qual é",
-  nome_ausente: "não achei essa pessoa no rascunho para gravar no lugar certo",
+  varias_pessoas: "com mais de um vendedor ou comprador o celular é preenchido na tela",
+  nome_divergente: "o nome não bate com o que está no rascunho, então não sei com segurança de quem é",
 };
 
 /**
- * O que fazer com o celular do Aceite (R23). Cada assinante sem celular é achado pelo NOME no rascunho do papel;
+ * O que fazer com o celular do Aceite (R24). Só se grava com UMA pessoa no papel e o nome batendo (`resolverCelular`);
  * se QUALQUER um não dá para gravar com segurança, nada é perguntado: explica e manda para a tela (sem metade feita).
  */
 function proximoCelular(options: OptionsV2, tipo: TipoDeAssinatura): ProximoCelular {

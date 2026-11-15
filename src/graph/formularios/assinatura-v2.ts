@@ -272,31 +272,29 @@ const GRUPO_DO_PAPEL: Record<string, "compradores" | "vendedores"> = {
   contraparte: "vendedores",
 };
 
-export type MotivoSemCaminho = "papel_nao_gravavel" | "nome_repetido" | "nome_ausente";
+export type MotivoSemCaminho = "papel_nao_gravavel" | "varias_pessoas" | "nome_divergente";
 
 /**
- * O caminho canônico do celular de quem assina (`vendedores[1].telefone`), achado pelo NOME (R23).
+ * O caminho canônico do celular de quem assina (`vendedores[0].telefone`) (R24). Lado seguro:
  *
- * Nunca pela `posicao` do servidor: ela é GLOBAL (proponente, vendedores, cônjuges e testemunhas juntos, ordenada por
- * grupo de assinatura), e `signatarios` sai noutra ordem (a física do banco), então as duas listas não se cruzam. O
- * `k` é o índice, no rascunho do papel (`compradores`/`vendedores`, a mesma lista que o condutor usa para indexar o
- * `proposal.update`), da pessoa cujo nome normalizado bate com o do destinatário. Só grava com EXATAMENTE um nome
- * igual naquele lado; nome repetido, nome ausente ou papel que o Max não edita = não grava (o corretor resolve na tela).
+ * Só grava quando o papel tem EXATAMENTE uma pessoa no rascunho (`k` = 0, sem depender de ordem alguma) e o nome dela
+ * bate com o do destinatário. Com duas ou mais no mesmo lado (`compradores`/`vendedores`) NUNCA grava: `signatarios`
+ * sai na ordem física do banco e `dataJson.vendedores[k]` na de criação, então o índice não é confiável; o celular
+ * é preenchido na tela. A `posicao` do servidor (global, outra ordenação) nem entra na conta.
+ * PENDÊNCIA: o CM expor posição estável (orderBy createdAt,id) -> PR em par; só então dá para gravar por índice.
  */
 export function resolverCelular(
   s: { papel: string; nome: string },
   signatarios: ReadonlyArray<{ nome: string; papel: string }>
 ): { ok: true; path: string } | { ok: false; motivo: MotivoSemCaminho } {
-  const papel = normalizar(s.papel);
-  const grupo = GRUPO_DO_PAPEL[papel];
+  const grupo = GRUPO_DO_PAPEL[normalizar(s.papel)];
   if (!grupo) return { ok: false, motivo: "papel_nao_gravavel" };
   const lado = grupo === "compradores" ? PAPEL_COMPRADOR : PAPEL_VENDEDOR;
-  const nomes = signatarios.filter((x) => lado.has(normalizar(x.papel))).map((x) => normalizar(x.nome));
+  const doLado = signatarios.filter((x) => lado.has(normalizar(x.papel)));
+  if (doLado.length > 1) return { ok: false, motivo: "varias_pessoas" };
   const alvo = normalizar(s.nome);
-  const indices = nomes.flatMap((n, i) => (alvo !== "" && n === alvo ? [i] : []));
-  if (indices.length === 0) return { ok: false, motivo: "nome_ausente" };
-  if (indices.length > 1) return { ok: false, motivo: "nome_repetido" };
-  return { ok: true, path: `${grupo}[${indices[0]}].telefone` };
+  if (doLado.length !== 1 || alvo === "" || normalizar(doLado[0]!.nome) !== alvo) return { ok: false, motivo: "nome_divergente" };
+  return { ok: true, path: `${grupo}[0].telefone` };
 }
 
 export function caminhoDoCelular(s: { papel: string; nome: string; posicao?: number }, signatarios: ReadonlyArray<{ nome: string; papel: string }>): string | null {

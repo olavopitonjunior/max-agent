@@ -889,12 +889,10 @@ describe("T13 ligado ao condutor", () => {
   });
 });
 
-describe("C1 (R23): o celular perguntado é gravado na pessoa certa, achada pelo nome no rascunho do papel", () => {
-  const tresAssinantes = [
-    { nome: "Letícia Gonçalves", papel: "proponente" },
-    { nome: "Valter Vendedor", papel: "vendedor" },
-    { nome: "Vera Vendedora", papel: "vendedor" },
-  ];
+describe("C1 (R24): o celular do Aceite só é gravado quando o papel tem UMA pessoa no rascunho", () => {
+  const proponente = { nome: "Letícia Gonçalves", papel: "proponente" };
+  const valter = { nome: "Valter Vendedor", papel: "vendedor" };
+  const vera = { nome: "Vera Vendedora", papel: "vendedor" };
   const aceiteSemCelular = (assinantesSemCelular: Array<{ posicao: number; papel: string; nome: string }>) => [
     { tipo: "email", disponivel: true, texto: "E-mail" },
     { tipo: "aceite", disponivel: true, custoCentavos: 99, texto: "Aceite", assinantesSemCelular },
@@ -902,66 +900,68 @@ describe("C1 (R23): o celular perguntado é gravado na pessoa certa, achada pelo
   const aceiteGravado = (signatarios: Array<{ nome: string; papel: string }>) =>
     optionsBody({ signatarios, tiposDeAssinatura: [{ tipo: "aceite", disponivel: true, custoCentavos: 99, texto: "Aceite" }] });
 
-  it("proponente + V1 sem celular + V2 com celular: pergunta o do V1 e grava em vendedores[0], nunca em vendedores[1]", async () => {
+  // Negado primeiro.
+  for (const [rotulo, signatarios] of [
+    ["proponente, V1, V2", [proponente, valter, vera]],
+    ["proponente, V2, V1 (embaralhado)", [proponente, vera, valter]],
+    ["V2, proponente, V1 (embaralhado)", [vera, proponente, valter]],
+  ] as const) {
+    for (const falta of [valter, vera]) {
+      it(`dois vendedores, ${falta.nome} sem celular, signatarios ${rotulo}: não grava, explica e manda para a tela`, async () => {
+        const t = montar({
+          options: optionsBody({ signatarios: [...signatarios], tiposDeAssinatura: aceiteSemCelular([{ posicao: 2, papel: "vendedor", nome: falta.nome }]) }),
+        });
+        await ateCartaoDeTestemunhas(t);
+        const lista = await t.fala("sim", "wamid.sim-testemunhas");
+        expect(lista.reply).toMatch(/aceite/i);
+        const p = await t.fala("aceite");
+        expect(p.reply).toContain(falta.nome);
+        expect(p.reply).toMatch(/mais de um vendedor ou comprador/);
+        expect(p.reply).toMatch(/pela tela/);
+        expect(t.de("proposal.update")).toHaveLength(0);
+        expect(t.de("proposal.preflight")).toHaveLength(0);
+        expect(t.de("proposal.send")).toHaveLength(0);
+      });
+    }
+  }
+
+  it("vendedor único sem celular: pergunta e grava em vendedores[0]", async () => {
+    const um = [proponente, valter];
     const t = montar({
-      options: optionsBody({ signatarios: tresAssinantes, tiposDeAssinatura: aceiteSemCelular([{ posicao: 2, papel: "vendedor", nome: "Valter Vendedor" }]) }),
-      optionsDepoisDeGravar: aceiteGravado(tresAssinantes),
+      options: optionsBody({ signatarios: um, tiposDeAssinatura: aceiteSemCelular([{ posicao: 2, papel: "vendedor", nome: "Valter Vendedor" }]) }),
+      optionsDepoisDeGravar: aceiteGravado(um),
       fila: { "proposal.preflight": [{ status: 200, body: PRONTO_ACEITE }] },
     });
     await ateCartaoDeTestemunhas(t);
     await t.fala("sim", "wamid.sim-testemunhas");
     const p = await t.fala("aceite");
     expect(p.reply).toContain("Valter Vendedor");
-    expect(p.reply).not.toContain("Vera Vendedora");
     await t.fala("11 98765-4321");
     await t.fala("sim", "wamid.sim-celular");
     const updates = t.de("proposal.update");
     expect(updates).toHaveLength(1);
-    // O update casa por posição: um único item no índice 0 (o V1); o V2 (índice 1) não é tocado.
     expect(updates[0]!.args).toEqual({ proposta_id: "prop-1", vendedores: [{ telefone: "11987654321" }] });
   });
 
-  it("signatarios embaralhado em relação a destinatarios (o proponente no fim): a posição global nem entra, grava em compradores[0]", async () => {
-    // `posicao: 1` (proponente) olharia signatarios[0], que aqui é o vendedor. Pelo nome, é a Letícia.
-    const embaralhado = [tresAssinantes[1]!, tresAssinantes[2]!, tresAssinantes[0]!];
+  it("proponente único com `signatarios` embaralhado: grava em compradores[0]", async () => {
+    const um = [valter, proponente];
     const t = montar({
-      options: optionsBody({ signatarios: embaralhado, tiposDeAssinatura: aceiteSemCelular([{ posicao: 1, papel: "proponente", nome: "Letícia Gonçalves" }]) }),
-      optionsDepoisDeGravar: aceiteGravado(embaralhado),
+      options: optionsBody({ signatarios: um, tiposDeAssinatura: aceiteSemCelular([{ posicao: 1, papel: "proponente", nome: "Letícia Gonçalves" }]) }),
+      optionsDepoisDeGravar: aceiteGravado(um),
       fila: { "proposal.preflight": [{ status: 200, body: PRONTO_ACEITE }] },
     });
     await ateCartaoDeTestemunhas(t);
     await t.fala("sim", "wamid.sim-testemunhas");
-    const p = await t.fala("aceite");
-    expect(p.reply).toContain("Letícia Gonçalves");
+    await t.fala("aceite");
     await t.fala("11 98765-4321");
     await t.fala("sim", "wamid.sim-celular");
     expect(t.de("proposal.update")[0]!.args).toEqual({ proposta_id: "prop-1", compradores: [{ telefone: "11987654321" }] });
   });
 
-  it("dois vendedores com o mesmo nome: não grava, explica e manda para a tela (nada de update)", async () => {
-    const iguais = [
-      { nome: "Letícia Gonçalves", papel: "proponente" },
-      { nome: "Maria Silva", papel: "vendedor" },
-      { nome: "Maria Silva", papel: "vendedor" },
-    ];
-    const t = montar({
-      options: optionsBody({ signatarios: iguais, tiposDeAssinatura: aceiteSemCelular([{ posicao: 2, papel: "vendedor", nome: "Maria Silva" }]) }),
-    });
-    await ateCartaoDeTestemunhas(t);
-    await t.fala("sim", "wamid.sim-testemunhas");
-    const p = await t.fala("aceite");
-    expect(p.reply).toMatch(/Maria Silva/);
-    expect(p.reply).toMatch(/mais de uma pessoa com esse nome/);
-    expect(p.reply).toMatch(/pela tela/);
-    expect(t.de("proposal.update")).toHaveLength(0);
-    expect(t.de("proposal.preflight")).toHaveLength(0);
-    expect(t.de("proposal.send")).toHaveLength(0);
-  });
-
-  it("nome que não está no rascunho: o Aceite continua na lista, a escolha explica e nada é gravado", async () => {
+  it("vendedor único com nome divergente: o Aceite continua na lista, a escolha explica e nada é gravado", async () => {
     const t = montar({
       options: optionsBody({
-        signatarios: tresAssinantes,
+        signatarios: [proponente, valter],
         tiposDeAssinatura: [
           { tipo: "email", disponivel: true, texto: "E-mail" },
           { tipo: "aceite", disponivel: false, motivo: "assinante_sem_celular", assinantesSemCelular: [{ posicao: 2, papel: "vendedor", nome: "Fulano Que Não Está" }], texto: "Aceite" },
@@ -978,10 +978,10 @@ describe("C1 (R23): o celular perguntado é gravado na pessoa certa, achada pelo
     expect(t.de("proposal.preflight")).toHaveLength(0);
   });
 
-  it("uma pessoa gravável e outra não: nada é perguntado antes de explicar (não deixa metade feita)", async () => {
+  it("uma pessoa gravável e outra não (testemunha): nada é perguntado antes de explicar", async () => {
     const t = montar({
       options: optionsBody({
-        signatarios: tresAssinantes,
+        signatarios: [proponente, valter],
         tiposDeAssinatura: aceiteSemCelular([
           { posicao: 2, papel: "vendedor", nome: "Valter Vendedor" },
           { posicao: 4, papel: "testemunha", nome: "Dora Testemunha" },
