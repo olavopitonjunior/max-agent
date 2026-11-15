@@ -3009,12 +3009,12 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
             // mapa nenhum; `limpar` (memory.ts) descarta por garantia qualquer
             // fato que ainda carregue `⟨`.
             const textoRed = redigir(turnText);
-            const replyRed = redigir(reply);
+            // Só a fala da pessoa vai ao extrator: a resposta do bot não é fato
+            // sobre ela (a pergunta "celular ou link?" virou "preferência").
             const novos = await extractFacts({
               orgId,
               phone,
               userText: textoRed,
-              replyText: replyRed,
               known: facts,
             });
             const gravados = await saveFacts(orgId, phone, novos);
