@@ -311,6 +311,44 @@ describe("campos lidos entram em lidosPendentes, não no rascunho", () => {
     expect(log).not.toContain(NOME);
   });
 
+  // Rodada 1, I1: a ficha "Documento lido - confira" mostra valor de documento. Quem grava fora do
+  // grafo (`inbound_queue.reply_text`) precisa tratar o turno como sensivel e receber um texto SEM valor.
+  it("a ficha e sensivel e traz um texto gravavel sem nenhum valor lido (I1)", async () => {
+    politica(true);
+    const CPF_MAL_LIDO = "123.456.789-00";
+    const ENDERECO = "Rua das Palmeiras, 1234";
+    const FONE = "(11) 91234-5678";
+    const NASC = "07/03/1985";
+    acao.mockResolvedValue({
+      status: 200,
+      body: {
+        documentType: "rg",
+        confianca: 0.9,
+        campos: [
+          { path: "compradores[0].nome", chave: "proponente.nome", valor: NOME, confianca: 0.9 },
+          { path: "compradores[0].cpf", chave: "proponente.documento", valor: CPF_MAL_LIDO, confianca: 0.4 },
+          { path: "compradores[0].endereco", chave: "proponente.endereco", valor: ENDERECO, confianca: 0.9 },
+          { path: "compradores[0].telefone", chave: "proponente.telefone", valor: FONE, confianca: 0.9 },
+          { path: "compradores[0].data_nascimento", chave: "proponente.nascimento", valor: NASC, confianca: 0.9 },
+        ],
+        ignorados: 0,
+      },
+    });
+
+    const result = await turno(foto());
+
+    // O texto real vai a pessoa e mostra o que foi lido...
+    expect(result.reply).toContain(NOME);
+    expect(result.sensivel).toBe(true);
+    // ...mas a copia gravavel nao traz valor nenhum (ausencia, nao presenca).
+    const gravado = result.replyGravado ?? "";
+    expect(gravado).not.toBe("");
+    for (const valor of [NOME, "Maria", CPF_MAL_LIDO, "123.456", ENDERECO, "Palmeiras", FONE, "91234", NASC, "1985"]) {
+      expect(gravado).not.toContain(valor);
+    }
+    expect(JSON.stringify(turnLog.mock.calls)).not.toContain(NOME);
+  });
+
   it("documento ilegivel: frase honesta e nada fica pendente", async () => {
     politica(true);
     acao.mockResolvedValue({ status: 422, body: { error: "documento_ilegivel" } });

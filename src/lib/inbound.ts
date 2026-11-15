@@ -393,7 +393,7 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
       // Turno da ficha de crédito: a fala (CPF, renda) sai da fila — o texto
       // foi gravado no INSERT, antes de se saber — e a resposta vai sem valores.
       await withDeliveryFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},async(client)=>{
-        await client.query(`UPDATE inbound_queue SET text=CASE WHEN $3 THEN NULL ELSE text END,sensivel=$3,reply_text=$2,dispatch_fence=$4,control_org_id=$5,control_version=$6 WHERE id=$1`,[row.id,reply?(turn.sensivel?redigirCredito(reply):redigir(reply,CAMPOS_DA_AUDITORIA)):reply,!!turn.sensivel,JSON.stringify(dispatchFence),control?.orgId??null,control?.controlVersion??null]);
+        await client.query(`UPDATE inbound_queue SET text=CASE WHEN $3 THEN NULL ELSE text END,sensivel=$3,reply_text=$2,dispatch_fence=$4,control_org_id=$5,control_version=$6 WHERE id=$1`,[row.id,reply?(turn.replyGravado??(turn.sensivel?redigirCredito(reply):redigir(reply,CAMPOS_DA_AUDITORIA))):reply,!!turn.sensivel,JSON.stringify(dispatchFence),control?.orgId??null,control?.controlVersion??null]);
       });
     } else if (row.last_send_started_at != null) {
       /**

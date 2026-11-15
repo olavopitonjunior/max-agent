@@ -221,6 +221,28 @@ d("inbound_queue (Postgres real)", () => {
     expect(rb!.reply_text).toContain("8.000,00");
   });
 
+  /**
+   * Rodada 1, I1: a ficha "Documento lido - confira" (PR-B) mostra nome, CPF e endereco lidos de
+   * um documento. `redigirCredito` nao mascara nome nem endereco, entao o turno entrega a copia
+   * gravavel pronta (`replyGravado`); a fila grava ESSA, e a pessoa recebe a ficha real.
+   */
+  it("ficha de documento lido: reply_text nao traz nome nem CPF nem endereco; a pessoa recebe o texto real (I1)", async () => {
+    const ficha = "Documento lido - confira:\nNome: Maria Teste da Silva\nCPF: 123.456.789-00\nEndereco: Rua das Palmeiras, 1234";
+    turn.mockResolvedValue({
+      reply: ficha,
+      sensivel: true,
+      replyGravado: "[documento lido: valores omitidos do log]",
+      afterReply: async () => undefined,
+    });
+    const a = await enqueueInbound(msg({ kind: "image", text: null, mediaUrl: "meta:MEDIA1", mimeType: "image/jpeg" }));
+    if (a.status !== "queued") throw new Error("esperava queued");
+    await processInboundNow(a.id);
+    const [r] = await query<{ reply_text: string | null; sensivel: boolean }>(`SELECT reply_text, sensivel FROM inbound_queue WHERE id = $1`, [a.id]);
+    expect(r!.sensivel).toBe(true);
+    for (const valor of ["Maria", "Silva", "123.456", "Palmeiras"]) expect(r!.reply_text).not.toContain(valor);
+    expect(JSON.stringify(sent.mock.calls[0])).toContain("Maria Teste da Silva");
+  });
+
   it("reenvio: linha sensível manda a frase fixa; linha comum, o reply_text original", async () => {
     turn.mockResolvedValue({ reply: "Anotei: renda R$ 8.000,00.", sensivel: true, afterReply: async () => undefined });
     const a = await enqueueInbound(msg({ text: "8 mil" }));

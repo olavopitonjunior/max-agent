@@ -2668,7 +2668,16 @@ export interface TurnResult {
    * (`inbound_queue`) apaga o texto e redige a resposta. Ausente = não.
    */
   sensivel?: boolean;
+  /**
+   * Cópia da resposta que pode ser GRAVADA (`inbound_queue.reply_text`) quando a resposta
+   * real traz valor lido de documento. Ausente = grava a resposta, redigida como sempre.
+   * A resposta real continua indo à pessoa; só esta cópia vai ao banco.
+   */
+  replyGravado?: string;
 }
+
+/** Marcador do que se grava/loga no lugar da ficha com valores lidos de documento. */
+const MARCADOR_DOCUMENTO_LIDO = "[documento lido: valores omitidos do log]";
 
 /**
  * O que é zerado a CADA turn — o contrato que o checkpointer obriga a manter.
@@ -2744,9 +2753,12 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
     reply: string | null,
     // `replyLog`: o que vai ao log no lugar da resposta, quando a resposta traz valor lido
     // de documento (nunca em log). Ausente = a resposta, como sempre foi.
-    extra: { orgId?: string; error?: string; replyLog?: string } = {}
+    // `sensivel`: a resposta traz valor lido; quem grava fora do grafo trata o turno como sensível
+    // e grava `replyGravado` (= `replyLog`) em vez da resposta.
+    extra: { orgId?: string; error?: string; replyLog?: string; sensivel?: boolean } = {}
   ): TurnResult => ({
     reply,
+    ...(extra.sensivel ? { sensivel: true, replyGravado: extra.replyLog ?? MARCADOR_DOCUMENTO_LIDO } : {}),
     afterReply: async () => {
       await registrarTurn({
         orgId: extra.orgId ?? SEM_ORG,
@@ -2959,7 +2971,8 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
       return sair(textoDeConferencia(daMidia), {
         orgId: identity.candidate.orgId,
         error: `leitura_${inbound.kind}_para_conferir`,
-        replyLog: "[documento lido: valores omitidos do log]",
+        replyLog: MARCADOR_DOCUMENTO_LIDO,
+        sensivel: true,
       });
     }
   }
