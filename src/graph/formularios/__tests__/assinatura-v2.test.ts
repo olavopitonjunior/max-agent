@@ -158,6 +158,7 @@ describe("T13: testemunhas e tipo de assinatura", () => {
 
   it("tipo Aceite sem celular do signatário pede o celular antes do preflight", () => {
     const o = options({
+      signatarios: [{ nome: "Letícia Gonçalves", papel: "proponente" }],
       tiposDeAssinatura: [
         { tipo: "email", disponivel: true, texto: "E-mail" },
         {
@@ -173,16 +174,69 @@ describe("T13: testemunhas e tipo de assinatura", () => {
     expect(opcoesDeTipo(o).map((x) => x.tipo)).toEqual(["email", "aceite"]);
     expect(textoDeTipos(opcoesDeTipo(o))).toContain("falta o celular de Letícia Gonçalves");
     // ...e o caminho que o condutor vai perguntar é o canônico do comprador.
-    expect(caminhoDoCelular({ posicao: 1, papel: "proponente" })).toBe("compradores[0].telefone");
-    expect(caminhoDoCelular({ posicao: 2, papel: "vendedor" })).toBe("vendedores[1].telefone");
+    const ordem = [{ nome: "Letícia Gonçalves", papel: "proponente" }];
+    expect(caminhoDoCelular({ posicao: 1, papel: "proponente", nome: "Letícia Gonçalves" }, ordem)).toBe("compradores[0].telefone");
     // Cônjuge e testemunha o Max não grava: o Aceite com um assim faltando não é oferecido.
-    expect(caminhoDoCelular({ posicao: 1, papel: "conjuge" })).toBeNull();
+    expect(caminhoDoCelular({ posicao: 1, papel: "conjuge", nome: "Letícia Gonçalves" }, [{ nome: "Letícia Gonçalves", papel: "conjuge" }])).toBeNull();
     const semComoGravar = options({
       tiposDeAssinatura: [
         { tipo: "aceite", disponivel: false, motivo: "assinante_sem_celular", assinantesSemCelular: [{ posicao: 1, papel: "testemunha", nome: "Dora" }], texto: "Aceite" },
       ],
     });
     expect(opcoesDeTipo(semComoGravar)).toEqual([]);
+  });
+
+  // C1 (revisão): `posicao` do servidor é GLOBAL (i+1 sobre todos os incluídos, na ordem de assinatura),
+  // não o índice dentro do papel. O índice de `vendedores[k]` é a contagem de quem tem o MESMO papel antes.
+  describe("C1: o celular vai para a pessoa que falta, não para a posição global", () => {
+    const ordem = [
+      { nome: "Letícia Gonçalves", papel: "proponente" },
+      { nome: "Valter Vendedor", papel: "vendedor" },
+      { nome: "Vera Vendedora", papel: "vendedor" },
+    ];
+
+    it("proponente + V1 sem celular + V2: grava em vendedores[0] e nunca em vendedores[1]", () => {
+      expect(caminhoDoCelular({ posicao: 2, papel: "vendedor", nome: "Valter Vendedor" }, ordem)).toBe("vendedores[0].telefone");
+      expect(caminhoDoCelular({ posicao: 3, papel: "vendedor", nome: "Vera Vendedora" }, ordem)).toBe("vendedores[1].telefone");
+    });
+
+    it("um vendedor só: nunca aponta para um índice que não existe (sem laço de 422)", () => {
+      const um = [ordem[0]!, ordem[1]!];
+      expect(caminhoDoCelular({ posicao: 2, papel: "vendedor", nome: "Valter Vendedor" }, um)).toBe("vendedores[0].telefone");
+    });
+
+    it("dois proponentes: o segundo é compradores[1], contando só o mesmo papel", () => {
+      const dois = [
+        { nome: "Ana", papel: "proponente" },
+        { nome: "Bia", papel: "vendedor" },
+        { nome: "Cris", papel: "proponente" },
+      ];
+      expect(caminhoDoCelular({ posicao: 3, papel: "proponente", nome: "Cris" }, dois)).toBe("compradores[1].telefone");
+    });
+
+    it("nome que não confere na posição: não grava (a tela resolve)", () => {
+      expect(caminhoDoCelular({ posicao: 2, papel: "vendedor", nome: "Outro Nome" }, ordem)).toBeNull();
+    });
+
+    it("papel que não confere na posição: não grava", () => {
+      expect(caminhoDoCelular({ posicao: 1, papel: "vendedor", nome: "Letícia Gonçalves" }, ordem)).toBeNull();
+    });
+
+    it("posição fora da lista, ou lista vazia: não grava", () => {
+      expect(caminhoDoCelular({ posicao: 9, papel: "vendedor", nome: "Valter Vendedor" }, ordem)).toBeNull();
+      expect(caminhoDoCelular({ posicao: 1, papel: "proponente", nome: "Letícia Gonçalves" }, [])).toBeNull();
+    });
+
+    it("sem como casar com segurança, o Aceite não é oferecido (o corretor segue pela tela)", () => {
+      const o = options({
+        signatarios: [{ nome: "Letícia Gonçalves", papel: "proponente" }],
+        tiposDeAssinatura: [
+          { tipo: "email", disponivel: true, texto: "E-mail" },
+          { tipo: "aceite", disponivel: false, motivo: "assinante_sem_celular", assinantesSemCelular: [{ posicao: 2, papel: "vendedor", nome: "Valter Vendedor" }], texto: "Aceite" },
+        ],
+      });
+      expect(opcoesDeTipo(o).map((x) => x.tipo)).toEqual(["email"]);
+    });
   });
 
   it("conta sem Plus: tipo indisponível não aparece", () => {

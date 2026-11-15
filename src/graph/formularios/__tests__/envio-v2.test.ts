@@ -687,6 +687,53 @@ describe("T13 ligado ao condutor", () => {
   });
 });
 
+describe("C1: o celular perguntado é gravado na pessoa certa (posição global ≠ índice do papel)", () => {
+  const tresAssinantes = [
+    { nome: "Letícia Gonçalves", papel: "proponente" },
+    { nome: "Valter Vendedor", papel: "vendedor" },
+    { nome: "Vera Vendedora", papel: "vendedor" },
+  ];
+  const aceiteSemCelular = (assinantesSemCelular: Array<{ posicao: number; papel: string; nome: string }>) => [
+    { tipo: "email", disponivel: true, texto: "E-mail" },
+    { tipo: "aceite", disponivel: true, custoCentavos: 99, texto: "Aceite", assinantesSemCelular },
+  ];
+
+  it("proponente + V1 sem celular + V2: pergunta o do V1 e grava em vendedores[0], nunca em vendedores[1]", async () => {
+    const t = montar({
+      options: optionsBody({ signatarios: tresAssinantes, tiposDeAssinatura: aceiteSemCelular([{ posicao: 2, papel: "vendedor", nome: "Valter Vendedor" }]) }),
+      optionsDepoisDeGravar: optionsBody({ signatarios: tresAssinantes, tiposDeAssinatura: [{ tipo: "aceite", disponivel: true, custoCentavos: 99, texto: "Aceite" }] }),
+      fila: { "proposal.preflight": [{ status: 200, body: PRONTO_ACEITE }] },
+    });
+    await ateCartaoDeTestemunhas(t);
+    await t.fala("sim", "wamid.sim-testemunhas");
+    const p = await t.fala("aceite");
+    expect(p.reply).toContain("Valter Vendedor");
+    expect(p.reply).not.toContain("Vera Vendedora");
+    await t.fala("11 98765-4321");
+    await t.fala("sim", "wamid.sim-celular");
+    const updates = t.de("proposal.update");
+    expect(updates).toHaveLength(1);
+    // O update casa por posição: um único item no índice 0 (o V1); o V2 (índice 1) não é tocado.
+    expect(updates[0]!.args).toEqual({ proposta_id: "prop-1", vendedores: [{ telefone: "11987654321" }] });
+  });
+
+  it("não casa com segurança (nome diferente na posição): o Aceite nem é oferecido e nada é gravado", async () => {
+    const t = montar({
+      options: optionsBody({
+        signatarios: tresAssinantes,
+        tiposDeAssinatura: [
+          { tipo: "email", disponivel: true, texto: "E-mail" },
+          { tipo: "aceite", disponivel: false, motivo: "assinante_sem_celular", assinantesSemCelular: [{ posicao: 2, papel: "vendedor", nome: "Fulano Que Não Está" }], texto: "Aceite" },
+        ],
+      }),
+    });
+    await ateCartaoDeTestemunhas(t);
+    const p = await t.fala("sim", "wamid.sim-testemunhas");
+    expect(p.reply).not.toMatch(/aceite/i);
+    expect(t.de("proposal.update")).toHaveLength(0);
+  });
+});
+
 // ─── R21: o Flow de assinatura (Max) e o texto numerado (Newton) ────────────
 
 describe("R21: o Flow de assinatura entra pelo condutor, com o token/nonce do C2", () => {

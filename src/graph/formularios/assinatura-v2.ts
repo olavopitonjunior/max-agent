@@ -242,14 +242,38 @@ const GRUPO_DO_PAPEL: Record<string, "compradores" | "vendedores"> = {
   contraparte: "vendedores",
 };
 
-/** O caminho canônico do celular de quem assina (`compradores[0].telefone`), ou `null` se o Max não o grava. */
-export function caminhoDoCelular(s: { posicao: number; papel: string }): string | null {
-  const grupo = GRUPO_DO_PAPEL[normalizar(s.papel)];
-  return grupo ? `${grupo}[${Math.max(0, s.posicao - 1)}].telefone` : null;
+/**
+ * O caminho canônico do celular de quem assina (`vendedores[0].telefone`), ou `null` se o Max não o
+ * grava com segurança.
+ *
+ * `posicao` do servidor é GLOBAL: `i+1` sobre TODOS os incluídos, na ordem de assinatura (proponente,
+ * vendedores, cônjuges, testemunhas juntos), não o índice dentro do papel. Já o `vendedores[k]` do
+ * `dataJson` conta só o mesmo papel. Por isso a pessoa é achada em `signatarios` (a mesma lista de
+ * `options`) pela posição global, conferindo papel E nome; o `k` é a contagem de quem tem o MESMO papel
+ * antes dela. Se o papel ou o nome não conferem (lista fora de ordem, nome repetido, posição fora),
+ * não grava: o corretor resolve na tela, nunca na pessoa errada.
+ */
+export function caminhoDoCelular(
+  s: { posicao: number; papel: string; nome: string },
+  signatarios: ReadonlyArray<{ nome: string; papel: string }>
+): string | null {
+  const papel = normalizar(s.papel);
+  const grupo = GRUPO_DO_PAPEL[papel];
+  if (!grupo || !Number.isInteger(s.posicao) || s.posicao < 1) return null;
+  const alvo = signatarios[s.posicao - 1];
+  if (!alvo || normalizar(alvo.papel) !== papel || normalizar(alvo.nome) !== normalizar(s.nome)) return null;
+  const k = signatarios.slice(0, s.posicao - 1).filter((x) => normalizar(x.papel) === papel).length;
+  return `${grupo}[${k}].telefone`;
 }
 
-function celularSeraPerguntado(o: OpcaoDeAssinatura): boolean {
-  return o.tipo === "aceite" && !o.disponivel && o.motivo === "assinante_sem_celular" && !!o.assinantesSemCelular?.length && o.assinantesSemCelular.every((s) => caminhoDoCelular(s) !== null);
+function celularSeraPerguntado(o: OpcaoDeAssinatura, signatarios: ReadonlyArray<{ nome: string; papel: string }>): boolean {
+  return (
+    o.tipo === "aceite" &&
+    !o.disponivel &&
+    o.motivo === "assinante_sem_celular" &&
+    !!o.assinantesSemCelular?.length &&
+    o.assinantesSemCelular.every((s) => caminhoDoCelular(s, signatarios) !== null)
+  );
 }
 
 /**
@@ -259,7 +283,7 @@ function celularSeraPerguntado(o: OpcaoDeAssinatura): boolean {
  */
 export function opcoesDeTipo(options: OptionsV2): OpcaoDeAssinatura[] {
   if (options.assinaturaConfigurada === false) return [];
-  return (options.tiposDeAssinatura ?? []).filter((o) => (o.disponivel || celularSeraPerguntado(o)) && o.tipo in ROTULO_DO_TIPO);
+  return (options.tiposDeAssinatura ?? []).filter((o) => (o.disponivel || celularSeraPerguntado(o, options.signatarios ?? [])) && o.tipo in ROTULO_DO_TIPO);
 }
 
 /** `R$ 0,99` a partir de centavos inteiros. */

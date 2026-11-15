@@ -437,7 +437,7 @@ function assinanteSemCelular(options: OptionsV2, tipo: TipoDeAssinatura): { posi
   if (tipo !== "aceite") return null;
   const aceite = (options.tiposDeAssinatura ?? []).find((o) => o.tipo === "aceite");
   for (const s of aceite?.assinantesSemCelular ?? []) {
-    const path = caminhoDoCelular(s);
+    const path = caminhoDoCelular(s, options.signatarios ?? []);
     if (path) return { ...s, path };
   }
   return null;
