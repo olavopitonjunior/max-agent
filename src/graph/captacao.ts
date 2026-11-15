@@ -941,6 +941,94 @@ export interface ImovelLido { dados: Record<string, unknown>; erro?: string }
 const PALAVRA_DE_COMPLEMENTO = /\b(ap(?:to|artamento)?|bloco|bl|casa|fundos|sala|loja|cobertura|andar|quadra|lote|torre|conjunto|conj|sobrado|km)\b/i;
 const pareceComplemento = (c: string) => /\d/.test(c) || PALAVRA_DE_COMPLEMENTO.test(c);
 
+// ─── Cidade/UF em código ─────────────────────────────────────────────────
+// "São Paulo/SP", "Campinas - SP", "Belo Horizonte, MG": o extrator às vezes
+// devolve isso inteiro em `bairro`. A sigla tem que ser uma das 27 válidas.
+
+const SIGLAS_UF = new Set("AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO".split(" "));
+/** Palavra de logradouro/unidade: o trecho antes da sigla é endereço, não cidade. */
+const PALAVRA_DE_LOGRADOURO = new Set(["rua", "avenida", "av", "alameda", "travessa", "rodovia", "estrada", "praca", "apto", "apartamento", "bloco", "cep", "bairro", "numero", "casa", "sala", "loja", "lote", "quadra", "torre", "conjunto", "conj", "andar", "km", "endereco", "terreno", "sobrado", "cobertura"]);
+/** Palavra que só pode estar ANTES da cidade ("venda em São Paulo/SP"): corta a cidade ali. */
+const PALAVRA_DE_CORTE = new Set(["em", "na", "no", "nas", "nos", "para", "pra", "com", "sem", "venda", "locacao", "aluguel", "imovel", "valor", "comissao", "prazo", "exclusiva", "exclusividade", "proprietario", "proprietaria", "tel", "cel", "fone", "cidade", "e", "ou", "mas", "a", "o", "um", "uma"]);
+const CONECTIVO_DE_CIDADE = new Set(["de", "da", "do", "das", "dos"]);
+const chaveDeTexto = (s: string) => normalizar(s).replace(/[^a-z0-9]+/g, " ").trim();
+
+/** A cidade é o fim do trecho que antecede a sigla (até 4 palavras); `null` se o trecho é logradouro. */
+function cidadeDoPrefixo(prefixo: string): string | null {
+  const toks = prefixo.trim().split(/\s+/).filter(Boolean);
+  const cidade: string[] = [];
+  for (let i = toks.length - 1; i >= 0; i--) {
+    const bruto = toks[i]!;
+    const limpo = bruto.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "");
+    if (!limpo || /\d/.test(bruto)) break;
+    const k = normalizar(limpo);
+    if (PALAVRA_DE_LOGRADOURO.has(k)) return null;
+    if (PALAVRA_DE_CORTE.has(k)) break;
+    if (cidade.length >= 4) return null;
+    cidade.unshift(limpo);
+  }
+  while (cidade.length && CONECTIVO_DE_CIDADE.has(normalizar(cidade[0]!))) cidade.shift();
+  return cidade.length ? cidade.join(" ") : null;
+}
+
+/**
+ * `Cidade/UF` (UF em qualquer caixa), `Cidade - UF` e `Cidade, UF` (UF em caixa
+ * alta). Só vale com sigla das 27 e um trecho que pareça cidade.
+ */
+export function cidadeUfNoTexto(texto: string): { cidade: string; uf: string } | null {
+  const formas = [
+    /([^\n,;/\d]*?)\s*\/\s*([A-Za-z]{2})(?![\p{L}\d])/gu,
+    /([^\n,;/\d–—-]*?)\s+[-–—]\s+([A-Z]{2})(?![\p{L}\d])/gu,
+    /([^\n,;/\d–—-]*?)\s*,\s*([A-Z]{2})(?![\p{L}\d])/gu,
+  ];
+  for (const re of formas) {
+    for (const m of texto.matchAll(re)) {
+      const uf = m[2]!.toUpperCase();
+      if (!SIGLAS_UF.has(uf)) continue;
+      const cidade = cidadeDoPrefixo(m[1]!);
+      if (cidade) return { cidade, uf };
+    }
+  }
+  return null;
+}
+
+/** "São Paulo/SP" (ou "- SP", ", SP") dentro de um campo só: separa cidade e sigla. */
+function separarCidadeUf(v: string): { cidade: string; uf: string } | null {
+  const m = /^(.+?)\s*(?:\/|\s-\s|,)\s*([A-Za-z]{2})$/.exec(v.trim());
+  if (!m || !SIGLAS_UF.has(m[2]!.toUpperCase())) return null;
+  return { cidade: m[1]!.trim(), uf: m[2]!.toUpperCase() };
+}
+
+/** Acerta cidade/uf/bairro de um endereço lido: a sigla escrita vence a do extrator e nunca sobra "Cidade/UF" em `bairro`. */
+function aplicarCidadeUf(dados: Record<string, unknown>, texto: string): void {
+  let cidade = typeof dados.cidade === "string" ? dados.cidade : undefined;
+  let uf = typeof dados.uf === "string" ? dados.uf : undefined;
+  const daCidade = cidade ? separarCidadeUf(cidade) : null;
+  if (daCidade) { cidade = daCidade.cidade; uf ??= daCidade.uf; }
+  const naMensagem = cidadeUfNoTexto(texto);
+  if (naMensagem) {
+    uf = naMensagem.uf;
+    const doTexto = ` ${chaveDeTexto(naMensagem.cidade)}`;
+    // O extrator costuma acertar a cidade mesmo sem vírgula ("Vila X São Paulo/SP"): se ela fecha com o fim do trecho, fica a dele.
+    if (!cidade || !doTexto.endsWith(` ${chaveDeTexto(cidade)}`)) cidade = naMensagem.cidade;
+  } else if (cidade) {
+    // Trecho colado à rua ("Rua Augusta São Paulo/SP"): a cidade do extrator, conferida no texto, ancora a sigla.
+    const escapada = cidade.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const m = new RegExp(String.raw`${escapada}\s*(?:(\/)\s*([A-Za-z]{2})|(?:\s-\s|,\s*)([A-Z]{2}))(?![\p{L}\d])`, "iu").exec(texto);
+    const sigla = (m?.[2] ?? (m?.[3] && m[3] === m[3].toUpperCase() ? m[3] : undefined))?.toUpperCase();
+    if (sigla && SIGLAS_UF.has(sigla)) uf = sigla;
+  }
+  const bairro = typeof dados.bairro === "string" ? dados.bairro : undefined;
+  if (bairro) {
+    const doBairro = separarCidadeUf(bairro);
+    if (doBairro && !cidade) { cidade = doBairro.cidade; uf ??= doBairro.uf; }
+    const kb = chaveDeTexto(bairro);
+    if (doBairro || (cidade && (kb === chaveDeTexto(cidade) || (uf && kb === chaveDeTexto(`${cidade} ${uf}`))))) delete dados.bairro;
+  }
+  if (cidade) dados.cidade = cidade;
+  if (uf && SIGLAS_UF.has(uf)) dados.uf = uf; else delete dados.uf;
+}
+
 /** Endereço pelo extrator (conferido contra o texto); matrícula, área, vagas e tipo em código. */
 export async function lerImovel(texto: string, extrair: ExtratorDeSecao): Promise<ImovelLido> {
   const dados: Record<string, unknown> = {};
@@ -973,6 +1061,7 @@ export async function lerImovel(texto: string, extrair: ExtratorDeSecao): Promis
   }
   const uf = str(r?.uf)?.toUpperCase();
   if (uf && /^[A-Z]{2}$/.test(uf) && new RegExp(String.raw`(?<![\p{L}])${uf}(?![\p{L}])`, "iu").test(texto)) dados.uf = uf;
+  aplicarCidadeUf(dados, texto);
   if (!dados.rua) return { dados, erro: "Não achei o endereço. Mande a rua e o número (e bairro e cidade, se puder)." };
   return { dados };
 }

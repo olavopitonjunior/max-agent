@@ -2239,3 +2239,69 @@ describe("lerCondicoes: valor com R$ / mil / milhão, mesmo com outros números 
     expect(venda("valor 850 mil, comissão 6%, prazo 180 dias")).toBe(850000);
   });
 });
+
+describe("lerImovel: Cidade/UF, Cidade - UF, Cidade, UF vão para cidade e uf, nunca para bairro", () => {
+  const ler = (texto: string, extraido: Record<string, unknown>) => cap.lerImovel(texto, async () => extraido);
+  const RUA = { rua: "Rua TESTE Captação", numero: "5" };
+
+  it("caso real de produção: o extrator devolveu bairro='São Paulo/SP'", async () => {
+    const r = await ler("imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000", { ...RUA, bairro: "São Paulo/SP" });
+    expect(r.dados).toMatchObject({ rua: "Rua TESTE Captação", numero: "5", cidade: "São Paulo", uf: "SP" });
+    expect(r.dados.bairro).toBeUndefined();
+  });
+
+  it.each([
+    ["Rua TESTE Captação, 5, Campinas - SP", "Campinas", "SP"],
+    ["Rua TESTE Captação, 5, Belo Horizonte, MG", "Belo Horizonte", "MG"],
+    ["Rua TESTE Captação, 5, Ribeirão Preto/sp", "Ribeirão Preto", "SP"],
+    ["Rua TESTE Captação, 5, Rio de Janeiro / RJ", "Rio de Janeiro", "RJ"],
+  ])("%s", async (texto, cidade, uf) => {
+    const r = await ler(texto, { ...RUA });
+    expect(r.dados).toMatchObject({ cidade, uf });
+    expect(r.dados.bairro).toBeUndefined();
+  });
+
+  it("não inventa bairro e mantém o que o extrator achou de verdade", async () => {
+    const r = await ler("Rua TESTE Captação, 5, Centro, Campinas/SP", { ...RUA, bairro: "Centro" });
+    expect(r.dados).toMatchObject({ bairro: "Centro", cidade: "Campinas", uf: "SP" });
+    const sem = await ler("Rua TESTE Captação, 5, Campinas/SP", { ...RUA });
+    expect(sem.dados.bairro).toBeUndefined();
+  });
+
+  it("bairro igual à cidade (ou 'cidade UF') é descartado", async () => {
+    const a = await ler("Rua TESTE Captação, 5, São Paulo, SP", { ...RUA, bairro: "São Paulo" });
+    expect(a.dados.bairro).toBeUndefined();
+    expect(a.dados).toMatchObject({ cidade: "São Paulo", uf: "SP" });
+  });
+
+  it("cidade do extrator no formato 'Cidade/UF' é dividida", async () => {
+    const r = await ler("Rua TESTE Captação, 5, São Paulo/SP", { ...RUA, cidade: "São Paulo/SP" });
+    expect(r.dados).toMatchObject({ cidade: "São Paulo", uf: "SP" });
+  });
+
+  it("sem espaço de vírgula depois da rua, ainda pega a cidade pela cidade do extrator", async () => {
+    const r = await ler("Rua Augusta São Paulo/SP", { rua: "Rua Augusta", cidade: "São Paulo" });
+    expect(r.dados).toMatchObject({ rua: "Rua Augusta", cidade: "São Paulo", uf: "SP" });
+  });
+
+  it("negativos: sigla inválida, rua com vírgula e número não viram cidade", async () => {
+    const a = await ler("Rua TESTE Captação, 5, apto 52, XX", { ...RUA });
+    expect(a.dados.cidade).toBeUndefined();
+    expect(a.dados.uf).toBeUndefined();
+    const b = await ler("Rua Augusta, SP", { rua: "Rua Augusta" });
+    expect(b.dados.cidade).toBeUndefined();
+    const c = await ler("Rua TESTE Captação, 5, Apto 52, SP", { ...RUA });
+    expect(c.dados.cidade).toBeUndefined();
+  });
+
+  it("'SP' sozinho continua aceito como uf (caminho antigo)", async () => {
+    const r = await ler("Rua TESTE Captação, 5, SP", { ...RUA, uf: "SP" });
+    expect(r.dados.uf).toBe("SP");
+    expect(r.dados.cidade).toBeUndefined();
+  });
+
+  it("o texto escrito vence um uf alucinado pelo extrator", async () => {
+    const r = await ler("Rua TESTE Captação, 5, Campinas/SP", { ...RUA, cidade: "Campinas", uf: "RJ" });
+    expect(r.dados).toMatchObject({ cidade: "Campinas", uf: "SP" });
+  });
+});
