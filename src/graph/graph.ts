@@ -32,7 +32,8 @@ import { ehSimDeAplicar, TEXTO_SUGESTAO_VENCIDA } from "./formularios/correcao-t
 import { ocrTranscribeFallbackLigado } from "./captacao-flags";
 import { cancelarFicha } from "./formularios/pausa";
 import { rebaixarParaV1 } from "./formularios/selecao";
-import { camposSemPapel, derivarPapel, fraseDeNaoLido, lerMidia, MARCADOR_DOCUMENTO_LIDO, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
+import type { FluxoFormularioV2 } from "./formularios/estado";
+import { camposSemPapel, derivarPapel, fraseDeNaoLido, guardarFala, falasDoCofre, lerMidia, MARCADOR_DOCUMENTO_LIDO, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
 import {
   comoMensagemDaJanela,
   INSTRUCAO_DA_JANELA,
@@ -288,6 +289,28 @@ function blindarCredito(state: MaxStateType, update: MaxUpdate): MaxUpdate {
   if ("piiMap" in update) out.piiMap = {};
   TURNO_CRU.set(id, cru);
   return out;
+}
+
+/**
+ * O que a fala do corretor vira no histórico do checkpoint (`messages`). Crédito, captação e proposta v2:
+ * a resposta da ficha traz CPF/telefone/renda, então só o marcador vai para o checkpoint. Nos demais
+ * fluxos a fala fica como está.
+ */
+export function historicoDoCorretor(kind: string, userText: string): string {
+  if (kind === "credito") return "(resposta da ficha de crédito)";
+  if (kind === "captacao") return "(resposta da ficha de captação)";
+  if (kind === "proposta_v2") return "(resposta da ficha de proposta)";
+  return userText;
+}
+
+/**
+ * Proposta v2: a fala do corretor vai CIFRADA para o fluxo (a janela de extração das mensagens
+ * seguintes lê dali, sem perder o elo entre pedaços); o histórico só ganha o marcador. Outros fluxos
+ * (ou nenhum) passam intactos.
+ */
+export function comFalaNoCofre<F extends { kind: string } | null | undefined>(fluxo: F, userText: string, thread: string): F {
+  if (!fluxo || fluxo.kind !== "proposta_v2") return fluxo;
+  return guardarFala(fluxo as unknown as FluxoFormularioV2, userText, thread) as unknown as F;
 }
 
 /**
@@ -991,7 +1014,9 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
         janelaDoTurno: (mensagensAnteriores: number, lidosDoChamador?: DocumentoLido[]) => {
           // Sem os seus, valem os documentos lidos NESTE turno (texto de imagem, T9).
           const lidos = lidosDoChamador ?? TURNO_CRU.get(state.inbound.messageId)?.lidos ?? [];
-          const doCorretor = state.messages.filter((m) => m.role === "user").map((m) => m.content);
+          // As falas anteriores vêm do cofre cifrado do fluxo (o histórico do checkpoint guarda só o marcador).
+          const fluxoAberto = state.fluxo;
+          const doCorretor = fluxoAberto && fluxoAberto.kind === "proposta_v2" ? falasDoCofre(fluxoAberto, threadIdFor(orgId, state.inbound.fromPhone)) : [];
           // `slice(-0)` devolveria tudo: 0 (ou negativo) é "nenhuma anterior".
           const n = Math.max(0, Math.floor(mensagensAnteriores));
           return montarJanela({
@@ -1546,7 +1571,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     // criar nem enviar (achado N1 do code review).
     return {
       // v2: o condutor pode devolver o fluxo v1 (feature desligada no meio do rascunho): vale o que ele devolveu.
-      fluxo: passo.fluxo === null ? null : rebaixarFluxo(atual.kind === "proposta_v2" ? passo.fluxo : atual),
+      fluxo: passo.fluxo === null ? null : comFalaNoCofre(rebaixarFluxo(atual.kind === "proposta_v2" ? passo.fluxo : atual), userText, ctxDoTurno.thread),
       ...(usage.length > 0 ? { usage } : {}),
       toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
     };
@@ -1555,8 +1580,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   const avisoDeMidia = TURNO_CRU.get(state.inbound.messageId)?.avisoDeMidia;
   if (passo.silencioso && avisoDeMidia) {
     return {
-      fluxo: passo.fluxo,
-      messages: [{ role: "user", content: userText }, { role: "assistant", content: avisoDeMidia }],
+      fluxo: comFalaNoCofre(passo.fluxo, userText, ctxDoTurno.thread),
+      messages: [{ role: "user", content: historicoDoCorretor(atual.kind, userText) }, { role: "assistant", content: avisoDeMidia }],
       reply: avisoDeMidia,
       ...(usage.length > 0 ? { usage } : {}),
       toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
@@ -1568,23 +1593,22 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     // no Max, um 👍 na própria mensagem do corretor; no Newton a reação não existe e fica mudo.
     void sendReaction({ to: state.inbound.fromPhone, messageId: state.inbound.messageId, emoji: "👍" });
     return {
-      fluxo: passo.fluxo,
+      fluxo: comFalaNoCofre(passo.fluxo, userText, ctxDoTurno.thread),
       halt: "formulario_coletando",
       // `halt` desvia do `confirm`: uma pendência antiga não pode sobreviver a ele (consentimento).
       pendingAction: null,
-      messages: [{ role: "user", content: userText }],
+      messages: [{ role: "user", content: historicoDoCorretor(atual.kind, userText) }],
       ...(usage.length > 0 ? { usage } : {}),
       // I5: coletou valor de documento; este turno não vai para resumo, memória nem log com valor.
       toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "proposta_v2" || atual.kind === "correcao_texto" ? { sensivel: true } : {}) }, outcome: passo.evento }],
     };
   }
   // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
-  const daFicha = atual.kind === "credito" || atual.kind === "captacao";
   const resposta = avisoDeMidia ? `${avisoDeMidia}\n\n${passo.reply}` : passo.reply;
   return {
-    fluxo: passo.fluxo,
+    fluxo: comFalaNoCofre(passo.fluxo, userText, ctxDoTurno.thread),
     messages: [
-      { role: "user", content: daFicha ? `(resposta da ficha de ${atual.kind === "captacao" ? "captação" : "crédito"})` : userText },
+      { role: "user", content: historicoDoCorretor(atual.kind, userText) },
       { role: "assistant", content: resposta },
     ],
     reply: resposta,

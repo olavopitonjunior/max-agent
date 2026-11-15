@@ -21,15 +21,15 @@ describe("eval fv2: achados", () => {
     return s;
   }
 
-  // F1 (PII, regra 6 do brief): para `proposta_v2` o texto do corretor entra no histórico do checkpoint
-  // (`messages`, graph.ts ~1555-1595) com o CPF em claro. Só `credito` e `captacao` o trocam por
-  // "(resposta da ficha de ...)". O estado do fluxo, o outbox e o prompt estão limpos (cobertos nos
-  // transversais); o histórico não.
-  it.fails("F1: o CPF dito pelo corretor não fica em claro no histórico do checkpoint", async () => {
+  // F1 (PII, regra 6 do brief): a fala do corretor (com CPF/telefone) não fica em claro no histórico do
+  // checkpoint. Como `credito`/`captacao`, `messages` guarda só "(resposta da ficha de proposta)"; a fala
+  // vai CIFRADA para o fluxo (`cofreFalas`) e a janela de extração a lê de lá.
+  it("F1: o CPF dito pelo corretor não fica em claro no histórico do checkpoint", async () => {
     const s = await comTudoNumaMensagem();
     const historico = await s.historicoDoCheckpoint();
     expect(historico.replace(/\D/g, "").includes(CPF_SINTETICO)).toBe(false);
     expect(historico.includes(formatarCpf(CPF_SINTETICO))).toBe(false);
+    expect(historico).toContain("(resposta da ficha de proposta)");
   });
 
   // F3 (UX): `rotuloDoPath` (src/graph/formularios/midia.ts) não tem rótulo para `negociacao.*`,

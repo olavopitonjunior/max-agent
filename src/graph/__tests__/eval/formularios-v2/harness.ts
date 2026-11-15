@@ -692,16 +692,22 @@ export async function verificarTransversais(s: Sessao, o: OpcoesDeVerificacao = 
       for (const cpf of s.cpfs) expect(p.body.replace(/\D/g, "").includes(cpf), "T3: CPF em claro no outbox").toBe(false);
     }
   }
-  // O estado do fluxo (e tudo fora do histórico) só tem caminho + referência; o valor mora no cofre.
-  // O HISTÓRICO (`messages`) fica de fora daqui de propósito: hoje ele guarda a fala do corretor em
-  // claro (achado F1, `achados.eval.ts`, marcado `it.fails`); não derrubar os 11 casos por ele.
-  const cp = await s.checkpointSemHistorico();
+  // O checkpoint INTEIRO (estado do fluxo e histórico `messages`): CPF, telefone e e-mail dos casos nunca em
+  // claro (só caminho + referência; o valor mora no cofre cifrado).
+  const cp = await s.checkpointCompleto();
   for (const cpf of s.cpfs) {
-    expect(cp.replace(/\D/g, "").includes(cpf), "T3: CPF em claro no checkpoint (fora do histórico)").toBe(false);
-    expect(cp.includes(formatarCpf(cpf)), "T3: CPF formatado no checkpoint (fora do histórico)").toBe(false);
+    expect(cp.replace(/\D/g, "").includes(cpf), "T3: CPF em claro no checkpoint").toBe(false);
+    expect(cp.includes(formatarCpf(cpf)), "T3: CPF formatado no checkpoint").toBe(false);
   }
+  expect(/90000[-\s]?00\d\d/.test(cp), "T3: telefone fictício em claro no checkpoint").toBe(false);
+  expect(/@[a-z0-9.-]*\.invalid/i.test(cp), "T3: e-mail fictício em claro no checkpoint").toBe(false);
+  // Nome: fora do histórico (o estado do fluxo só tem caminho). No histórico o nome pode aparecer na resposta
+  // do assistente (lista de assinantes, "quem falta"): o projeto não trata nome como PII ali (não há categoria
+  // NOME no `tokenizar`); a fala do corretor vira marcador.
+  const { messages: _historico, ...semHistorico } = JSON.parse(cp) as Record<string, unknown>;
+  const cpSemHistorico = JSON.stringify(semHistorico);
   for (const nome of s.nomes) {
-    expect(cp.includes(nome), `T3: o nome "${nome}" apareceu no checkpoint (fora do histórico)`).toBe(false);
+    expect(cpSemHistorico.includes(nome), `T3: o nome "${nome}" apareceu no checkpoint (fora do histórico)`).toBe(false);
   }
 
   // T4: custo reportado por chamada ao modelo (e só com o modelo real: lerDocumento/transcribe são cobrados no servidor).

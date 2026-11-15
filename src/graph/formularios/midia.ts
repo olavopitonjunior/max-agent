@@ -447,6 +447,37 @@ function decifrarCofre(payload: string, thread: string): string {
   return Buffer.concat([d.update(Buffer.from(dado, "base64")), d.final()]).toString("utf8");
 }
 
+/** Quantas falas anteriores o cofre guarda (a janela de extração usa no máximo isto menos a atual). */
+const FALAS_NO_COFRE = 7;
+/** Teto por fala (o da janela, `JANELA_MAX_CHARS`): o que passa disso nunca caberia na janela. */
+const FALA_MAX_CHARS = 6000;
+
+/**
+ * As falas anteriores do corretor neste fluxo, abertas do cofre. Qualquer falha (sem cofre, chave
+ * ausente ou rotacionada, outra thread, payload adulterado) é `[]`: nunca lança e nunca devolve
+ * fala de outra thread.
+ */
+export function falasDoCofre(fluxo: Pick<FluxoFormularioV2, "cofreFalas">, thread: string): string[] {
+  if (!fluxo.cofreFalas) return [];
+  try {
+    const bruto: unknown = JSON.parse(decifrarCofre(fluxo.cofreFalas, `falas|${thread}`));
+    return Array.isArray(bruto) ? bruto.filter((t): t is string => typeof t === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Acrescenta a fala do corretor ao cofre de falas (as mais novas ficam). Sem chave, descarta o
+ * cofre inteiro: a fala nunca vai em claro para o checkpoint (a janela fica sem anteriores).
+ */
+export function guardarFala(fluxo: FluxoFormularioV2, texto: string, thread: string): FluxoFormularioV2 {
+  const { cofreFalas: _antigo, ...resto } = fluxo;
+  if (!cofreDisponivel()) return resto;
+  const falas = [...falasDoCofre(fluxo, thread), texto.slice(0, FALA_MAX_CHARS)].slice(-FALAS_NO_COFRE);
+  return { ...resto, cofreFalas: cifrarCofre(JSON.stringify(falas), `falas|${thread}`) };
+}
+
 /**
  * Os campos lidos guardados no cofre do fluxo. Qualquer falha (sem cofre, chave
  * ausente ou rotacionada, outra thread, payload adulterado) é `[]`: nunca lança e
