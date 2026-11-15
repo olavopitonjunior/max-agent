@@ -182,10 +182,19 @@ export const CAPABILITIES = [
    * editor da política. Só para `kind: "user"`: o servidor recusa o corretor
    * comissionado (403 `verbo_requer_sujeito_usuario`) e este módulo nunca a
    * resolve para ele (`SO_USUARIO`), nem por `brokerDefault` nem por
-   * `byRecipient.allow`. Posição 33 (0-based), FIXA, a última deste lado;
-   * `document.text.edit` (34) é de outro PR.
+   * `byRecipient.allow`. Posição 33 (0-based), FIXA.
    */
   "document.read",
+  /**
+   * Correção de texto do documento por IA (15/11/2026, par do contractmaker #3140, max.md
+   * §18.13.14): o corretor pede a mudança de um trecho da proposta ou da captação, vê o
+   * antes/depois e só um SIM explícito aplica (verbos `proposal.text.suggest|apply` e
+   * `captacao.text.suggest|apply`, TODOS de escrita). Nasce DESLIGADA e FORA do
+   * `POLITICA_PADRAO` do ImobPro, e só para `kind: "user"` (`SO_USUARIO`): o corretor
+   * comissionado nunca a recebe, nem por `brokerDefault` nem por `byRecipient.allow`.
+   * Posição 34 (0-based), FIXA, a última deste lado.
+   */
+  "document.text.edit",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -225,7 +234,7 @@ export interface MaxPolicy {
  * de um override ou o `brokerDefault` as listarem não as concede a ele. O
  * servidor também recusa; esta é a segunda trava, do lado que oferece.
  */
-const SO_USUARIO: ReadonlySet<Capability> = new Set<Capability>(["document.read"]);
+const SO_USUARIO: ReadonlySet<Capability> = new Set<Capability>(["document.read", "document.text.edit"]);
 
 /**
  * Capability desconhecida é IGNORADA, não é erro.

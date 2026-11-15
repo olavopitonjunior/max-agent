@@ -41,6 +41,12 @@ export const IMOBPRO_TRANSCRIBE_TIMEOUT_MS = 45_000;
  * processando" (o servidor segue, cobra e guarda a resposta pela `messageId`), nunca "tente de novo".
  */
 export const IMOBPRO_DOCUMENT_READ_TIMEOUT_MS = 45_000;
+/**
+ * Correção de texto (PR-E, max.md §18.13.14): `suggest` lê o Google Doc e chama o modelo de redação;
+ * `apply` escreve no Doc. Passam dos 8 s comuns. Estouro é INCERTO (o servidor segue e guarda a
+ * resposta pela chave): o fluxo diz "não consegui confirmar", nunca repete com chave nova.
+ */
+export const IMOBPRO_TEXT_EDIT_TIMEOUT_MS = 30_000;
 /** `credit.request` (M3): o servidor espera a Upestate até 20 s e responde 202 depois; +10 s de rede. */
 export const IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS = 30_000;
 /**

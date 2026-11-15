@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { VERBOS_DE_ACAO } from "../acao";
+import { VERBOS_DE_ACAO, timeoutDoVerbo } from "../acao";
 import { catalog } from "../runtime/catalog";
 
 /**
@@ -53,8 +53,11 @@ const PROPOSAL_ESCRITA_DO_CM = [
   "proposal.duplicate",
 ];
 
-/** O CM tem e este lado ainda não usa (PR4 dos formulários v2): lacuna conhecida, não divergência. */
-const SO_NO_CM = ["proposal.text.suggest", "proposal.text.apply"];
+/** O CM tem e este lado ainda não usa: lacuna conhecida, não divergência. Vazia desde o PR-E (correção de texto). */
+const SO_NO_CM: string[] = [];
+
+/** Os quatro verbos de correção de texto (CM §18.13.14): escrita, capability `document.text.edit`. */
+const TEXTO_DO_CM = ["proposal.text.suggest", "proposal.text.apply", "captacao.text.suggest", "captacao.text.apply"];
 
 const proposalAqui = (VERBOS_DE_ACAO as readonly string[]).filter((v) => v.startsWith("proposal."));
 
@@ -81,6 +84,30 @@ describe("paridade dos verbos de ação com o contractmaker (PR-D)", () => {
     expect(t?.permission).toBe("proposal.create");
     expect(t?.effect).toBe("write");
     expect(t?.confirmation).toBe(true);
+  });
+
+  it("os quatro verbos de correção de texto existem aqui, são escrita com confirmação e usam document.text.edit (e não captacao.create)", () => {
+    const tools = catalog("org1").tools;
+    for (const v of TEXTO_DO_CM) {
+      expect((VERBOS_DE_ACAO as readonly string[]).includes(v), v).toBe(true);
+      const t = tools.find((x) => x.id === v);
+      expect(t?.permission, v).toBe("document.text.edit");
+      expect(t?.policyCapability, v).toBe("document.text.edit");
+      expect(t?.effect, v).toBe("write");
+      expect(t?.confirmation, v).toBe(true);
+      expect(t?.dataClass, v).toBe("sensitive-document");
+    }
+  });
+
+  it("os verbos de texto da captação vêm depois dos da proposta, sem se misturar às demais captacao.*", () => {
+    const todos = VERBOS_DE_ACAO as readonly string[];
+    expect(todos.indexOf("proposal.text.apply")).toBe(todos.indexOf("proposal.text.suggest") + 1);
+    expect(todos.indexOf("captacao.text.apply")).toBe(todos.indexOf("captacao.text.suggest") + 1);
+  });
+
+  it("corrigir texto de documento: suggest espera a IA e o Google, mais que o teto comum", () => {
+    expect(timeoutDoVerbo("proposal.text.suggest")).toBeGreaterThan(8_000);
+    expect(timeoutDoVerbo("captacao.text.suggest")).toBeGreaterThan(8_000);
   });
 
   it("toda escrita proposal.* do CM que existe aqui é escrita no catálogo (nunca leitura disfarçada)", () => {
