@@ -33,6 +33,9 @@ export const VERBOS_DE_ACAO = [
   "proposal.status",
   "proposal.create",
   "proposal.update",
+  // Testemunhas da proposta v2 (PR-D/T13, par do contractmaker PR3, max.md §18.13.12.1): ESCRITA,
+  // `x-idempotency-key` = a `messageId` do primeiro "sim". Capability `proposal.create` (catalog).
+  "proposal.witnesses.set",
   "proposal.options",
   "proposal.preflight",
   "proposal.send",
