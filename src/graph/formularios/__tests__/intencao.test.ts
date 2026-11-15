@@ -108,6 +108,31 @@ describe("lerIntencaoDeFormulario: corrigir", () => {
   it("corrigir redação quando fala do texto", () => {
     expect(lerIntencaoDeFormulario("corrige a redação da proposta")).toEqual({ tipo: "corrigir_redacao", alvo: "proposta" });
   });
+
+  // P4 (M2 do PR-A): o verbo de correção casava pergunta e negação.
+  it.each([
+    "não corrige a proposta",
+    "nao troca o valor da proposta",
+    "não precisa mudar nada na proposta",
+    "nunca altera a proposta do João",
+    "a proposta corrige?",
+    "corrige a proposta?",
+    "como corrige a proposta",
+    "como eu corrijo a proposta?",
+    "por que troca o valor da proposta",
+    "a proposta foi corrigida ontem",
+    "quando o Max corrige a proposta",
+  ])("negação ou pergunta sobre o verbo não é pedido de correção: %s", (t) => {
+    expect(lerIntencaoDeFormulario(t)).toBeNull();
+  });
+
+  it.each([
+    ["pode corrigir a proposta?", "proposta"],
+    ["consegue trocar o valor da proposta?", "proposta"],
+    ["corrige a proposta, não o contrato", "proposta"],
+  ])("pedido educado ou com negação de outro objeto continua sendo correção: %s", (t, alvo) => {
+    expect(lerIntencaoDeFormulario(t)).toMatchObject({ tipo: "corrigir_dado", alvo });
+  });
 });
 
 describe("v1 mantém o regex de hoje (feature desligada)", () => {

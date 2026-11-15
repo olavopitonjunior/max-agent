@@ -99,8 +99,34 @@ export function normalizarParaIntencao(texto: string): string {
   return base.replace(/[a-z]{7,}/g, corrigirPalavra);
 }
 
-const VERBO_DE_CORRECAO =
-  /\b(?:corrig\w*|corrij\w*|ajust\w*|retific\w*|arrum\w*|conserta\w*|troc\w*|muda\w*|alter\w*|edit\w*|errei|errado|errada)\b/;
+const VERBO_DE_CORRECAO_G =
+  /\b(?:corrig\w*|corrij\w*|ajust\w*|retific\w*|arrum\w*|conserta\w*|troc\w*|muda\w*|alter\w*|edit\w*|errei|errado|errada)\b/g;
+const PARTICIPIO_DE_CORRECAO = /^(?:corrigid|ajustad|retificad|arrumad|consertad|trocad|mudad|alterad|editad)[oa]s?$/;
+const NEGACAO_ANTES_DO_VERBO = /\b(?:nao|nunca|jamais|sem)\s+(?:\w+\s+){0,2}$/;
+const INTERROGATIVA_ANTES_DO_VERBO = /\b(?:como|por que|porque|pq|quando|onde|qual|quais|quem|o que|sera que)\s+(?:\w+\s+){0,3}$/;
+const PEDIDO_EDUCADO_ANTES_DO_VERBO = /\b(?:pode|podes|poderia|consegue|conseguiria|da pra|d[aá] pra|vc pode|voce pode)\s+(?:\w+\s+){0,2}$/;
+
+/**
+ * `true` quando o texto PEDE uma correção (P4). O verbo sozinho casava pergunta
+ * ("a proposta corrige?"), negação ("não corrige a proposta") e particípio
+ * ("foi corrigida ontem"); nenhum destes é pedido. Pedido educado com "?"
+ * ("pode corrigir a proposta?") continua sendo pedido. `n` já vem normalizado.
+ */
+function pedeCorrecao(n: string): boolean {
+  const pergunta = n.trimEnd().endsWith("?");
+  for (const m of n.matchAll(VERBO_DE_CORRECAO_G)) {
+    if (PARTICIPIO_DE_CORRECAO.test(m[0])) continue;
+    const idx = m.index ?? 0;
+    // Só a oração do verbo conta: pontuação separa ("não, corrige a proposta").
+    const prefixo = n.slice(0, idx).split(/[.,;!?]/).pop() ?? "";
+    if (NEGACAO_ANTES_DO_VERBO.test(prefixo)) continue;
+    if (INTERROGATIVA_ANTES_DO_VERBO.test(prefixo)) continue;
+    if (n.slice(idx + m[0].length).trimStart().startsWith("?")) continue;
+    if (pergunta && !PEDIDO_EDUCADO_ANTES_DO_VERBO.test(prefixo)) continue;
+    return true;
+  }
+  return false;
+}
 const MENCAO_DE_TEXTO = /\b(?:texto|redacao|clausulas?|paragrafos?|trecho)\b/;
 
 function esteiraDoTexto(n: string): "venda" | "locacao" | undefined {
@@ -128,7 +154,7 @@ export function lerIntencaoDeFormulario(texto: string): IntencaoDeFormulario {
     return { tipo: "criar", alvo: temCaptacao ? "captacao" : "proposta", ...(esteira ? { esteira } : {}) };
   }
 
-  if (VERBO_DE_CORRECAO.test(n)) {
+  if (pedeCorrecao(n)) {
     const redacao = MENCAO_DE_TEXTO.test(n);
     if (temCaptacao) return { tipo: redacao ? "corrigir_redacao" : "corrigir_dado", alvo: "captacao" };
     if (/\bpropostas?\b/.test(n)) return { tipo: redacao ? "corrigir_redacao" : "corrigir_dado", alvo: "proposta" };
