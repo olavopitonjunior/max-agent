@@ -1575,8 +1575,8 @@ function textoDasCondicoes(tipo: TipoDeCaptacao): string {
 }
 
 const TEXTO_PROPRIETARIOS =
-  "Agora os proprietários, um por mensagem: nome completo, CPF (ou CNPJ), telefone, e-mail e estado civil. " +
-  "Quando acabar, diga FIM.";
+  "Agora os proprietários: nome completo, CPF (ou CNPJ), telefone, e-mail e estado civil. " +
+  "Pode mandar todos de uma vez, um por linha. Quando acabar, diga FIM.";
 
 const ROTULO_DA_FALTA: Record<FaltaDeDono, string> = { cpf: "CPF", cnpj: "CNPJ", contato: "telefone ou e-mail", estado_civil: "estado civil" };
 
@@ -1887,7 +1887,7 @@ export function continuacaoCaptacao(f: FluxoCaptacao): string {
     case "imovel": return `${cab}${TEXTO_IMOVEL}`;
     case "condicoes": return `${cab}${textoDasCondicoes(f.tipo ?? "venda")}`;
     case "exclusividade": return `${cab}responda *COM* ou *SEM* exclusividade.`;
-    case "proprietarios": return `${cab}mande o próximo proprietário, ou FIM.`;
+    case "proprietarios": return f.donosEmAberto?.length ? `${cab}${textoDosProprietarios(f)}` : `${cab}mande o próximo proprietário, ou FIM.`;
     case "estado_civil": return `${cab}${perguntaDoEstadoCivil(nomeDoDono(f, f.estadoCivilDe))}`;
     case "extras": return `${cab}tem testemunha ou outra pessoa para assinar? Mande nome e e-mail/telefone, ou diga NÃO.`;
     case "faltantes": {
@@ -2495,6 +2495,94 @@ function seguirParaExtras(f: FluxoCaptacao, ctx: ContextoDoTurno, prefixo: strin
   return resposta(g(f, ctx, { etapa: "extras", tentativas: 0, estadoCivilDe: undefined }), `${prefixo}${TEXTO_EXTRAS}`, "captacao_extras");
 }
 
+interface PessoaDaLinha { p: PessoaLida; linha: string }
+interface DonoDeCaptacao { id: string; nome: string; pj?: boolean }
+interface ClassificacaoDeDonos {
+  novos: { p: PessoaLida; nome: string }[];
+  completos: { dono: DonoDeCaptacao; p: PessoaLida }[];
+  ruins: { n: number; motivo: string }[];
+}
+
+const mesmoNome = (a?: string, b?: string) => !!a && !!b && normalizar(a) === normalizar(b);
+const temDadoDePessoa = (p: PessoaLida) => !!(p.cpf || p.cnpj || p.telefone || p.email || p.estadoCivil);
+
+/** O que de `falta` o complemento `item` ainda não cobre. */
+function faltaRestante(falta: FaltaDeDono[], item: Record<string, unknown>): FaltaDeDono[] {
+  return falta.filter((x) => (x === "cpf" ? !str(item.cpf) : x === "cnpj" ? !str(item.cnpj) : x === "contato" ? !(str(item.telefone1) || str(item.email)) : !str(item.estado_civil)));
+}
+
+/**
+ * Separa as pessoas de uma mensagem em: dono novo, complemento de dono que já existe (mesmo nome, ou só dados
+ * quando há UM dono em aberto) e linha que não deu para entender (só o motivo, nunca o texto da linha).
+ */
+function classificarPessoas(f: FluxoCaptacao, partes: PessoaDaLinha[]): ClassificacaoDeDonos {
+  const donos = f.proprietarios ?? [];
+  const abertos = f.donosEmAberto ?? [];
+  const out: ClassificacaoDeDonos = { novos: [], completos: [], ruins: [] };
+  for (const [i, { p, linha }] of partes.entries()) {
+    const n = i + 1;
+    const existente = p.nome && !p.erro ? donos.find((d) => mesmoNome(d.nome, p.nome)) : undefined;
+    if (existente) { if (temDadoDePessoa(p)) out.completos.push({ dono: existente, p }); continue; }
+    if (!p.erro && p.nome) {
+      if (donos.length + out.novos.length >= 20) { out.ruins.push({ n, motivo: "Chegamos ao limite de 20 proprietários." }); continue; }
+      if (!pareceProprietario(linha, p) && !p.telefone && !p.email) { out.ruins.push({ n, motivo: "Faltou o CPF (ou CNPJ) ou um contato." }); continue; }
+      out.novos.push({ p, nome: p.nome });
+      continue;
+    }
+    if (p.erro?.startsWith("Não achei o nome") && temDadoDePessoa(p)) {
+      const alvo = abertos.length === 1 ? donos.find((d) => d.id === abertos[0]!.id) : undefined;
+      if (alvo) { out.completos.push({ dono: alvo, p }); continue; }
+    }
+    out.ruins.push({ n, motivo: p.erro ?? "Não entendi." });
+  }
+  return out;
+}
+
+/** Uma gravação só para todas as pessoas da mensagem (novas e complementos). */
+async function gravarProprietarios(f: FluxoCaptacao, c: ClassificacaoDeDonos, fim: boolean, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const donos = f.proprietarios ?? [];
+  const canalDito = canalDoTexto(ctx.texto) ?? f.canalDito;
+  const itensNovos = c.novos.map((x, i) => itemDeProprietario(x.p, `p${donos.length + i + 1}`, canalDito));
+  const itensCompletos = c.completos.map(({ dono, p }) => {
+    // Complemento: sem nome (já está gravado) e sem canal; o tipo vem do dono, não da leitura.
+    const { nome: _n, razao_social: _r, canal: _c, ...resto } = itemDeProprietario(p, dono.id);
+    void _n; void _r; void _c;
+    return { ...resto, tipo_pessoa: dono.pj ? "juridica" : "fisica" };
+  });
+  const r = await complementar(f, ctx, deps, { proprietarios: [...itensCompletos, ...itensNovos] });
+  if (!r.ok) return r.r;
+
+  let abertos = (f.donosEmAberto ?? []).map((a) => ({ ...a }));
+  c.completos.forEach(({ dono }, i) => {
+    abertos = abertos
+      .map((a) => (a.id === dono.id ? { ...a, falta: faltaRestante(a.falta, itensCompletos[i]!) } : a))
+      .filter((a) => a.falta.length);
+  });
+  itensNovos.forEach((item, i) => {
+    const falta = faltaDoDono(item);
+    if (falta.length) abertos.push({ id: String(item.id), falta });
+  });
+  const canalAplicado = c.novos.length
+    ? (canalDito && (donos.length === 0 || f.canalAplicado === canalDito) ? canalDito : undefined)
+    : f.canalAplicado;
+  const novo = g(r.f, ctx, {
+    proprietarios: [...donos, ...c.novos.map((x, i) => ({ id: String(itensNovos[i]!.id), nome: x.nome, ...(x.p.pj ? { pj: true } : {}) }))],
+    donosEmAberto: abertos.length ? abertos : undefined,
+    ...(canalDito && c.novos.length ? { canalDito } : {}),
+    canalAplicado,
+    tentativas: 0,
+  });
+  const anotei = anoteiDosDonos([
+    ...c.completos.map(({ dono }, i) => ({ ...itensCompletos[i]!, nome: dono.nome })),
+    ...itensNovos,
+  ]);
+  const problemas = c.ruins.length
+    ? ` Não entendi ${c.ruins.map((x) => `a linha ${x.n} (${x.motivo.replace(/\.$/, "")})`).join(" e ")}; mande de novo.`
+    : "";
+  if (fim && !c.ruins.length) return seguirParaExtras(novo, ctx, `${r.prefixo}${anotei}\n`);
+  return resposta(novo, `${r.prefixo}${anotei}${problemas}\n${textoDosProprietarios(novo)}`, "captacao_proprietarios");
+}
+
 /**
  * Confirmação única (26/10): cada proprietário é GRAVADO no turno em que
  * chega (`captacao.create{captacaoId, version}`, chave = messageId) — nada
@@ -2517,10 +2605,45 @@ async function conduzirProprietarios(f: FluxoCaptacao, t: string, ctx: ContextoD
     const n = lerNumeros(ctx.texto);
     if (!n.cpfs.length && !n.cnpjs.length && !ROTULO_DE_PESSOA.test(ctx.texto)) return pausar(f);
   }
+  // PULAR com pendência aberta de um dono do 1º pedido: o que falta fica para a tela.
+  if (f.donosEmAberto?.length && PULAR.test(t)) {
+    const semEstadoCivil = f.donosEmAberto.filter((a) => a.falta.includes("estado_civil")).map((a) => a.id);
+    const nomes = f.donosEmAberto.map((a) => nomeDoDono(f, a.id)).filter(Boolean).join(", ");
+    return resposta(
+      g(f, ctx, { donosEmAberto: undefined, tentativas: 0, estadoCivilPulado: [...new Set([...(f.estadoCivilPulado ?? []), ...semEstadoCivil])] }),
+      `Certo, o que falta de ${nomes || "o proprietário"} fica para a tela. ${TEXTO_PROXIMO_PROPRIETARIO}`,
+      "captacao_pendencias_puladas"
+    );
+  }
   if (donos.length >= 20) return resposta(g(f, ctx), "Chegamos ao limite de 20 proprietários. Diga FIM para seguir.", "captacao_limite_proprietarios");
   const extrair: ExtratorDeSecao = async (texto, secao) => (deps.extrairCaptacao ? deps.extrairCaptacao(texto, secao) : null);
+  // Várias pessoas numa mensagem: uma por linha, gravadas juntas (e um FIM na última linha encerra).
+  const linhas = ctx.texto.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  if (linhas.length >= 2) {
+    const fimNaUltima = FIM.test(normalizar(linhas[linhas.length - 1]!));
+    const doBloco = fimNaUltima ? linhas.slice(0, -1) : linhas;
+    const partes: PessoaDaLinha[] = [];
+    for (const linha of doBloco) partes.push({ p: await lerPessoa(linha, extrair), linha });
+    const c = classificarPessoas(f, partes);
+    if (c.novos.length || c.completos.length) return gravarProprietarios(f, c, fimNaUltima, ctx, deps);
+  }
   const p = await lerPessoa(ctx.texto, extrair);
-  if (p.erro) return falhou(f, p.erro, ctx);
+  if (p.erro) {
+    // Só dados ("CPF …, solteiro") com um dono em aberto do 1º pedido: completa esse dono.
+    if (f.donosEmAberto?.length) {
+      const c = classificarPessoas(f, [{ p, linha: ctx.texto }]);
+      if (c.completos.length) return gravarProprietarios(f, c, false, ctx, deps);
+      if (f.donosEmAberto.length > 1 && !!(p.cpf || p.cnpj || p.telefone || p.email || p.estadoCivil)) {
+        return falhou(f, "De qual proprietário é? Comece pelo nome (um por linha, se for mais de um).", ctx);
+      }
+    }
+    return falhou(f, p.erro, ctx);
+  }
+  // Repetiu o nome de um dono já anotado: completa o dono em vez de duplicar.
+  if (donos.some((d) => mesmoNome(d.nome, p.nome))) {
+    const c = classificarPessoas(f, [{ p, linha: ctx.texto }]);
+    if (c.completos.length) return gravarProprietarios(f, c, false, ctx, deps);
+  }
   if (!pareceProprietario(ctx.texto, p)) {
     return falhou(f, "Preciso do CPF (ou CNPJ) do proprietário, ou escreva \"proprietário: nome\".", ctx);
   }

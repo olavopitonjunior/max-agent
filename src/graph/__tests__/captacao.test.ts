@@ -2423,3 +2423,128 @@ describe("captação fluida: o pedido de uma mensagem só não vira interrogató
     expect(JSON.stringify(llm.mock.calls)).not.toContain(FONE_D);
   });
 });
+
+describe("captação fluida: pendências dos proprietários numa mensagem só", () => {
+  const RUA_DO_PEDIDO = { rua: "Rua TESTE Captação", numero: "5" };
+  const CPF2 = "529.982.247-25";
+  const CPF2_D = "52998224725";
+  const MSG = "nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999063228, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000";
+  type Fluxo = { etapa?: string; proprietarios?: { id: string; nome: string }[]; donosEmAberto?: { id: string; falta: string[] }[] };
+  const fluxoDe = (s: { fluxo?: unknown }) => (s.fluxo ?? {}) as Fluxo;
+
+  async function ateOProprietario(fala: ReturnType<typeof conversa>) {
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    return fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+  }
+
+  it("o pedido de proprietários não é mais 'um por mensagem': aceita todos de uma vez, um por linha", async () => {
+    const fala = conversa();
+    const r = await ateOProprietario(fala);
+    expect(r.reply).toContain("um por linha");
+    expect(r.reply).toContain("FIM");
+    expect(r.reply).not.toContain("um por mensagem");
+  });
+
+  it("dois proprietários na mesma mensagem: uma gravação só, ids distintos, sem interrogar estado civil de cada um", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const antes = verbos("captacao.create").length;
+    const r = await fala(`Maria Silva, CPF ${CPF}, casada\nJoão Souza, CPF ${CPF2}, tel ${FONE}, solteiro`);
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    expect(ultimo("captacao.create")!.args.dados).toMatchObject({
+      proprietarios: [
+        { id: "p1", nome: "Maria Silva", cpf: CPF_D, estado_civil: "casada" },
+        { id: "p2", nome: "João Souza", cpf: CPF2_D, telefone1: `+55${FONE_D}`, estado_civil: "solteiro" },
+      ],
+    });
+    expect(r.reply).toContain("Anotei Maria Silva");
+    expect(r.reply).toContain("Anotei João Souza");
+    expect(r.reply).not.toContain("Qual o estado civil");
+    expect(fluxoDe(r).proprietarios).toEqual([{ id: "p1", nome: "Maria Silva" }, { id: "p2", nome: "João Souza" }]);
+    expect(semDadosPessoais(r.fluxo)).toBe(true);
+    expect(semDadosPessoais(r.reply)).toBe(true);
+  });
+
+  it("linha sem entendimento: grava as boas, avisa pelo número da linha e não repete o texto dela", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const r = await fala(`Maria Silva, CPF ${CPF}, casada\nJoão, tel ${FONE}`);
+    expect(ultimo("captacao.create")!.args.dados).toMatchObject({ proprietarios: [{ id: "p1", nome: "Maria Silva" }] });
+    expect(r.reply).toContain("linha 2");
+    expect(r.reply).not.toContain("João,");
+    expect(fluxoDe(r).proprietarios).toHaveLength(1);
+  });
+
+  it("última linha FIM: grava e já segue para as testemunhas", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const r = await fala(`Maria Silva, CPF ${CPF}, casada\nJoão Souza, CPF ${CPF2}, solteiro\nFIM`);
+    expect(r.reply).toContain("testemunha");
+    expect(fluxoDe(r).etapa).toBe("extras");
+    expect(fluxoDe(r).proprietarios).toHaveLength(2);
+  });
+
+  it("dono vindo do 1º pedido: pergunta só o que falta dele, numa mensagem", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    const r = await fala(MSG);
+    expect(r.reply).toContain("Pedro TESTE Captação: CPF, estado civil");
+    expect(r.reply).toContain("PULAR");
+    expect(fluxoDe(r).donosEmAberto).toEqual([{ id: "p1", falta: ["cpf", "estado_civil"] }]);
+  });
+
+  it("a resposta só com dados (sem nome) completa o dono em aberto; não cria outro proprietário", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala(MSG);
+    const r = await fala(`CPF ${CPF2}, solteiro`);
+    const grava = ultimo("captacao.create")!;
+    expect(grava.args.dados).toMatchObject({ proprietarios: [{ id: "p1", papel: "proprietario", tipo_pessoa: "fisica", cpf: CPF2_D, estado_civil: "solteiro" }] });
+    expect((grava.args.dados as { proprietarios: unknown[] }).proprietarios).toHaveLength(1);
+    expect(r.reply).toContain("Anotei Pedro TESTE Captação");
+    expect(fluxoDe(r).proprietarios).toEqual([{ id: "p1", nome: "Pedro TESTE Captação" }]);
+    expect(fluxoDe(r).donosEmAberto ?? []).toEqual([]);
+    expect(r.reply).not.toContain("Falta pouco");
+  });
+
+  it("completar só uma parte mantém o resto em aberto", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala(MSG);
+    const r = await fala("solteiro");
+    expect(fluxoDe(r).donosEmAberto).toEqual([{ id: "p1", falta: ["cpf"] }]);
+    expect(r.reply).toContain("CPF");
+    expect(r.reply).toContain("Pedro TESTE Captação: CPF.");
+  });
+
+  it("repetir o nome de um dono já anotado completa esse dono em vez de duplicar", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala(MSG);
+    const r = await fala(`Pedro TESTE Captação, CPF ${CPF2}, solteiro`);
+    expect(ultimo("captacao.create")!.args.dados).toMatchObject({ proprietarios: [{ id: "p1", cpf: CPF2_D }] });
+    expect(fluxoDe(r).proprietarios).toHaveLength(1);
+  });
+
+  it("PULAR deixa o que falta para a tela e não grava nada", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala(MSG);
+    const antes = verbos("captacao.create").length;
+    const r = await fala("pular");
+    expect(verbos("captacao.create")).toHaveLength(antes);
+    expect(r.reply).toContain("fica para a tela");
+    expect(fluxoDe(r).donosEmAberto ?? []).toEqual([]);
+    const fim = await fala("FIM");
+    expect(fluxoDe(fim).etapa).toBe("extras");
+  });
+
+  it("dado solto sem nome e sem dono em aberto continua pedindo o nome", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const r = await fala(`CPF ${CPF}`);
+    expect(r.reply).toContain("Não achei o nome");
+  });
+});
