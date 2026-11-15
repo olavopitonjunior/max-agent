@@ -232,9 +232,13 @@ export function normalizar(texto: string): string {
  *
  * A lista é curta porque a pergunta diz à pessoa exatamente o que responder. Não
  * é para adivinhar intenção — é para reconhecer a resposta que pedimos.
+ *
+ * Segurança: `lerConfirmacao` é genérico e autoriza envio para assinatura e
+ * exclusão. "claro", "aham", "uhum", "positivo", "com certeza", "cria", "faz",
+ * "manda ver" e "pode" sozinho são conversa, não autorização: caem em VAGO.
  */
 const AFIRMA =
-  /^(sim|s|isso( mesmo)?|isso ai|claro|positivo|confirmo?|confirmado|pode( criar| mandar| enviar| fazer)?|manda( ai| ver)?|cri(a|ar)|faz(er)?( isso)?|aham|uhum|com certeza|✅)$/;
+  /^(sim|s|confirmo|confirmado|pode (criar|mandar|enviar|fazer)|manda|isso( mesmo)?|✅)$/;
 
 /**
  * W46: "ok", "blz", "beleza", "certo", "tá", "vai", "👍", "👌" são o jeito de
@@ -245,7 +249,7 @@ const AFIRMA =
  * é "talvez", não "autorizo".
  */
 const VAGO =
-  /^(ok|okay|okey|blz|beleza|certo|perfeito|vai|bora|ta|ta bom|ta certo|pode ser|👍|👌|🙏)$/;
+  /^(ok|okay|okey|blz|beleza|certo|perfeito|vai|bora|ta|ta bom|ta certo|pode ser|pode|claro|positivo|aham|uhum|com certeza|isso ai|cri(a|ar)|faz(er)?( isso)?|manda (ver|ai)|👍|👌|🙏)$/;
 
 const NEGA =
   /^(nao|n|nn|nops?|nope|negativo|deixa( pra la| quieto)?|cancela|esquece|para|nada|agora nao|melhor nao|nao precisa|nao quero|nao e isso|❌|👎)$/;

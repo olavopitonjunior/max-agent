@@ -32,15 +32,26 @@ const DADOS_OK: import("../fluxos").DadosDaProposta = {
   pagamento: { forma: "à vista" },
 };
 
+const AMBIGUAS = ["claro", "aham", "uhum", "positivo", "com certeza", "isso ai", "cria", "criar", "faz", "fazer", "faz isso", "pode", "manda ver", "manda ai", "ok", "blz", "👍"];
+
 describe("lerConfirmacao", () => {
   it.each(["ok", "OK", "okay", "blz", "beleza", "certo", "perfeito", "ta", "vai", "bora", "pode ser", "👍", "👌"])(
     "%s é vago",
     (t) => expect(lerConfirmacao(t)).toBe("vago")
   );
-  it.each(["sim", "SIM", "Sim.", "s", "confirmo", "pode criar", "pode enviar", "manda", "isso mesmo", "✅"])(
+  it.each(["sim", "SIM", "Sim.", "s", "confirmo", "confirmado", "pode criar", "pode mandar", "pode enviar", "pode fazer", "manda", "isso", "isso mesmo", "Isso mesmo!", "✅"])(
     "%s é sim",
     (t) => expect(lerConfirmacao(t)).toBe("sim")
   );
+  // Segurança: lerConfirmacao autoriza envio para assinatura e exclusão. Só a lista
+  // curta e explícita vale; o resto da conversa ("claro", "pode", "cria") é vago.
+  it.each(AMBIGUAS)("%s NÃO confirma (é vago)", (t) => {
+    expect(lerConfirmacao(t)).not.toBe("sim");
+    expect(lerConfirmacao(t)).toBe("vago");
+  });
+  it.each(["Claro!", "AHAM", "Pode.", "Manda ver!", "Com certeza.", "Cria", "FAZ"])("variação %s também não confirma", (t) => {
+    expect(lerConfirmacao(t)).not.toBe("sim");
+  });
   it.each(["não", "cancela", "deixa pra lá"])("%s é não", (t) => expect(lerConfirmacao(t)).toBe("nao"));
   it("o que só contém um ok segue 'nenhum'", () => {
     expect(lerConfirmacao("ok, mas muda o valor")).toBe("nenhum");
@@ -104,5 +115,70 @@ describe("crédito aprovado: 'ok' não abre a proposta de locação (W46)", () =
     expect(p.reply).toMatch(/responda SIM/);
     expect(p.fluxo).toMatchObject({ etapa: "resultado" });
     expect(d.acao).not.toHaveBeenCalled();
+  });
+});
+
+describe("fluxos de gestão, assinatura, atividades e captação: ambíguo não executa", () => {
+  const VAGAS = ["claro", "aham", "cria", "faz", "pode", "manda ver", "com certeza", "ok", "blz", "👍"];
+  const politica = ["proposal.list", "proposal.create", "proposal.send", "proposal.delete", "activity.list", "activity.write", "captacao.create", "captacao.list", "captacao.autorizacao.pedir", "captacao.autorizacao.decidir"] as never;
+  const c = (texto: string) => ({ texto, messageId: `m-${texto}`, policy: politica, agora, orgName: "Imob" });
+
+  it.each(VAGAS)("gestão (excluir proposta): '%s' reapresenta o resumo e não exclui", async (t) => {
+    const { conduzirGestao } = await import("../gestao");
+    const d = deps();
+    const f = { kind: "gestao" as const, operacao: "excluir" as const, etapa: "confirmacao" as const, alvo: { id: "p1", codigo: "PROP-2026-0001" }, atualizadoEm: agora };
+    const r = await conduzirGestao(f, c(t), d);
+    expect(d.acao).not.toHaveBeenCalled();
+    expect("fluxo" in r && r.fluxo).toBeTruthy();
+    expect(r.reply).toContain("PROP-2026-0001");
+  });
+
+  it.each(VAGAS)("assinatura (cancelar/lembrar): '%s' não envia nem cancela", async (t) => {
+    const { conduzirAssinatura } = await import("../assinatura");
+    for (const operacao of ["lembrar", "cancelar"] as const) {
+      const d = deps();
+      const alvo = { id: "p1", codigo: "PROP-2026-0031", titulo: "Rua X, 100", estado: "Enviada", status: "enviada", assinaturas: [{ nome: "Ana", status: "pendente", canal: "email" as const }] };
+      const f = { kind: "assinatura" as const, operacao, etapa: "confirmacao" as const, alvo, atualizadoEm: agora, ...(operacao === "cancelar" ? { motivo: "desistiu" } : {}) };
+      const r = await conduzirAssinatura(f, c(t), d);
+      expect(d.acao).not.toHaveBeenCalled();
+      expect("fluxo" in r && r.fluxo).toBeTruthy();
+    }
+  });
+
+  it.each(VAGAS)("atividades (concluir): '%s' reapresenta o resumo e não escreve", async (t) => {
+    const { iniciarAtividade, conduzirAtividade } = await import("../atividades");
+    const d = deps();
+    const f = iniciarAtividade({ operacao: "concluir", alvo: { id: "atv_1", rotulo: "Ligar para o João" } }, c("")).fluxo as import("../atividades").FluxoAtividade;
+    const r = await conduzirAtividade(f, c(t), d);
+    expect(d.acao).not.toHaveBeenCalled();
+    expect("fluxo" in r && r.fluxo).toBeTruthy();
+  });
+
+  it.each(VAGAS)("captação (pedir autorização): '%s' repete a pergunta e não pede", async (t) => {
+    process.env.MAX_CAPTACAO_AUTORIZACAO = "true";
+    const { conduzirCaptacao } = await import("../captacao");
+    const d = deps();
+    const f: import("../captacao").FluxoCaptacao = {
+      kind: "captacao", etapa: "autorizacao_oferta", captacaoId: "cap-1", version: 3,
+      autorizacaoPedido: { tipo: "proprietario", ref: "p1" }, tentativas: 0, atualizadoEm: agora,
+    };
+    const r = await conduzirCaptacao(f, c(t), d, true);
+    delete process.env.MAX_CAPTACAO_AUTORIZACAO;
+    expect(d.acao).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/responda \*sim\*/);
+  });
+
+  it.each(VAGAS)("captação (decidir autorização): '%s' repete a pergunta e não decide", async (t) => {
+    process.env.MAX_CAPTACAO_AUTORIZACAO = "true";
+    const { conduzirCaptacao } = await import("../captacao");
+    const d = deps();
+    const f: import("../captacao").FluxoCaptacao = {
+      kind: "captacao", etapa: "autorizacao_confirmar", tentativas: 0, atualizadoEm: agora,
+      autorizacaoDecisao: { autorizacaoId: "aut-1", tipo: "proprietario", decisao: "aprovar", codigo: "CAP-2026-0007", solicitante: "Ana Souza", documento: "***.456.789-**" },
+    };
+    const r = await conduzirCaptacao(f, c(t), d, true);
+    delete process.env.MAX_CAPTACAO_AUTORIZACAO;
+    expect(d.acao).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/responda \*sim\*/);
   });
 });
