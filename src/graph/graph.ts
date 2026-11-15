@@ -28,7 +28,7 @@ import {
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
 import { ocrTranscribeFallbackLigado } from "./captacao-flags";
-import { fraseDeNaoLido, lerMidia, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
+import { camposSemPapel, derivarPapel, fraseDeNaoLido, lerMidia, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
 import {
   comoMensagemDaJanela,
   INSTRUCAO_DA_JANELA,
@@ -2957,7 +2957,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   if (daMidia?.tipo === "campos") {
     // A foto não é um "sim": nenhuma pendência de escrita sobrevive a este turno.
     await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
-    const guardou = await guardarLidosNoFluxo(identity.candidate, inbound, daMidia.campos);
+    const guardou = await guardarLidosNoFluxo(identity.candidate, inbound, daMidia.campos, daMidia.papelIncerto === true);
     if (!guardou) {
       // Sem onde guardar o valor com segurança (sem chave): não mostra nem retém.
       return sair(fraseDeNaoLido("falha", inbound.kind as "image" | "document"), {
@@ -3227,14 +3227,14 @@ async function sujeitoTemCapability(identity: Candidate, phone: string, capabili
  * rascunho. `false` = não guardou (sem fluxo vivo ou sem chave): quem chama não
  * mostra o valor.
  */
-async function guardarLidosNoFluxo(identity: Candidate, inbound: InboundMessage, campos: CampoLido[]): Promise<boolean> {
+async function guardarLidosNoFluxo(identity: Candidate, inbound: InboundMessage, campos: CampoLido[], semPapel = false): Promise<boolean> {
   try {
     const app = await getApp();
     const thread = currentExecution()?.context.conversationId ?? liveNamespaceFor(identity.orgId, inbound.fromPhone, subjectDe(identity));
     const config = { configurable: { thread_id: thread } };
     const fluxo = ((await app.getState(config)).values as Partial<MaxStateType> | undefined)?.fluxo;
     if (!fluxo || fluxo.kind !== "proposta_v2") return false;
-    const r = registrarLidos(fluxo, { ref: inbound.messageId, campos }, thread);
+    const r = registrarLidos(fluxo, { ref: inbound.messageId, campos, ...(semPapel ? { semPapel: true } : {}) }, thread);
     if (!r.ok) return false;
     await app.updateState(config, { fluxo: r.fluxo });
     return true;
@@ -3282,7 +3282,10 @@ async function lerMidiaDoFluxoV2(identity: Candidate, inbound: InboundMessage): 
       fallbackDeTranscricao: ocrTranscribeFallbackLigado(),
       newtonMidiaAtiva: newtonMediaAtiva,
     };
-    return await lerMidia(
+    // I4: de quem é o documento. Sem papel o servidor assume "comprador 1", e isso despejaria o
+    // documento de um vendedor, de uma testemunha ou do 2º comprador no comprador já salvo.
+    const { papel, posicao } = derivarPapel(inbound.text ?? undefined, fluxo.aguardaCampo);
+    const r = await lerMidia(
       deps,
       {
         kind: inbound.kind,
@@ -3290,8 +3293,17 @@ async function lerMidiaDoFluxoV2(identity: Candidate, inbound: InboundMessage): 
         ...(inbound.mimeType ? { mimeType: inbound.mimeType } : {}),
         ...(inbound.text ? { legenda: inbound.text } : {}),
       },
-      { orgId, messageId: inbound.messageId, alvo: "proposta", tipo: fluxo.esteira, ...(fluxo.schemaType ? { schemaType: fluxo.schemaType } : {}) }
+      {
+        orgId,
+        messageId: inbound.messageId,
+        alvo: "proposta",
+        tipo: fluxo.esteira,
+        ...(fluxo.schemaType ? { schemaType: fluxo.schemaType } : {}),
+        ...(papel ? { papelSugerido: papel } : {}),
+        ...(papel && posicao ? { posicao } : {}),
+      }
     );
+    return r.tipo === "campos" && camposSemPapel(r.campos, papel) ? { ...r, papelIncerto: true } : r;
   } catch {
     return null;
   }

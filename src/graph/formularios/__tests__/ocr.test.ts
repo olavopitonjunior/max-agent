@@ -142,13 +142,21 @@ function featureV2() {
   vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [ORG]: ["formularios_v2"] }));
 }
 
-async function turno(inbound: Parameters<typeof runTurn>[0], opts: { fluxoVivo?: boolean } = {}) {
+async function turno(
+  inbound: Parameters<typeof runTurn>[0],
+  opts: { fluxoVivo?: boolean; aguardaCampo?: { parteRef: string; path: string } } = {}
+) {
   const thread = `ocr-v2-${Math.random()}`;
   const app = await getApp();
   if (opts.fluxoVivo !== false) {
     await app.updateState(
       { configurable: { thread_id: thread } },
-      { fluxo: novoFluxoV2({ esteira: "venda", agora: Date.now(), schemaType: "venda_padrao" }) as never }
+      {
+        fluxo: {
+          ...novoFluxoV2({ esteira: "venda", agora: Date.now(), schemaType: "venda_padrao" }),
+          ...(opts.aguardaCampo ? { aguardaCampo: opts.aguardaCampo } : {}),
+        } as never,
+      }
     );
   }
   const r = await withExecution(
@@ -347,6 +355,58 @@ describe("campos lidos entram em lidosPendentes, não no rascunho", () => {
       expect(gravado).not.toContain(valor);
     }
     expect(JSON.stringify(turnLog.mock.calls)).not.toContain(NOME);
+  });
+
+  // Rodada 1, I4: de quem e o documento. O papel/posicao vao ao servidor; sem eles o dado de pessoa
+  // entra "sem papel" (nao grava, a ficha pergunta).
+  describe("de quem e o documento (I4)", () => {
+    const docDe = (_: string) =>
+      acao.mock.calls.map(([p]) => p).filter((p) => p.verb === "document.read").map((p) => ({ ...p.args }));
+
+    it("a legenda manda o papel e a posicao ao servidor (vendedor 2)", async () => {
+      politica(true);
+      await turno(foto({ text: "RG do vendedor 2" }));
+      expect(docDe("")[0]).toMatchObject({ papel_sugerido: "vendedor", posicao: 2 });
+    });
+
+    it("sem legenda, o campo que o fluxo aguarda decide (comprador:2)", async () => {
+      politica(true);
+      const { reply, values } = await turno(foto(), { aguardaCampo: { parteRef: "comprador:2", path: "compradores[1].cpf" } });
+      expect(docDe("")[0]).toMatchObject({ papel_sugerido: "proponente", posicao: 2 });
+      expect(reply).not.toMatch(/de quem é esse documento/i);
+      expect(JSON.stringify(values)).not.toContain("semPapel");
+    });
+
+    it("sem legenda e sem campo aguardado: nada de papel ao servidor, a ficha pergunta de quem e e os lidos nao gravam", async () => {
+      politica(true);
+      const { reply, values, thread } = await turno(foto());
+
+      const args = docDe("")[0]!;
+      expect(args).not.toHaveProperty("papel_sugerido");
+      expect(args).not.toHaveProperty("posicao");
+      expect(reply).toMatch(/de quem é esse documento/i);
+      expect(reply).not.toMatch(/me diga se está certo/i);
+
+      // Mesmo com o "sim": nada e gravado e os lidos continuam pendentes.
+      const fluxo = values.fluxo as Parameters<typeof gravarLidos>[1];
+      const salvo = vi.fn();
+      const r = await gravarLidos({ acao: salvo }, { ...fluxo, proposalId: "prop-1" }, thread, { messageIdDoSim: "wamid.SIM" });
+      expect(salvo).not.toHaveBeenCalled();
+      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.erro).toBe("papel_indefinido");
+      expect(r.fluxo.lidosPendentes.length).toBeGreaterThan(0);
+    });
+
+    it("so dado de imovel (matricula) nao precisa de papel: ficha de sempre", async () => {
+      politica(true);
+      acao.mockResolvedValue({
+        status: 200,
+        body: { documentType: "matricula", confianca: 0.9, campos: [{ path: "imoveis[0].matricula", valor: "12345", confianca: 0.9 }], ignorados: 0 },
+      });
+      const { reply } = await turno(foto());
+      expect(reply).not.toMatch(/de quem é esse documento/i);
+      expect(reply).toMatch(/me diga se está certo/i);
+    });
   });
 
   it("documento ilegivel: frase honesta e nada fica pendente", async () => {

@@ -48,13 +48,26 @@ export interface CampoLido {
   chave?: string;
   valor: string;
   confianca: number;
+  /**
+   * Lido sem se saber de quem é o documento (I4). Só existe DENTRO do cofre cifrado (nunca no
+   * checkpoint em claro) e impede a gravação: ver `montarPatchDosLidos`.
+   */
+  semPapel?: boolean;
 }
 
 export type MotivoNaoLido = "mime" | "heic" | "tamanho" | "ilegivel" | "sem_leitura" | "falha" | "processando";
 
 export type ResultadoDaMidia =
   | { tipo: "texto"; texto: string }
-  | { tipo: "campos"; documentType: string; confianca: number; campos: CampoLido[]; ignorados: number }
+  | {
+      tipo: "campos";
+      documentType: string;
+      confianca: number;
+      campos: CampoLido[];
+      ignorados: number;
+      /** Dado de pessoa lido sem papel (nem legenda nem campo aguardado): não pode ser gravado (I4). */
+      papelIncerto?: boolean;
+    }
   | { tipo: "nao_lido"; motivo: MotivoNaoLido };
 
 /** O que `cm.lerDocumento` devolve; o mapeamento de status HTTP mora lá. */
@@ -117,6 +130,93 @@ export interface ContextoDaMidia {
 }
 
 const naoLido = (motivo: MotivoNaoLido): ResultadoDaMidia => ({ tipo: "nao_lido", motivo });
+
+/** Os papéis do contrato (`papel_sugerido`, max.md §18.13.13). */
+export type PapelSugerido = "proponente" | "vendedor" | "conjuge" | "proprietario" | "testemunha" | "imovel";
+
+const semAcento = (s: string): string => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+
+/**
+ * Cada papel e as palavras que o dizem (texto já sem acento e em minúsculas). Na proposta o
+ * proprietário é o lado vendedor: `proprietario` do contrato é de captação e não é enviado aqui.
+ */
+const PALAVRAS_DO_PAPEL: Array<[PapelSugerido, RegExp]> = [
+  ["vendedor", /\b(?:vendedor(?:a|es|as)?|proprietari[oa]s?)\b/],
+  ["proponente", /\b(?:comprador(?:a|es|as)?|proponentes?|locatari[oa]s?|inquilin[oa]s?)\b/],
+  ["conjuge", /\b(?:conjuges?|espos[oa]s?|marido|companheir[oa]s?)\b/],
+  ["testemunha", /\btestemunhas?\b/],
+  ["imovel", /\b(?:matriculas?|iptu|escrituras?|imovel|imoveis)\b/],
+];
+
+const ORDINAIS: Array<[RegExp, number]> = [
+  [/\bprimeir[oa]s?\b/g, 1],
+  [/\bsegund[oa]s?\b/g, 2],
+  [/\bterceir[oa]s?\b/g, 3],
+  [/\bquart[oa]s?\b/g, 4],
+  [/\bquint[oa]s?\b/g, 5],
+];
+
+/** Posição citada na legenda (1 a 10); `null` = nenhuma; `"ambigua"` = mais de uma, diferentes. */
+function posicaoDaLegenda(t: string): number | null | "ambigua" {
+  const achadas = new Set<number>();
+  // `search` e não `test`: o `/g` do regex compartilhado guardaria `lastIndex` entre chamadas.
+  for (const [re, n] of ORDINAIS) if (t.search(re) >= 0) achadas.add(n);
+  for (const m of t.matchAll(/\b(10|[1-9])\s*[º°ª]/g)) achadas.add(Number(m[1]));
+  for (const m of t.matchAll(
+    /\b(?:comprador|vendedor|proponente|locatari|inquilin|testemunha|proprietari|conjuge|espos)\w*\s*(?:n[º°.]?\s*)?(10|[1-9])\b/g
+  ))
+    achadas.add(Number(m[1]));
+  if (achadas.size === 0) return null;
+  return achadas.size === 1 ? [...achadas][0]! : "ambigua";
+}
+
+/** O papel que a `parteRef` do campo aguardado (`comprador:2`, `imovel`) nomeia; `{}` se não é de pessoa/imóvel. */
+function papelDaParteRef(parteRef: string): { papel?: PapelSugerido; posicao?: number } {
+  const m = /^(comprador|proponente|locatario|vendedor|locador|proprietario|conjuge|testemunha|imovel)(?::(\d+))?$/.exec(parteRef);
+  if (!m) return {};
+  const papel: PapelSugerido =
+    m[1] === "comprador" || m[1] === "proponente" || m[1] === "locatario"
+      ? "proponente"
+      : m[1] === "vendedor" || m[1] === "locador" || m[1] === "proprietario"
+        ? "vendedor"
+        : (m[1] as PapelSugerido);
+  const n = m[2] ? Number(m[2]) : undefined;
+  return n && n >= 1 && n <= 10 && papel !== "imovel" ? { papel, posicao: n } : { papel };
+}
+
+/**
+ * De QUEM é o documento (I4): a legenda diz primeiro; sem legenda útil, vale o campo que o
+ * fluxo está esperando (`aguardaCampo.parteRef`). Legenda ambígua (dois papéis, ou duas posições)
+ * NÃO cai no campo aguardado: o conflito é do corretor. `{}` = indeterminado, e quem chama não
+ * pode assumir "comprador 1" (a leitura entra como "sem papel" e nada é gravado por omissão).
+ */
+export function derivarPapel(
+  legenda: string | undefined,
+  aguardaCampo: { parteRef: string; path?: string } | undefined
+): { papel?: PapelSugerido; posicao?: number } {
+  const t = legenda ? semAcento(legenda) : "";
+  const papeis = PALAVRAS_DO_PAPEL.filter(([, re]) => re.test(t)).map(([p]) => p);
+  if (papeis.length > 1) return {};
+  if (papeis.length === 1) {
+    const papel = papeis[0]!;
+    if (papel === "imovel") return { papel };
+    const pos = posicaoDaLegenda(t);
+    if (pos === "ambigua") return {};
+    return pos === null ? { papel } : { papel, posicao: pos };
+  }
+  return aguardaCampo ? papelDaParteRef(aguardaCampo.parteRef) : {};
+}
+
+const CAMINHO_DE_PESSOA = /^(?:compradores|vendedores|locatarios|locadores|proprietarios|testemunhas)\[/;
+
+/**
+ * A leitura é "sem papel" quando NÃO se mandou papel ao servidor e o documento trouxe dado de
+ * PESSOA: sem papel o servidor assume comprador 1, e isso não pode ser tratado como "de quem é".
+ * Dado do imóvel não precisa de papel (matrícula, IPTU e escritura vão sempre para o imóvel).
+ */
+export function camposSemPapel(campos: CampoLido[], papelSugerido: string | undefined): boolean {
+  return !papelSugerido && campos.some((c) => CAMINHO_DE_PESSOA.test(c.path));
+}
 
 /** Frase honesta por motivo. Sem código interno, sem URL. */
 export function fraseDeNaoLido(motivo: MotivoNaoLido, kind: MidiaRecebida["kind"]): string {
@@ -384,13 +484,17 @@ function pendentesComValor(fluxo: FluxoFormularioV2, thread: string): Array<Camp
  */
 export function registrarLidos(
   fluxo: FluxoFormularioV2,
-  leitura: { ref: string; campos: CampoLido[] },
+  leitura: { ref: string; campos: CampoLido[]; semPapel?: boolean },
   thread: string
 ): { ok: true; fluxo: FluxoFormularioV2 } | { ok: false } {
   if (leitura.campos.length === 0) return { ok: true, fluxo };
   const porPath = new Map<string, CampoLido & { ref: string }>();
   for (const c of pendentesComValor(fluxo, thread)) porPath.set(c.path, c);
-  for (const c of leitura.campos) porPath.set(c.path, { ...c, ref: leitura.ref });
+  for (const c of leitura.campos) {
+    // `semPapel` é decidido por quem lê e vale para a leitura inteira; nunca herdado do que o servidor mandou.
+    const { semPapel: _vindo, ...limpo } = c;
+    porPath.set(c.path, { ...limpo, ...(leitura.semPapel ? { semPapel: true } : {}), ref: leitura.ref });
+  }
   return comLidos(fluxo, [...porPath.values()], thread);
 }
 
@@ -462,6 +566,7 @@ export function textoDeConferencia(l: {
   confianca: number;
   campos: CampoLido[];
   ignorados: number;
+  papelIncerto?: boolean;
 }): string {
   const baixa = l.confianca < BAIXA_CONFIANCA;
   const linhas: string[] = [
@@ -478,7 +583,16 @@ export function textoDeConferencia(l: {
   if (l.ignorados > 0) {
     linhas.push("", `${l.ignorados} ${l.ignorados === 1 ? "dado do documento não coube" : "dados do documento não couberam"} na proposta.`);
   }
-  linhas.push("", "Nada foi anotado ainda. Confira e me diga se está certo.");
+  if (l.papelIncerto) {
+    // Sem saber de quem é, "está certo" não tem sentido: o mesmo dado serviria a qualquer parte.
+    linhas.push(
+      "",
+      "De quem é esse documento? (comprador, vendedor, cônjuge, testemunha...) Mande a foto de novo com isso na legenda.",
+      "Nada foi anotado ainda."
+    );
+  } else {
+    linhas.push("", "Nada foi anotado ainda. Confira e me diga se está certo.");
+  }
   return linhas.join("\n");
 }
 
@@ -502,6 +616,9 @@ function montarPatchDosLidos(campos: CampoLido[]): { patch: PatchV2; gravados: S
   const gravados = new Set<string>();
 
   for (const c of campos) {
+    // I4: sem saber de quem é, o dado não vai para parte nenhuma (nem para a posição que o
+    // servidor assumiu por omissão): fica pendente até alguém dizer.
+    if (c.semPapel) continue;
     const parte = /^(compradores|vendedores|locatarios|locadores)\[(\d+)\]\.(conjuge\.)?(\w+)$/.exec(c.path);
     if (parte) {
       const [, grupo, n, conjuge, campo] = parte;
@@ -532,7 +649,7 @@ function montarPatchDosLidos(campos: CampoLido[]): { patch: PatchV2; gravados: S
   return { patch, gravados };
 }
 
-export type ErroDosLidos = ErroDoParcial | "cofre_ilegivel" | "nada_a_gravar";
+export type ErroDosLidos = ErroDoParcial | "cofre_ilegivel" | "nada_a_gravar" | "papel_indefinido";
 
 export type GravacaoDosLidos =
   | { ok: true; fluxo: FluxoFormularioV2; resultado: Extract<ResultadoParcial, { ok: true }> }
@@ -563,7 +680,9 @@ export async function gravarLidos(
   }
 
   const { patch, gravados } = montarPatchDosLidos(pendentes);
-  if (gravados.size === 0) return { ok: false, erro: "nada_a_gravar", fluxo };
+  if (gravados.size === 0) {
+    return { ok: false, erro: pendentes.some((c) => c.semPapel) ? "papel_indefinido" : "nada_a_gravar", fluxo };
+  }
 
   const r = await salvarParcial(deps, fluxo, patch, { confirmacao: { messageIdDoSim: opts.messageIdDoSim } });
   if (!r.ok) {
