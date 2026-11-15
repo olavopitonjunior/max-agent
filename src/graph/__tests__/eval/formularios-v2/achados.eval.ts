@@ -41,13 +41,21 @@ describe("eval fv2: achados", () => {
     expect(s.ultimaResposta).toContain("Valor da negociação");
   });
 
-  // F5: a função pura não pega "propsta" sozinho nem "capitação" (com a criação permitida, quem decide é o
-  // modelo; sem a permissão, o typo cai no chat em vez da recusa clara).
-  it.fails("F5a: 'propsta' sozinho é entendido como pedido de proposta", () => {
+  // F5: a função pura tolera erro de digitação na palavra-chave sozinha ("propsta", "capitação").
+  it("F5a: 'propsta' sozinho é entendido como pedido de proposta", () => {
     expect(lerIntencaoDeFormulario("propsta")).toMatchObject({ tipo: "criar", alvo: "proposta" });
+    expect(lerIntencaoDeFormulario("porposta")).toMatchObject({ tipo: "criar", alvo: "proposta" });
+    expect(lerIntencaoDeFormulario("proposa")).toMatchObject({ tipo: "criar", alvo: "proposta" });
   });
-  it.fails("F5b: 'capitação' é entendido como captação", () => {
+  it("F5b: 'capitação' é entendido como captação", () => {
     expect(lerIntencaoDeFormulario("capitação")).toMatchObject({ tipo: "criar", alvo: "captacao" });
+    expect(lerIntencaoDeFormulario("captaçao")).toMatchObject({ tipo: "criar", alvo: "captacao" });
+    expect(lerIntencaoDeFormulario("captacão")).toMatchObject({ tipo: "criar", alvo: "captacao" });
+  });
+  it("F5c: palavras reais parecidas não viram pedido", () => {
+    for (const t of ["resposta", "aposta", "capacitação", "proposito"]) {
+      expect(lerIntencaoDeFormulario(t), t).toBeNull();
+    }
   });
 
   // F4: o mesmo CPF em duas posições só é barrado pelo servidor (409 `signatarios_duplicados`), depois do

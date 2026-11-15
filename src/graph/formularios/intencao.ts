@@ -12,6 +12,11 @@
  * estão ("proposto", "contato"): sem ela, "foi proposto um valor" viraria
  * "foi proposta um valor" e "contato" viraria "contrato".
  *
+ * F5: proposta e captação aceitam até 2 edições ("porposa", "capitaao"), desde que a
+ * palavra comece pela mesma letra (a troca da inicial é quase sempre outra palavra:
+ * "resposta", "aposta", "capacitação", "adaptação"). A palavra-chave SOZINHA ("propsta",
+ * "uma captaçao") também é pedido de criação.
+ *
  * Quem decide se isto vale é o chamador, pela feature `formularios_v2`
  * (`toleranteNaOrg`): sem ela o v1 segue com o regex de hoje, byte a byte.
  *
@@ -55,7 +60,13 @@ const PALAVRAS_CHAVE = ["proposta", "propostas", "captacao", "captacoes", "formu
 const PROTEGIDAS = new Set([
   "proposto", "propostos", "proposito", "propositos", "proposital", "propositado",
   "captador", "captadora", "captadores",
+  // F5: reais a 1-2 edições (preposta = representante; posposta = adiada).
+  "preposta", "prepostas", "preposto", "prepostos", "posposta", "pospostas", "pospostos",
+  "capacitacao", "capacitacoes", "adaptacao", "adaptacoes", "formulacao", "formulacoes",
 ]);
+
+/** Palavras que aceitam 2 edições (mesma inicial); as demais, só 1. */
+const ACEITAM_DUAS_EDICOES = new Set(["proposta", "propostas", "captacao", "captacoes"]);
 
 const MINIMO_DE_LETRAS = 7;
 
@@ -84,6 +95,10 @@ function corrigirPalavra(palavra: string): string {
   if ((PALAVRAS_CHAVE as readonly string[]).includes(palavra)) return palavra;
   for (const chave of PALAVRAS_CHAVE) {
     if (Math.abs(chave.length - palavra.length) <= 1 && distancia(palavra, chave) <= 1) return chave;
+  }
+  for (const chave of PALAVRAS_CHAVE) {
+    if (!ACEITAM_DUAS_EDICOES.has(chave) || palavra[0] !== chave[0]) continue;
+    if (Math.abs(chave.length - palavra.length) <= 2 && distancia(palavra, chave) <= 2) return chave;
   }
   return palavra;
 }
@@ -127,6 +142,7 @@ function pedeCorrecao(n: string): boolean {
   }
   return false;
 }
+const PALAVRA_CHAVE_SOZINHA = /^(?:(?:uma|um|a|o)\s+)?(?:(?:nova|novo)\s+)?(proposta|captacao|formulario)\s*[.!]*$/;
 const MENCAO_DE_TEXTO = /\b(?:texto|redacao|clausulas?|paragrafos?|trecho)\b/;
 
 function esteiraDoTexto(n: string): "venda" | "locacao" | undefined {
@@ -151,6 +167,11 @@ function esteiraDoTexto(n: string): "venda" | "locacao" | undefined {
 export function lerIntencaoDeFormulario(texto: string): IntencaoDeFormulario {
   const n = normalizarParaIntencao(texto);
   if (!n) return null;
+
+  // F5: só a palavra-chave ("propsta", "uma captaçao", "nova proposta!"): pedido de criação. No singular e sem
+  // mais nada na frase: "propostas" é consulta, "a proposta do João" e "proposta de novo?" são outra coisa.
+  const sozinha = PALAVRA_CHAVE_SOZINHA.exec(n);
+  if (sozinha) return { tipo: "criar", alvo: /^captac/.test(sozinha[1]!) ? "captacao" : "proposta" };
 
   const temCaptacao = /\bcaptac(?:ao|oes)\b/.test(n);
   // "cria uma captação" é criação como "cria uma proposta": o mesmo regex, com a palavra trocada.
