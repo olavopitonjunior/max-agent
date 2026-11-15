@@ -144,10 +144,20 @@ describe("feature formularios_v2 decide quem passa tolerante", () => {
     const { toleranteNaOrg } = await import("../intencao");
     vi.stubEnv("MAX_FORMULARIOS_V2", "true");
     vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [ORG]: ["formularios_v2"] }));
-    expect(toleranteNaOrg(ORG)).toBe(true);
-    expect(toleranteNaOrg("outra-org")).toBe(false);
-    expect(toleranteNaOrg(undefined)).toBe(false);
+    expect(toleranteNaOrg(ORG, { fluxoV2: true })).toBe(true);
+    expect(toleranteNaOrg("outra-org", { fluxoV2: true })).toBe(false);
+    expect(toleranteNaOrg(undefined, { fluxoV2: true })).toBe(false);
     vi.stubEnv("MAX_FORMULARIOS_V2", "false");
+    expect(toleranteNaOrg(ORG, { fluxoV2: true })).toBe(false);
+  });
+
+  it("M3: feature ligada mas servidor sem o v2 (fluxoV2 false) ou options não consultado: sem tolerância", async () => {
+    const { toleranteNaOrg } = await import("../intencao");
+    vi.stubEnv("MAX_FORMULARIOS_V2", "true");
+    vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [ORG]: ["formularios_v2"] }));
+    expect(toleranteNaOrg(ORG, { fluxoV2: false })).toBe(false);
+    expect(toleranteNaOrg(ORG, { fluxoV2: null })).toBe(false);
+    expect(toleranteNaOrg(ORG, {})).toBe(false);
     expect(toleranteNaOrg(ORG)).toBe(false);
   });
 });

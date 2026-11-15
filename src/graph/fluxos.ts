@@ -49,7 +49,6 @@ import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./ca
 import { termoDeBusca } from "./localizar";
 import type { FluxoFormularioV2 } from "./formularios/estado";
 import type { DocumentoLido, JanelaDeExtracao } from "./formularios/janela";
-import { rebaixarParaV1 } from "./formularios/selecao";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -1437,9 +1436,10 @@ export async function conduzirFluxo(
   if (fluxo.kind === "captacao") return conduzirCaptacao(fluxo, ctx, deps, false);
   // Formulários v2: o condutor chega no PR-C. Até lá nenhum caminho cria este
   // fluxo (a feature `formularios_v2` nasce desligada); se um checkpoint v2
-  // aparecer, rebaixa para o v1 e libera o turno (D3: nunca quebra a conversa).
+  // aparecer, só libera o turno e limpa o fluxo (D3: nunca quebra a conversa).
+  // Não cria fluxo v1: ninguém pediu uma `coleta`, e o checkpoint não leva `dados`.
   if (fluxo.kind === "proposta_v2") {
-    return { liberar: true, fluxo: rebaixarParaV1(fluxo, {}), evento: "fluxo_v2_sem_condutor" };
+    return { liberar: true, fluxo: null, evento: "fluxo_v2_sem_condutor" };
   }
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };

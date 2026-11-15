@@ -25,9 +25,17 @@ export type IntencaoDeFormulario =
   | { tipo: "corrigir_dado" | "corrigir_redacao"; alvo: "proposta" | "captacao" | "contrato_do_negocio" }
   | null;
 
-/** O v2 tolera erro de digitação; o v1 (feature desligada ou outra org) fica com o regex de hoje. */
-export function toleranteNaOrg(orgId: string | undefined): boolean {
-  return featureEnabled("formularios_v2", orgId);
+/**
+ * O v2 tolera erro de digitação; o v1 (feature desligada ou outra org) fica com o regex de hoje.
+ *
+ * Só vale com a feature ligada E o servidor dizendo que fala v2 (`options.fluxoV2 === true`,
+ * §18.13.3): com a feature ligada e o servidor no v1 a tolerância misturaria os dois
+ * mundos. `options` ainda não consultado (ou sem resposta) = sem tolerância. Os
+ * chamadores de hoje não consultam o `options` neste ponto e por isso chamam só com a
+ * org (v1 byte a byte); o condutor v2 (PR-C) passa `{ fluxoV2 }` do `options` que consultou.
+ */
+export function toleranteNaOrg(orgId: string | undefined, options?: { fluxoV2?: boolean | null }): boolean {
+  return options?.fluxoV2 === true && featureEnabled("formularios_v2", orgId);
 }
 
 /**

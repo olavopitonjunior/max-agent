@@ -195,6 +195,13 @@ describe("o fluxo não sequestra a conversa", () => {
     expect(passo.liberar).toBe(true);
     expect(deps.acao).not.toHaveBeenCalled();
   });
+
+  it("M4: o stub só libera e limpa: não cria fluxo v1 (coleta) que ninguém pediu", async () => {
+    const f = comAguarda("proponente", "proponente.documento");
+    const ctx: ContextoDoTurno = { texto: "oi", messageId: "m1", policy: [], agora };
+    const passo = await conduzirFluxo(f, ctx, { acao: vi.fn() } as unknown as DepsDoFluxo);
+    expect(passo).toMatchObject({ liberar: true, fluxo: null, evento: "fluxo_v2_sem_condutor" });
+  });
 });
 
 function depsDeLista(resposta: RespostaDoServidor | null) {
