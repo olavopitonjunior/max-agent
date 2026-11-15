@@ -71,6 +71,11 @@ export type CanalDeEnvio = "email" | "whatsapp" | "aceite";
 
 export interface FluxoCaptacao {
   kind: "captacao";
+  /**
+   * Versão do fluxo (formulários v2, D3), gravada no início. Ausente = v1: o
+   * checkpoint antigo e o v1 não mudam. Só `2` liga o comportamento novo.
+   */
+  versao?: 1 | 2;
   etapa:
     | "natureza" | "nome" | "modelo" | "imovel" | "condicoes" | "exclusividade" | "proprietarios" | "estado_civil"
     | "extras" | "verificar" | "faltantes" | "selecao" | "revisao" | "enviando"

@@ -47,6 +47,8 @@ import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-con
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
+import type { FluxoFormularioV2 } from "./formularios/estado";
+import { rebaixarParaV1 } from "./formularios/selecao";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -125,6 +127,7 @@ export type Fluxo =
   | FluxoCaptacao
   | FluxoAtividade
   | FluxoPreferencias
+  | FluxoFormularioV2
   | {
       kind: "escolha";
       natureza?: "venda" | "locacao";
@@ -1384,7 +1387,7 @@ export async function iniciarProposta(
 // ─── O turno dentro de um fluxo ───────────────────────────────────────────
 
 export function fluxoExpirou(f: Fluxo, agora: number): boolean {
-  const longo = (f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave) || f.kind === "credito" || (f.kind === "captacao" && (!!f.captacaoId || !!f.chave));
+  const longo = (f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave) || (f.kind === "proposta_v2" && !!f.proposalId) || f.kind === "credito" || (f.kind === "captacao" && (!!f.captacaoId || !!f.chave));
   const ttl = longo ? FLUXO_TTL_POS_RASCUNHO_MS : FLUXO_TTL_MS;
   return agora - f.atualizadoEm > ttl;
 }
@@ -1417,6 +1420,12 @@ export async function conduzirFluxo(
   // viola o fail-closed da governança do Max. `false` replica o default
   // seguro de qualquer capability nova.
   if (fluxo.kind === "captacao") return conduzirCaptacao(fluxo, ctx, deps, false);
+  // Formulários v2: o condutor chega no PR-C. Até lá nenhum caminho cria este
+  // fluxo (a feature `formularios_v2` nasce desligada); se um checkpoint v2
+  // aparecer, rebaixa para o v1 e libera o turno (D3: nunca quebra a conversa).
+  if (fluxo.kind === "proposta_v2") {
+    return { liberar: true, fluxo: rebaixarParaV1(fluxo, {}), evento: "fluxo_v2_sem_condutor" };
+  }
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };
   }
