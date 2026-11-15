@@ -296,6 +296,38 @@ const O_QUE: Record<string, string> = {
 
 const primeiroSegmento = (campo: string): string => campo.split(/[.[]/)[0]!;
 const ultimoSegmento = (campo: string): string => campo.split(".").pop()!.replace(/\[\d*\]/g, "");
+
+const LISTA_DO_PAPEL: Record<string, string> = { proprietario: "proprietarios", conjuge: "conjuges", representante: "representantes" };
+const CAMPO_CANONICO: Record<string, string> = { documento: "cpf", nascimento: "data_nascimento" };
+
+/**
+ * UMA forma de caminho para `aguardaCampo.path`: a do estado (`compradores[1].cpf`,
+ * `proprietarios[0].cpf`, `negociacao.valor`). A chave do catálogo do servidor
+ * (`proponente.documento`) e o caminho da captação (`proprietarios[].cpf`) mais a
+ * `signatario.posicao` são convertidos aqui, na entrada: a posição nunca se perde
+ * (a resposta do 2º comprador não cai no 1º). Idempotente. Nas listas da captação
+ * o papel real do signatário escolhe a lista (conjuge, representante) e a posição
+ * conta dentro do papel (§18.13.2).
+ */
+export function caminhoCanonico(campo: string, signatario: { posicao: number; papel: string } | null): string {
+  const idx = signatario ? Math.max(0, signatario.posicao - 1) : 0;
+  let m = /^(proponente|contraparte)\.([a-z_]+)$/.exec(campo);
+  if (m) return `${m[1] === "proponente" ? "compradores" : "vendedores"}[${idx}].${CAMPO_CANONICO[m[2]!] ?? m[2]}`;
+  m = /^([a-z]+)\[\]\.([a-z_0-9]+)$/.exec(campo);
+  if (m) return `${(signatario && LISTA_DO_PAPEL[signatario.papel]) || m[1]}[${idx}].${m[2]}`;
+  m = /^(compradores|vendedores)\[(\d+)\]\.([a-z_0-9]+)$/.exec(campo);
+  if (m) return `${m[1]}[${m[2]}].${CAMPO_CANONICO[m[3]!] ?? m[3]}`;
+  return campo;
+}
+
+const semIndice = (path: string): string => path.replace(/\[\d+\]/g, "[]");
+
+/** `comprador:2` (a `parteRef` gravada) de volta a posição + papel; só para quem tem `parteRef` de pessoa. */
+function signatarioDaParteRef(parteRef: string): { posicao: number; papel: string } | null {
+  const m = /^([a-z_]+):(\d+)$/.exec(parteRef);
+  return m ? { papel: m[1]!, posicao: Number(m[2]) } : null;
+}
+
 const rotuloDoPapel = (papel: string): string => (papel === "proprietario" ? "proprietário" : papel.replace(/_/g, " "));
 
 function textoDaPergunta(p: Pendencia, obrigatorios?: CampoObrigatorio[]): string {
@@ -325,7 +357,7 @@ export function proximaPergunta(
     const chave = chaveDaPergunta(p);
     if (jaPerguntado.has(chave)) continue;
     const parteRef = p.signatario ? `${p.signatario.papel}:${p.signatario.posicao}` : primeiroSegmento(p.campo);
-    const path = p.signatario ? p.campo.replace(/\[\]/g, `[${p.signatario.posicao - 1}]`) : p.campo;
+    const path = caminhoCanonico(p.campo, p.signatario);
     return { pergunta: textoDaPergunta(p, obrigatorios), aguarda: { parteRef, path }, chave };
   }
   return null;
@@ -342,7 +374,7 @@ export function registrarPergunta(f: FluxoFormularioV2, p: PerguntaDeCampo, agor
 }
 
 export type RespostaAoCampo =
-  | { tipo: "preenche"; patch: PatchV2; campo: CampoAguardado }
+  | { tipo: "preenche"; patch: PatchV2 | PatchDeCaptacao; campo: CampoAguardado }
   /** Parece resposta ao campo, mas o valor não vale: pede de novo, sem "anotei". */
   | { tipo: "invalida"; reply: string }
   /** Não é resposta ao campo: o turno segue o caminho normal (o fluxo não sequestra). */
@@ -352,61 +384,69 @@ const LIBERAR: RespostaAoCampo = { tipo: "liberar" };
 const SO_DIGITOS = (s: string): string => s.replace(/\D/g, "");
 const LETRAS_DE_SOBRA = 20;
 
-function tipoDoCampo(path: string, obrigatorios?: CampoObrigatorio[]): TipoDeCampo {
-  const def = obrigatorios?.find((o) => o.chave === path);
+function tipoDoCampo(path: string, def: CampoObrigatorio | undefined): TipoDeCampo {
   if (def) return def.tipoCampo;
   switch (ultimoSegmento(path)) {
     case "documento": case "cpf": case "cnpj": return "cpf_cnpj";
     case "email": return "email";
-    case "telefone": case "mobile_phone": return "telefone";
+    case "telefone": case "telefone1": case "telefone2": case "mobile_phone": return "telefone";
     case "nascimento": case "data_nascimento": case "data_entrada": return "data";
     case "valor": case "sinal": return "moeda";
-    case "prazo_meses": return "numero";
+    case "prazo_meses": case "percentual": return "numero";
     case "modalidade": return "opcao";
     default: return "texto";
   }
 }
 
 type Destino =
-  | { secao: "compradores" | "vendedores"; indice: number; campo: string }
+  | { secao: "compradores" | "vendedores" | "proprietarios" | "conjuges" | "representantes"; indice: number; campo: string }
   | { secao: "imovel" | "negociacao" | "corretor"; campo: string }
   | { secao: "observacoes" };
 
-/** Chave do catálogo do servidor (`proponente.documento`) ou caminho do estado (`compradores[1].cpf`). */
+/** A resposta da captação (listas por pessoa, na ordem do papel). Traduzir posição em `id` é do condutor. */
+export interface PatchDeCaptacao {
+  proprietarios?: Array<Record<string, unknown>>;
+  conjuges?: Array<Record<string, unknown>>;
+  representantes?: Array<Record<string, unknown>>;
+  imovel?: Record<string, unknown>;
+}
+
+/** Só o caminho do estado (já canônico): `compradores[1].cpf`, `proprietarios[0].cpf`, `negociacao.valor`. */
 function destinoDoCampo(path: string): Destino | null {
   if (path === "observacoes") return { secao: "observacoes" };
-  let m = /^(proponente|contraparte)\.([a-z_]+)$/.exec(path);
-  if (m) return { secao: m[1] === "proponente" ? "compradores" : "vendedores", indice: 0, campo: m[2]! };
-  m = /^(compradores|vendedores)\[(\d+)\]\.([a-z_]+)$/.exec(path);
-  if (m) return { secao: m[1] as "compradores" | "vendedores", indice: Number(m[2]), campo: m[3]! };
+  let m = /^(compradores|vendedores|proprietarios|conjuges|representantes)\[(\d+)\]\.([a-z_0-9]+)$/.exec(path);
+  if (m) return { secao: m[1] as "compradores", indice: Number(m[2]), campo: m[3]! };
   m = /^(imovel|negociacao|corretor)\.([a-z_]+)$/.exec(path);
-  if (m) return { secao: m[1] as "imovel" | "negociacao" | "corretor", campo: m[2]! };
+  if (m) return { secao: m[1] as "imovel", campo: m[2]! };
   return null;
 }
 
 const CAMPOS_DA_PARTE: Record<string, string> = {
-  nome: "nome", email: "email", telefone: "telefone", cpf: "cpf", cnpj: "cnpj",
-  nascimento: "data_nascimento", data_nascimento: "data_nascimento", documento: "documento",
+  nome: "nome", email: "email", telefone: "telefone", cpf: "cpf", cnpj: "cnpj", data_nascimento: "data_nascimento",
 };
 const CAMPOS_DA_NEGOCIACAO = new Set(["valor", "sinal", "modalidade", "prazo_meses", "data_entrada"]);
-const CAMPOS_DO_IMOVEL = new Set(["endereco", "tipo", "matricula", "cartorio"]);
 const CAMPOS_DO_CORRETOR = new Set(["nome", "creci", "mobile_phone", "email"]);
 
-function patchDe(d: Destino, valor: string | number): PatchV2 | null {
+function patchDe(d: Destino, valor: string | number): PatchV2 | PatchDeCaptacao | null {
   switch (d.secao) {
     case "observacoes":
       return { observacoes: String(valor) };
     case "compradores":
-    case "vendedores": {
-      const chave = CAMPOS_DA_PARTE[d.campo];
-      if (!chave) return null;
-      const k = chave === "documento" ? (SO_DIGITOS(String(valor)).length === 14 ? "cnpj" : "cpf") : chave;
+    case "vendedores":
+    case "proprietarios":
+    case "conjuges":
+    case "representantes": {
+      const pessoa = d.secao === "compradores" || d.secao === "vendedores";
+      // A captação tem mais campos por pessoa (rg, profissão...); o servidor valida.
+      let k = pessoa ? CAMPOS_DA_PARTE[d.campo] : d.campo;
+      if (!k) return null;
+      if (k === "cpf" && SO_DIGITOS(String(valor)).length === 14) k = "cnpj";
       const lista: Array<Record<string, unknown>> = Array.from({ length: d.indice }, () => ({}));
       lista.push({ [k]: valor });
-      return { [d.secao]: lista } as PatchV2;
+      return { [d.secao]: lista } as PatchV2 | PatchDeCaptacao;
     }
     case "imovel":
-      return CAMPOS_DO_IMOVEL.has(d.campo) ? { imovel: { [d.campo]: valor } } : null;
+      return { imovel: { [d.campo]: valor } };
     case "negociacao":
       return CAMPOS_DA_NEGOCIACAO.has(d.campo) ? ({ negociacao: { [d.campo]: valor } } as PatchV2) : null;
     case "corretor":
@@ -414,7 +454,15 @@ function patchDe(d: Destino, valor: string | number): PatchV2 | null {
   }
 }
 
-const SAUDACAO = /^(oi|ola|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|ok|sim|nao|cancelar|cancela)\b/;
+/**
+ * Comando, verbo de fluxo, sim/não e saudação NUNCA são resposta de campo: "espera",
+ * "manda o link", "cancela", "para". Casado no começo da fala, em palavra inteira
+ * ("Pereira" e "Paraná" seguem valendo como nome e endereço).
+ */
+const RECUSA_DE_CAMPO =
+  /^(oi|ola|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|tchau|ok|certo|beleza|blz|claro|sim|nao|talvez|cancela|cancelar|cancele|para|pare|parar|espera|espere|aguarda|aguarde|pera|peraí|um (?:segundo|minuto|momento)|manda|mande|envia|envie|deixa|deixe|volta|voltar|esquece|esqueca|desisto|chega|continua|continue|segue|siga|refaz|refaca|apaga|apague|exclui|exclua|mostra|mostre|abre|abra|cria|crie|pode|vai|vamos|me (?:manda|mande|envia|envie|mostra|mostre|diz|diga|fala|fale))\b/;
+
+const PARECE_DINHEIRO = /r\$|\d\.\d{3}|\d,\d{1,2}\b|\bmil\b|milhao|milhoes|\d\s?k\b|^\s*\d{4,}\s*$/;
 
 type Leitura = { valor: string | number } | { invalido: string } | null;
 
@@ -440,6 +488,8 @@ function lerValor(tipo: TipoDeCampo, texto: string, def: CampoObrigatorio | unde
     }
     case "moeda": {
       if (!/\d/.test(t) || t.length > 60 || t.includes("?")) return null;
+      // Precisa PARECER dinheiro: "são 2 compradores" não é valor.
+      if (!PARECE_DINHEIRO.test(normalizar(t))) return null;
       const v = valoresNoTexto(t);
       if (v.length === 1 && v[0]! > 0) return { valor: v[0]! };
       return t.length <= 30 ? { invalido: "Não entendi o valor. Me manda em reais, por exemplo 520 mil ou R$ 520.000,00?" } : null;
@@ -474,7 +524,7 @@ function lerValor(tipo: TipoDeCampo, texto: string, def: CampoObrigatorio | unde
       return casam.length === 1 ? { valor: casam[0]!.id } : null;
     }
     case "texto": {
-      if (!t || t.length > 120 || t.includes("?") || SAUDACAO.test(normalizar(t))) return null;
+      if (!t || t.length > 120 || t.includes("?")) return null;
       if (folha === "nome" && (/\d/.test(t) || t.split(/\s+/).length > 10)) return null;
       return { valor: t };
     }
@@ -488,16 +538,19 @@ function lerValor(tipo: TipoDeCampo, texto: string, def: CampoObrigatorio | unde
  * a conversa (pergunta fora do assunto segue o caminho normal).
  */
 export function lerRespostaAoCampo(f: FluxoFormularioV2, texto: string, obrigatorios?: CampoObrigatorio[]): RespostaAoCampo {
-  const campo = f.aguardaCampo;
-  if (!campo) return LIBERAR;
-  const destino = destinoDoCampo(campo.path);
+  const aguarda = f.aguardaCampo;
+  if (!aguarda) return LIBERAR;
+  if (RECUSA_DE_CAMPO.test(normalizar(texto))) return LIBERAR;
+  // Checkpoint antigo ou de outra origem: a chave do catálogo é convertida aqui, com a posição da `parteRef`.
+  const path = caminhoCanonico(aguarda.path, signatarioDaParteRef(aguarda.parteRef));
+  const destino = destinoDoCampo(path);
   if (!destino) return LIBERAR;
-  const def = obrigatorios?.find((o) => o.chave === campo.path);
-  const leitura = lerValor(tipoDoCampo(campo.path, obrigatorios), texto, def, ultimoSegmento(campo.path));
+  const def = obrigatorios?.find((o) => semIndice(caminhoCanonico(o.chave, null)) === semIndice(path));
+  const leitura = lerValor(tipoDoCampo(path, def), texto, def, ultimoSegmento(path));
   if (!leitura) return LIBERAR;
   if ("invalido" in leitura) return { tipo: "invalida", reply: leitura.invalido };
   const patch = patchDe(destino, leitura.valor);
-  return patch ? { tipo: "preenche", patch, campo } : LIBERAR;
+  return patch ? { tipo: "preenche", patch, campo: { parteRef: aguarda.parteRef, path } } : LIBERAR;
 }
 
 // ─── Retomada de rascunho ────────────────────────────────────────────────
@@ -599,8 +652,10 @@ export function textoDaOferta(itens: RascunhoAberto[], opts: { truncado: boolean
     );
   }
   const linhas = itens.slice(0, MAX_NA_OFERTA).map((i, n) => `${n + 1}) ${i.resumo} (${quemCasou(i.casouPor)})`);
+  const restam = itens.length - MAX_NA_OFERTA;
   return (
     `Você já tem rascunhos em aberto que combinam:${aviso}\n${linhas.join("\n")}\n` +
+    (restam > 0 ? `...e mais ${restam}. Se não for um destes, diga o cliente ou o imóvel.\n` : "") +
     "Responda com o número do que quer continuar, ou *NÃO* para criar outro."
   );
 }

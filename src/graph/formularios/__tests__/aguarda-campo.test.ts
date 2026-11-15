@@ -34,7 +34,7 @@ describe("proximaPergunta: uma coisa por vez, sem repetir", () => {
   it("pergunta só a primeira pendência e diz qual campo a resposta curta vai preencher", () => {
     const p = proximaPergunta(faltando, new Set());
     expect(p).not.toBeNull();
-    expect(p!.aguarda).toEqual({ parteRef: "proponente", path: "proponente.documento" });
+    expect(p!.aguarda).toEqual({ parteRef: "proponente", path: "compradores[0].cpf" });
     expect(p!.pergunta).toMatch(/CPF/i);
     // uma pergunta só: não lista as outras pendências
     expect(p!.pergunta).not.toMatch(/e-mail/i);
@@ -44,7 +44,7 @@ describe("proximaPergunta: uma coisa por vez, sem repetir", () => {
   it("não repete a que já foi feita: segue para a próxima", () => {
     const feitas = new Set([chaveDaPergunta(faltando[0]!)]);
     const p = proximaPergunta(faltando, feitas);
-    expect(p!.aguarda.path).toBe("proponente.email");
+    expect(p!.aguarda.path).toBe("compradores[0].email");
     const feitas2 = new Set([chaveDaPergunta(faltando[0]!), chaveDaPergunta(faltando[1]!)]);
     expect(proximaPergunta(faltando, feitas2)!.aguarda.path).toBe("negociacao.valor");
   });
@@ -96,7 +96,7 @@ describe("antes de existir rascunho: aguardaCampo desde o primeiro turno", () =>
   it("registrarPergunta grava só caminho e referência no fluxo, nunca valor", () => {
     const p = proximaPergunta([pend("proponente.documento")], new Set())!;
     const f = registrarPergunta(fluxo(), p);
-    expect(f.aguardaCampo).toEqual({ parteRef: "proponente", path: "proponente.documento" });
+    expect(f.aguardaCampo).toEqual({ parteRef: "proponente", path: "compradores[0].cpf" });
     expect(f.perguntados).toEqual([chaveDaPergunta(pend("proponente.documento"))]);
     expect(JSON.stringify(f)).not.toMatch(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/);
   });
@@ -107,7 +107,7 @@ describe("antes de existir rascunho: aguardaCampo desde o primeiro turno", () =>
     const r = lerRespostaAoCampo(f, CPF_VALIDO);
     expect(r).toEqual({
       tipo: "preenche",
-      campo: { parteRef: "proponente", path: "proponente.documento" },
+      campo: { parteRef: "proponente", path: "compradores[0].cpf" },
       patch: { compradores: [{ cpf: "12345678909" }] },
     });
   });
@@ -300,5 +300,142 @@ describe("textoDaOferta: continuar o rascunho aberto (botões)", () => {
 
   it("sem itens: texto vazio, nada a oferecer", () => {
     expect(textoDaOferta([], { truncado: false })).toBe("");
+  });
+});
+
+describe("C1: o caminho do campo aguardado tem UMA forma, a do estado", () => {
+  const comprador2 = pend("proponente.documento", { signatario: { posicao: 2, papel: "comprador" } });
+
+  it("o CPF do 2º comprador vira compradores[1].cpf (a chave do catálogo é convertida na entrada)", () => {
+    const p = proximaPergunta([comprador2], new Set())!;
+    expect(p.aguarda).toEqual({ parteRef: "comprador:2", path: "compradores[1].cpf" });
+    expect(p.pergunta).toMatch(/comprador 2/i);
+  });
+
+  it("a resposta grava em compradores[1] e NÃO toca compradores[0]", () => {
+    const f = registrarPergunta(fluxo(), proximaPergunta([comprador2], new Set())!);
+    const r = lerRespostaAoCampo(f, CPF_VALIDO);
+    expect(r.tipo).toBe("preenche");
+    if (r.tipo !== "preenche") return;
+    const compradores = (r.patch as { compradores?: Array<Record<string, unknown>> }).compradores!;
+    expect(compradores).toHaveLength(2);
+    expect(compradores[0]).toEqual({});
+    expect(compradores[1]).toEqual({ cpf: "12345678909" });
+  });
+
+  it("checkpoint com a chave do catálogo e parteRef com posição também grava na posição certa", () => {
+    const r = lerRespostaAoCampo(comAguarda("comprador:2", "proponente.documento"), CPF_VALIDO);
+    expect(r).toMatchObject({ tipo: "preenche", patch: { compradores: [{}, { cpf: "12345678909" }] } });
+  });
+
+  it("vendedor 3 (papel proprietario) vira vendedores[2]; contraparte sem signatário vira vendedores[0]", () => {
+    const p = proximaPergunta([pend("contraparte.email", { signatario: { posicao: 3, papel: "vendedor" } })], new Set())!;
+    expect(p.aguarda.path).toBe("vendedores[2].email");
+    expect(proximaPergunta([pend("contraparte.email")], new Set())!.aguarda.path).toBe("vendedores[0].email");
+  });
+
+  it("CNPJ no campo cpf do comprador 2 vai como cnpj", () => {
+    const r = lerRespostaAoCampo(comAguarda("comprador:2", "compradores[1].cpf"), CNPJ_VALIDO);
+    expect(r).toMatchObject({ tipo: "preenche", patch: { compradores: [{}, { cnpj: "11222333000181" }] } });
+  });
+
+  it("o tipo do campo vem do options mesmo com o índice de outra posição", () => {
+    const obrigatorios: CampoObrigatorio[] = [
+      { chave: "proponente.nascimento", rotulo: "Nascimento", grupo: "Comprador", esteira: "ambas", tipoCampo: "data" },
+    ];
+    const r = lerRespostaAoCampo(comAguarda("comprador:2", "compradores[1].data_nascimento"), "31/01/1990", obrigatorios);
+    expect(r).toMatchObject({ tipo: "preenche", patch: { compradores: [{}, { data_nascimento: "1990-01-31" }] } });
+  });
+});
+
+describe("I4: comando, verbo de fluxo, sim/não e saudação não viram resposta de campo livre", () => {
+  it.each([
+    "espera um pouco",
+    "manda o link",
+    "cancela",
+    "cancelar",
+    "para",
+    "sim",
+    "não",
+    "ok",
+    "bom dia",
+    "pera aí",
+    "me manda o resumo",
+    "deixa pra lá",
+  ])("%s libera em campo de texto", (texto) => {
+    for (const path of ["corretor.nome", "imovel.endereco", "observacoes", "corretor.creci"]) {
+      expect(lerRespostaAoCampo(comAguarda(path.split(".")[0]!, path), texto).tipo).toBe("liberar");
+    }
+  });
+
+  it("nome que só começa parecido continua valendo (Pereira, Paraná)", () => {
+    expect(lerRespostaAoCampo(comAguarda("corretor", "corretor.nome"), "Pereira Teste")).toMatchObject({ tipo: "preenche" });
+    expect(lerRespostaAoCampo(comAguarda("imovel", "imovel.endereco"), "Paraná, 100")).toMatchObject({ tipo: "preenche" });
+  });
+});
+
+describe("I5: captação, caminho proprietarios[n].campo com a posição dentro do papel", () => {
+  it("proprietarios[1].cpf preenche a 2ª posição da lista e deixa a 1ª quieta", () => {
+    const r = lerRespostaAoCampo(comAguarda("proprietario:2", "proprietarios[1].cpf"), CPF_VALIDO);
+    expect(r).toMatchObject({
+      tipo: "preenche",
+      campo: { parteRef: "proprietario:2", path: "proprietarios[1].cpf" },
+    });
+    if (r.tipo !== "preenche") return;
+    const lista = (r.patch as { proprietarios?: Array<Record<string, unknown>> }).proprietarios!;
+    expect(lista[0]).toEqual({});
+    expect(lista[1]).toEqual({ cpf: "12345678909" });
+  });
+
+  it("conjuge e representante têm a própria lista, com posição dentro do papel", () => {
+    const c = lerRespostaAoCampo(comAguarda("conjuge:1", "conjuges[0].cpf"), CPF_VALIDO);
+    expect(c).toMatchObject({ tipo: "preenche", patch: { conjuges: [{ cpf: "12345678909" }] } });
+    const r = lerRespostaAoCampo(comAguarda("representante:2", "representantes[1].email"), "rep@exemplo.com");
+    expect(r).toMatchObject({ tipo: "preenche", patch: { representantes: [{}, { email: "rep@exemplo.com" }] } });
+  });
+
+  it("a pendência da captação (proprietarios[].cpf + signatário) vira o caminho indexado pelo papel", () => {
+    const p = proximaPergunta([pend("proprietarios[].cpf", { signatario: { posicao: 2, papel: "conjuge" } })], new Set())!;
+    expect(p.aguarda).toEqual({ parteRef: "conjuge:2", path: "conjuges[1].cpf" });
+  });
+
+  it("campo do imóvel da captação (imovel.matricula) também preenche", () => {
+    expect(lerRespostaAoCampo(comAguarda("imovel", "imovel.matricula"), "12345")).toMatchObject({
+      tipo: "preenche", patch: { imovel: { matricula: "12345" } },
+    });
+  });
+
+  it("CPF inválido do proprietário pede de novo", () => {
+    expect(lerRespostaAoCampo(comAguarda("proprietario:1", "proprietarios[0].cpf"), "111.111.111-11").tipo).toBe("invalida");
+  });
+});
+
+describe("M7: valor em reais exige marca de dinheiro", () => {
+  it.each(["são 2 compradores", "quero 3 vias", "moro no 12", "2"])("%s não é valor", (texto) => {
+    expect(lerRespostaAoCampo(comAguarda("negociacao", "negociacao.valor"), texto).tipo).toBe("liberar");
+  });
+
+  it.each([
+    ["R$ 520.000,00", 520000],
+    ["520 mil", 520000],
+    ["1.500.000", 1500000],
+    ["520000", 520000],
+    ["1,5 milhão", 1500000],
+  ])("%s é valor", (texto, valor) => {
+    expect(lerRespostaAoCampo(comAguarda("negociacao", "negociacao.valor"), texto)).toMatchObject({
+      tipo: "preenche", patch: { negociacao: { valor } },
+    });
+  });
+});
+
+describe("M8: a oferta diz quantos ficaram de fora", () => {
+  it("mais de 5 rascunhos: lista 5 e diz 'e mais N'", () => {
+    const itens = Array.from({ length: 8 }, (_, n) => ({
+      id: `p${n}`, codigo: `PROP-${n}`, resumo: `PROP-${n} — Proposta`, casouPor: ["cliente" as const],
+    }));
+    const t = textoDaOferta(itens, { truncado: false });
+    expect(t).toMatch(/e mais 3/);
+    expect(t).not.toMatch(/6\) /);
+    expect(derivarInterativo(t)?.tipo).toBe("lista");
   });
 });
