@@ -112,6 +112,7 @@ import {
   textoSemLeituraDeMidia,
   textoDeRecusa,
 } from "./prompt";
+import { houveEscritaNoTurno } from "./escrita-do-turno";
 import { corrigirVocativo, humanizarCodigosInternos, limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
 import {
@@ -2270,7 +2271,8 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
     podeCriar: modoDeCriacao(state.identity, state.policy) === "disponivel",
     podeEnviar: podeEscrever(state.identity) && state.policy.includes("proposal.send"),
     // W46: "ajusto o complemento" sem tool de escrita no turno é promessa vazia.
-    houveEscrita: (state.toolLog ?? []).some((t) => buscarNoRegistro(t.name)?.tipo === "escrita"),
+    // Só conta a escrita que não falhou (recusada, descartada, "falhou"): ver `escrita-do-turno`.
+    houveEscrita: houveEscritaNoTurno(state.toolLog ?? [], (nome) => buscarNoRegistro(nome)?.tipo === "escrita"),
   });
   if (trava.travou) {
     console.warn(`[compose] afirmação de criação/envio sem escrita em ${state.identity.orgId}`);

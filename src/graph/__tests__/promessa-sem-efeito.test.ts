@@ -180,3 +180,32 @@ describe("W46: 'complemento é apartamento 1' na revisão da proposta vai para o
     expect(JSON.stringify((r.fluxo as { dados: unknown }).dados)).not.toContain("complemento");
   });
 });
+
+const { houveEscritaNoTurno } = await import("../escrita-do-turno");
+const { TOOL_PROPOR_FORM, buscarNoRegistro } = await import("../tools");
+
+describe("houveEscritaNoTurno: tool de escrita que falhou não conta", () => {
+  const ehEscrita = (n: string) => buscarNoRegistro(n)?.tipo === "escrita";
+
+  it("a escrita registrada (proposta ou feita) conta", () => {
+    expect(houveEscritaNoTurno([{ name: TOOL_PROPOR_FORM, outcome: "proposta" }], ehEscrita)).toBe(true);
+    expect(houveEscritaNoTurno([{ name: TOOL_PROPOR_FORM, outcome: "criado" }], ehEscrita)).toBe(true);
+  });
+
+  it.each(["falhou", "modulo_desligado", "descartada", "capability_negada", "identidade_nao_escreve", "nao_oferecida", "tipo_invalido", "fluxo_em_andamento", "negocio_existente"])(
+    "escrita com desfecho '%s' não conta",
+    (outcome) => {
+      expect(houveEscritaNoTurno([{ name: TOOL_PROPOR_FORM, outcome }], ehEscrita)).toBe(false);
+    }
+  );
+
+  it("leitura não conta, e uma escrita boa ao lado de uma falha ainda conta", () => {
+    expect(houveEscritaNoTurno([{ name: "listar_negocios", outcome: "ok" }], ehEscrita)).toBe(false);
+    expect(houveEscritaNoTurno([{ name: TOOL_PROPOR_FORM, outcome: "falhou" }, { name: TOOL_PROPOR_FORM, outcome: "criado" }], ehEscrita)).toBe(true);
+  });
+
+  it("com a escrita falha, a promessa vazia é travada", () => {
+    const houveEscrita = houveEscritaNoTurno([{ name: TOOL_PROPOR_FORM, outcome: "falhou" }], ehEscrita);
+    expect(travarCriacaoFalsa("Perfeito, ajusto o complemento.", { ...SEM_ESCRITA, houveEscrita }).travou).toBe(true);
+  });
+});
