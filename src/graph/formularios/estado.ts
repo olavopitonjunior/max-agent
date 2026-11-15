@@ -17,7 +17,7 @@ export type EtapaV2 = "entender" | "compor" | "ficha" | "revisar" | "assinatura"
 export interface CampoAguardado {
   /** Posição + papel da parte (`proponente:1`) ou `imovel`/`negociacao`/`corretor`. Nunca nome. */
   parteRef: string;
-  /** Caminho do campo (`compradores[0].cpf`, `negociacao.valor`). */
+  /** O campo como o servidor o nomeia no `faltando` (`proponente.documento`, `negociacao.valor`, `proprietarios[1].cpf`). */
   path: string;
 }
 

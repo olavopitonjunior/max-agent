@@ -19,9 +19,13 @@
  */
 
 import { nomeDoAgente } from "@/lib/deploy-profile";
+import { RE_CNPJ, RE_CPF } from "@/lib/pii";
+import { cnpjValido, lerItemDaCaptacao } from "../captacao";
+import { cpfValido, valoresNoTexto } from "../credito";
 import { TEXTO_ESCRITA_INCERTA, type DadosDaProposta, type DepsDoFluxo, type Fluxo, type RespostaDoServidor } from "../fluxos";
-import type { OptionsV1, OptionsV2, PatchV2, Pendencia } from "./contrato";
-import type { FluxoFormularioV2 } from "./estado";
+import { normalizar } from "../tools";
+import type { CampoObrigatorio, OptionsV1, OptionsV2, PatchV2, Pendencia, TipoDeCampo } from "./contrato";
+import type { CampoAguardado, FluxoFormularioV2 } from "./estado";
 import { ehFluxoDesligado, rebaixarParaV1 } from "./selecao";
 
 type DepsAcao = Pick<DepsDoFluxo, "acao">;
@@ -240,4 +244,363 @@ export function textoDoParcial(r: ResultadoParcial, ctx: { codigo?: string }): s
     case "indisponivel":
       return "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
   }
+}
+
+// ─── aguardaCampo desde o primeiro turno e retomada de rascunho (T6) ─────
+
+export interface PerguntaDeCampo {
+  pergunta: string;
+  aguarda: CampoAguardado;
+  /** Identifica a pergunta para não repeti-la (`perguntados`). Só caminho e posição. */
+  chave: string;
+}
+
+/** Posição + papel + campo: a mesma chave em duas pessoas são duas perguntas. */
+export function chaveDaPergunta(p: Pendencia): string {
+  return p.signatario ? `${p.signatario.papel}:${p.signatario.posicao}:${p.campo}` : p.campo;
+}
+
+/** Antes de existir rascunho o que falta é o que a org obriga (o `options` sem alvo não traz `faltando`). */
+export function pendenciasIniciais(obrigatorios: CampoObrigatorio[]): Pendencia[] {
+  return obrigatorios.map((o) => ({ signatario: null, campo: o.chave, motivo: "obrigatorio_da_org" }));
+}
+
+const SUJEITO: Record<string, string> = {
+  proponente: "do proponente",
+  contraparte: "da outra parte",
+  imovel: "do imóvel",
+  negociacao: "da negociação",
+  corretor: "do corretor",
+};
+const O_QUE: Record<string, string> = {
+  documento: "o CPF (ou CNPJ)",
+  cpf: "o CPF",
+  cnpj: "o CNPJ",
+  email: "o e-mail",
+  telefone: "o telefone com DDD",
+  mobile_phone: "o celular com DDD",
+  nome: "o nome completo",
+  nascimento: "a data de nascimento",
+  data_nascimento: "a data de nascimento",
+  valor: "o valor",
+  sinal: "o valor do sinal",
+  modalidade: "a modalidade",
+  prazo_meses: "o prazo em meses",
+  data_entrada: "a data de entrada",
+  endereco: "o endereço",
+  tipo: "o tipo",
+  matricula: "o número da matrícula",
+  cartorio: "o cartório",
+  creci: "o CRECI",
+};
+
+const primeiroSegmento = (campo: string): string => campo.split(/[.[]/)[0]!;
+const ultimoSegmento = (campo: string): string => campo.split(".").pop()!.replace(/\[\d*\]/g, "");
+const rotuloDoPapel = (papel: string): string => (papel === "proprietario" ? "proprietário" : papel.replace(/_/g, " "));
+
+function textoDaPergunta(p: Pendencia, obrigatorios?: CampoObrigatorio[]): string {
+  const def = obrigatorios?.find((o) => o.chave === p.campo);
+  const quem = p.signatario ? ` do ${rotuloDoPapel(p.signatario.papel)} ${p.signatario.posicao}` : "";
+  if (def) {
+    const opcoes = def.opcoes?.length ? ` Opções: ${def.opcoes.map((x) => x.rotulo).join(", ")}.` : "";
+    return `Qual a informação "${def.rotulo}"${quem || (def.grupo ? ` (${def.grupo})` : "")}?${opcoes}`;
+  }
+  const o = O_QUE[ultimoSegmento(p.campo)] ?? `o campo ${ultimoSegmento(p.campo)}`;
+  const sujeito = SUJEITO[primeiroSegmento(p.campo)];
+  return `Qual ${o}${quem || (sujeito ? ` ${sujeito}` : "")}?`;
+}
+
+/**
+ * A próxima (e única) pergunta: a primeira pendência que ainda não foi feita.
+ * O mínimo de testemunhas não é campo, é da etapa de assinatura. `aguarda` diz
+ * qual campo a resposta curta seguinte preenche.
+ */
+export function proximaPergunta(
+  faltando: Pendencia[],
+  jaPerguntado: ReadonlySet<string>,
+  obrigatorios?: CampoObrigatorio[]
+): PerguntaDeCampo | null {
+  for (const p of faltando) {
+    if (p.motivo === "minimo_de_testemunhas") continue;
+    const chave = chaveDaPergunta(p);
+    if (jaPerguntado.has(chave)) continue;
+    const parteRef = p.signatario ? `${p.signatario.papel}:${p.signatario.posicao}` : primeiroSegmento(p.campo);
+    const path = p.signatario ? p.campo.replace(/\[\]/g, `[${p.signatario.posicao - 1}]`) : p.campo;
+    return { pergunta: textoDaPergunta(p, obrigatorios), aguarda: { parteRef, path }, chave };
+  }
+  return null;
+}
+
+/** Grava no fluxo QUAL campo a próxima resposta preenche e que a pergunta foi feita. Sem valor, sem PII. */
+export function registrarPergunta(f: FluxoFormularioV2, p: PerguntaDeCampo, agora?: number): FluxoFormularioV2 {
+  return {
+    ...f,
+    aguardaCampo: p.aguarda,
+    perguntados: f.perguntados.includes(p.chave) ? f.perguntados : [...f.perguntados, p.chave],
+    ...(agora !== undefined ? { atualizadoEm: agora } : {}),
+  };
+}
+
+export type RespostaAoCampo =
+  | { tipo: "preenche"; patch: PatchV2; campo: CampoAguardado }
+  /** Parece resposta ao campo, mas o valor não vale: pede de novo, sem "anotei". */
+  | { tipo: "invalida"; reply: string }
+  /** Não é resposta ao campo: o turno segue o caminho normal (o fluxo não sequestra). */
+  | { tipo: "liberar" };
+
+const LIBERAR: RespostaAoCampo = { tipo: "liberar" };
+const SO_DIGITOS = (s: string): string => s.replace(/\D/g, "");
+const LETRAS_DE_SOBRA = 20;
+
+function tipoDoCampo(path: string, obrigatorios?: CampoObrigatorio[]): TipoDeCampo {
+  const def = obrigatorios?.find((o) => o.chave === path);
+  if (def) return def.tipoCampo;
+  switch (ultimoSegmento(path)) {
+    case "documento": case "cpf": case "cnpj": return "cpf_cnpj";
+    case "email": return "email";
+    case "telefone": case "mobile_phone": return "telefone";
+    case "nascimento": case "data_nascimento": case "data_entrada": return "data";
+    case "valor": case "sinal": return "moeda";
+    case "prazo_meses": return "numero";
+    case "modalidade": return "opcao";
+    default: return "texto";
+  }
+}
+
+type Destino =
+  | { secao: "compradores" | "vendedores"; indice: number; campo: string }
+  | { secao: "imovel" | "negociacao" | "corretor"; campo: string }
+  | { secao: "observacoes" };
+
+/** Chave do catálogo do servidor (`proponente.documento`) ou caminho do estado (`compradores[1].cpf`). */
+function destinoDoCampo(path: string): Destino | null {
+  if (path === "observacoes") return { secao: "observacoes" };
+  let m = /^(proponente|contraparte)\.([a-z_]+)$/.exec(path);
+  if (m) return { secao: m[1] === "proponente" ? "compradores" : "vendedores", indice: 0, campo: m[2]! };
+  m = /^(compradores|vendedores)\[(\d+)\]\.([a-z_]+)$/.exec(path);
+  if (m) return { secao: m[1] as "compradores" | "vendedores", indice: Number(m[2]), campo: m[3]! };
+  m = /^(imovel|negociacao|corretor)\.([a-z_]+)$/.exec(path);
+  if (m) return { secao: m[1] as "imovel" | "negociacao" | "corretor", campo: m[2]! };
+  return null;
+}
+
+const CAMPOS_DA_PARTE: Record<string, string> = {
+  nome: "nome", email: "email", telefone: "telefone", cpf: "cpf", cnpj: "cnpj",
+  nascimento: "data_nascimento", data_nascimento: "data_nascimento", documento: "documento",
+};
+const CAMPOS_DA_NEGOCIACAO = new Set(["valor", "sinal", "modalidade", "prazo_meses", "data_entrada"]);
+const CAMPOS_DO_IMOVEL = new Set(["endereco", "tipo", "matricula", "cartorio"]);
+const CAMPOS_DO_CORRETOR = new Set(["nome", "creci", "mobile_phone", "email"]);
+
+function patchDe(d: Destino, valor: string | number): PatchV2 | null {
+  switch (d.secao) {
+    case "observacoes":
+      return { observacoes: String(valor) };
+    case "compradores":
+    case "vendedores": {
+      const chave = CAMPOS_DA_PARTE[d.campo];
+      if (!chave) return null;
+      const k = chave === "documento" ? (SO_DIGITOS(String(valor)).length === 14 ? "cnpj" : "cpf") : chave;
+      const lista: Array<Record<string, unknown>> = Array.from({ length: d.indice }, () => ({}));
+      lista.push({ [k]: valor });
+      return { [d.secao]: lista } as PatchV2;
+    }
+    case "imovel":
+      return CAMPOS_DO_IMOVEL.has(d.campo) ? { imovel: { [d.campo]: valor } } : null;
+    case "negociacao":
+      return CAMPOS_DA_NEGOCIACAO.has(d.campo) ? ({ negociacao: { [d.campo]: valor } } as PatchV2) : null;
+    case "corretor":
+      return CAMPOS_DO_CORRETOR.has(d.campo) ? ({ corretor: { [d.campo]: valor } } as PatchV2) : null;
+  }
+}
+
+const SAUDACAO = /^(oi|ola|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|ok|sim|nao|cancelar|cancela)\b/;
+
+type Leitura = { valor: string | number } | { invalido: string } | null;
+
+function lerValor(tipo: TipoDeCampo, texto: string, def: CampoObrigatorio | undefined, folha: string): Leitura {
+  const t = texto.trim();
+  const letras = t.replace(/[\d\s.,/()+-]/g, "").length;
+  switch (tipo) {
+    case "cpf_cnpj": {
+      if (SO_DIGITOS(t).length < 6 || letras > LETRAS_DE_SOBRA) return null;
+      for (const m of t.match(new RegExp(RE_CNPJ.source, "g")) ?? []) if (cnpjValido(m)) return { valor: SO_DIGITOS(m) };
+      for (const m of t.match(new RegExp(RE_CPF.source, "g")) ?? []) if (cpfValido(m)) return { valor: SO_DIGITOS(m) };
+      return { invalido: "Esse CPF ou CNPJ não parece válido. Confira os números e me mande de novo?" };
+    }
+    case "telefone": {
+      const d = SO_DIGITOS(t);
+      if (d.length < 6 || letras > LETRAS_DE_SOBRA) return null;
+      return d.length >= 10 && d.length <= 13 ? { valor: d } : { invalido: "Esse telefone não parece completo. Me manda com DDD?" };
+    }
+    case "email": {
+      if (!t.includes("@")) return null;
+      const m = /[^\s@<>()]+@[^\s@<>()]+\.[a-z]{2,}/i.exec(t);
+      return m ? { valor: m[0] } : { invalido: "Esse e-mail não parece válido. Me manda de novo?" };
+    }
+    case "moeda": {
+      if (!/\d/.test(t) || t.length > 60 || t.includes("?")) return null;
+      const v = valoresNoTexto(t);
+      if (v.length === 1 && v[0]! > 0) return { valor: v[0]! };
+      return t.length <= 30 ? { invalido: "Não entendi o valor. Me manda em reais, por exemplo 520 mil ou R$ 520.000,00?" } : null;
+    }
+    case "data": {
+      if (!/\d/.test(t) || t.length > 30) return null;
+      const m = /(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/.exec(t);
+      if (m) {
+        const [d, mes, a] = [Number(m[1]), Number(m[2]), Number(m[3])] as [number, number, number];
+        const dt = new Date(Date.UTC(a, mes - 1, d));
+        if (dt.getUTCFullYear() === a && dt.getUTCMonth() === mes - 1 && dt.getUTCDate() === d) {
+          return { valor: `${a}-${String(mes).padStart(2, "0")}-${String(d).padStart(2, "0")}` };
+        }
+      }
+      return { invalido: "Não entendi a data. Me manda no formato dia/mês/ano, por exemplo 31/01/1990?" };
+    }
+    case "numero": {
+      const nums = t.match(/\d+/g);
+      if (!nums || nums.length !== 1 || t.length > 40 || t.includes("?")) return null;
+      return { valor: Number(nums[0]) };
+    }
+    case "opcao": {
+      const opcoes = def?.opcoes;
+      if (!opcoes?.length) return null;
+      const n = ` ${normalizar(t)} `;
+      const casam = opcoes.filter((o) => {
+        const cands = [o.id.replace(/_/g, " "), o.rotulo, o.rotulo.replace(/\s*\(.*?\)\s*/g, " ")]
+          .map((c) => normalizar(c))
+          .filter(Boolean);
+        return cands.some((c) => n.includes(` ${c} `));
+      });
+      return casam.length === 1 ? { valor: casam[0]!.id } : null;
+    }
+    case "texto": {
+      if (!t || t.length > 120 || t.includes("?") || SAUDACAO.test(normalizar(t))) return null;
+      if (folha === "nome" && (/\d/.test(t) || t.split(/\s+/).length > 10)) return null;
+      return { valor: t };
+    }
+  }
+}
+
+/**
+ * A resposta curta ("123.456.789-09") vale para o campo que o Max acabou de
+ * perguntar (`aguardaCampo`), mesmo antes de existir rascunho. Só se o texto
+ * PARECE resposta (formato do campo); senão `liberar`: o fluxo nunca sequestra
+ * a conversa (pergunta fora do assunto segue o caminho normal).
+ */
+export function lerRespostaAoCampo(f: FluxoFormularioV2, texto: string, obrigatorios?: CampoObrigatorio[]): RespostaAoCampo {
+  const campo = f.aguardaCampo;
+  if (!campo) return LIBERAR;
+  const destino = destinoDoCampo(campo.path);
+  if (!destino) return LIBERAR;
+  const def = obrigatorios?.find((o) => o.chave === campo.path);
+  const leitura = lerValor(tipoDoCampo(campo.path, obrigatorios), texto, def, ultimoSegmento(campo.path));
+  if (!leitura) return LIBERAR;
+  if ("invalido" in leitura) return { tipo: "invalida", reply: leitura.invalido };
+  const patch = patchDe(destino, leitura.valor);
+  return patch ? { tipo: "preenche", patch, campo } : LIBERAR;
+}
+
+// ─── Retomada de rascunho ────────────────────────────────────────────────
+
+export type MotivoDoCasamento = "cliente" | "imovel";
+
+export interface RascunhoAberto {
+  id: string;
+  codigo?: string;
+  resumo: string;
+  casouPor: MotivoDoCasamento[];
+}
+
+export interface RascunhosAbertos {
+  itens: RascunhoAberto[];
+  /** O servidor cortou a lista: "só esse" não pode ser afirmado. */
+  truncado: boolean;
+  /** 403 `fluxo_desligado`: o chamador fica no v1. */
+  desligado?: boolean;
+}
+
+const LIMITE_DA_PISTA = 80; // acima disso o servidor recusa (422)
+
+const pistaLimpa = (s: string | undefined): string | undefined => {
+  const t = s?.replace(/\s+/g, " ").trim().slice(0, LIMITE_DA_PISTA).trim();
+  return t ? t : undefined;
+};
+
+function motivos(v: unknown): MotivoDoCasamento[] {
+  return Array.isArray(v) ? v.filter((x): x is MotivoDoCasamento => x === "cliente" || x === "imovel") : [];
+}
+
+/**
+ * Rascunhos abertos do MESMO cliente e/ou do MESMO imóvel (`proposal.list` /
+ * `captacao.list` com os filtros do v2). Sem pista não consulta: a lista inteira
+ * não é "o mesmo cliente". O servidor decide o casamento; o Max só lê `casouPor`.
+ */
+export async function rascunhoAberto(
+  deps: DepsAcao,
+  alvo: "proposta" | "captacao",
+  pistas: { cliente?: string; imovel?: string }
+): Promise<RascunhosAbertos> {
+  const cliente = pistaLimpa(pistas.cliente);
+  const imovel = pistaLimpa(pistas.imovel);
+  if (!cliente && !imovel) return { itens: [], truncado: false };
+  const args: Record<string, unknown> = {
+    ...(cliente ? { cliente } : {}),
+    ...(imovel ? { imovel } : {}),
+    somente_abertas: true,
+  };
+  const r = await deps.acao(alvo === "proposta" ? "proposal.list" : "captacao.list", args);
+  if (ehFluxoDesligado(r)) return { itens: [], truncado: false, desligado: true };
+  if (!r || r.status !== 200) return { itens: [], truncado: false };
+  const brutos: unknown[] = Array.isArray(r.body?.items) ? r.body.items : [];
+  const itens: RascunhoAberto[] = [];
+  for (const b of brutos) {
+    if (alvo === "captacao") {
+      const i = lerItemDaCaptacao(b);
+      if (i) itens.push({ id: i.id, codigo: i.codigo, resumo: `${i.codigo} — ${i.nome}`, casouPor: i.casouPor ?? [] });
+      continue;
+    }
+    const o = (b && typeof b === "object" ? b : {}) as Record<string, unknown>;
+    const id = textoOuUndefined(o.id);
+    if (!id) continue;
+    const codigo = textoOuUndefined(o.codigo);
+    const titulo = textoOuUndefined(o.titulo);
+    itens.push({
+      id,
+      ...(codigo ? { codigo } : {}),
+      resumo: [codigo, titulo].filter(Boolean).join(" — ") || "Proposta sem título",
+      casouPor: motivos(o.casouPor),
+    });
+  }
+  return { itens, truncado: r.body?.truncado === true };
+}
+
+const MAX_NA_OFERTA = 5;
+
+function quemCasou(c: MotivoDoCasamento[]): string {
+  if (c.includes("cliente") && c.includes("imovel")) return "do mesmo cliente e do mesmo imóvel";
+  if (c.includes("cliente")) return "do mesmo cliente";
+  if (c.includes("imovel")) return "do mesmo imóvel";
+  return "em aberto";
+}
+
+/**
+ * A oferta de continuar. Um rascunho: SIM/NÃO (vira botões). Vários: lista
+ * numerada (vira lista) com NÃO para criar outro. O SIM/o número voltam como
+ * texto e são lidos por quem conduz o fluxo.
+ */
+export function textoDaOferta(itens: RascunhoAberto[], opts: { truncado: boolean }): string {
+  if (!itens.length) return "";
+  const aviso = opts.truncado ? " Olhei só os rascunhos mais recentes." : "";
+  if (itens.length === 1) {
+    const i = itens[0]!;
+    return (
+      `Você já tem um rascunho ${quemCasou(i.casouPor)}: ${i.resumo}.${aviso} Quer continuar nele? ` +
+      "Responda *SIM* para continuar ou *NÃO* para criar outro."
+    );
+  }
+  const linhas = itens.slice(0, MAX_NA_OFERTA).map((i, n) => `${n + 1}) ${i.resumo} (${quemCasou(i.casouPor)})`);
+  return (
+    `Você já tem rascunhos em aberto que combinam:${aviso}\n${linhas.join("\n")}\n` +
+    "Responda com o número do que quer continuar, ou *NÃO* para criar outro."
+  );
 }
