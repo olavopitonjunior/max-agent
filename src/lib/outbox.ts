@@ -198,6 +198,27 @@ export type EnqueueResult =
   | { status: "queued"; id: string; deliverAfter: Date }
   | { status: "duplicate"; id: string };
 
+/** Linha derrubada porque o autor a cancelou antes de sair (ex.: ficha do formulário, mensagem nova chegou). */
+export const MARCA_CANCELADO_PELO_AUTOR = "cancelado: o autor da linha a retirou antes do envio";
+
+/**
+ * Cancela as linhas AINDA pendentes cujo `dedupe_key` começa com `prefixo`
+ * (cancelamento por chave, D2 dos formulários: a ficha agendada some quando chega
+ * mensagem nova). Só `pending`: o que já foi reivindicado/enviado não é tocado.
+ * Prefixo vazio não faz nada (nunca varre a fila). Devolve quantas linhas derrubou.
+ */
+export async function cancelarPendentesPorPrefixo(prefixo: string): Promise<number> {
+  if (!prefixo) return 0;
+  const r = await query<{ id: string }>(
+    `UPDATE outbox
+        SET status = 'dropped', last_error = $2, send_started_at = NULL
+      WHERE status = 'pending' AND starts_with(dedupe_key, $1)
+      RETURNING id`,
+    [prefixo, MARCA_CANCELADO_PELO_AUTOR]
+  );
+  return r.length;
+}
+
 export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
   // O Newton só fala com usuário interno, e o transporte dele não tem
   // template nem janela: aviso para parte do negócio sairia como texto livre.

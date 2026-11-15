@@ -535,7 +535,7 @@ function rotuloDoCampo(campo: string): string {
 }
 
 /** Grupo e campo legíveis a partir do caminho do servidor. */
-function rotuloDoPath(path: string): { grupo: string; campo: string } {
+export function rotuloDoPath(path: string): { grupo: string; campo: string } {
   const parte = /^(compradores|vendedores|locatarios|locadores|testemunhas|proprietarios)\[(\d+)\]\.(conjuge\.)?(\w+)$/.exec(path);
   if (parte) {
     const base = `${PARTES[parte[1]!]} ${Number(parte[2]) + 1}`;
