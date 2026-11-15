@@ -55,7 +55,12 @@ export interface CampoLido {
   semPapel?: boolean;
 }
 
-export type MotivoNaoLido = "mime" | "heic" | "tamanho" | "ilegivel" | "sem_leitura" | "falha" | "processando";
+export type MotivoNaoLido =
+  | "mime" | "heic" | "tamanho" | "ilegivel" | "sem_leitura" | "falha" | "processando"
+  /** N4: sem a chave do cofre não há onde guardar o valor lido; reenviar não ajuda. */
+  | "sem_cofre"
+  /** M3: o servidor desligou o fluxo v2 (403 `fluxo_desligado`); o fluxo volta ao v1. */
+  | "fluxo_desligado";
 
 export type ResultadoDaMidia =
   | { tipo: "texto"; texto: string }
@@ -75,7 +80,7 @@ export type LeituraDeDocumento =
   | { ok: true; documentType: string; confianca: number; campos: CampoLido[]; ignorados: number }
   | {
       ok: false;
-      motivo: "politica" | "mime" | "heic" | "tamanho" | "ilegivel" | "indisponivel" | "processando" | "falha";
+      motivo: "politica" | "fluxo_desligado" | "mime" | "heic" | "tamanho" | "ilegivel" | "indisponivel" | "processando" | "falha";
     };
 
 export interface PedidoDeLeitura {
@@ -235,6 +240,11 @@ export function fraseDeNaoLido(motivo: MotivoNaoLido, kind: MidiaRecebida["kind"
         : textoSemLeituraDeMidia(null);
     case "falha":
       return "Não consegui abrir esse arquivo agora; tente de novo ou digite.";
+    case "sem_cofre":
+      // Reenviar não resolve: o problema não é o arquivo.
+      return "A leitura de documentos está indisponível agora. Digite os dados que eu confiro com você.";
+    case "fluxo_desligado":
+      return "Não leio documentos por aqui no momento. Pode digitar os dados que eu sigo daqui.";
     case "processando":
       // O prazo estourou, mas o servidor segue lendo (e cobra uma vez só, pela chave da mensagem).
       // Mandar a mesma foto de novo seria uma segunda leitura paga: a frase diz para esperar.
@@ -288,7 +298,7 @@ export async function lerMidia(
 
     // Fail-closed SEM custo: o valor lido só tem onde ficar com a chave do cofre. Sem ela, ler
     // (e pagar o OCR) para depois descartar o resultado seria gasto sem entrega.
-    if (!cofreDisponivel()) return naoLido("falha");
+    if (!cofreDisponivel()) return naoLido("sem_cofre");
 
     const b = await baixarSeguro(deps, m.ref);
     if (!b.ok) return naoLido(b.motivo);
@@ -330,6 +340,8 @@ export async function lerMidia(
     switch (leitura.motivo) {
       case "politica":
         return naoLido("sem_leitura");
+      case "fluxo_desligado":
+        return naoLido("fluxo_desligado");
       case "indisponivel":
         return naoLido("falha");
       default:

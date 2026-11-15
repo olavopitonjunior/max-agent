@@ -29,6 +29,7 @@ import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
 import { ocrTranscribeFallbackLigado } from "./captacao-flags";
 import { cancelarFicha } from "./formularios/pausa";
+import { rebaixarParaV1 } from "./formularios/selecao";
 import { camposSemPapel, derivarPapel, fraseDeNaoLido, lerMidia, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
 import {
   comoMensagemDaJanela,
@@ -223,6 +224,8 @@ interface TurnoCru {
   texto?: string; reply?: string; draft?: string;
   /** Texto lido de uma imagem (T9): DADO só deste turno, para a janela de extração. Nunca no state. */
   lidos?: DocumentoLido[];
+  /** v2 (N5): a mídia anexada à legenda não foi lida; a resposta do turno diz isso (nunca silêncio). */
+  avisoDeMidia?: string;
 }
 const TURNO_CRU = new Map<string, TurnoCru>();
 /** Põe (ou limpa, com `[]`) os documentos lidos deste turno. Para `runTurnCore` e para testes com `buildGraph`. */
@@ -1453,6 +1456,17 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
       toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
     };
   }
+  // N5: o anexo da legenda não foi lido. Nunca silêncio: a pessoa precisa saber.
+  const avisoDeMidia = TURNO_CRU.get(state.inbound.messageId)?.avisoDeMidia;
+  if (passo.silencioso && avisoDeMidia) {
+    return {
+      fluxo: passo.fluxo,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: avisoDeMidia }],
+      reply: avisoDeMidia,
+      ...(usage.length > 0 ? { usage } : {}),
+      toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
+    };
+  }
   if (passo.silencioso) {
     // v2 (T10): coletou e não responde; a ficha sai pelo outbox depois da pausa. `halt` pula o
     // `compact` e a memória (o turno tem dado de documento) e não gera texto. Nunca "anotei":
@@ -1470,13 +1484,14 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   }
   // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
   const daFicha = atual.kind === "credito" || atual.kind === "captacao";
+  const resposta = avisoDeMidia ? `${avisoDeMidia}\n\n${passo.reply}` : passo.reply;
   return {
     fluxo: passo.fluxo,
     messages: [
       { role: "user", content: daFicha ? `(resposta da ficha de ${atual.kind === "captacao" ? "captação" : "crédito"})` : userText },
-      { role: "assistant", content: passo.reply },
+      { role: "assistant", content: resposta },
     ],
-    reply: passo.reply,
+    reply: resposta,
     ...(usage.length > 0 ? { usage } : {}),
     // Sem os DADOS: o que a pessoa ditou (CPF, telefone) não vai para o log.
     toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
@@ -2410,9 +2425,12 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   const final = limitarTamanho(trava.texto);
   // Ficha de crédito pausada por uma pergunta: volta ao campo em aberto.
   const pausada = (state.fluxo?.kind === "credito" || state.fluxo?.kind === "captacao") && state.fluxo.pausado ? state.fluxo : null;
-  const saida = pausada
+  const corpo = pausada
     ? `${final.texto}\n\n${pausada.kind === "captacao" ? continuacaoCaptacao(pausada) : continuacaoCredito(pausada)}`
     : final.texto;
+  // N5: legenda + anexo não lido e o turno foi ao modelo (a pergunta saiu da ficha): o aviso vai junto.
+  const avisoDeMidia = TURNO_CRU.get(state.inbound.messageId)?.avisoDeMidia;
+  const saida = avisoDeMidia ? `${avisoDeMidia}\n\n${corpo}` : corpo;
 
   return {
     ...(pausada ? { fluxo: { ...pausada, pausado: false } } : {}),
@@ -3017,6 +3035,10 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
    * foto vai à leitura.
    */
   const daMidia = await lerMidiaDoFluxoV2(identity.candidate, inbound);
+  let avisoDeMidia: string | undefined;
+  if (daMidia?.tipo === "nao_lido" && daMidia.motivo === "fluxo_desligado") {
+    await rebaixarFluxoV2ParaV1(identity.candidate, inbound);
+  }
   if (daMidia?.tipo === "nao_lido" && !(daMidia.motivo === "sem_leitura" && inbound.kind === "image")) {
     if (!turnText) {
       await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
@@ -3025,6 +3047,8 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
         error: `sem_leitura_${inbound.kind}_${daMidia.motivo}`,
       });
     }
+    // N5: com legenda a legenda segue como mensagem, mas o corretor precisa saber que o anexo não foi lido.
+    avisoDeMidia = fraseDeNaoLido(daMidia.motivo, inbound.kind as "image" | "document");
   }
   // Texto lido de uma imagem (fallback T9, sempre com legenda): é DADO do turno para a janela
   // de extração. Fica só em `TURNO_CRU`: nunca vira mensagem, memória nem checkpoint.
@@ -3100,7 +3124,11 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   // turn já faz. Em paralelo com o grafo (que só compila na primeira vez).
   const [facts, app] = await Promise.all([loadFacts(orgId, phone), getApp()]);
 
-  TURNO_CRU.set(inbound.messageId, lidosDoTurno.length ? { texto: turnText, lidos: lidosDoTurno } : { texto: turnText });
+  TURNO_CRU.set(inbound.messageId, {
+    texto: turnText,
+    ...(lidosDoTurno.length ? { lidos: lidosDoTurno } : {}),
+    ...(avisoDeMidia ? { avisoDeMidia } : {}),
+  });
   let replyCru: string | undefined;
   const result = await comRastro(() => app.invoke(
     {
@@ -3339,6 +3367,24 @@ async function guardarLidosNoFluxo(
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * M3 (D3/§18.13.1): o servidor desligou o fluxo v2 no meio da conversa (403 `fluxo_desligado`
+ * em `document.read`). O fluxo cai para o v1 e o turno segue sem mensagem de erro técnica.
+ * Os lidos pendentes (cofre cifrado) não vão para o v1: o corretor digita de novo.
+ */
+async function rebaixarFluxoV2ParaV1(identity: Candidate, inbound: InboundMessage): Promise<void> {
+  try {
+    const app = await getApp();
+    const thread = currentExecution()?.context.conversationId ?? liveNamespaceFor(identity.orgId, inbound.fromPhone, subjectDe(identity));
+    const config = { configurable: { thread_id: thread } };
+    const fluxo = ((await app.getState(config)).values as Partial<MaxStateType> | undefined)?.fluxo;
+    if (!fluxo || fluxo.kind !== "proposta_v2") return;
+    await app.updateState(config, { fluxo: rebaixarParaV1(fluxo, {}) as never });
+  } catch {
+    // Sem o checkpoint o turno seguinte rebaixa pelo próprio condutor (options.fluxoV2).
   }
 }
 

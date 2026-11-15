@@ -173,12 +173,12 @@ describe("lerMidia: leitura pelo servidor (T7)", () => {
     expect(d.baixar).toHaveBeenCalledWith("meta:123", { distinguirTamanho: true });
   });
 
-  it("sem a chave do cofre (M4) nem baixa nem paga o OCR: 'falha', o servidor não é chamado", async () => {
+  it("sem a chave do cofre (M4/N4) nem baixa nem paga o OCR: 'sem_cofre', o servidor não é chamado", async () => {
     const antiga = process.env.MAX_ENCRYPTION_KEY;
     process.env.MAX_ENCRYPTION_KEY = "";
     try {
       const d = deps();
-      expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "falha" });
+      expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "sem_cofre" });
       expect(d.baixar).not.toHaveBeenCalled();
       expect(d.lerDocumento).not.toHaveBeenCalled();
     } finally {
@@ -191,11 +191,23 @@ describe("lerMidia: leitura pelo servidor (T7)", () => {
     process.env.MAX_ENCRYPTION_KEY = Buffer.alloc(8, 1).toString("base64");
     try {
       const d = deps();
-      expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "falha" });
+      expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "sem_cofre" });
       expect(d.lerDocumento).not.toHaveBeenCalled();
     } finally {
       process.env.MAX_ENCRYPTION_KEY = antiga;
     }
+  });
+
+  it("N4: a frase de 'sem_cofre' não manda tentar de novo e oferece digitar", () => {
+    const f = fraseDeNaoLido("sem_cofre", "image");
+    expect(f).not.toMatch(/de novo|novamente|reenvie|mande outra/i);
+    expect(f).toMatch(/digit/i);
+  });
+
+  it("M3: 403 fluxo_desligado do servidor vira o motivo próprio, e a frase não cita código interno", async () => {
+    const d = deps({ lerDocumento: vi.fn().mockResolvedValue({ ok: false, motivo: "fluxo_desligado" }) });
+    expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "fluxo_desligado" });
+    expect(fraseDeNaoLido("fluxo_desligado", "image")).not.toMatch(/fluxo_desligado|403/);
   });
 
   it("nunca lança: erro inesperado do download vira 'falha'", async () => {
