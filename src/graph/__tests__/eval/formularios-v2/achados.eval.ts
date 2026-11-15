@@ -35,9 +35,10 @@ describe("eval fv2: achados", () => {
   // F3 (UX): `rotuloDoPath` (src/graph/formularios/midia.ts) não tem rótulo para `negociacao.*`,
   // `corretor.*` e `observacoes`; o valor da proposta lido pelo modelo aparece na ficha como
   // "Outros · negociacao.valor: 500000".
-  it.fails("F3: a ficha rotula o valor como 'Valor da proposta', não pelo caminho técnico", async () => {
+  it("F3: a ficha rotula o valor como 'Valor da negociação', não pelo caminho técnico", async () => {
     const s = await comTudoNumaMensagem();
     expect(s.ultimaResposta).not.toContain("negociacao.valor");
+    expect(s.ultimaResposta).toContain("Valor da negociação");
   });
 
   // F5: a função pura não pega "propsta" sozinho nem "capitação" (com a criação permitida, quem decide é o

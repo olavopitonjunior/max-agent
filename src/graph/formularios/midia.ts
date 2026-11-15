@@ -595,8 +595,27 @@ export function rotuloDoPath(path: string): { grupo: string; campo: string } {
   }
   const imovel = /^(?:imoveis\[0\]|imovel)\.(\w+)$/.exec(path);
   if (imovel) return { grupo: "Imóvel", campo: rotuloDoCampo(imovel[1]!) };
-  return { grupo: "Outros", campo: path };
+  const negociacao = /^negociacao\.(\w+)$/.exec(path);
+  if (negociacao) return { grupo: "Negociação", campo: NEGOCIACAO[negociacao[1]!] ?? rotuloDoCampo(negociacao[1]!) };
+  const corretor = /^corretor\.(\w+)$/.exec(path);
+  if (corretor) return { grupo: "Corretor", campo: CORRETOR[corretor[1]!] ?? rotuloDoCampo(corretor[1]!) };
+  if (path === "observacoes") return { grupo: "Outros", campo: "Observações" };
+  // Genérico: nunca o caminho técnico ("seguro.apolice_numero") para o corretor; só o último trecho, legível.
+  const ultimo = path.split(".").pop()?.replace(/\[\d+\]/g, "") ?? "";
+  return { grupo: "Outros", campo: ultimo ? rotuloDoCampo(ultimo) : "Outro dado" };
 }
+
+const NEGOCIACAO: Record<string, string> = {
+  valor: "Valor da negociação",
+  sinal: "Sinal",
+  prazo_meses: "Prazo (meses)",
+  data_entrada: "Data de entrada",
+  modalidade: "Modalidade",
+};
+
+const CORRETOR: Record<string, string> = {
+  creci: "CRECI",
+};
 
 /** Valor do documento para a tela: uma linha, curto e sem sinal de confirmação forjado. */
 function valorParaTela(v: string): string {
