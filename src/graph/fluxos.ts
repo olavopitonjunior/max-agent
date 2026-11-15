@@ -49,6 +49,7 @@ import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./ca
 import { termoDeBusca } from "./localizar";
 import type { FluxoFormularioV2 } from "./formularios/estado";
 import type { DocumentoLido, JanelaDeExtracao } from "./formularios/janela";
+import type { DepsDaPausa } from "./formularios/pausa";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -227,6 +228,8 @@ export interface DepsDoFluxo {
     janela: JanelaDeExtracao,
     tool: { name: string; description: string; parameters: Record<string, unknown> }
   ): Promise<Record<string, unknown> | null>;
+  /** v2 (T10): a fila da pausa antes da ficha (outbox com `deliverAfter`). Sem ela a ficha sai na hora. */
+  pausa?: DepsDaPausa;
   /**
    * Preferências de aviso (M3): leitura e PATCH das preferências da PRÓPRIA pessoa (telefone do turn).
    * `null` = sem resposta utilizável. Opcional: sem ele, o fluxo responde que não conseguiu.
@@ -249,6 +252,10 @@ export interface ContextoDoTurno {
   orgName?: string;
   /** Thread do checkpoint — AAD do cofre da ficha de crédito. */
   thread?: string;
+  /** v2 (T10): chave da pessoa (`JSON.stringify([orgId, subject])`) — agrupa/cancela a ficha agendada. */
+  subjectKey?: string;
+  /** v2: quem fala pode escrever (RBAC de identidade). `false` = o "sim" nunca grava. */
+  podeEscrever?: boolean;
 }
 
 /**
@@ -256,7 +263,17 @@ export interface ContextoDoTurno {
  * para o atendimento normal e o fluxo continua como estava.
  */
 export type PassoDoFluxo =
-  | { reply: string; fluxo: Fluxo | null; evento: string; liberar?: false }
+  | {
+      reply: string;
+      fluxo: Fluxo | null;
+      evento: string;
+      liberar?: false;
+      /**
+       * v2 (T10): o turno coletou e não responde (a ficha sai pelo outbox depois da pausa).
+       * `reply` vem vazio; o grafo reage com 👍 (Max) e não manda texto.
+       */
+      silencioso?: true;
+    }
   | { liberar: true; fluxo: Fluxo | null; evento: string; reply?: undefined };
 
 // ─── Textos (templates) ───────────────────────────────────────────────────
@@ -1439,7 +1456,8 @@ export async function conduzirFluxo(
   // aparecer, só libera o turno e limpa o fluxo (D3: nunca quebra a conversa).
   // Não cria fluxo v1: ninguém pediu uma `coleta`, e o checkpoint não leva `dados`.
   if (fluxo.kind === "proposta_v2") {
-    return { liberar: true, fluxo: null, evento: "fluxo_v2_sem_condutor" };
+    const { conduzirV2 } = await import("./formularios/condutor");
+    return conduzirV2(fluxo, ctx, deps);
   }
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };

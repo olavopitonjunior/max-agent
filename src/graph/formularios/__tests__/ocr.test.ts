@@ -560,6 +560,10 @@ describe("só o 'sim' do resumo grava os lidos", () => {
 describe("valor lido nunca vai a memory_facts", () => {
   it("foto + legenda: o turno segue com a legenda; CPF e nome lidos nao chegam a memoria, ao modelo nem ao checkpoint", async () => {
     politica(true);
+    // O condutor v2 (PR-C1) pergunta ao servidor se a v2 vale: aqui diz que não, e o turno segue pela legenda.
+    acao.mockImplementation(async (p) =>
+      p.verb === "proposal.options" ? { status: 200, body: { metodos: [], fluxoV2: false } } : LEITURA_200
+    );
 
     const { reply, values } = await turno(foto({ text: "segue o RG do comprador" }));
 

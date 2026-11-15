@@ -24,6 +24,12 @@ vi.mock("@/lib/cm", async (orig) => ({
   reportUsage: vi.fn().mockResolvedValue(undefined),
   transcribeMedia: vi.fn().mockResolvedValue(null),
 }));
+// O condutor v2 (PR-C1) pergunta ao servidor se a v2 vale: aqui o servidor diz que não,
+// e o turno da legenda segue pelo atendimento normal (o que estes testes afirmam).
+vi.mock("@/lib/acao", async (orig) => ({
+  ...(await orig<typeof import("@/lib/acao")>()),
+  executarAcao: vi.fn().mockResolvedValue({ status: 200, body: { metodos: [], fluxoV2: false } }),
+}));
 vi.mock("@/lib/transport", async (orig) => ({
   ...(await orig<typeof import("@/lib/transport")>()),
   downloadMedia: vi.fn().mockResolvedValue(null),
