@@ -55,12 +55,21 @@ describe("detecção", () => {
 });
 
 describe("texto (fonte única)", () => {
-  it("lista os 3 tipos", () => {
-    expect(TEXTO_TIPOS_DE_ASSINATURA).toMatch(/E-mail \(ClickSign\)/);
-    expect(TEXTO_TIPOS_DE_ASSINATURA).toMatch(/WhatsApp \(ClickSign\)/);
-    expect(TEXTO_TIPOS_DE_ASSINATURA).toMatch(/Aceite/);
+  it("lista os 2 tipos do contrato (ClickSign por e-mail e por WhatsApp), sem numerar o Aceite", () => {
+    expect(TEXTO_TIPOS_DE_ASSINATURA).toMatch(/1\. E-mail \(ClickSign\)/);
+    expect(TEXTO_TIPOS_DE_ASSINATURA).toMatch(/2\. WhatsApp \(ClickSign\).*plano da imobili/);
+    expect(TEXTO_TIPOS_DE_ASSINATURA).not.toMatch(/3\./);
   });
-  it("o processo resume proposta, contrato e assinatura e cita os mesmos 3 tipos (mesma fonte)", () => {
+  it("o Aceite não é tipo do contrato: vale para propostas e diversos; na captação vai no envio da ClickSign", () => {
+    for (const t of [TEXTO_TIPOS_DE_ASSINATURA, textoDoProcesso()]) {
+      expect(t).toMatch(/Aceite por WhatsApp vale para propostas e documentos diversos, não para o contrato/);
+    }
+    expect(TEXTO_TIPOS_DE_ASSINATURA).toMatch(/captação, o aceite vai no mesmo envio da ClickSign/);
+    // A frase falsa em todos os casos: a captação e a proposta misturam aceite e ClickSign.
+    expect(TEXTO_TIPOS_DE_ASSINATURA).not.toMatch(/sem ClickSign/i);
+    expect(textoDoProcesso()).not.toMatch(/sem ClickSign/i);
+  });
+  it("o processo resume proposta, contrato e assinatura e cita os mesmos tipos (mesma fonte)", () => {
     const t = textoDoProcesso();
     expect(t).toMatch(/proposta/i);
     expect(t).toMatch(/contrato/i);
@@ -69,7 +78,7 @@ describe("texto (fonte única)", () => {
       expect(t).toContain(rotulo);
       expect(TEXTO_TIPOS_DE_ASSINATURA).toContain(rotulo);
     }
-    expect(TIPOS_DE_ASSINATURA.map((x) => x.rotulo)).toEqual(["E-mail (ClickSign)", "WhatsApp (ClickSign)", "Aceite"]);
+    expect(TIPOS_DE_ASSINATURA.map((x) => x.rotulo)).toEqual(["E-mail (ClickSign)", "WhatsApp (ClickSign)"]);
   });
   it.each([TEXTO_TIPOS_DE_ASSINATURA, textoDoProcesso()])("passa pelo sanitizador e pelo teto de tamanho intactos", (t) => {
     expect(t).not.toContain("**");

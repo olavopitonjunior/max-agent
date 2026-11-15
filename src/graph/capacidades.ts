@@ -41,14 +41,21 @@ export function pedeCapacidades(texto: string): boolean {
  */
 export const TIPOS_DE_ASSINATURA = [
   { rotulo: "E-mail (ClickSign)", descricao: "o assinante recebe o link por e-mail." },
-  { rotulo: "WhatsApp (ClickSign)", descricao: "o assinante recebe o link por WhatsApp." },
-  { rotulo: "Aceite", descricao: "o cliente confirma por WhatsApp, sem ClickSign." },
+  { rotulo: "WhatsApp (ClickSign)", descricao: "o assinante recebe o link por WhatsApp, se o plano da imobiliária permitir." },
 ] as const;
 
+/**
+ * O Aceite NÃO é tipo de assinatura do contrato principal (docs do CM:
+ * contratos-diversos.md e clicksign-v3.md, Caminho D): vale para propostas e
+ * documentos diversos; na captação, vai no mesmo envio da ClickSign.
+ */
+export const TEXTO_ACEITE = "O Aceite por WhatsApp vale para propostas e documentos diversos, não para o contrato.";
+
 export const TEXTO_TIPOS_DE_ASSINATURA =
-  "Os tipos de assinatura são:\n" +
+  "O contrato é assinado pela ClickSign, de um destes jeitos:\n" +
   TIPOS_DE_ASSINATURA.map((t, i) => `${i + 1}. ${t.rotulo}: ${t.descricao}`).join("\n") +
-  "\nQuais ficam liberados depende da sua imobiliária; no envio eu mostro as opções.";
+  `\n${TEXTO_ACEITE} Na captação, o aceite vai no mesmo envio da ClickSign.` +
+  "\nNo envio eu mostro as opções liberadas para a sua imobiliária.";
 
 export function textoDoProcesso(): string {
   return (
@@ -56,7 +63,7 @@ export function textoDoProcesso(): string {
     "1. Proposta: colho os dados, gero o rascunho e envio para assinatura.\n" +
     "2. Contrato: com a proposta fechada, vira negócio; o contrato é feito e aprovado na tela do negócio.\n" +
     "3. Assinatura: o contrato aprovado vai para assinatura pela tela do negócio.\n" +
-    `Tipos de assinatura: ${TIPOS_DE_ASSINATURA.map((t) => t.rotulo).join(", ")}.`
+    `Tipos de assinatura do contrato: ${TIPOS_DE_ASSINATURA.map((t) => t.rotulo).join(", ")}. ${TEXTO_ACEITE}`
   );
 }
 
