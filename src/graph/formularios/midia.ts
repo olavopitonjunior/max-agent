@@ -598,6 +598,8 @@ export function textoDeConferencia(l: {
 
 const CAMPOS_DA_PARTE = new Set(["nome", "cpf", "cnpj", "email", "telefone", "data_nascimento", "estado_civil", "regime_bens"]);
 const CAMPOS_DO_CONJUGE = new Set(["nome", "cpf"]);
+const CAMPOS_NUMERICOS = new Set(["valor", "sinal", "prazo_meses"]);
+const CAMPOS_DA_NEGOCIACAO = new Set(["valor", "sinal", "prazo_meses", "modalidade", "data_entrada"]);
 const PARTE_DO_PATCH: Record<string, "compradores" | "vendedores"> = {
   compradores: "compradores",
   locatarios: "compradores",
@@ -605,70 +607,224 @@ const PARTE_DO_PATCH: Record<string, "compradores" | "vendedores"> = {
   locadores: "vendedores",
 };
 
+const RE_PARTE = /^(compradores|vendedores|locatarios|locadores)\[(\d+)\]\.(conjuge\.)?(\w+)$/;
+
+/**
+ * O caminho tem destino no PATCH do `proposal.update`? (M2) Testemunha, proprietário,
+ * RG, endereço de pessoa e qualquer campo fora das listas fechadas NÃO têm: o dado não
+ * cabe na proposta, e quem o guardasse "pendente" o reteria para sempre.
+ */
+export function caminhoGravavel(path: string): boolean {
+  const parte = RE_PARTE.exec(path);
+  if (parte) return (parte[3] ? CAMPOS_DO_CONJUGE : CAMPOS_DA_PARTE).has(parte[4]!);
+  if (/^(?:imoveis\[0\]|imovel)\.\w+$/.test(path)) return true;
+  const neg = /^negociacao\.(\w+)$/.exec(path);
+  if (neg) return CAMPOS_DA_NEGOCIACAO.has(neg[1]!);
+  return path === "corretor.creci" || path === "observacoes";
+}
+
+export type GrupoDaParte = "compradores" | "vendedores";
+
+/** Nome (por posição) das partes que o servidor já tem: a base do M1 e da conferência N1. */
+export type PartesGravadas = Record<GrupoDaParte, string[]>;
+
+export interface OpcoesDaGravacao {
+  messageIdDoSim: string;
+  /** O que o servidor já tem (de `options.signatarios`). Sem isto, trata-se como rascunho sem partes. */
+  partes?: PartesGravadas;
+  /** O corretor disse "é o mesmo, troca": R38, escreve com `substituir:true`. */
+  substituir?: { grupo: GrupoDaParte; posicao: number };
+  /** O corretor disse "é outro": os lidos dessa posição vão para a próxima livre. */
+  comoNovaParte?: { grupo: GrupoDaParte; posicao: number };
+}
+
+export interface ConflitoDeParte {
+  grupo: GrupoDaParte;
+  posicao: number;
+  nomeAtual: string;
+}
+
+const nomeNormalizado = (s: string): string =>
+  s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** Mesmo nome? Caixa/acento à parte, e "Maria Teste" cabe em "Maria Teste da Silva". */
+function mesmoNome(a: string, b: string): boolean {
+  const pa = nomeNormalizado(a).split(" ").filter((p) => p.length > 2);
+  const pb = nomeNormalizado(b).split(" ").filter((p) => p.length > 2);
+  if (pa.length === 0 || pb.length === 0) return true; // nada comparável: não há conflito detectável
+  const [curto, longo] = pa.length <= pb.length ? [pa, pb] : [pb, pa];
+  return curto.every((p) => longo.includes(p));
+}
+
+interface PatchMontado {
+  patch: PatchV2;
+  gravados: Set<string>;
+  /** Sem destino (M2) ou com valor impossível: sai do cofre. */
+  descartados: string[];
+  conflito?: ConflitoDeParte;
+}
+
 /**
  * O PATCH do `proposal.update` com o que dá para gravar dos lidos, e os caminhos que
- * entraram nele. O resto (testemunha, proprietário, campo sem lugar no PATCH) segue
- * pendente: não há como gravar e não é descartado em silêncio.
+ * entraram nele.
+ *
+ *  - M1: nunca manda uma posição "vazia" que o servidor recusa. A posição i só vai se
+ *    todas as anteriores já existem ou vão no mesmo PATCH; senão o dado segue pendente.
+ *  - M2: o que não tem destino é devolvido em `descartados`.
+ *  - N1: nome diferente do da parte já gravada na mesma posição não é escrito: devolve
+ *    `conflito` e nada é gravado (quem decide é o corretor).
  */
-function montarPatchDosLidos(campos: CampoLido[]): { patch: PatchV2; gravados: Set<string> } {
-  const partes: Record<"compradores" | "vendedores", Array<Record<string, unknown>>> = { compradores: [], vendedores: [] };
-  let imovel: Record<string, unknown> | undefined;
+function montarPatchDosLidos(campos: CampoLido[], op: Pick<OpcoesDaGravacao, "partes" | "substituir" | "comoNovaParte">): PatchMontado {
+  const existentes: PartesGravadas = op.partes ?? { compradores: [], vendedores: [] };
+  const descartados: string[] = [];
   const gravados = new Set<string>();
+  const porGrupo: Record<GrupoDaParte, Map<number, Record<string, unknown>>> = { compradores: new Map(), vendedores: new Map() };
+  const caminhosPorGrupo: Record<GrupoDaParte, Map<number, string[]>> = { compradores: new Map(), vendedores: new Map() };
+  let imovel: Record<string, unknown> | undefined;
+  let negociacao: NonNullable<PatchV2["negociacao"]> | undefined;
+  let corretor: NonNullable<PatchV2["corretor"]> | undefined;
+  let observacoes: string | undefined;
+  let conflito: ConflitoDeParte | undefined;
+
+  // "É outro": a posição pedida passa a ser a próxima livre (depois do que já existe e do que veio).
+  const nova = op.comoNovaParte;
+  let destinoDaNova = -1;
+  if (nova) {
+    destinoDaNova = existentes[nova.grupo].length;
+    for (const c of campos) {
+      const m = RE_PARTE.exec(c.path);
+      if (m && PARTE_DO_PATCH[m[1]!] === nova.grupo && Number(m[2]) !== nova.posicao) {
+        destinoDaNova = Math.max(destinoDaNova, Number(m[2]) + 1);
+      }
+    }
+  }
 
   for (const c of campos) {
+    if (!caminhoGravavel(c.path)) {
+      descartados.push(c.path);
+      continue;
+    }
     // I4: sem saber de quem é, o dado não vai para parte nenhuma (nem para a posição que o
     // servidor assumiu por omissão): fica pendente até alguém dizer.
     if (c.semPapel) continue;
-    const parte = /^(compradores|vendedores|locatarios|locadores)\[(\d+)\]\.(conjuge\.)?(\w+)$/.exec(c.path);
+
+    const parte = RE_PARTE.exec(c.path);
     if (parte) {
-      const [, grupo, n, conjuge, campo] = parte;
-      if (!(conjuge ? CAMPOS_DO_CONJUGE : CAMPOS_DA_PARTE).has(campo!)) continue;
-      const lista = partes[PARTE_DO_PATCH[grupo!]!];
-      const i = Number(n);
-      while (lista.length <= i) lista.push({});
+      const [, grupoBruto, n, conjuge, campo] = parte;
+      const grupo = PARTE_DO_PATCH[grupoBruto!]!;
+      let i = Number(n);
+      if (nova && nova.grupo === grupo && nova.posicao === i) i = destinoDaNova;
+      const nomeAtual = existentes[grupo][i];
+      const trocando = op.substituir?.grupo === grupo && op.substituir.posicao === i;
+      if (!conjuge && campo === "nome" && nomeAtual && !trocando && !mesmoNome(nomeAtual, c.valor)) {
+        conflito ??= { grupo, posicao: i, nomeAtual };
+      }
+      const alvo = porGrupo[grupo].get(i) ?? {};
       if (conjuge) {
-        const atual = (lista[i]!.conjuge as Record<string, unknown> | undefined) ?? {};
-        lista[i]!.conjuge = { ...atual, [campo!]: c.valor };
+        alvo.conjuge = { ...((alvo.conjuge as Record<string, unknown> | undefined) ?? {}), [campo!]: c.valor };
       } else {
-        lista[i]![campo!] = c.valor;
+        alvo[campo!] = c.valor;
+      }
+      if (trocando) alvo.substituir = true;
+      porGrupo[grupo].set(i, alvo);
+      caminhosPorGrupo[grupo].set(i, [...(caminhosPorGrupo[grupo].get(i) ?? []), c.path]);
+      continue;
+    }
+
+    const doImovel = /^(?:imoveis\[0\]|imovel)\.(\w+)$/.exec(c.path);
+    if (doImovel) {
+      imovel = { ...(imovel ?? {}), [doImovel[1]!]: c.valor };
+      gravados.add(c.path);
+      continue;
+    }
+    const neg = /^negociacao\.(\w+)$/.exec(c.path);
+    if (neg) {
+      const campo = neg[1]!;
+      if (CAMPOS_NUMERICOS.has(campo)) {
+        const n = Number(c.valor);
+        if (!Number.isFinite(n) || n <= 0) {
+          descartados.push(c.path);
+          continue;
+        }
+        negociacao = { ...(negociacao ?? {}), [campo]: n };
+      } else {
+        negociacao = { ...(negociacao ?? {}), [campo]: c.valor };
       }
       gravados.add(c.path);
       continue;
     }
-    const doImovel = /^imoveis\[0\]\.(\w+)$/.exec(c.path);
-    if (doImovel) {
-      imovel = { ...(imovel ?? {}), [doImovel[1]!]: c.valor };
+    if (c.path === "corretor.creci") {
+      corretor = { ...(corretor ?? {}), creci: c.valor };
+      gravados.add(c.path);
+      continue;
+    }
+    if (c.path === "observacoes") {
+      observacoes = c.valor;
       gravados.add(c.path);
     }
   }
 
+  if (conflito) return { patch: {}, gravados: new Set(), descartados, conflito };
+
   const patch: PatchV2 = {};
-  if (partes.compradores.length) patch.compradores = partes.compradores as ParteV2[];
-  if (partes.vendedores.length) patch.vendedores = partes.vendedores as ParteV2[];
+  for (const grupo of ["compradores", "vendedores"] as const) {
+    const mapa = porGrupo[grupo];
+    if (mapa.size === 0) continue;
+    let cursor = existentes[grupo].length;
+    const lista: Array<Record<string, unknown>> = [];
+    for (const i of [...mapa.keys()].sort((a, b) => a - b)) {
+      if (i > cursor) continue; // buraco (M1): fica pendente, não vira posição vazia
+      while (lista.length < i) lista.push({});
+      lista[i] = mapa.get(i)!;
+      for (const p of caminhosPorGrupo[grupo].get(i) ?? []) gravados.add(p);
+      cursor = Math.max(cursor, i + 1);
+    }
+    if (lista.length) patch[grupo] = lista as ParteV2[];
+  }
   if (imovel) patch.imovel = imovel;
-  return { patch, gravados };
+  if (negociacao) patch.negociacao = negociacao;
+  if (corretor) patch.corretor = corretor;
+  if (observacoes !== undefined) patch.observacoes = observacoes;
+  return { patch, gravados, descartados };
 }
 
-export type ErroDosLidos = ErroDoParcial | "cofre_ilegivel" | "nada_a_gravar" | "papel_indefinido";
+export type ErroDosLidos = ErroDoParcial | "cofre_ilegivel" | "nada_a_gravar" | "papel_indefinido" | "conflito_de_parte";
 
 export type GravacaoDosLidos =
-  | { ok: true; fluxo: FluxoFormularioV2; resultado: Extract<ResultadoParcial, { ok: true }> }
-  | { ok: false; erro: ErroDosLidos; fluxo: FluxoFormularioV2; resultado?: ResultadoParcial };
+  | { ok: true; fluxo: FluxoFormularioV2; resultado: Extract<ResultadoParcial, { ok: true }>; descartados: string[] }
+  | {
+      ok: false;
+      erro: ErroDosLidos;
+      fluxo: FluxoFormularioV2;
+      resultado?: ResultadoParcial;
+      descartados: string[];
+      conflito?: ConflitoDeParte;
+    };
 
 /**
  * Grava os lidos no rascunho. SÓ chama o servidor com a prova do "sim" do corretor
  * (`messageIdDoSim`, que vira a `idempotencyKey` pelo `salvarParcial`); sem ela, nada
  * é escrito e os lidos seguem pendentes. Recusa ou falta de resposta NUNCA limpam os
  * lidos (o corretor pode tentar de novo); só o 2xx limpa o que de fato gravou.
+ *
+ * O que não tem destino no PATCH (M2) sai do cofre assim que o "sim" chega e volta em
+ * `descartados`, para o corretor ouvir "não cabe na proposta". Se o servidor recusar a
+ * escrita, nada sai do cofre (a tentativa seguinte refaz o cálculo).
  */
 export async function gravarLidos(
   deps: Pick<DepsDoFluxo, "acao">,
   fluxo: FluxoFormularioV2,
   thread: string,
-  opts: { messageIdDoSim: string }
+  opts: OpcoesDaGravacao
 ): Promise<GravacaoDosLidos> {
   if (typeof opts.messageIdDoSim !== "string" || opts.messageIdDoSim.trim().length === 0) {
-    return { ok: false, erro: "sem_confirmacao", fluxo };
+    return { ok: false, erro: "sem_confirmacao", fluxo, descartados: [] };
   }
   const pendentes = pendentesComValor(fluxo, thread);
   if (pendentes.length === 0) {
@@ -676,22 +832,43 @@ export async function gravarLidos(
     // se perdeu. Limpa o ponteiro sem valor e diz a verdade, em vez de reter lixo.
     const perdido = fluxo.lidosPendentes.length > 0;
     const limpo = comLidos(fluxo, [], thread);
-    return { ok: false, erro: perdido ? "cofre_ilegivel" : "nada_a_gravar", fluxo: limpo.ok ? limpo.fluxo : fluxo };
+    return { ok: false, erro: perdido ? "cofre_ilegivel" : "nada_a_gravar", fluxo: limpo.ok ? limpo.fluxo : fluxo, descartados: [] };
   }
 
-  const { patch, gravados } = montarPatchDosLidos(pendentes);
+  const { patch, gravados, descartados, conflito } = montarPatchDosLidos(pendentes, opts);
+  const semDestino = new Set(descartados);
+
+  // Re-cifra o cofre só com o que sobra. Sem chave, descarta tudo (nunca em claro).
+  const comOsRestantes = (base: FluxoFormularioV2, restantes: Array<CampoLido & { ref: string }>): FluxoFormularioV2 => {
+    const limpo = comLidos(base, restantes, thread);
+    return limpo.ok ? limpo.fluxo : { ...base, lidosPendentes: [], cofreLidos: undefined };
+  };
+
+  if (conflito) {
+    return {
+      ok: false,
+      erro: "conflito_de_parte",
+      fluxo: descartados.length ? comOsRestantes(fluxo, pendentes.filter((c) => !semDestino.has(c.path))) : fluxo,
+      descartados,
+      conflito,
+    };
+  }
+
   if (gravados.size === 0) {
-    return { ok: false, erro: pendentes.some((c) => c.semPapel) ? "papel_indefinido" : "nada_a_gravar", fluxo };
+    const restantes = pendentes.filter((c) => !semDestino.has(c.path));
+    return {
+      ok: false,
+      erro: restantes.some((c) => c.semPapel) ? "papel_indefinido" : "nada_a_gravar",
+      fluxo: descartados.length ? comOsRestantes(fluxo, restantes) : fluxo,
+      descartados,
+    };
   }
 
   const r = await salvarParcial(deps, fluxo, patch, { confirmacao: { messageIdDoSim: opts.messageIdDoSim } });
   if (!r.ok) {
     const proximo = r.fluxo && r.fluxo.kind === "proposta_v2" ? r.fluxo : fluxo;
-    return { ok: false, erro: r.erro, fluxo: proximo, resultado: r };
+    return { ok: false, erro: r.erro, fluxo: proximo, resultado: r, descartados: [] };
   }
-  const sobra = pendentes.filter((c) => !gravados.has(c.path));
-  const limpo = comLidos(r.fluxo, sobra, thread);
-  // Sem como re-cifrar a sobra (chave sumiu entre os dois passos): descarta a sobra, não a deixa em claro.
-  const final: FluxoFormularioV2 = limpo.ok ? limpo.fluxo : { ...r.fluxo, lidosPendentes: [], cofreLidos: undefined };
-  return { ok: true, fluxo: final, resultado: r };
+  const sobra = pendentes.filter((c) => !gravados.has(c.path) && !semDestino.has(c.path));
+  return { ok: true, fluxo: comOsRestantes(r.fluxo, sobra), resultado: r, descartados };
 }

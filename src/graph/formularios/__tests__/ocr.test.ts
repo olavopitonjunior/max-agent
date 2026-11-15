@@ -530,10 +530,10 @@ describe("só o 'sim' do resumo grava os lidos", () => {
       imovel: { matricula: "12345" },
     });
     expect(r.ok).toBe(true);
-    // O que nao tem destino no PATCH (testemunha) segue pendente, e o resto saiu.
-    expect(r.fluxo.lidosPendentes.map((l) => l.path)).toEqual(["testemunhas[0].nome"]);
-    const aindaNoCofre = lidosDoCofre(r.fluxo, THREAD);
-    expect(aindaNoCofre.map((c) => c.path)).toEqual(["testemunhas[0].nome"]);
+    // M2: o que nao tem destino no PATCH (testemunha) e descartado e dito, nao fica pendente para sempre.
+    expect(r.ok && r.descartados).toEqual(["testemunhas[0].nome"]);
+    expect(r.fluxo.lidosPendentes).toEqual([]);
+    expect(lidosDoCofre(r.fluxo, THREAD)).toEqual([]);
   });
 
   it("a escrita que falha NAO limpa os lidos (o corretor pode tentar de novo)", async () => {

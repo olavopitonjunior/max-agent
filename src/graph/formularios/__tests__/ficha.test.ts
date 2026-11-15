@@ -103,6 +103,20 @@ describe("renderizarFicha", () => {
     expect(t).not.toContain("⬜");
   });
 
+  it("M2: lido que não cabe na proposta é dito como ignorado, não como pendente de confirmação", () => {
+    const t = renderizarFicha({
+      rascunho: { salvos: [] },
+      faltando: [],
+      lidos: [
+        { path: "compradores[0].nome", valor: "Maria", confianca: 0.9 },
+        { path: "testemunhas[0].nome", valor: "Ana", confianca: 0.9 },
+      ],
+    });
+    expect(t).toMatch(/Testemunha 1.*não cabe na proposta, vou ignorar/s);
+    expect(t).not.toMatch(/Ana.*\(lido, confira\)/);
+    expect(t).toMatch(/Maria.*\(lido, confira\)/);
+  });
+
   it("código do rascunho vai no cabeçalho quando existe", () => {
     const t = renderizarFicha({ rascunho: { salvos: [] }, faltando: [falta("valor")], lidos: [], codigo: "PROP-2026-0001" });
     expect(t).toContain("PROP-2026-0001");

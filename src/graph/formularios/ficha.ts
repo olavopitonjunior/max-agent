@@ -16,7 +16,7 @@
 import { RE_CNPJ, RE_CPF } from "@/lib/pii";
 import type { CampoObrigatorio, Pendencia } from "./contrato";
 import type { FluxoFormularioV2 } from "./estado";
-import { rotuloDoPath, type CampoLido } from "./midia";
+import { caminhoGravavel, rotuloDoPath, type CampoLido } from "./midia";
 import { PAUSA_DA_FICHA_MS } from "./pausa";
 
 export const LIMITE_DA_FICHA = 1024;
@@ -157,7 +157,9 @@ export function renderizarFicha(args: {
     ...args.faltando.map<Item>((p) => ({ tipo: "falta", texto: `⬜ ${rotuloDaPendencia(p, args.obrigatorios)}` })),
     ...args.lidos.map<Item>((c) => {
       const { grupo, campo } = rotuloDoPath(c.path);
-      return { tipo: "lido", texto: `📄 ${grupo} · ${campo}: ${mascararValor(c.path, c.valor)} (lido, confira)` };
+      // M2: sem destino no PATCH, o dado não vai a lugar nenhum: dizer, em vez de pedir confirmação.
+      const nota = caminhoGravavel(c.path) ? "(lido, confira)" : "(não cabe na proposta, vou ignorar)";
+      return { tipo: "lido", texto: `📄 ${grupo} · ${campo}: ${mascararValor(c.path, c.valor)} ${nota}` };
     }),
   ];
 
