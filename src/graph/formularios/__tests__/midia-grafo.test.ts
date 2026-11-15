@@ -59,7 +59,7 @@ vi.mock("../midia", async (orig) => ({
 }));
 
 const { runTurn, getApp } = await import("../../graph");
-const { lerMidia } = await import("../midia");
+const { lerMidia, fraseDeNaoLido } = await import("../midia");
 const { novoFluxoV2 } = await import("../estado");
 const { textoSemLeituraDeMidia } = await import("../../prompt");
 const { resolveIdentity } = await import("@/lib/identity");
@@ -177,8 +177,9 @@ describe("legenda + foto: a legenda vai à janela, a foto à leitura", () => {
     const { reply } = await turno(foto({ text: "segue o RG do comprador" }), { fluxoVivo: true });
 
     expect(ler.mock.calls[0]![1]).toMatchObject({ kind: "image", legenda: "segue o RG do comprador" });
-    // A legenda é a mensagem: o turno chegou ao modelo e a resposta é a dele.
-    expect(reply).toBe("Anotei a legenda.");
+    // A legenda é a mensagem: o turno chegou ao modelo e a resposta é a dele, e (N5, PR-C1) a
+    // frase do anexo não lido vai na frente: a pessoa precisa saber que o arquivo não foi lido.
+    expect(reply).toBe(`${fraseDeNaoLido("heic", "image")}\n\nAnotei a legenda.`);
     expect(llm).toHaveBeenCalled();
   });
 });
