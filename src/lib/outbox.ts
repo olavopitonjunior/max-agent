@@ -219,6 +219,19 @@ export async function cancelarPendentesPorPrefixo(prefixo: string): Promise<numb
   return r.length;
 }
 
+/**
+ * A linha com esta chave EXATA foi enviada? (C1 dos formulários: só a ficha que saiu
+ * prova que o corretor a viu; pendente, derrubada ou falha não provam nada.)
+ */
+export async function linhaEnviada(dedupeKey: string): Promise<boolean> {
+  if (!dedupeKey) return false;
+  const r = await query<{ id: string }>(
+    `SELECT id FROM outbox WHERE dedupe_key = $1 AND status = 'sent' LIMIT 1`,
+    [dedupeKey]
+  );
+  return r.length > 0;
+}
+
 export async function enqueue(p: EnqueueParams): Promise<EnqueueResult> {
   // O Newton só fala com usuário interno, e o transporte dele não tem
   // template nem janela: aviso para parte do negócio sairia como texto livre.

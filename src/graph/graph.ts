@@ -1003,6 +1003,11 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
             const { cancelarPendentesPorPrefixo } = await import("@/lib/outbox");
             await cancelarPendentesPorPrefixo(prefixo);
           },
+          // C1: só a linha ENVIADA prova que o corretor viu a ficha.
+          entregue: async (dedupeKey: string) => {
+            const { linhaEnviada } = await import("@/lib/outbox");
+            return linhaEnviada(dedupeKey);
+          },
         },
       }
     : {};
