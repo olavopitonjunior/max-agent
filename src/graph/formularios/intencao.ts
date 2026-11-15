@@ -141,6 +141,9 @@ function esteiraDoTexto(n: string): "venda" | "locacao" | undefined {
  * algo. `null` quando o texto é outra coisa. "Corrige o contrato" (do negócio) é
  * só a INTENÇÃO `corrigir_redacao` sobre `contrato_do_negocio`: o que o Max
  * responde (o link do Doc) é de outra tarefa (T17).
+ *
+ * Sem chamador em produção no PR-C1 (só testes): o roteamento da correção entra no
+ * PR-C. Não ligar `formularios_v2` esperando que o Max já reconheça "corrige ...".
  */
 export function lerIntencaoDeFormulario(texto: string): IntencaoDeFormulario {
   const n = normalizarParaIntencao(texto);

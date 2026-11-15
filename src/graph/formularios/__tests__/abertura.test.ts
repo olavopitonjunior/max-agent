@@ -81,6 +81,33 @@ describe("abertura v2 (negados primeiro)", () => {
   });
 });
 
+describe("M8: modeloDisponivel ausente conta como sem modelo (igual ao derivarSchema)", () => {
+  it("modalidade da esteira sem o campo modeloDisponivel: avisa que não há modelo, não abre o v2", async () => {
+    const t = montar({ optionsBody: { ...OPTIONS, modalidades: [{ schemaType: "compra_venda_v1", esteira: "venda", rotulo: "Compra e venda" }] } });
+    const p = await iniciarProposta("venda", t.texto, t.ctx.agora, t.deps, undefined, undefined, t.ctx);
+    expect(p.evento).toBe("proposta_sem_modelo");
+    expect(p.fluxo).toBeNull();
+  });
+});
+
+describe("P3 (negado): captação nunca abre o v2, nem com a feature ligada e o servidor dizendo fluxoV2", () => {
+  it("iniciarCaptacao segue no v1: não consulta proposal.options, não chama a extração v2 e o fluxo não é versao 2", async () => {
+    const { iniciarCaptacao } = await import("../../captacao");
+    const t = montar({ args: {} });
+    const acao = vi.fn(async (verb: string): Promise<RespostaDoServidor | null> => {
+      if (verb === "captacao.options") return { status: 200, body: { modelos: [{ id: "m1", nome: "Modelo A" }] } };
+      return null;
+    });
+    const deps = { ...t.deps, acao } as unknown as DepsDoFluxo;
+    const ctx: ContextoDoTurno = { ...t.ctx, texto: "cria uma captação de venda para o Apto da Dona Maria", policy: ["captacao.create"] };
+    const p = await iniciarCaptacao(ctx, deps, true);
+    expect(acao.mock.calls.some(([v]) => v === "proposal.options")).toBe(false);
+    expect(t.extrairComJanela).not.toHaveBeenCalled();
+    expect(p.fluxo).toMatchObject({ kind: "captacao" });
+    expect((p.fluxo as { versao?: number } | null)?.versao).not.toBe(2);
+  });
+});
+
 describe("abertura v2 (permitidos)", () => {
   it("pedido sem dado: abre o v2 e convida a mandar os dados, sem pedir campo a campo", async () => {
     const t = montar({ args: {} });

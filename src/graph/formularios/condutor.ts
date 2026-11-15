@@ -231,7 +231,7 @@ export async function abrirV2(
   if (!options) return null;
   if (escolherVersao({ orgId: ctx.orgId, options }) !== 2) return null;
   const modalidades = (options as OptionsV2).modalidades ?? [];
-  if (modalidades.length > 0 && !modalidades.some((m) => m.esteira === natureza && m.modeloDisponivel !== false)) {
+  if (modalidades.length > 0 && !modalidades.some((m) => m.esteira === natureza && m.modeloDisponivel)) {
     return { reply: textoSemModelo(natureza), fluxo: null, evento: "proposta_sem_modelo" };
   }
   const f0 = novoFluxoV2({ esteira: natureza, agora });
