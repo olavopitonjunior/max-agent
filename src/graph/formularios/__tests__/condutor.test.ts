@@ -644,6 +644,30 @@ describe("I2: a resposta ao conflito com NEGAÇÃO nunca vira 'é o mesmo'", () 
     }
   );
 
+  // Rodada 3: verbo de troca NEGADO segura o voto "mesmo" (mesmo caminho da negação solta).
+  it.each([
+    "não troca, é o mesmo",
+    "não substitui, é a mesma",
+    "não muda, é o mesmo",
+    "não precisa trocar, é o mesmo",
+    "não corrige, é o mesmo",
+    "é o mesmo, não troca",
+  ])("%s: verbo de troca negado nunca vira substituição (não grava e pergunta de novo)", async (texto) => {
+    const t = montar({ texto, optionsBody: opts() });
+    const passo = await conduzirV2(aberto(), t.ctx, t.deps);
+    expect(escritas(t.acao)).toHaveLength(0);
+    expect(passo.reply).toMatch(/novo/i);
+    expect((passo.fluxo as FluxoFormularioV2).conflito).toEqual({ grupo: "compradores", posicao: 0 });
+    expect((passo.fluxo as FluxoFormularioV2).lidosPendentes.length).toBeGreaterThan(0);
+  });
+
+  it("'é o mesmo, troca' (sem negação) continua sendo a substituição", async () => {
+    const t = montar({ texto: "é o mesmo, troca", optionsBody: opts() });
+    await conduzirV2(aberto(), t.ctx, t.deps);
+    const [, corpo] = escritas(t.acao)[0] as [string, { compradores: unknown[] }];
+    expect(corpo.compradores).toEqual([{ nome: "João Pereira Alves", substituir: true }]);
+  });
+
   it("resposta contraditória ('novo' e 'o mesmo' juntos) pergunta de novo", async () => {
     const t = montar({ texto: "é um novo, é o mesmo", optionsBody: opts() });
     await conduzirV2(aberto(), t.ctx, t.deps);

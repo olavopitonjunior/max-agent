@@ -166,8 +166,9 @@ function ocorrencias(re: RegExp, oracao: string, consumidas: Set<number>): boole
 function lerConflito(texto: string): RespostaDoConflito {
   const votos = new Set<"novo" | "mesmo">();
   let descarta = false;
-  // Um "não" que nenhum termo/verbo da oração reivindicou ("não, é o mesmo", "é a mesma, não") é
-  // dúvida: nunca deixa a resposta virar "o mesmo" (que substitui o que está no rascunho).
+  // Um "não" que nenhum termo/verbo da oração reivindicou ("não, é o mesmo", "é a mesma, não") ou
+  // que negou um verbo de troca é dúvida: nunca deixa a resposta virar "o mesmo" (que substitui
+  // o que está no rascunho).
   let negacaoSolta = false;
   for (const bruta of texto.split(/[,.;!?\n]+/)) {
     const o = normalizar(bruta);
@@ -175,7 +176,11 @@ function lerConflito(texto: string): RespostaDoConflito {
     const consumidas = new Set<number>();
     for (const negado of ocorrencias(TERMO_NOVO, o, consumidas)) votos.add(negado ? "mesmo" : "novo");
     for (const negado of ocorrencias(TERMO_MESMO, o, consumidas)) votos.add(negado ? "novo" : "mesmo");
-    for (const negado of ocorrencias(VERBO_DE_TROCA, o, consumidas)) if (!negado) votos.add("mesmo");
+    // Verbo de troca negado ("não troca, é o mesmo") não vota E segura o voto "mesmo": mesmo caminho da negação solta.
+    for (const negado of ocorrencias(VERBO_DE_TROCA, o, consumidas)) {
+      if (negado) negacaoSolta = true;
+      else votos.add("mesmo");
+    }
     for (const negado of ocorrencias(VERBO_DE_DESCARTE, o, consumidas)) if (!negado) descarta = true;
     for (const m of o.matchAll(/\b(?:nao|nunca|jamais|sem)\b/g)) if (!consumidas.has(m.index ?? -1)) negacaoSolta = true;
   }
