@@ -80,7 +80,8 @@ export interface InterativoFlow {
   data: Record<string, unknown>;
   corpo?: string;
   cta?: string;
-  flowToken?: string;
+  /** Obrigatório: amarra a resposta ao envio (`fv2:<passo>:<nonce>`, `lib/meta-flow.ts`). Não é PII. */
+  flowToken: string;
 }
 
 /** Botão preenchido na hora do envio, na ordem em que o template os declara. */

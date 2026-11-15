@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { query } from "./db";
 import { sendText, connectionStatus, markReadTyping, type InboundMessage, type InterativoFlow } from "./transport";
 import { derivarInterativo, PREFIXO_OPCAO } from "./interativo";
-import { consumirFlowDoTurno } from "./meta-flow";
+import { descartarFlowDoTurno, espiarFlowDoTurno } from "./meta-flow";
 import { falhaDaMensagemMeta, inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
 import { abrirJanela } from "./janela24h";
@@ -441,6 +441,7 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
         });
         res=await withTransportFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},()=>
           sendText({to:row.from_phone,body:reply!,quoteMessageId:row.message_id,...comInterativo(reply!,row.message_id)}));
+        descartarFlowDoTurno(row.message_id);
       } catch (err) {
         if(err instanceof TransportAcceptedCommitError)throw err;
         /**
@@ -776,12 +777,17 @@ export async function podarTextoDaFila(dias = 30): Promise<number> {
  * Botões/lista para a resposta, quando ela é um "Responda SIM" ou um menu
  * numerado (`lib/interativo.ts`). Só entra no envio quando existe, para que
  * a chamada sem botão continue idêntica à de antes.
+ *
+ * Revisão v2 no Max (T11): o condutor deixa o Flow do passo num cache por `messageId` (`meta-flow.ts`).
+ * O cache NUNCA é a fonte: só vale se o `corpo` do Flow é exatamente a resposta que vai sair (se o
+ * grafo trocou o `reply` depois do condutor, o Flow antigo não carrega a resposta nova), e é só lido
+ * aqui; sai do cache quando o envio é aceito (`descartarFlowDoTurno`), para a retentativa de uma
+ * falha ainda o achar. Sem cache (outro processo, vencido) a revisão sai em texto, com botões/lista
+ * derivados como sempre.
  */
-function comInterativo(reply: string, messageId?: string): { interativo?: NonNullable<ReturnType<typeof derivarInterativo>> | InterativoFlow } {
-  // Revisão v2 no Max (T11): o condutor deixou o Flow do passo para este turno. Só existe com a flag, o id do Flow
-  // e o provedor; sem ele (inclusive na retentativa) segue o texto, com botões/lista derivados como sempre.
-  const flow = messageId ? consumirFlowDoTurno(messageId) : undefined;
-  if (flow) return { interativo: { ...flow, corpo: flow.corpo ?? reply } };
+export function comInterativo(reply: string, messageId?: string): { interativo?: NonNullable<ReturnType<typeof derivarInterativo>> | InterativoFlow } {
+  const flow = messageId ? espiarFlowDoTurno(messageId) : undefined;
+  if (flow && flow.corpo === reply) return { interativo: flow };
   const interativo = derivarInterativo(reply);
   return interativo ? { interativo } : {};
 }

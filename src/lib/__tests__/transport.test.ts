@@ -136,6 +136,7 @@ describe("sendText com Flow (revisão v2)", () => {
     screen: "PARTE_1",
     data: { compradores_0__nome: "Maria Souza" },
     corpo: "Revisão da proposta",
+    flowToken: "fv2:partes:NONCE",
   };
   const params = { to: "5511999990000", body: "ficha numerada", quoteMessageId: "Q", interativo: flow };
 
@@ -169,6 +170,18 @@ describe("sendText com Flow (revisão v2)", () => {
     vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.T" });
     expect(await sendText(params)).toEqual({ messageId: "wamid.T" });
     expect(meta.sendText).toHaveBeenCalledWith({ to: "5511999990000", body: "ficha numerada", quoteMessageId: "Q" });
+  });
+
+  // M10: nenhum caminho do Flow loga nome, CPF, telefone, e-mail, a ficha nem o token.
+  it("o 400 que cai no texto loga só tipo e código, nunca o dado do Flow", async () => {
+    const espioes = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+    const corpoDoErro = JSON.stringify({ error: { code: 131009, message: "Maria Souza 529.982.247-25 maria@exemplo.com 5511987654321" } });
+    vi.mocked(meta.sendInteractive).mockRejectedValue(new MetaHttpError("/1/messages", 400, corpoDoErro));
+    vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.T" });
+    await sendText({ ...params, interativo: { ...flow, data: { compradores_0__nome: "Maria Souza" }, corpo: "Ficha: Maria Souza CPF 529.982.247-25" } });
+    const saida = espioes.flatMap((e) => e.mock.calls.map((c) => c.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "))).join("\n");
+    expect(saida).toContain("transport.interativo_recusado");
+    for (const dado of ["Maria", "529.982", "52998224725", "maria@exemplo.com", "5511987654321", "fv2:partes", "NONCE", "FLOW123"]) expect(saida).not.toContain(dado);
   });
 
   it("Newton (bridge) nunca manda Flow à Meta nem ao bridge", async () => {

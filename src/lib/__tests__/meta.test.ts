@@ -257,6 +257,26 @@ describe("parseWebhook — mensagens", () => {
       expect(m.buttonPayload ?? null).toBeNull();
     });
 
+    // I1: o token do Flow do Max amarra a resposta ao envio. Só `fv2:` vira payload (`flow:<token>`);
+    // o de qualquer outro Flow segue descartado, como antes.
+    it("token fv2 do Max vira button_payload flow:<token>, fora do texto e dos campos", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F7", { response_json: JSON.stringify({ flow_token: "fv2:partes:abc_DEF-123", compradores_0__nome: "Maria Souza" }) }),
+        PNID
+      );
+      const m = ev.messages[0];
+      expect(m.buttonPayload).toBe("flow:fv2:partes:abc_DEF-123");
+      expect(m.text).toBe("compradores_0__nome: Maria Souza");
+      expect(m.flowResponse).toEqual({ compradores_0__nome: "Maria Souza" });
+    });
+
+    it("token que não é fv2 (outro Flow, vazio, não-string) não vira payload", () => {
+      for (const flow_token of ["TOKEN-SECRETO", "", 42, null, "xfv2:partes:n"]) {
+        const ev = parseWebhook(nfm("wamid.F8", { response_json: JSON.stringify({ flow_token, nome: "Ana" }) }), PNID);
+        expect(ev.messages[0].buttonPayload ?? null).toBeNull();
+      }
+    });
+
     it("texto do Flow tem o mesmo teto de 4096 do texto digitado", () => {
       const ev = parseWebhook(
         nfm("wamid.F9", { response_json: JSON.stringify({ obs: "x".repeat(5000) }) }),
@@ -851,7 +871,7 @@ describe("chamadas à Graph API", () => {
         data: { compradores_0__nome: "Maria Souza" },
         corpo: "x".repeat(1100),
         cta: "Revisar a proposta inteira agora mesmo",
-        flowToken: "fv2:partes",
+        flowToken: "fv2:partes:NONCE",
       },
     });
     expect(res).toEqual({ messageId: "wamid.FLW" });
@@ -865,7 +885,7 @@ describe("chamadas à Graph API", () => {
     expect(par.flow_message_version).toBe("3");
     expect(par.flow_id).toBe("FLOW123");
     expect(par.flow_cta.length).toBeLessThanOrEqual(30);
-    expect(par.flow_token).toBe("fv2:partes");
+    expect(par.flow_token).toBe("fv2:partes:NONCE");
     expect(par.flow_action).toBe("navigate");
     expect(par.flow_action_payload).toEqual({ screen: "PARTE_1", data: { compradores_0__nome: "Maria Souza" } });
   });

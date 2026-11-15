@@ -1210,7 +1210,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone),
     orgId: state.identity.orgId,
     subjectKey: JSON.stringify([state.identity.orgId, subjectDe(state.identity)]),
-    podeEscrever: podeEscrever(state.identity) };
+    podeEscrever: podeEscrever(state.identity),
+    botao: state.inbound.buttonPayload ?? null };
   const credito = creditoLigado() && livre && !escritaEmAberto ? pedeCredito(userText) : null;
   if (credito) {
     const deps = depsDoFluxo(state, usage);

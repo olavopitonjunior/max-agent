@@ -18,9 +18,11 @@
  * revisão cai na lista numerada, botões/lista (`flowDoPasso` devolve `null`).
  */
 
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { CampoObrigatorio, OptionsV2, PatchV2, TipoDeAssinatura } from "@/graph/formularios/contrato";
 import type { PassoDeRevisao } from "@/graph/formularios/estado";
+import { contagemDePartes } from "@/graph/formularios/partes";
 import { caminhoCanonico, lerCampoPorCaminho } from "@/graph/formularios/proposta-v2";
 import { deployProfile } from "./deploy-profile";
 import { interativoDisponivel, type InterativoFlow } from "./transport";
@@ -70,21 +72,13 @@ export function caminhoDoCampoFlow(nome: string): string | null {
   return null;
 }
 
-const norm = (s: string): string => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
-const PAPEL_COMPRADOR = new Set(["comprador", "locatario", "proponente", "inquilino"]);
-const PAPEL_VENDEDOR = new Set(["vendedor", "locador", "proprietario", "contraparte"]);
-
-/** Quantas partes o rascunho já tem por lado (mínimo 1: a tela da primeira parte sempre existe). */
-export function contarPartes(options: OptionsV2): { compradores: number; vendedores: number; nomes: { compradores: string[]; vendedores: string[] } } {
-  const nomes = { compradores: [] as string[], vendedores: [] as string[] };
-  for (const s of options.signatarios ?? []) {
-    const papel = norm(s.papel ?? "");
-    if (PAPEL_COMPRADOR.has(papel)) nomes.compradores.push(s.nome);
-    else if (PAPEL_VENDEDOR.has(papel)) nomes.vendedores.push(s.nome);
-  }
-  const compradores = Math.max(1, nomes.compradores.length);
-  const vendedores = Math.max(1, nomes.vendedores.length);
-  return { compradores, vendedores, nomes };
+/**
+ * Quantas partes o Flow mostra por lado (mínimo 1: a tela da primeira parte sempre existe).
+ * Piso vindo de `signatarios` (só quem assina): enquanto o `options` não trouxer as partes do
+ * rascunho por posição, parte que não assina pode não ganhar tela.
+ */
+export function contarPartes(options: OptionsV2): { compradores: number; vendedores: number } {
+  return contagemDePartes(options);
 }
 
 const PREFIXO_DO_LADO: Record<string, "compradores" | "vendedores"> = { proponente: "compradores", contraparte: "vendedores" };
@@ -272,7 +266,8 @@ const RespostaSchema = z
   .record(z.string().max(60), z.union([z.string().max(300), z.number().finite(), z.array(z.string().max(80)).max(20)]))
   .refine((r) => Object.keys(r).length > 0 && Object.keys(r).length <= 60);
 
-export type RespostaDoFlow = PatchV2 | { erro: "formato"; invalidos?: string[] };
+/** `semMudanca`: o Flow voltou só com o que já estava preenchido (ou em branco): não há correção a anotar. */
+export type RespostaDoFlow = PatchV2 | { erro: "formato"; invalidos?: string[] } | { semMudanca: true };
 
 function juntar(a: Record<string, unknown>, b: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...a };
@@ -296,8 +291,16 @@ const TIPOS_DE_ASSINATURA = new Set<string>(["email", "whatsapp", "aceite"]);
  * NUNCA grava: o patch vira campo lido, ficha e o "sim" de sempre. Qualquer chave fora do catálogo
  * do passo, valor de tipo estranho ou campo que a leitura local recusa devolve `{ erro: "formato" }`
  * (com os caminhos recusados, sem valor), e nada é anotado, nem os campos bons.
+ *
+ * `preenchidos` (caminho → valor que o envio levava) descarta o campo devolvido IGUAL ao
+ * pré-preenchido: o Flow devolve todos os campos com `init-value`, e isso não é correção.
  */
-export function lerRespostaDoFlow(flowResponse: unknown, passo: string, obrigatorios?: CampoObrigatorio[]): RespostaDoFlow {
+export function lerRespostaDoFlow(
+  flowResponse: unknown,
+  passo: string,
+  obrigatorios?: CampoObrigatorio[],
+  preenchidos: Record<string, string> = {}
+): RespostaDoFlow {
   const parsed = RespostaSchema.safeParse(flowResponse);
   if (!parsed.success) return { erro: "formato" };
   const resposta = parsed.data;
@@ -311,6 +314,7 @@ export function lerRespostaDoFlow(flowResponse: unknown, passo: string, obrigato
   let patch: Record<string, unknown> = {};
   const invalidos: string[] = [];
   let lidos = 0;
+  let iguais = 0;
   for (const [nome, bruto] of Object.entries(resposta)) {
     const path = caminhoDoCampoFlow(nome);
     const doPasso = path !== null && (passo === "partes" ? /^(compradores|vendedores)\[/.test(path) : /^(imovel|negociacao)\./.test(path));
@@ -318,6 +322,11 @@ export function lerRespostaDoFlow(flowResponse: unknown, passo: string, obrigato
     if (Array.isArray(bruto)) return { erro: "formato" };
     const texto = String(bruto).trim();
     if (texto === "") continue; // campo em branco = não mexeu
+    const antes = preenchidos[path];
+    if (antes !== undefined && antes.trim() === texto) {
+      iguais++; // devolvido como veio: não é correção
+      continue;
+    }
     const r = lerCampoPorCaminho(path, "revisao", texto, obrigatorios);
     if (r.tipo !== "preenche") {
       invalidos.push(path);
@@ -327,7 +336,7 @@ export function lerRespostaDoFlow(flowResponse: unknown, passo: string, obrigato
     lidos++;
   }
   if (invalidos.length > 0) return { erro: "formato", invalidos };
-  if (lidos === 0) return { erro: "formato" };
+  if (lidos === 0) return iguais > 0 ? { semMudanca: true } : { erro: "formato" };
   return patch as PatchV2;
 }
 
@@ -376,39 +385,90 @@ export function flowDisponivel(passo: PassoDeRevisao, env: NodeJS.ProcessEnv = p
   return { flowId };
 }
 
-/** A mensagem de Flow do passo (o `interactive.type="flow"`), ou `null` quando ele não pode sair. */
+// ─── O token do Flow (amarra a resposta ao envio) ───────────────────────────
+
+/** Prefixo do `flow_token` do Max (`fv2:<passo>:<nonce>`); `meta.ts` só repassa tokens com ele. */
+export const PREFIXO_DO_TOKEN_DO_FLOW = "fv2:";
+/** O `button_payload` que guarda o token da resposta de um Flow nosso. */
+export const PREFIXO_DO_BOTAO_DO_FLOW = "flow:";
+
+/** Um segredo por envio de Flow (não é PII): sem ele a resposta de um Flow antigo ou digitada não vale. */
+export function novoNonceDoFlow(): string {
+  return randomBytes(9).toString("base64url");
+}
+
+export function tokenDoFlow(passo: PassoDeRevisao, nonce: string): string {
+  return `${PREFIXO_DO_TOKEN_DO_FLOW}${passo}:${nonce}`;
+}
+
+/** O token que o `button_payload` da resposta carrega (`flow:<token>`), ou `null` se não é de Flow nosso. */
+export function tokenDoBotao(botao: string | null | undefined): string | null {
+  if (!botao || !botao.startsWith(PREFIXO_DO_BOTAO_DO_FLOW)) return null;
+  const token = botao.slice(PREFIXO_DO_BOTAO_DO_FLOW.length);
+  return token === "" ? null : token;
+}
+
+/**
+ * A mensagem de Flow do passo (o `interactive.type="flow"`), ou `null` quando ele não pode sair.
+ * `nonce` é o do estado da revisão: o token do envio é `fv2:<passo>:<nonce>`.
+ */
 export function montarEnvioDoFlow(
   passo: PassoDeRevisao,
   options: OptionsV2,
   valores: Record<string, string>,
   corpo: string,
+  nonce: string,
   env: NodeJS.ProcessEnv = process.env
 ): InterativoFlow | null {
   const ok = flowDisponivel(passo, env);
   if (!ok) return null;
   const { screen, data } = montarFlowDeRevisao(passo, options, valores);
-  return { tipo: "flow", flowId: ok.flowId, screen, data, corpo, cta: "Revisar", flowToken: `fv2:${passo}` };
+  return { tipo: "flow", flowId: ok.flowId, screen, data, corpo, cta: "Revisar", flowToken: tokenDoFlow(passo, nonce) };
 }
 
 /**
- * Canal lateral entre o condutor (que decide o Flow) e o envio (`inbound.ts`), no mesmo processo e
- * por `messageId`, como o `TURNO_CRU` do grafo. Não vai ao checkpoint nem à fila (o `data` carrega
- * nome de parte). Se a retentativa do envio rodar sem o Flow (outro processo, já consumido), o texto
- * numerado equivalente sai no lugar: a revisão nunca fica sem resposta.
+ * CACHE (nunca a fonte) entre o condutor, que decide o Flow, e o envio (`inbound.ts`), no mesmo
+ * processo e por `messageId`, como o `TURNO_CRU` do grafo. A fonte é o estado da revisão (passo,
+ * itens, nonce): o texto numerado, que é o corpo e a reserva do Flow, sai sempre do `reply`. Sem
+ * o cache (outro processo, retentativa depois de reiniciar, vencido) a revisão sai em texto e
+ * nada se perde. Não vai ao checkpoint nem à fila (o `data` carrega nome de parte). Entradas
+ * vencem em `VALIDADE_DO_CANAL_MS` (playground, resposta vazia e ficha agendada nunca o consomem).
  */
-const FLOW_DO_TURNO = new Map<string, InterativoFlow>();
+const FLOW_DO_TURNO = new Map<string, { flow: InterativoFlow; em: number }>();
 const TETO_DO_CANAL = 200;
+export const VALIDADE_DO_CANAL_MS = 10 * 60_000;
 
-export function registrarFlowDoTurno(messageId: string, flow: InterativoFlow): void {
+function podarCanal(agora: number): void {
+  for (const [k, v] of FLOW_DO_TURNO) if (agora - v.em > VALIDADE_DO_CANAL_MS) FLOW_DO_TURNO.delete(k);
+}
+
+export function registrarFlowDoTurno(messageId: string, flow: InterativoFlow, agora: number = Date.now()): void {
+  podarCanal(agora);
   if (FLOW_DO_TURNO.size >= TETO_DO_CANAL) {
     const antigo = FLOW_DO_TURNO.keys().next().value;
     if (antigo !== undefined) FLOW_DO_TURNO.delete(antigo);
   }
-  FLOW_DO_TURNO.set(messageId, flow);
+  FLOW_DO_TURNO.set(messageId, { flow, em: agora });
 }
 
-export function consumirFlowDoTurno(messageId: string): InterativoFlow | undefined {
-  const flow = FLOW_DO_TURNO.get(messageId);
+/** Lê sem tirar: a retentativa do envio (falha, outro worker) ainda o encontra. Vencido = ausente. */
+export function espiarFlowDoTurno(messageId: string, agora: number = Date.now()): InterativoFlow | undefined {
+  const e = FLOW_DO_TURNO.get(messageId);
+  if (!e) return undefined;
+  if (agora - e.em > VALIDADE_DO_CANAL_MS) {
+    FLOW_DO_TURNO.delete(messageId);
+    return undefined;
+  }
+  return e.flow;
+}
+
+/** O envio foi aceito (ou o turno acabou): o Flow não volta a sair. */
+export function descartarFlowDoTurno(messageId: string): void {
+  FLOW_DO_TURNO.delete(messageId);
+}
+
+export function consumirFlowDoTurno(messageId: string, agora: number = Date.now()): InterativoFlow | undefined {
+  const flow = espiarFlowDoTurno(messageId, agora);
   FLOW_DO_TURNO.delete(messageId);
   return flow;
 }

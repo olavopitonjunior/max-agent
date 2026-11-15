@@ -258,6 +258,11 @@ export interface ContextoDoTurno {
   subjectKey?: string;
   /** v2: quem fala pode escrever (RBAC de identidade). `false` = o "sim" nunca grava. */
   podeEscrever?: boolean;
+  /**
+   * O `button_payload` da entrada. Numa resposta de Flow do Max é `flow:<token>` (`fv2:<passo>:<nonce>`):
+   * o condutor da revisão só aceita a resposta se o token for o do último envio.
+   */
+  botao?: string | null;
 }
 
 /**

@@ -4,8 +4,14 @@ import {
   FLOW_SCHEMA_VERSION,
   camposDoPasso,
   caminhoDoCampoFlow,
+  VALIDADE_DO_CANAL_MS,
   consumirFlowDoTurno,
   definicaoDoFlow,
+  descartarFlowDoTurno,
+  espiarFlowDoTurno,
+  novoNonceDoFlow,
+  tokenDoBotao,
+  tokenDoFlow,
   flowDisponivel,
   flowDoTexto,
   flowIdDoPasso,
@@ -87,7 +93,7 @@ describe("negados: o Flow só sai com flag, id e perfil Max", () => {
   it("sem MAX_FLOW_ID_* cai em botões/lista", () => {
     expect(flowIdDoPasso("partes", {} as NodeJS.ProcessEnv)).toBeNull();
     expect(flowDisponivel("partes", {} as NodeJS.ProcessEnv)).toBeNull();
-    expect(montarEnvioDoFlow("partes", options(), {}, "corpo", {} as NodeJS.ProcessEnv)).toBeNull();
+    expect(montarEnvioDoFlow("partes", options(), {}, "corpo", "N", {} as NodeJS.ProcessEnv)).toBeNull();
     // Id em branco também é "não configurado".
     expect(flowDisponivel("partes", { MAX_FLOW_ID_REVISAR_PARTES: "   " } as unknown as NodeJS.ProcessEnv)).toBeNull();
   });
@@ -102,7 +108,7 @@ describe("negados: o Flow só sai com flag, id e perfil Max", () => {
   it("o Newton nunca recebe Flow, mesmo com o id configurado", () => {
     vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
     expect(flowDisponivel("partes", ENV_FLOW)).toBeNull();
-    expect(montarEnvioDoFlow("partes", options(), {}, "corpo", ENV_FLOW)).toBeNull();
+    expect(montarEnvioDoFlow("partes", options(), {}, "corpo", "N", ENV_FLOW)).toBeNull();
   });
 
   it("o perfil sozinho já barra o Flow no Newton, mesmo que o transporte dissesse 'interativo'", async () => {
@@ -130,9 +136,9 @@ describe("negados: o Flow só sai com flag, id e perfil Max", () => {
     expect(flowDisponivel("partes", ENV_FLOW)).toBeNull();
   });
 
-  it("com tudo ligado: Flow do passo, token fv2:<passo>, corpo e CTA", () => {
-    const e = montarEnvioDoFlow("partes", options(), {}, "corpo da ficha", ENV_FLOW);
-    expect(e).toMatchObject({ tipo: "flow", flowId: "FLOW_PARTES", flowToken: "fv2:partes", cta: "Revisar", corpo: "corpo da ficha" });
+  it("com tudo ligado: Flow do passo, token fv2:<passo>:<nonce>, corpo e CTA", () => {
+    const e = montarEnvioDoFlow("partes", options(), {}, "corpo da ficha", "NONCE1", ENV_FLOW);
+    expect(e).toMatchObject({ tipo: "flow", flowId: "FLOW_PARTES", flowToken: "fv2:partes:NONCE1", cta: "Revisar", corpo: "corpo da ficha" });
     expect(e?.screen).toBe("PARTE_1");
   });
 });
@@ -244,8 +250,7 @@ describe("a resposta do Flow é DADO: mesma validação, nada é gravado", () =>
 
   it("resposta válida de imóvel e valor vira patch", () => {
     const r = lerRespostaDoFlow({ negociacao__valor: "450.000", negociacao__modalidade: "financiamento" }, "imovel_valor", options().obrigatorios);
-    expect("erro" in r).toBe(false);
-    expect(r).toMatchObject({ negociacao: { modalidade: "financiamento" } });
+    expect(r).toEqual({ negociacao: { valor: 450000, modalidade: "financiamento" } });
   });
 
   it("flowResponse inválido não grava nada", () => {
@@ -310,7 +315,7 @@ describe("flowDoTexto: a resposta do Flow como o meta.ts a deixa no texto", () =
 
 describe("canal lateral do turno (consome uma vez)", () => {
   it("registrar e consumir devolve o Flow uma vez só", () => {
-    const flow = montarEnvioDoFlow("partes", options(), {}, "corpo", ENV_FLOW)!;
+    const flow = montarEnvioDoFlow("partes", options(), {}, "corpo", "N", ENV_FLOW)!;
     registrarFlowDoTurno("wamid.X", flow);
     expect(consumirFlowDoTurno("wamid.X")).toEqual(flow);
     expect(consumirFlowDoTurno("wamid.X")).toBeUndefined();
@@ -318,9 +323,96 @@ describe("canal lateral do turno (consome uma vez)", () => {
   });
 
   it("o teto descarta o mais antigo, sem crescer sem limite", () => {
-    const flow = montarEnvioDoFlow("partes", options(), {}, "c", ENV_FLOW)!;
+    const flow = montarEnvioDoFlow("partes", options(), {}, "c", "N", ENV_FLOW)!;
     for (let i = 0; i < 260; i++) registrarFlowDoTurno(`wamid.${i}`, flow);
     expect(consumirFlowDoTurno("wamid.0")).toBeUndefined();
     expect(consumirFlowDoTurno("wamid.259")).toEqual(flow);
+  });
+});
+
+// ─── I2: o que volta igual ao pré-preenchido não é correção ────────────────
+
+describe("lerRespostaDoFlow com campos pré-preenchidos", () => {
+  const O = () => options().obrigatorios;
+
+  it("tudo devolvido como veio: 'sem mudança', nada para gravar", () => {
+    const r = lerRespostaDoFlow({ compradores_0__nome: "Maria Souza", vendedores_0__nome: "João Pires" }, "partes", O(), {
+      "compradores[0].nome": "Maria Souza",
+      "vendedores[0].nome": "João Pires",
+    });
+    expect(r).toEqual({ semMudanca: true });
+  });
+
+  it("só o que mudou entra no patch; o devolvido igual (com espaço sobrando) é descartado", () => {
+    const r = lerRespostaDoFlow({ compradores_0__nome: " Maria Souza ", vendedores_0__nome: "João Novo" }, "partes", O(), {
+      "compradores[0].nome": "Maria Souza",
+      "vendedores[0].nome": "João Pires",
+    });
+    expect(r).toEqual({ vendedores: [{ nome: "João Novo" }] });
+  });
+
+  it("sem pré-preenchimento nada é descartado (comportamento de antes)", () => {
+    expect(lerRespostaDoFlow({ compradores_0__nome: "Maria Souza" }, "partes", O())).toEqual({ compradores: [{ nome: "Maria Souza" }] });
+  });
+
+  it("resposta toda em branco continua sendo formato inválido, não 'sem mudança'", () => {
+    expect(lerRespostaDoFlow({ compradores_0__nome: "  " }, "partes", O(), { "compradores[0].nome": "Maria" })).toEqual({ erro: "formato" });
+  });
+
+  it("valor inválido no que mudou recusa a resposta inteira", () => {
+    const r = lerRespostaDoFlow({ compradores_0__nome: "Maria Souza", compradores_0__cpf: "111.111.111-11" }, "partes", O(), { "compradores[0].nome": "Maria Souza" });
+    expect(r).toEqual({ erro: "formato", invalidos: ["compradores[0].cpf"] });
+  });
+});
+
+// ─── I1: o token amarra a resposta ao Flow enviado ─────────────────────────
+
+describe("token do Flow", () => {
+  it("fv2:<passo>:<nonce>, e o botão do Meta é flow:<token>", () => {
+    expect(tokenDoFlow("partes", "ABC")).toBe("fv2:partes:ABC");
+    expect(tokenDoBotao("flow:fv2:partes:ABC")).toBe("fv2:partes:ABC");
+  });
+
+  it("botão que não é de Flow nosso não vira token (negados)", () => {
+    for (const b of [null, undefined, "", "sim", "confirmar", "flow:", "fv2:partes:ABC", "FLOW:fv2:partes:ABC"]) expect(tokenDoBotao(b)).toBeNull();
+  });
+
+  it("o nonce é único por envio e só tem caracteres seguros", () => {
+    const a = novoNonceDoFlow();
+    const b = novoNonceDoFlow();
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^[A-Za-z0-9_-]{8,}$/);
+  });
+
+  it("o descritor leva o token com o nonce dado", () => {
+    expect(montarEnvioDoFlow("partes", options(), {}, "c", "XYZ", ENV_FLOW)).toMatchObject({ flowToken: "fv2:partes:XYZ" });
+  });
+});
+
+// ─── I3: o canal lateral é um cache com validade ────────────────────────────
+
+describe("canal lateral: espiar, descartar e validade", () => {
+  const flow = () => montarEnvioDoFlow("partes", options(), {}, "corpo", "N", ENV_FLOW)!;
+
+  it("espiar não consome; descartar remove", () => {
+    registrarFlowDoTurno("wamid.E1", flow(), 1_000);
+    expect(espiarFlowDoTurno("wamid.E1", 1_001)).toEqual(flow());
+    expect(espiarFlowDoTurno("wamid.E1", 1_002)).toEqual(flow());
+    descartarFlowDoTurno("wamid.E1");
+    expect(espiarFlowDoTurno("wamid.E1", 1_003)).toBeUndefined();
+  });
+
+  it("entrada vencida some (playground, resposta vazia e ficha agendada não deixam lixo)", () => {
+    registrarFlowDoTurno("wamid.E2", flow(), 1_000);
+    expect(espiarFlowDoTurno("wamid.E2", 1_000 + VALIDADE_DO_CANAL_MS - 1)).toEqual(flow());
+    expect(espiarFlowDoTurno("wamid.E2", 1_000 + VALIDADE_DO_CANAL_MS + 1)).toBeUndefined();
+    expect(consumirFlowDoTurno("wamid.E2", 1_000 + VALIDADE_DO_CANAL_MS + 1)).toBeUndefined();
+  });
+
+  it("registrar poda as vencidas", () => {
+    registrarFlowDoTurno("wamid.E3", flow(), 1_000);
+    registrarFlowDoTurno("wamid.E4", flow(), 1_000 + VALIDADE_DO_CANAL_MS + 5);
+    expect(consumirFlowDoTurno("wamid.E3", 1_000 + VALIDADE_DO_CANAL_MS + 6)).toBeUndefined();
+    expect(consumirFlowDoTurno("wamid.E4", 1_000 + VALIDADE_DO_CANAL_MS + 6)).toEqual(flow());
   });
 });
