@@ -661,8 +661,9 @@ export const MINHAS_PENDENCIAS: ToolDef = {
       properties: {
         filtro: {
           type: "string",
-          enum: ["formularios", "propostas", "atividades"],
-          description: "Só o bloco pedido. Omita quando a pergunta for geral. Opcional.",
+          enum: ["formularios", "propostas", "atividades", "avisos"],
+          description:
+            "Só o bloco pedido. Omita quando a pergunta for geral. \"avisos\" são os avisos da fila do sistema, só quando liberados. Opcional.",
         },
         negocio_id: {
           type: "string",

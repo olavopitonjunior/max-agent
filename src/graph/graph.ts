@@ -1658,6 +1658,12 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
     criacao,
     avisos: state.identity.kind === "user" && preferenciasPermitidas({ policy: state.policy, politicaIndisponivel: state.politicaIndisponivel }),
     pendencias: !state.politicaIndisponivel && state.policy.includes("pending.summary"),
+    // Avisos da fila (2.8b): só usuário da plataforma com `pending.summary` E `pending.avisos`.
+    avisosDaFila:
+      !state.politicaIndisponivel &&
+      state.identity.kind === "user" &&
+      state.policy.includes("pending.summary") &&
+      state.policy.includes("pending.avisos"),
     // Vazio na primeira volta; preenchido quando o `tools` já rodou.
     toolResults: state.toolResults,
     credito: creditoLigado(),

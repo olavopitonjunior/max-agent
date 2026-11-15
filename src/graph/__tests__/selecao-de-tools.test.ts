@@ -315,7 +315,7 @@ describe("minhas_pendencias: o que EU tenho pendente", () => {
     const t = TOOLS_DE_LEITURA.find((x) => x.nome === "minhas_pendencias")!;
     expect(t).toMatchObject({ tipo: "leitura", capability: "pending.summary", verb: "pending.summary", prioridade: 15 });
     const props = (t.def.parameters as { properties: Record<string, { enum?: string[]; type?: string }> }).properties;
-    expect(props.filtro.enum).toEqual(["formularios", "propostas", "atividades"]);
+    expect(props.filtro.enum).toEqual(["formularios", "propostas", "atividades", "avisos"]);
     expect(props.negocio_id.type).toBe("string");
   });
 

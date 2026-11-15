@@ -105,8 +105,11 @@ export interface ScopeQueryRequest {
     filtro?: "minhas" | "atrasadas" | "hoje";
     /** `activity.get`. */
     atividade_id?: string;
-    /** `pending.summary`: blocos pedidos (um, ou ausente = os três). */
-    blocos?: ("formularios" | "propostas" | "atividades")[];
+    /**
+     * `pending.summary`: blocos pedidos (ausente = os três de sempre). `avisos` só sai quando
+     * pedido por nome, com a capability `pending.avisos`, e nunca junto de `dealId`.
+     */
+    blocos?: ("formularios" | "propostas" | "atividades" | "avisos")[];
     /** `pending.summary`: restringe os formulários a este negócio. */
     dealId?: string;
     /** `metrics.get`: período pedido (par do contractmaker, plano notificações por papel PR6/v3). */

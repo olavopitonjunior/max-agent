@@ -20,6 +20,7 @@ import { ITENS_POR_LISTA, REFERENCIA_TTL_MS, resolverReferencia, numerarLista, t
 import type { StageClarification } from "./query-options";
 import { projetarParaOModelo } from "./preferencias";
 import { projetarNotificacao } from "./notificacao-projecao";
+import { projetarResumoDePendencias } from "./avisos-projecao";
 import { atividadeEmHoraLocal } from "./atividade-hora-local";
 
 /**
@@ -206,12 +207,27 @@ export async function despacharLeituras(params: {
       numeroDoDetalhe = selected.item.n;
       args = { atividade_id: selected.item.id };
     }
+    // `pending.avisos` (2.8b): o bloco `avisos` só é PEDIDO por quem tem a capability E é usuário da
+    // plataforma (corretor comissionado não tem fila). O CM só o devolve quando pedido pelo nome.
+    const avisosLiberados = params.policy.includes("pending.avisos") && params.identity.kind === "user";
     if (entrada.verb === "pending.summary") {
       // Só passa o que o servidor entende: `filtro` (enum) vira `blocos` com um
       // bloco, `negocio_id` vira `dealId`. Qualquer outro campo do modelo some.
-      const filtro = lerBlocoDePendencia(args.filtro);
+      let filtro = lerBlocoDePendencia(args.filtro);
       const dealId = typeof args.negocio_id === "string" ? args.negocio_id.trim().slice(0, 64) : "";
-      args = { ...(filtro ? { blocos: [filtro] } : {}), ...(dealId ? { dealId } : {}) };
+      // Filtro "avisos" sem a capability: resposta de "não disponível" e NENHUMA chamada ao CM.
+      if (filtro === "avisos" && !avisosLiberados) {
+        resultados.push({ tool: chamada.name, items: [{ avisos: { disponivel: false, total: 0, itens: [] } }], truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "sem_permissao" });
+        continue;
+      }
+      // Com `dealId` o servidor não devolve avisos (a fila é da pessoa, não do negócio): o negócio
+      // manda, e o filtro "avisos" cai (vira a consulta de sempre, restrita ao negócio).
+      if (filtro === "avisos" && dealId) filtro = null;
+      // Sem filtro, o servidor decide os blocos sozinho e NÃO inclui `avisos` (só pedido por nome):
+      // com a capability e sem negócio, a lista passa a ser explícita, com os quatro.
+      const blocos = filtro ? [filtro] : avisosLiberados && !dealId ? [...BLOCOS_DE_PENDENCIA_SEM_FILTRO, "avisos"] : null;
+      args = { ...(blocos ? { blocos } : {}), ...(dealId ? { dealId } : {}) };
     }
     if (entrada.verb === "metrics.get") {
       // Só `periodo` e `quebra`, ambos dentro do enum: `estado`, `numero`, `mais` e o resto do modelo somem.
@@ -255,6 +271,9 @@ export async function despacharLeituras(params: {
       trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
       continue;
     }
+
+    // Avisos da fila: whitelist de campos, dado de terceiro marcado; sem a capability o bloco sai do resumo.
+    if (entrada.verb === "pending.summary" && !semPermissao) r.items = r.items.map((it) => projetarResumoDePendencias(it, avisosLiberados));
 
     // Notificação: só os campos que o Max conhece; título/corpo (CM do Passo 5) entram marcados como dado de terceiros.
     if (entrada.verb === "notification.list") r.items = r.items.map(projetarNotificacao);
@@ -317,9 +336,12 @@ export async function despacharLeituras(params: {
   return { resultados, trilha, referencias };
 }
 
+/** Os blocos que o servidor devolve em `pending.summary` quando nenhum é pedido (sem `avisos`). */
+export const BLOCOS_DE_PENDENCIA_SEM_FILTRO = ["formularios", "propostas", "atividades"] as const;
+
 /** Blocos que o servidor aceita em `pending.summary`. Valor fora da lista some (todos os blocos). */
-export function lerBlocoDePendencia(v: unknown): "formularios" | "propostas" | "atividades" | null {
-  return v === "formularios" || v === "propostas" || v === "atividades" ? v : null;
+export function lerBlocoDePendencia(v: unknown): "formularios" | "propostas" | "atividades" | "avisos" | null {
+  return v === "formularios" || v === "propostas" || v === "atividades" || v === "avisos" ? v : null;
 }
 
 /**
