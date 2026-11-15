@@ -5,9 +5,10 @@ export const ROLLOUT_FLAGS = {
   queries: 'MAX_EXTENDED_QUERIES',
   handoff: 'MAX_HANDOFF',
   marketing: 'MAX_MARKETING',
+  formularios_v2: 'MAX_FORMULARIOS_V2',
 } as const;
 export type RolloutFeature = keyof typeof ROLLOUT_FLAGS;
-const features = ['runtime', 'queries', 'handoff', 'marketing'] as const;
+const features = ['runtime', 'queries', 'handoff', 'marketing', 'formularios_v2'] as const;
 const schema = z.record(
   z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/),
   z.array(z.enum(features)).max(features.length),
