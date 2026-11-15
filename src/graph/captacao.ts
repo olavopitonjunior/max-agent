@@ -1010,6 +1010,27 @@ const MARCAS: [RegExp, string][] = [
 const semPercentualEPrazo = (s: string) =>
   s.replace(/\d+(?:[.,]\d+)?\s*(?:%|por cento)/g, " ").replace(/\d+\s*(?:dias?|meses|mes)\b/g, " ");
 
+/** Valor que se anuncia: "R$ 800.000", "R$800 mil", "R$ 1,2 milhão" ou "800 mil" (texto já normalizado). */
+const RE_VALOR_MARCADO = /r\$\s*\d[\d.,]*(?:\s*(?:mil|milhoes?|milhao|k)\b)?|\d[\d.,]*\s*(?:mil|milhoes?|milhao)\b/g;
+/** Rótulos cujo "R$" é de OUTRO campo (condomínio, IPTU, taxa, aluguel já lido): não viram o valor principal. */
+const MARCAS_DE_OUTRO_VALOR = new Set(["aluguel", "condominio", "iptu", "taxa", "valor"]);
+
+/**
+ * O único valor marcado (R$/mil/milhão) que não pertence a um rótulo de outro
+ * campo. Dois valores diferentes (ou nenhum) → `undefined`: nunca chuta.
+ */
+function valorMarcado(t: string, marcas: { campo: string; ini: number }[]): number | undefined {
+  const achados = new Set<number>();
+  for (const m of t.matchAll(RE_VALOR_MARCADO)) {
+    const idx = m.index ?? 0;
+    const anterior = [...marcas].reverse().find((x) => x.ini < idx);
+    if (anterior && MARCAS_DE_OUTRO_VALOR.has(anterior.campo)) continue;
+    const v = valoresNoTexto(m[0])[0];
+    if (v !== undefined && v > 0) achados.add(v);
+  }
+  return achados.size === 1 ? [...achados][0] : undefined;
+}
+
 function prazoEmDias(segmento: string): number | null {
   const d = /(\d{1,5})\s*dias?\b/.exec(segmento);
   if (d) return Number(d[1]);
@@ -1062,15 +1083,20 @@ export function lerCondicoes(texto: string, tipo: TipoDeCaptacao): CondicoesLida
     }
   });
 
-  // Sem rótulo: um único valor solto é o valor principal da esteira.
+  // Sem rótulo: um valor com "R$" (ou "mil"/"milhão") é o valor principal mesmo
+  // havendo outros números (o número da rua); senão, um único valor solto.
   const principal = tipo === "venda" ? condicoes.valor : locacao.aluguel;
   if (principal === undefined) {
-    const primeiraMarca = achadas[0]?.ini ?? t.length;
-    const solto = valoresNoTexto(semPercentualEPrazo(t.slice(0, primeiraMarca)));
-    if (solto.length === 1) setMoeda("valor", solto[0]);
-    else if (!achadas.length) {
-      const todos = valoresNoTexto(semPercentualEPrazo(t));
-      if (todos.length === 1) setMoeda("valor", todos[0]);
+    const marcado = valorMarcado(t, achadas);
+    if (marcado !== undefined) setMoeda("valor", marcado);
+    else {
+      const primeiraMarca = achadas[0]?.ini ?? t.length;
+      const solto = valoresNoTexto(semPercentualEPrazo(t.slice(0, primeiraMarca)));
+      if (solto.length === 1) setMoeda("valor", solto[0]);
+      else if (!achadas.length) {
+        const todos = valoresNoTexto(semPercentualEPrazo(t));
+        if (todos.length === 1) setMoeda("valor", todos[0]);
+      }
     }
   }
   // Sem rótulo: "180 dias" é o prazo; um único "%" solto é a comissão.

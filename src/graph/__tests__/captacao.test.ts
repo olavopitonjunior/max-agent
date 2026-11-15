@@ -2201,3 +2201,41 @@ describe("revisão opus (26/10, rodada de correções)", () => {
     expect(ok.reply).toContain("Criei o rascunho");
   });
 });
+
+// ─── Captação fluida (11/2026): a mensagem única não vira interrogatório ────
+
+describe("lerCondicoes: valor com R$ / mil / milhão, mesmo com outros números no texto", () => {
+  const venda = (t: string) => cap.lerCondicoes(t, "venda").condicoes.valor;
+
+  it.each([
+    ["Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000", 800000],
+    ["Rua das Flores, 123, venda R$800 mil", 800000],
+    ["Av. Brasil, 77, apto 12, R$ 1,2 milhão", 1200000],
+    ["Rua A, 10, 800 mil", 800000],
+    ["800 mil, Rua A, 10", 800000],
+    ["Rua B, 5, valor R$ 950.000,00, comissão 6%", 950000],
+  ])("%s → %d", (texto, esperado) => {
+    expect(venda(texto)).toBe(esperado);
+  });
+
+  it("sem R$/mil e com dois números: não chuta (número da rua não vira valor)", () => {
+    expect(venda("Rua TESTE, 5, venda 800")).toBeUndefined();
+    expect(venda("Rua A, 10, apto 52")).toBeUndefined();
+  });
+
+  it("dois valores marcados diferentes: não chuta", () => {
+    expect(venda("Rua A, 10, R$ 800.000 ou R$ 750.000")).toBeUndefined();
+  });
+
+  it("R$ ligado a condomínio/IPTU na locação não vira o aluguel", () => {
+    const l = cap.lerCondicoes("Rua A, condomínio R$ 500, IPTU R$ 120", "locacao");
+    expect(l.locacao.aluguel).toBeUndefined();
+    expect(l.locacao.condominio).toBe(500);
+    expect(l.locacao.iptu).toBe(120);
+    expect(cap.lerCondicoes("Rua A, 10, R$ 3.500", "locacao").locacao.aluguel).toBe(3500);
+  });
+
+  it("o rótulo continua mandando: 'valor 850 mil' não é afetado por outros R$", () => {
+    expect(venda("valor 850 mil, comissão 6%, prazo 180 dias")).toBe(850000);
+  });
+});
