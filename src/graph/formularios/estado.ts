@@ -31,6 +31,37 @@ export interface RevisaoEmCurso {
   nonce?: string;
 }
 
+/**
+ * O passo da assinatura e do envio (PR-D, T13/T14). Só ids opacos e escolhas: nenhum nome, CPF,
+ * e-mail ou telefone (o texto das testemunhas sai do `options` a cada turno).
+ *
+ *  - `testemunhas`: a lista numerada das do cadastro (padrão marcado);
+ *  - `testemunhas_cartao`: o cartão "Testemunhas: ... Confirma?" (o SIM grava `proposal.witnesses.set`);
+ *  - `tipo`: a escolha de e-mail / WhatsApp / Aceite;
+ *  - `celular`: o Aceite escolhido sem celular de um signatário: o celular vem ANTES de qualquer preflight;
+ *  - `canal_cartao`: o canal guardado difere do escolhido; o SIM grava `proposal.update { tipo_assinatura }`;
+ *  - `regerar`: o servidor recusou por `documento_proprio`; o aviso de perda de edição vem ANTES do SIM;
+ *  - `envio_cartao`: o resumo do preflight; o SIM manda o `proposal.send` com o `instrumento_confirmado`.
+ *
+ * `mostrado`: o instrumento e o tipo efetivo do resumo que o corretor VIU; só eles vão como
+ * `instrumento_confirmado`. `nonce`: o segredo do Flow de assinatura (`fv2:assinatura:<nonce>`); fica
+ * aqui, e não em `revisao`, porque a revisão trataria o "sim" do cartão como o fim da revisão.
+ */
+export type PassoDaAssinatura = "testemunhas" | "testemunhas_cartao" | "tipo" | "celular" | "canal_cartao" | "regerar" | "envio_cartao";
+
+export interface AssinaturaEmCurso {
+  passo: PassoDaAssinatura;
+  tipo?: "email" | "whatsapp" | "aceite";
+  /** `idPadrao` das testemunhas escolhidas (o catálogo é o do cadastro). Só ids. */
+  testemunhas?: string[];
+  /** As testemunhas já foram gravadas neste fluxo (`proposal.witnesses.set` 200). */
+  testemunhasOk?: boolean;
+  /** O canal escolhido já foi gravado (`proposal.update`): o preflight que ainda difere vira aviso, não novo cartão. */
+  canalGravado?: boolean;
+  mostrado?: { instrumento: "envelope" | "aceite"; tipoEfetivo: "email" | "whatsapp" | "aceite" };
+  nonce?: string;
+}
+
 export type EtapaV2 = "entender" | "compor" | "ficha" | "revisar" | "assinatura" | "envio" | "correcao";
 
 /** O campo que a próxima resposta curta preenche ("123.456.789-09" sem dizer de quê). */
@@ -93,6 +124,8 @@ export interface FluxoFormularioV2 {
   conflito?: { grupo: "compradores" | "vendedores"; posicao: number };
   /** A revisão do rascunho em curso (T11/T12). Ausente = não está revisando. */
   revisao?: RevisaoEmCurso;
+  /** O passo da assinatura e do envio (T13/T14). Ausente = não está nele. */
+  assinatura?: AssinaturaEmCurso;
   /** Todo `Fluxo` carrega isto: TTL e expiração. */
   atualizadoEm: number;
 }
