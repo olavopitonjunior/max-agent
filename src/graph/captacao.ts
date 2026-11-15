@@ -2624,6 +2624,10 @@ async function conduzirRevisao(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: Dep
   }
   const lida = lerRespostaDoResumo(ctx.texto);
   if (lida.nao) return cancelar(f);
+  // W46: "ok"/"blz"/"👍" não autorizam o envio ao proprietário. A pergunta volta, nada sai.
+  if (!lida.sim && !lida.canal && lerConfirmacao(ctx.texto) === "vago") {
+    return resposta(g(f, ctx), "Para enviar ao proprietário, responda *sim*, ou CANCELAR.", "captacao_resumo_confirmar");
+  }
   if (!lida.sim && !lida.canal) return pausar(f);
   const trocaCanal = !!lida.canal && lida.canal !== f.canalDito;
   if (trocaCanal && !f.proprietarios?.length) {
@@ -2787,6 +2791,10 @@ async function conduzirAutorizacaoOferta(f: FluxoCaptacao, t: string, ctx: Conte
     );
   }
   if (lerConfirmacao(ctx.texto) === "sim") return pedirAutorizacao(f, ctx, deps, pedido);
+  // "ok"/"blz"/"👍" não confirmam (W46) e também não são justificativa: a pergunta volta.
+  if (lerConfirmacao(ctx.texto) === "vago") {
+    return resposta(g(f, ctx), "Para pedir a autorização, responda *sim* (ou *não*).", "captacao_autorizacao_oferta_confirmar");
+  }
   // "sim, <justificativa>" / "sim - <justificativa>" (achado de review 19/10, item 6): já
   // confirma, levando o texto depois da vírgula/hífen como justificativa — sem o passo extra de
   // "peço com essa justificativa?" (a pessoa já confirmou na MESMA mensagem). Roda ANTES do
@@ -2991,6 +2999,9 @@ async function conduzirAutorizacaoConfirmar(f: FluxoCaptacao, ctx: ContextoDoTur
   if (lerConfirmacao(ctx.texto) === "nao") {
     if (f.autorizacaoChave) return respostaDeAutorizacaoIncerta("captacao_autorizacao_decisao_cancelada_incerta");
     return resposta(null, "Tudo bem, não decidi nada.", "captacao_autorizacao_decisao_cancelada");
+  }
+  if (lerConfirmacao(ctx.texto) === "vago") {
+    return resposta(g(f, ctx), "Para confirmar, responda *sim* (ou *não*).", "captacao_autorizacao_decisao_confirmar");
   }
   if (lerConfirmacao(ctx.texto) !== "sim") return pausar(f);
   return decidirAutorizacao(f, ctx, deps, decisao);

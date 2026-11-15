@@ -68,6 +68,7 @@ import {
   textoCriacaoIndisponivel,
   TEXTO_INDISPONIVEL_AGORA,
   TEXTO_CANCELADO,
+  TEXTO_PARA_CONFIRMAR,
   textoFalhou,
   MUDAR_MINHAS_NOTIFICACOES,
   type PendingAction,
@@ -1388,6 +1389,18 @@ async function confirm(state: MaxStateType): Promise<MaxUpdate> {
         { role: "assistant", content: TEXTO_CANCELADO },
       ],
       reply: TEXTO_CANCELADO,
+    };
+  }
+
+  if (resposta === "vago") {
+    // "ok"/"blz"/"👍" não autorizam escrita (W46). A pendência FICA — o próximo
+    // "sim" a executa — e a pergunta volta reformulada, sem rodar nada.
+    return {
+      messages: [
+        { role: "user", content: userText },
+        { role: "assistant", content: TEXTO_PARA_CONFIRMAR },
+      ],
+      reply: TEXTO_PARA_CONFIRMAR,
     };
   }
 

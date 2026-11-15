@@ -37,7 +37,7 @@
 
 import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { Capability } from "./policy";
-import { lerConfirmacao, normalizar } from "./tools";
+import { lerConfirmacao, normalizar, TEXTO_PARA_CONFIRMAR } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
 import { conduzirAssinatura, type FluxoAssinatura } from "./assinatura";
@@ -1553,6 +1553,8 @@ async function conduzirNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: Deps
     return { reply: resumoDoNegocio({ ...f, titulo: nome }), fluxo: { ...f, titulo: nome, etapa: "revisao", chave: undefined, atualizadoEm: agora }, evento: "negocio_revisao" };
   }
   if (f.etapa === "revisao" && resposta === "sim") return criarNegocio(f, ctx, deps);
+  // "ok"/"blz" não autorizam a escrita (W46): a pergunta volta, nada é criado.
+  if (f.etapa === "revisao" && resposta === "vago") return { reply: TEXTO_PARA_CONFIRMAR, fluxo: { ...f, atualizadoEm: agora }, evento: "negocio_confirmar" };
   // Correção do nome no resumo: "nome: Casa da Praia" (o extrator só conhece as chaves do popup).
   const usaPadrao=(f.campos??[]).some(c=>c.chave.startsWith('titleParts.'));
   const novoNome = !usaPadrao && (f.etapa === "revisao" || f.etapa === "campos") ? tituloDeclarado(ctx.texto) ?? /^\s*nome\s*[:\-]\s*(.+)$/i.exec(ctx.texto)?.[1]?.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
@@ -1669,6 +1671,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     if (resposta === "nao") {
       return { reply: "Certo, não abri a proposta. A análise fica na tela do lead.", fluxo: null, evento: "proposta_lead_recusada" };
     }
+    if (resposta === "vago") return { reply: TEXTO_PARA_CONFIRMAR, fluxo: { ...f, atualizadoEm: agora }, evento: "proposta_confirmar" };
     if (resposta !== "sim") return { liberar: true, fluxo: f, evento: "proposta_lead_oferta_liberada" };
     const g: FluxoProposta = { ...f, leaseClientId: undefined, ofertaSemVinculo: undefined, leadIncompleto: undefined, chave: undefined, atualizadoEm: agora };
     const falta = faltandoNaProposta(g.dados);
@@ -1682,6 +1685,10 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   if (f.etapa === "revisao" && resposta === "sim") return criarRascunho(f, ctx, deps);
   if (f.etapa === "revisao_ajuste" && resposta === "sim") return atualizarRascunho(f, ctx, deps);
+  // "ok"/"blz"/"👍" não autorizam escrita (W46): a pergunta volta, nada é gravado.
+  if ((f.etapa === "revisao" || f.etapa === "revisao_ajuste") && resposta === "vago") {
+    return { reply: TEXTO_PARA_CONFIRMAR, fluxo: { ...f, atualizadoEm: agora }, evento: "proposta_confirmar" };
+  }
   if ((f.etapa === "revisao" || f.etapa === "revisao_ajuste") && resposta === "nao") {
     return {
       reply:
@@ -1749,6 +1756,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   if (f.etapa === "envio") {
     if (resposta === "sim") return enviar(f, ctx, deps);
+    if (resposta === "vago") return { reply: TEXTO_PARA_CONFIRMAR, fluxo: { ...f, atualizadoEm: agora }, evento: "envio_confirmar" };
     if (resposta === "nao") {
       return {
         reply: `Ok, não enviei. O rascunho${f.codigo ? ` ${f.codigo}` : ""} continua salvo no sistema.`,

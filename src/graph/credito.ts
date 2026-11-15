@@ -1295,6 +1295,10 @@ async function desdobrarResultado(f: FluxoCredito, ctx: ContextoDoTurno, deps: D
   const confirmacao = lerConfirmacao(ctx.texto);
   const url = linkDoLead(f.leaseClientId);
   if (confirmacao === "nao") return resposta(null, `Certo. A análise fica na tela do lead: ${url}`, "credito_resultado_encerrado");
+  // W46: "ok" depois do resultado NÃO abre a proposta (acompanha a conversa, não autoriza). A pergunta volta.
+  if (confirmacao === "vago") {
+    return resposta({ ...f, atualizadoEm: ctx.agora }, `Para abrir a proposta de locação, responda SIM. Se não for agora, a análise fica na tela do lead: ${url}`, "credito_resultado_confirmar");
+  }
   // Outra conversa: o resultado já foi dito; o fluxo acaba e o modelo responde.
   if (confirmacao !== "sim") return { liberar: true, fluxo: null, evento: "credito_resultado_liberado" };
   if (!ctx.policy.includes("proposal.create")) {

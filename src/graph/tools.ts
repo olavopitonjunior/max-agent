@@ -234,12 +234,25 @@ export function normalizar(texto: string): string {
  * é para adivinhar intenção — é para reconhecer a resposta que pedimos.
  */
 const AFIRMA =
-  /^(sim|s|isso( mesmo)?|isso ai|ok|okay|okey|blz|beleza|certo|claro|perfeito|positivo|confirmo?|confirmado|pode( ser| criar| mandar| fazer)?|manda( ai| ver)?|cri(a|ar)|faz(er)?( isso)?|vai|bora|aham|uhum|com certeza|ta|ta bom|ta certo|👍|✅|👌|🙏)$/;
+  /^(sim|s|isso( mesmo)?|isso ai|claro|positivo|confirmo?|confirmado|pode( criar| mandar| enviar| fazer)?|manda( ai| ver)?|cri(a|ar)|faz(er)?( isso)?|aham|uhum|com certeza|✅)$/;
+
+/**
+ * W46: "ok", "blz", "beleza", "certo", "tá", "vai", "👍", "👌" são o jeito de
+ * ENCERRAR ou de ACOMPANHAR a conversa no WhatsApp, não de autorizar uma escrita
+ * (um "ok" tratado como SIM abriu a proposta de locação a partir do crédito). Em
+ * card de escrita não valem como SIM: respondem com a pergunta reformulada
+ * ("Para confirmar, responda SIM.") e nada executa. `pode ser` fica aqui também:
+ * é "talvez", não "autorizo".
+ */
+const VAGO =
+  /^(ok|okay|okey|blz|beleza|certo|perfeito|vai|bora|ta|ta bom|ta certo|pode ser|👍|👌|🙏)$/;
 
 const NEGA =
   /^(nao|n|nn|nops?|nope|negativo|deixa( pra la| quieto)?|cancela|esquece|para|nada|agora nao|melhor nao|nao precisa|nao quero|nao e isso|❌|👎)$/;
 
-export type Confirmacao = "sim" | "nao" | "nenhum";
+export const TEXTO_PARA_CONFIRMAR = "Para confirmar, responda SIM.";
+
+export type Confirmacao = "sim" | "nao" | "nenhum" | "vago";
 
 export function lerConfirmacao(texto: string): Confirmacao {
   const t = normalizar(texto);
@@ -247,6 +260,7 @@ export function lerConfirmacao(texto: string): Confirmacao {
   // Negativa primeiro: "nao pode" tem que cair aqui, não no ramo afirmativo.
   if (NEGA.test(t)) return "nao";
   if (AFIRMA.test(t)) return "sim";
+  if (VAGO.test(t)) return "vago";
   return "nenhum";
 }
 

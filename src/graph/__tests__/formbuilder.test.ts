@@ -549,8 +549,14 @@ describe("locação e proposta", () => {
 
 describe("matcher de confirmação", () => {
   it("aceita as formas que a pergunta induz", () => {
-    for (const t of ["sim", "SIM", "Sim.", "pode criar", "isso", "ok", "👍", "beleza"]) {
+    for (const t of ["sim", "SIM", "Sim.", "pode criar", "isso", "confirmo", "✅"]) {
       expect(lerConfirmacao(t), t).toBe("sim");
+    }
+  });
+
+  it("ok/blz/beleza/👍 são vagos: não confirmam escrita", () => {
+    for (const t of ["ok", "👍", "beleza", "blz", "certo"]) {
+      expect(lerConfirmacao(t), t).toBe("vago");
     }
   });
 
