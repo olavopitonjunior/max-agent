@@ -63,7 +63,9 @@ vi.mock("@/lib/turnlog", async (orig) => ({
 }));
 
 const { runTurn, getApp } = await import("../../graph");
-const { pedeCorrecaoDeTexto } = await import("../correcao-roteamento");
+const { pedeCorrecaoDeTexto, TEXTO_FLUXO_ABERTO } = await import("../correcao-roteamento");
+const { novoFluxoV2 } = await import("../estado");
+const { cancelarPendentesPorPrefixo } = await import("@/lib/outbox");
 const { resolveIdentity } = await import("@/lib/identity");
 const { executarAcao } = await import("@/lib/acao");
 const { fetchProfile } = await import("@/lib/cm");
@@ -150,8 +152,30 @@ describe("pedeCorrecaoDeTexto: o detector lexical", () => {
     ["pode mudar a cláusula da multa na proposta?", "proposta"],
     ["corrige o contrato", "contrato"],
     ["muda a cláusula de multa do contrato", "contrato"],
+    ["reescreve o texto da proposta", "proposta"],
   ])("'%s' é correção de texto (%s)", (texto, alvo) => {
     expect(pedeCorrecaoDeTexto(texto)).toBe(alvo);
+  });
+
+  // R32: palavra de DADO nunca é marca de texto ("item", "itens", "texto" sozinho).
+  it.each([
+    "inclui o item churrasqueira",
+    "adiciona item: vaga de garagem",
+    "tira os itens da lista",
+    "atualiza o texto do anúncio",
+    "corrige o texto",
+  ])("R32: '%s' NÃO é correção de texto (nem com a regra branda)", (texto) => {
+    expect(pedeCorrecaoDeTexto(texto)).toBeNull();
+    expect(pedeCorrecaoDeTexto(texto, { forte: true })).toBeNull();
+  });
+
+  it("com fluxo aberto (forte) só cláusula, parágrafo, redação ou 'texto do documento' contam; 'trecho' não", () => {
+    expect(pedeCorrecaoDeTexto("reescreve o trecho do prazo da proposta")).toBe("proposta");
+    expect(pedeCorrecaoDeTexto("reescreve o trecho do prazo da proposta", { forte: true })).toBeNull();
+    expect(pedeCorrecaoDeTexto("muda a cláusula de multa da proposta", { forte: true })).toBe("proposta");
+    expect(pedeCorrecaoDeTexto("corrige o parágrafo da rescisão", { forte: true })).toBe("indefinido");
+    expect(pedeCorrecaoDeTexto("ajusta a redação da proposta", { forte: true })).toBe("proposta");
+    expect(pedeCorrecaoDeTexto("muda o texto do documento", { forte: true })).toBe("indefinido");
   });
 
   it.each([
@@ -225,9 +249,12 @@ describe("T17: com feature e capability", () => {
 
   it("'corrige o CPF da proposta' é DADO: nunca vira text.suggest, segue em proposal.update (gestão)", async () => {
     ligar(true);
-    await turno(`corrige o CPF da proposta ${CODIGO} para 529.982.247-25`);
+    const { r, values } = await turno(`corrige o CPF da proposta ${CODIGO} para 529.982.247-25`);
     expect(verbos().some((v) => v.includes(".text."))).toBe(false);
-    expect(verbos()).toContain("proposal.status");
+    expect(verbos()).toEqual(["proposal.options", "proposal.status"]);
+    // M6: a GESTÃO abriu de fato (ajuste do rascunho), não só "nenhum .text.".
+    expect(values.fluxo).toMatchObject({ kind: "proposta", etapa: "ajustes", propostaId: "prop-1" });
+    expect(r.reply).toMatch(/O que você quer mudar na proposta PROP-2026-0001/);
   });
 
   it("proposta sem citação e sem fluxo aberto: pergunta qual, não chama o servidor, não adivinha", async () => {
@@ -263,13 +290,15 @@ describe("T17: com feature e capability", () => {
     expect(acao.mock.calls[0]![0].args).toMatchObject({ proposta_id: "prop-9" });
   });
 
-  it("captação COM o captacaoId do fluxo aberto: usa captacao.text.suggest com esse id", async () => {
+  it("R32: captação COM captacaoId em revisão: a correção NÃO substitui o fluxo; frase fixa, fluxo intacto, sem servidor nem modelo", async () => {
     ligar(true);
     const fluxo = { kind: "captacao", versao: 2, etapa: "revisao", captacaoId: "cap-7", codigo: "CAP-7", atualizadoEm: Date.now() };
-    const { values } = await turno("muda a cláusula de multa da captação para 10%", fluxo);
-    expect(verbos()).toEqual(["captacao.text.suggest"]);
-    expect(acao.mock.calls[0]![0].args).toMatchObject({ captacaoId: "cap-7" });
-    expect(values.fluxo).toMatchObject({ kind: "correcao_texto", alvo: "captacao", id: "cap-7" });
+    const { r, values } = await turno("muda a cláusula de multa da captação para 10%", fluxo);
+    expect(acao).not.toHaveBeenCalled();
+    expect(llm).not.toHaveBeenCalled();
+    expect(r.reply).toBe(TEXTO_FLUXO_ABERTO);
+    expect(values.fluxo).toMatchObject({ kind: "captacao", etapa: "revisao", captacaoId: "cap-7" });
+    expect(r.sensivel).toBeFalsy();
   });
 
   it("captação SEM captacaoId no contexto: pergunta qual / manda para a tela, nunca adivinha", async () => {
@@ -310,8 +339,13 @@ describe("T17: com feature e capability", () => {
       if (verb === "proposal.text.suggest") return { status: 403, body: { error: "fluxo_desligado" } };
       return { status: 200, body: { items: [], total: 0 } };
     }) as never);
-    const { values } = await turno(`muda a cláusula de multa da proposta ${CODIGO} para 10%`);
+    const { r, values } = await turno(`muda a cláusula de multa da proposta ${CODIGO} para 10%`);
+    expect(verbos()).toContain("proposal.text.suggest");
     expect((values.fluxo as { kind?: string } | undefined)?.kind).not.toBe("correcao_texto");
+    // M6: o turno SEGUIU para a gestão (que responde que cláusula não se ajusta por ali), não ficou mudo nem foi para a correção.
+    expect(verbos().slice(-2)).toEqual(["proposal.options", "proposal.status"]);
+    expect(values.fluxo).toMatchObject({ kind: "proposta", etapa: "ajustes", propostaId: "prop-1" });
+    expect(r.reply).toMatch(/Cláusula não dá para ajustar pelo WhatsApp/);
   });
 
   it("política indisponível: o roteamento novo nem dispara (cai no caminho de hoje)", async () => {
@@ -319,5 +353,67 @@ describe("T17: com feature e capability", () => {
     perfil.mockRejectedValue(new Error("fora do ar"));
     await turno(`muda a cláusula de multa da proposta ${CODIGO} para 10%`);
     expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+  });
+});
+
+describe("R32: a correção nunca substitui um fluxo aberto", () => {
+  const agora = () => Date.now();
+  const v2 = () => ({ ...novoFluxoV2({ esteira: "venda", agora: agora(), schemaType: "compra_venda_v1" }), fichaAgendadaEm: agora() - 1000 });
+  const captacao = (etapa: string) => ({ kind: "captacao", versao: 2, etapa, captacaoId: "cap-7", codigo: "CAP-7", atualizadoEm: agora() });
+
+  it("'inclui o item churrasqueira' durante a coleta da proposta v2 segue na coleta: nada de .text., fluxo e ficha agendada intactos", async () => {
+    ligar(true);
+    const fluxo = v2();
+    const { values } = await turno("inclui o item churrasqueira", fluxo);
+    // O turno é da coleta (o condutor v2 trata o dado), não da correção: nunca .text., o fluxo segue v2.
+    expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+    expect(values.fluxo).toMatchObject({ kind: "proposta_v2", esteira: "venda" });
+  });
+
+  it.each(["proprietarios", "extras", "revisao"])(
+    "'inclui o item churrasqueira' em captação (etapa %s) segue na captação: nada de .text.",
+    async (etapa) => {
+      ligar(true);
+      perfil.mockResolvedValue(politica(...CAPS, "captacao.create", "captacao.send"));
+      const { r, values } = await turno("inclui o item churrasqueira", captacao(etapa));
+      expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+      expect(r.reply).not.toContain(ANTES);
+      expect(values.fluxo).toMatchObject({ kind: "captacao", etapa, captacaoId: "cap-7" });
+    }
+  );
+
+  it("palavra forte durante a coleta v2: frase fixa, o fluxo v2 e o job da ficha ficam como estavam (sem cancelar a ficha)", async () => {
+    ligar(true);
+    const fluxo = v2();
+    const { r, values } = await turno("muda a cláusula de multa da proposta para 10%", fluxo);
+    expect(r.reply).toBe(TEXTO_FLUXO_ABERTO);
+    expect(acao).not.toHaveBeenCalled();
+    expect(llm).not.toHaveBeenCalled();
+    expect(cancelarPendentesPorPrefixo).not.toHaveBeenCalled();
+    expect(values.fluxo).toMatchObject({ kind: "proposta_v2", etapa: fluxo.etapa, fichaAgendadaEm: fluxo.fichaAgendadaEm });
+  });
+
+  it.each(["proprietarios", "extras", "revisao"])("palavra forte em captação (etapa %s): frase fixa e a captação intacta", async (etapa) => {
+    ligar(true);
+    const { r, values } = await turno("corrige o parágrafo da rescisão", captacao(etapa));
+    expect(r.reply).toBe(TEXTO_FLUXO_ABERTO);
+    expect(acao).not.toHaveBeenCalled();
+    expect(values.fluxo).toMatchObject({ kind: "captacao", etapa, captacaoId: "cap-7" });
+  });
+
+  it("M5: 'corrige o contrato' com a captação em revisão só orienta e deixa a captação intacta (não rebaixa)", async () => {
+    ligar(true);
+    const fluxo = captacao("revisao");
+    const { r, values } = await turno("corrige o contrato", fluxo);
+    expect(r.reply).toMatch(/pela tela do negócio/);
+    expect(acao).not.toHaveBeenCalled();
+    expect(values.fluxo).toMatchObject({ kind: "captacao", etapa: "revisao", captacaoId: "cap-7", atualizadoEm: fluxo.atualizadoEm });
+  });
+
+  it("M5: 'corrige o contrato' com a proposta v2 aberta só orienta e deixa o fluxo intacto", async () => {
+    ligar(true);
+    const fluxo = v2();
+    const { values } = await turno("corrige o contrato", fluxo);
+    expect(values.fluxo).toMatchObject({ kind: "proposta_v2", fichaAgendadaEm: fluxo.fichaAgendadaEm });
   });
 });

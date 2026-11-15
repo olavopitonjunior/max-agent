@@ -1527,7 +1527,11 @@ export async function conduzirFluxo(
   // Correção de texto (PR-E): import tardio, o módulo importa daqui as frases fixas.
   if (fluxo.kind === "correcao_texto") {
     // Fail-closed: a feature saiu do ar com o fluxo aberto, nada mais é conduzido (nem escrita incerta).
-    if (!featureEnabled("formularios_v2", ctx.orgId)) return { liberar: true, fluxo: null, evento: "fluxo_v2_desligado" };
+    // R34: nunca o modelo livre num "sim" de escrita nem em escrita incerta (frase fixa em `respostaRecursoDesligado`).
+    if (!featureEnabled("formularios_v2", ctx.orgId)) {
+      const { respostaRecursoDesligado } = await import("./formularios/correcao-texto");
+      return respostaRecursoDesligado(fluxo, ctx);
+    }
     const { conduzirCorrecaoTexto } = await import("./formularios/correcao-texto");
     return conduzirCorrecaoTexto(fluxo, ctx, deps);
   }

@@ -12,35 +12,20 @@
  *
  * Nada aqui roda sem a feature `formularios_v2` E a capability `document.text.edit` (o chamador confere).
  */
-import { normalizar } from "../tools";
 import type { ContextoDoTurno, DepsDoFluxo, Fluxo, PassoDoFluxo } from "../fluxos";
 import { buscarPropostas, codigoCitado, rotuloDaProposta } from "../localizar";
 import { termoDaEdicao } from "../gestao";
 import { iniciarCorrecaoTexto } from "./correcao-texto";
+import type { AlvoPedido } from "./correcao-detector";
 
-export type AlvoPedido = "proposta" | "captacao" | "contrato" | "indefinido";
+// O detector vive em correcao-detector.ts (sem import circular com o fluxo); reexportado para quem já o importa daqui.
+export { pedeCorrecaoDeTexto } from "./correcao-detector";
+export type { AlvoPedido } from "./correcao-detector";
 
-const VERBO_DE_EDICAO = /\b(?:mud|alter|troc|corrig|corrij|ajust|edit|reescrev|reescrit|reformul|redij|retific|revis|atualiz|substitu|coloc|coloq|tir|remov|acrescent|adicion|inclu|aument|diminu|reduz)\w*/;
-/** Palavra que torna o pedido TEXTO do documento. Sem ela, é dado da proposta (gestão). */
-const MARCA_DE_TEXTO = /\b(?:clausulas?|paragrafos?|redacao|trechos?|textos?|item|itens)\b/;
-const NEGACAO = /\b(?:nao|nunca|jamais)\b/;
-const PERGUNTA_DE_PROCESSO = /^(?:como|quando|onde|por que|porque|o que|qual|quais|quanto|posso|da pra|da para|e possivel)\b/;
-
-/** O pedido é corrigir o TEXTO de um documento? `null` = não é (dado, pergunta, negação ou outro assunto). */
-export function pedeCorrecaoDeTexto(texto: string): AlvoPedido | null {
-  const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "").trim();
-  if (!t || NEGACAO.test(t) || PERGUNTA_DE_PROCESSO.test(t)) return null;
-  // "Pode mudar a cláusula…?" é pedido; outra frase com "?" é pergunta.
-  if (/\?\s*$/.test(texto) && !/^(?:pode|consegue)\b/.test(t)) return null;
-  if (!VERBO_DE_EDICAO.test(t)) return null;
-  const proposta = /\bproposta\b|\bprop-\d/.test(t);
-  // "Corrige o contrato" (sem palavra de texto): contrato não é desta versão; responde com o caminho da tela.
-  if (!MARCA_DE_TEXTO.test(t)) return !proposta && /\bcontrato\b/.test(t) && !/\bcaptacao\b/.test(t) ? "contrato" : null;
-  if (proposta) return "proposta";
-  if (/\bcaptacao\b|\bcaptacoes\b/.test(t)) return "captacao";
-  if (/\bcontrato\b/.test(t)) return "contrato";
-  return "indefinido";
-}
+/** Com um fluxo aberto: a pessoa está no meio de outra coisa. A correção NUNCA o substitui (R32). */
+export const TEXTO_FLUXO_ABERTO =
+  "Estamos no meio de outro pedido, então não abri a correção do texto. Termine o que estamos fazendo, ou diga *cancelar* para parar, " +
+  "e depois peça a correção do texto de novo. Não mexi em nada.";
 
 export const TEXTO_CONTRATO_PELA_TELA = (link?: string | null): string =>
   "O texto do contrato eu não corrijo por aqui: ele é ajustado no editor do documento, pela tela do negócio" +

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "../../fluxos";
-import { rebaixarFluxo } from "../../fluxos";
-import { conduzirCorrecaoTexto, iniciarCorrecaoTexto, renderizarAntesDepois, type FluxoCorrecaoTexto } from "../correcao-texto";
+import { FLUXO_TTL_MS, rebaixarFluxo } from "../../fluxos";
+import {
+  TEXTO_CONFIRA, conduzirCorrecaoTexto, iniciarCorrecaoTexto, renderizarAntesDepois, respostaRecursoDesligado, type FluxoCorrecaoTexto,
+} from "../correcao-texto";
 import { derivarInterativo } from "@/lib/interativo";
 
 /**
@@ -592,5 +594,215 @@ describe("erros do suggest (frases fixas, sem retentativa)", () => {
   it("404 sem corpo conhecido: documento não encontrado", async () => {
     acao.mockResolvedValueOnce(erro(404, "Not Found"));
     expect((await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada)).reply).toMatch(/Não encontrei esse documento/);
+  });
+});
+
+/** Rodada 1: o fluxo aberto, na etapa da sugestão (a partir do suggest 200). */
+async function comSugestao(): Promise<FluxoCorrecaoTexto> {
+  acao.mockResolvedValueOnce(ok(SUGESTAO));
+  const r = await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada);
+  acao.mockClear();
+  return fluxoDe(r);
+}
+
+/** Escrita incerta: o SIM sem resposta do servidor deixa a chave guardada. */
+async function comEscritaIncerta(): Promise<FluxoCorrecaoTexto> {
+  const f = await comSugestao();
+  acao.mockResolvedValueOnce(null);
+  const r = await conduzirCorrecaoTexto(f, ctx("sim", { messageId: "wamid.INC" }), deps);
+  acao.mockClear();
+  const incerto = fluxoDe(r);
+  expect(incerto.chave).toBeDefined();
+  return incerto;
+}
+
+describe("R34: recurso desligado com a correção aberta (frase fixa, nunca modelo livre)", () => {
+  it("o apply com 403 fluxo_desligado: frase fixa, fluxo encerrado, não libera para o modelo", async () => {
+    const f = await comSugestao();
+    acao.mockResolvedValueOnce(erro(403, "fluxo_desligado"));
+    const r = await conduzirCorrecaoTexto(f, ctx("sim"), deps);
+    expect(r.liberar).toBeUndefined();
+    expect(r.fluxo).toBeNull();
+    expect(r.reply).toMatch(/foi desligada/);
+    expect(r.reply).toMatch(/Nada foi aplicado/);
+  });
+
+  it("o apply com escrita incerta e 403 fluxo_desligado: manda conferir no documento", async () => {
+    const f = await comEscritaIncerta();
+    acao.mockResolvedValueOnce(erro(403, "fluxo_desligado"));
+    const r = await conduzirCorrecaoTexto(f, ctx("sim"), deps);
+    expect(r.liberar).toBeUndefined();
+    expect(r.fluxo).toBeNull();
+    expect(r.reply).toBe(TEXTO_CONFIRA);
+    expect(r.reply).not.toMatch(/Nada foi/);
+  });
+
+  it("o PRIMEIRO suggest (ainda sem fluxo) com 403 fluxo_desligado continua liberando o turno", async () => {
+    acao.mockResolvedValueOnce(erro(403, "fluxo_desligado"));
+    const r = await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada);
+    expect(r.liberar).toBe(true);
+    expect(r.fluxo).toBeNull();
+  });
+
+  it("o suggest DENTRO do fluxo (Ajustar) com 403 fluxo_desligado: frase fixa, sem liberar", async () => {
+    const f = await comSugestao();
+    const aj = fluxoDe(await conduzirCorrecaoTexto(f, ctx("2"), deps));
+    acao.mockResolvedValueOnce(erro(403, "fluxo_desligado"));
+    const r = await conduzirCorrecaoTexto(aj, ctx("coloca 12% em vez de 10%"), deps);
+    expect(r.liberar).toBeUndefined();
+    expect(r.fluxo).toBeNull();
+    expect(r.reply).toMatch(/foi desligada/);
+  });
+
+  it("403 de permissão no apply com escrita incerta: a recusa traz o aviso de conferir", async () => {
+    const f = await comEscritaIncerta();
+    acao.mockResolvedValueOnce(erro(403, "Forbidden", { reason: "politica_nao_concede" }));
+    const r = await conduzirCorrecaoTexto(f, ctx("sim"), deps);
+    expect(r.reply).toMatch(/não está liberado/);
+    expect(r.reply).toContain(TEXTO_CONFIRA);
+  });
+
+  it("respostaRecursoDesligado: incerta confere, menu/sim/não dá frase fixa, conversa comum libera", async () => {
+    const f = await comSugestao();
+    const incerto = await comEscritaIncerta();
+    expect(respostaRecursoDesligado(incerto, ctx("qualquer coisa")).reply).toBe(TEXTO_CONFIRA);
+    for (const t of ["sim", "não", "1", "2", "3", "aplicar"]) {
+      const r = respostaRecursoDesligado(f, ctx(t));
+      expect(r.liberar).toBeUndefined();
+      expect(r.reply).toMatch(/foi desligada/);
+      expect(r.fluxo).toBeNull();
+    }
+    const livre = respostaRecursoDesligado(f, ctx("qual o status da proposta do João?"));
+    expect(livre.liberar).toBe(true);
+    expect(livre.fluxo).toBeNull();
+  });
+});
+
+describe("M2: escrita incerta vencida nunca some sem aviso", () => {
+  it("passou do prazo: manda conferir, não repete o apply e encerra", async () => {
+    const f = await comEscritaIncerta();
+    const r = await conduzirCorrecaoTexto(f, ctx("sim", { agora: f.atualizadoEm + FLUXO_TTL_MS + 1 }), deps);
+    expect(acao).not.toHaveBeenCalled();
+    expect(r.reply).toBe(TEXTO_CONFIRA);
+    expect(r.fluxo).toBeNull();
+  });
+
+  it("dentro do prazo o SIM ainda repete com a mesma chave", async () => {
+    const f = await comEscritaIncerta();
+    acao.mockResolvedValueOnce(ok({ aplicado: true, avisos: [] }));
+    await conduzirCorrecaoTexto(f, ctx("sim", { agora: f.atualizadoEm + FLUXO_TTL_MS - 1 }), deps);
+    expect(acao).toHaveBeenCalledWith("proposal.text.apply", expect.anything(), "wamid.INC");
+  });
+
+  it("sem escrita incerta o prazo não muda nada neste ponto (a sugestão vence por outra regra)", async () => {
+    const f = await comSugestao();
+    acao.mockResolvedValueOnce(ok(SUGESTAO));
+    const r = await conduzirCorrecaoTexto(f, ctx("3", { agora: f.atualizadoEm + FLUXO_TTL_MS + 1 }), deps);
+    expect(r.reply).not.toBe(TEXTO_CONFIRA);
+  });
+});
+
+describe("R35: um segundo pedido de correção com a sugestão aberta abandona a anterior", () => {
+  it("pedido novo da mesma proposta: sugestão nova, chave da mensagem, sem apply e sem paragrafo_id velho", async () => {
+    const f = await comSugestao();
+    acao.mockResolvedValueOnce(ok({ ...SUGESTAO, sugestaoId: "sug-9", paragrafoId: "p8" }));
+    const r = await conduzirCorrecaoTexto(f, ctx("muda também a cláusula de prazo para 30 dias", { messageId: "wamid.NOVO" }), deps);
+    expect(acao).toHaveBeenCalledTimes(1);
+    const [verbo, args, chave] = acao.mock.calls[0]!;
+    expect(verbo).toBe("proposal.text.suggest");
+    expect(verbo).not.toBe("proposal.text.apply");
+    expect(chave).toBe("wamid.NOVO");
+    expect(args).toMatchObject({ proposta_id: "prop-1", pedido: "muda também a cláusula de prazo para 30 dias" });
+    expect(args).not.toHaveProperty("paragrafo_id");
+    expect(r.reply).toMatch(/Deixei a sugestão anterior de lado, sem aplicar/);
+    expect(fluxoDe(r)).toMatchObject({ etapa: "sugestao", sugestaoId: "sug-9", paragrafoId: "p8" });
+  });
+
+  it("a sugestão antiga não pode mais ser aplicada: o SIM seguinte usa a sugestão NOVA", async () => {
+    const f = await comSugestao();
+    acao.mockResolvedValueOnce(ok({ ...SUGESTAO, sugestaoId: "sug-9", hashParagrafo: "n".repeat(16) }));
+    const r = await conduzirCorrecaoTexto(f, ctx("troca a cláusula de foro"), deps);
+    acao.mockResolvedValueOnce(ok({ aplicado: true, avisos: [] }));
+    await conduzirCorrecaoTexto(fluxoDe(r), ctx("sim", { messageId: "wamid.SIM" }), deps);
+    expect(acao).toHaveBeenLastCalledWith("proposal.text.apply", { proposta_id: "prop-1", sugestaoId: "sug-9", hashParagrafo: "n".repeat(16) }, "wamid.SIM");
+  });
+
+  it("pedido sobre o contrato ou sobre outra proposta: frase fixa, o fluxo e a sugestão ficam", async () => {
+    const f = await comSugestao();
+    for (const t of ["muda a cláusula do contrato", "muda a cláusula da PROP-2026-0099"]) {
+      const r = await conduzirCorrecaoTexto(f, ctx(t), deps);
+      expect(acao).not.toHaveBeenCalled();
+      expect(r.reply).toMatch(/outro documento/);
+      expect(fluxoDe(r)).toMatchObject({ etapa: "sugestao", sugestaoId: "sug-1" });
+    }
+  });
+
+  it("o menu '2' continua indo para Ajustar (não vira pedido novo)", async () => {
+    const f = await comSugestao();
+    const r = await conduzirCorrecaoTexto(f, ctx("2"), deps);
+    expect(acao).not.toHaveBeenCalled();
+    expect(fluxoDe(r).etapa).toBe("ajustar");
+  });
+
+  it("sem palavra de texto forte o turno continua indo para fora do fluxo", async () => {
+    const f = await comSugestao();
+    const r = await conduzirCorrecaoTexto(f, ctx("inclui o item churrasqueira"), deps);
+    expect(acao).not.toHaveBeenCalled();
+    expect(r.liberar).toBe(true);
+  });
+});
+
+describe("M1: 503 nao_configurado não é o mesmo que recurso pausado", () => {
+  it("nao_configurado: falta configurar", async () => {
+    acao.mockResolvedValueOnce(erro(503, "nao_configurado"));
+    const r = await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada);
+    expect(r.reply).toMatch(/não está configurada/);
+  });
+
+  it.each(["writes_disabled", "kill_switch", "qualquer_outro"])("503 %s: recurso pausado, nunca 'não configurada'", async (codigo) => {
+    acao.mockResolvedValueOnce(erro(503, codigo));
+    const r = await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada);
+    expect(r.reply).toMatch(/pausada/);
+    expect(r.reply).not.toMatch(/configurada/);
+    expect(r.fluxo).toBeNull();
+    expect(acao).toHaveBeenCalledTimes(1);
+  });
+
+  it("503 no apply também: pausado, fluxo encerrado", async () => {
+    const f = await comSugestao();
+    acao.mockResolvedValueOnce(erro(503, "writes_disabled"));
+    const r = await conduzirCorrecaoTexto(f, ctx("sim"), deps);
+    expect(r.reply).toMatch(/pausada/);
+    expect(r.fluxo).toBeNull();
+  });
+});
+
+describe("M4: criar o documento sem resposta nunca afirma que nada foi alterado", () => {
+  async function criando(): Promise<FluxoCorrecaoTexto> {
+    acao.mockResolvedValueOnce(ok({ estado: "sem_documento_proprio" }));
+    const r = await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada);
+    acao.mockClear();
+    return fluxoDe(r);
+  }
+
+  it.each([
+    ["sem resposta (timeout)", null],
+    ["502 do Google", erro(502, "documento_indisponivel")],
+    ["500 sem corpo conhecido", erro(500, "erro_interno")],
+  ])("%s: manda conferir, sem 'Nada foi alterado'", async (_nome, resposta) => {
+    const f = await criando();
+    acao.mockResolvedValueOnce(resposta);
+    const r = await conduzirCorrecaoTexto(f, ctx("sim"), deps);
+    expect(acao).toHaveBeenCalledTimes(1);
+    expect(acao).toHaveBeenCalledWith("proposal.text.suggest", expect.objectContaining({ criar_documento: true }), expect.any(String));
+    expect(r.reply).toMatch(/Não consegui confirmar/);
+    expect(r.reply).not.toMatch(/Nada foi alterado/i);
+    expect(r.fluxo).toBeNull();
+  });
+
+  it("sem criar documento, o timeout do suggest continua dizendo que nada foi alterado", async () => {
+    acao.mockResolvedValueOnce(null);
+    const r = await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada);
+    expect(r.reply).toMatch(/Nada foi alterado/);
   });
 });

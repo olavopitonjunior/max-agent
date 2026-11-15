@@ -96,10 +96,10 @@ const fluxoSugestao = () => ({
   expiraEm: Date.now() + 10 * 60_000,
 });
 
-async function turnoComFluxo(texto: string) {
+async function turnoComFluxo(texto: string, fluxo: Record<string, unknown> = fluxoSugestao()) {
   const thread = `correcao-texto-${Math.random()}`;
   const app = await getApp();
-  await app.updateState({ configurable: { thread_id: thread } }, { fluxo: fluxoSugestao() as never });
+  await app.updateState({ configurable: { thread_id: thread } }, { fluxo: fluxo as never });
   const r = await withExecution(
     {
       orgId: ORG, subject: { kind: "user", userId: "u1" }, conversationId: thread,
@@ -164,5 +164,63 @@ describe("correção de texto no grafo", () => {
     const cp = JSON.stringify(values.fluxo);
     expect(cp).toContain("sug-1");
     expect(cp).not.toContain("MARCADOR");
+  });
+
+  it("R33: o trecho colado pelo corretor (etapa citar) não fica no checkpoint nem no log do turno", async () => {
+    featureV2(true);
+    const COLADO = "TRECHO-COLADO-MARCADOR a multa rescisória será de vinte por cento";
+    acao.mockResolvedValueOnce({
+      status: 200,
+      body: { estado: "sugestao", sugestaoId: "sug-7", paragrafoId: "p9", hashParagrafo: "h".repeat(16), antes: ANTES, depois: DEPOIS },
+    } as never);
+    const citar = { ...fluxoSugestao(), etapa: "citar", paragrafoId: undefined, sugestaoId: undefined, hashParagrafo: undefined, expiraEm: undefined };
+    const { r, values } = await turnoComFluxo(COLADO, citar);
+
+    // O servidor recebeu a citação (é para isso que ela existe) e o corretor viu a resposta.
+    expect(acao).toHaveBeenCalledTimes(1);
+    expect(acao.mock.calls[0]![0]).toMatchObject({ verb: "proposal.text.suggest" });
+    expect(r.reply).toContain("ANTES-MARCADOR");
+    expect(r.sensivel).toBe(true);
+    // Checkpoint: NENHUMA mensagem (de qualquer papel) carrega o trecho colado nem o antes/depois.
+    expect(values.messages.some((m) => m.role === "user")).toBe(true); // o turno do corretor está lá, só que cego
+    const todas = JSON.stringify(values.messages);
+    expect(todas).not.toContain("TRECHO-COLADO-MARCADOR");
+    expect(todas).not.toContain("ANTES-MARCADOR");
+    expect(JSON.stringify(values)).not.toContain("TRECHO-COLADO-MARCADOR");
+    // Log do turno: o texto de entrada e a transcrição viram o marcador.
+    const log = vi.mocked(registrarTurn).mock.calls.at(-1)![0];
+    expect(JSON.stringify(log)).not.toContain("TRECHO-COLADO-MARCADOR");
+    expect(JSON.stringify(log)).not.toContain("ANTES-MARCADOR");
+    expect(extractFacts).not.toHaveBeenCalled();
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("R34: feature desligada com a correção aberta e 'sim': frase fixa, sem servidor e sem modelo livre", async () => {
+    featureV2(false);
+    const { r } = await turnoComFluxo("sim");
+    expect(acao.mock.calls.some(([p]) => String(p.verb).includes(".text."))).toBe(false);
+    expect(llm).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/foi desligada/);
+    expect(r.reply).toMatch(/Nada foi aplicado/);
+  });
+
+  it("R34: feature desligada com escrita incerta aberta: manda conferir no documento, sem modelo livre", async () => {
+    featureV2(false);
+    const incerto = { ...fluxoSugestao(), chave: { verbo: "proposal.text.apply", valor: "wamid.ANTIGA" } };
+    const { r, values } = await turnoComFluxo("sim", incerto);
+    expect(acao.mock.calls.some(([p]) => String(p.verb).includes(".text."))).toBe(false);
+    expect(llm).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/confira no documento/);
+    expect(JSON.stringify(values.fluxo ?? null)).not.toContain("wamid.ANTIGA");
+  });
+
+  it("M2: escrita incerta vencida no relógio do fluxo: manda conferir, não repete o apply", async () => {
+    featureV2(true);
+    const velho = Date.now() - 3 * 60 * 60_000;
+    const incerto = { ...fluxoSugestao(), atualizadoEm: velho, chave: { verbo: "proposal.text.apply", valor: "wamid.ANTIGA" } };
+    const { r } = await turnoComFluxo("sim", incerto);
+    expect(acao.mock.calls.some(([p]) => String(p.verb).includes(".text."))).toBe(false);
+    expect(llm).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/confira no documento/);
   });
 });

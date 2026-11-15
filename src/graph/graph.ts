@@ -27,7 +27,7 @@ import {
 } from "./capacidades";
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
-import { pedeCorrecaoDeTexto, rotearCorrecaoDeTexto } from "./formularios/correcao-roteamento";
+import { pedeCorrecaoDeTexto, rotearCorrecaoDeTexto, TEXTO_FLUXO_ABERTO } from "./formularios/correcao-roteamento";
 import { ocrTranscribeFallbackLigado } from "./captacao-flags";
 import { cancelarFicha } from "./formularios/pausa";
 import { rebaixarParaV1 } from "./formularios/selecao";
@@ -303,7 +303,9 @@ function blindarFormularioV2(state: MaxStateType, update: MaxUpdate): MaxUpdate 
   if (typeof update.reply === "string") { cru.reply = update.reply; out.reply = MARCADOR_DOCUMENTO_LIDO; }
   const msgs = update.messages as MessagesUpdate | undefined;
   if (msgs && Array.isArray(msgs)) {
-    out.messages = msgs.map((m) => (m.role === "assistant" ? { ...m, content: MARCADOR_DOCUMENTO_LIDO } : m));
+    // Correção de texto (R33): a fala do corretor também (passagem colada); na ficha v2 ela fica.
+    const tambemOCorretor = turnoDeCorrecaoTexto(update.toolLog as ToolLogEntry[] | undefined);
+    out.messages = msgs.map((m) => (m.role === "assistant" || (tambemOCorretor && m.role === "user") ? { ...m, content: MARCADOR_DOCUMENTO_LIDO } : m));
   }
   TURNO_CRU.set(id, cru);
   return out;
@@ -1099,7 +1101,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
   // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
   // resumo velhos não podem capturar um "2" dias depois (review 09/10).
-  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "assinatura" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave) || (state.fluxo?.kind === "atividade" && !!state.fluxo.chave);
+  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "assinatura" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave) || (state.fluxo?.kind === "atividade" && !!state.fluxo.chave) || (state.fluxo?.kind === "correcao_texto" && !!state.fluxo.chave);
   const atual = vencido ? (sobrevive ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
   const escritaEmAberto = !!(atual && "chave" in atual && atual.chave);
 
@@ -1315,10 +1317,25 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // que leria o mesmo pedido como edição de DADO. Determinístico (sem modelo) e atrás da feature `formularios_v2`
   // E da capability `document.text.edit`: sem as duas, nada daqui roda e o roteamento é o de antes. Captação só
   // com o `captacaoId` do fluxo aberto (R30); o dado ("corrige o CPF") segue em `proposal.update`.
-  const captacaoComId = atual?.kind === "captacao" && !!atual.captacaoId && !atual.chave;
-  const correcaoLigada = !assinatura && !escritaEmAberto && podeEscrever(state.identity) && (livre || captacaoComId) &&
+  //
+  // Rodada 1 (R32): a correção NUNCA substitui um fluxo aberto (proposta v2 em coleta, captação em qualquer etapa,
+  // gestão, atividade...). Com fluxo aberto só uma palavra FORTE (cláusula, parágrafo, redação, "texto do documento")
+  // reconhece o pedido, e a resposta é uma frase fixa que não descarta estado nem o job `ficha:` agendado.
+  // Sem fluxo aberto, a resposta que só orienta (contrato pela tela, qual proposta) também deixa tudo como está (M5).
+  const fluxoOcupado = !!atual && atual.kind !== "continuidade" && !rascunhoAberto;
+  const correcaoLigada = !assinatura && !escritaEmAberto && podeEscrever(state.identity) && (livre || atual?.kind === "captacao") &&
     featureEnabled("formularios_v2", state.identity.orgId) && state.policy.includes("document.text.edit");
-  const alvoDaCorrecao = correcaoLigada ? pedeCorrecaoDeTexto(userText) : null;
+  const alvoDaCorrecao = correcaoLigada ? pedeCorrecaoDeTexto(userText, { forte: fluxoOcupado }) : null;
+  // Vencido sem sobrevivente: o fluxo velho sai; com sobrevivente, grava o rebaixado; senão não toca em nada.
+  const fluxoIntacto = vencido ? (atual ?? null) : undefined;
+  if (alvoDaCorrecao && fluxoOcupado && alvoDaCorrecao !== "contrato") {
+    return {
+      ...(fluxoIntacto !== undefined ? { fluxo: fluxoIntacto } : {}),
+      reply: TEXTO_FLUXO_ABERTO,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: TEXTO_FLUXO_ABERTO }],
+      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: "correcao_texto_fluxo_aberto" }],
+    };
+  }
   if (alvoDaCorrecao) {
     const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
     const roteado = await rotearCorrecaoDeTexto(
@@ -1327,8 +1344,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     );
     if (roteado && !roteado.passo.liberar) {
       const { passo, orienta } = roteado;
-      // Resposta que só orienta não mexe no fluxo aberto (fica rebaixado); a que abre a correção o substitui.
-      const fluxo = orienta ? (atual ? rebaixarFluxo(atual) : vencido ? null : undefined) : passo.fluxo;
+      // Resposta que só orienta não mexe no fluxo aberto; a que abre a correção o substitui (só sem fluxo aberto).
+      const fluxo = orienta ? fluxoIntacto : passo.fluxo;
       return {
         ...(fluxo !== undefined ? { fluxo } : {}),
         reply: passo.reply,
@@ -2521,6 +2538,15 @@ function turnoV2Sensivel(toolLog: readonly ToolLogEntry[] | undefined): boolean 
   return (toolLog ?? []).some((t) => t.name === "fluxo" && (t.args.kind === "proposta_v2" || t.args.kind === "correcao_texto") && t.args.sensivel === true);
 }
 
+/**
+ * R33: o turno é do fluxo de CORREÇÃO DE TEXTO. A fala do corretor aqui pode ser a passagem do documento
+ * colada (etapa `citar`) ou o pedido com trecho do contrato: some do checkpoint e do log, como a resposta.
+ * Só este fluxo; na ficha v2 a janela de extração precisa da fala do corretor.
+ */
+function turnoDeCorrecaoTexto(toolLog: readonly ToolLogEntry[] | undefined): boolean {
+  return (toolLog ?? []).some((t) => t.name === "fluxo" && t.args.kind === "correcao_texto" && t.args.sensivel === true);
+}
+
 /** O turno passou pela ficha de crédito? Então não vai para resumo nem memória. */
 function turnoDeCredito(toolLog: readonly ToolLogEntry[] | undefined): boolean {
   // Captação (P9) entra aqui: CPF, telefone e e-mail de proprietário não vão ao
@@ -3240,6 +3266,8 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   const deCredito = turnoSensivel(result, {});
   // I5: turno do formulário v2 (a resposta pode ser a ficha com valor de documento).
   const deFormularioV2 = turnoV2Sensivel(result.toolLog);
+  // R33: na correção de texto a fala do corretor (passagem colada) também não vai ao log.
+  const deCorrecaoTexto = turnoDeCorrecaoTexto(result.toolLog);
   const usage = result.usage ?? [];
   const tools = result.toolLog ?? [];
   const timings = result.timings ?? [];
@@ -3284,10 +3312,10 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
         messageId: inbound.messageId,
         kind: inbound.kind,
         // Crédito: auditoria também sem valores (renda, aluguel).
-        inboundText: (deCredito || deFormularioV2 ? redigirCredito(turnText) : turnText) || null,
+        inboundText: (deCorrecaoTexto ? MARCADOR_DOCUMENTO_LIDO : deCredito || deFormularioV2 ? redigirCredito(turnText) : turnText) || null,
         // Só quando houve mídia: repetir o texto digitado nas duas colunas
         // encheria a tabela sem acrescentar informação.
-        transcript: fromMedia ? (deCredito || deFormularioV2 ? redigirCredito(turnText) : turnText) : null,
+        transcript: fromMedia ? (deCorrecaoTexto ? MARCADOR_DOCUMENTO_LIDO : deCredito || deFormularioV2 ? redigirCredito(turnText) : turnText) : null,
         // I5: a ficha v2 traz valor de documento: no log vai só o marcador.
         replyText: deFormularioV2 && reply ? MARCADOR_DOCUMENTO_LIDO : deCredito && reply ? redigirCredito(reply) : reply,
         tools,

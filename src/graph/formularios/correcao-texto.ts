@@ -1,7 +1,8 @@
 import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo, RespostaDoServidor } from "../fluxos";
-import { TEXTO_ESCRITA_INCERTA, TEXTO_SEM_RESPOSTA, querCancelar } from "../fluxos";
+import { FLUXO_TTL_MS, TEXTO_ESCRITA_INCERTA, TEXTO_SEM_RESPOSTA, querCancelar } from "../fluxos";
 import { lerConfirmacao, normalizar } from "../tools";
+import { pedeCorrecaoDeTexto } from "./correcao-detector";
 import { ehFluxoDesligado } from "./selecao";
 import { abrirCorpo, selarCorpo, seloDisponivel } from "./selo";
 
@@ -74,6 +75,15 @@ const TEXTO_LIMITE = "Já pedi 3 sugestões para este documento nos últimos 10 
 const TEXTO_GOOGLE = "Não consegui falar com o Google agora. Nada foi alterado no documento.";
 const TEXTO_REDACAO = "Não consegui redigir a correção agora. Nada foi alterado no documento. Tente de novo mais tarde.";
 const TEXTO_NAO_CONFIGURADO = "A correção de texto ainda não está configurada nesta imobiliária. Nada foi alterado.";
+/** 503 que não é `nao_configurado` (ex.: `writes_disabled`, a chave geral de escrita): o recurso está parado, não faltando configurar. */
+const TEXTO_PAUSADO = "A correção de texto está pausada no momento. Nada foi alterado; tente de novo mais tarde ou faça pela tela do sistema.";
+/** R34: o recurso foi desligado no meio da conversa. Frase fixa, nunca o modelo livre (um "sim" solto viraria "pronto, corrigi"). */
+const TEXTO_RECURSO_DESLIGADO = "A correção de texto por aqui foi desligada. Nada foi aplicado; se ainda precisar, faça pela tela do sistema.";
+/** R34/M2/M4: escrita que pode ter acontecido. Nunca "nada foi alterado". */
+export const TEXTO_CONFIRA = "Não consegui confirmar se a correção anterior foi aplicada: confira no documento, pela tela do sistema.";
+const TEXTO_CONFIRA_DOCUMENTO = "Não consegui confirmar se o documento da proposta foi criado nem se a correção foi aplicada: confira pela tela do sistema antes de tentar de novo.";
+/** R35: segundo pedido de correção que não é do mesmo documento. */
+const TEXTO_OUTRO_DOCUMENTO = "Esse pedido é de outro documento. Termine a correção atual: *1* aplica, *NÃO* para parar. Depois peça a outra.";
 const TEXTO_SUGESTAO_INVALIDA = "A correção que eu redigi não passou na conferência (ela mexia no que você não pediu). Nada foi alterado; reformule o pedido, dizendo o que trocar e por quê.";
 const TEXTO_NAO_ACHADO = "Não encontrei esse documento. Nada foi alterado.";
 const TEXTO_TRECHO_SUMIU = "Esse trecho não está mais no documento (ele pode ter mudado). Nada foi alterado; diga de novo o que mudar.";
@@ -214,7 +224,12 @@ function erroDeEstado(alvo: Alvo, r: RespostaDoServidor): Resposta | null {
     if (erro === "documento_bloqueado") return resposta(null, "O documento ficou indisponível para edição enquanto eu aplicava (o estado dele mudou). Nada foi confirmado; confira pela tela.", "texto_bloqueado");
   }
   if (r.status === 429 && erro === "limite_de_sugestoes") return resposta(null, TEXTO_LIMITE, "texto_limite");
-  if (r.status === 503) return resposta(null, TEXTO_NAO_CONFIGURADO, "texto_nao_configurado");
+  if (r.status === 503) {
+    // M1: só `nao_configurado` é "falta configurar"; o resto (kill switch `writes_disabled`...) é recurso parado.
+    return erro === "nao_configurado"
+      ? resposta(null, TEXTO_NAO_CONFIGURADO, "texto_nao_configurado")
+      : resposta(null, TEXTO_PAUSADO, "texto_pausado");
+  }
   return null;
 }
 
@@ -229,6 +244,11 @@ interface ContextoDoSugerir {
   paragrafoId?: string;
   /** Prefixo da resposta (ex.: "O parágrafo mudou… refiz"). */
   prefixo?: string;
+  /**
+   * O primeiro suggest do pedido (ainda fora do fluxo): `fluxo_desligado` libera o turno para o caminho
+   * normal (o pedido de correção nunca existiu). Dentro do fluxo, vira frase fixa (R34).
+   */
+  inicial?: boolean;
 }
 
 /** Estado novo do fluxo: só ids; o pedido vai selado (ou nada). */
@@ -245,8 +265,15 @@ async function sugerir(c: ContextoDoSugerir): Promise<Resposta | { liberar: true
   const r = await sugerirTexto(deps, f.alvo, f.id, pedido, c.chave, {
     paragrafo_id: paragrafoId, criar_documento: f.criarDocumento,
   });
-  if (!r) return resposta(null, `${TEXTO_SEM_RESPOSTA} Nada foi alterado no documento.`, "texto_sem_resposta");
-  if (ehFluxoDesligado(r)) return { liberar: true, fluxo: null, evento: "texto_fluxo_desligado" };
+  if (!r) {
+    // M4: com `criar_documento` o Doc pode ter nascido antes do timeout: "nada foi alterado" seria falso.
+    if (f.criarDocumento) return resposta(null, TEXTO_CONFIRA_DOCUMENTO, "texto_sem_resposta_criando");
+    return resposta(null, `${TEXTO_SEM_RESPOSTA} Nada foi alterado no documento.`, "texto_sem_resposta");
+  }
+  if (ehFluxoDesligado(r)) {
+    if (c.inicial) return { liberar: true, fluxo: null, evento: "texto_fluxo_desligado" };
+    return resposta(null, TEXTO_RECURSO_DESLIGADO, "texto_fluxo_desligado");
+  }
 
   const body = r.body ?? {};
   const erro = str(body.error);
@@ -287,8 +314,11 @@ async function sugerir(c: ContextoDoSugerir): Promise<Resposta | { liberar: true
   }
   if (r.status === 422) return resposta(null, TEXTO_SUGESTAO_INVALIDA, "texto_sugestao_invalida");
   if (r.status === 502) {
+    // M4: criando o Doc, um 502 do Google pode ter vindo depois de o documento nascer.
+    if (f.criarDocumento) return resposta(null, TEXTO_CONFIRA_DOCUMENTO, "texto_documento_indisponivel");
     return resposta(null, erro === "redacao_indisponivel" ? TEXTO_REDACAO : TEXTO_GOOGLE, erro === "redacao_indisponivel" ? "texto_redacao_indisponivel" : "texto_documento_indisponivel");
   }
+  if (f.criarDocumento) return resposta(null, TEXTO_CONFIRA_DOCUMENTO, `texto_suggest_${r.status}`);
   return resposta(null, `Não consegui preparar a correção agora (${r.status}). Nada foi alterado.`, `texto_suggest_${r.status}`);
 }
 
@@ -358,7 +388,21 @@ export async function iniciarCorrecaoTexto(ctx: ContextoDoTurno, deps: DepsDoFlu
   const invalido = pedidoValido(e.pedido);
   if (invalido) return resposta(null, invalido, "texto_pedido_invalido");
   const f: FluxoCorrecaoTexto = { kind: "correcao_texto", alvo: e.alvo, id: e.id, rotulo: e.rotulo, etapa: "sugestao", atualizadoEm: ctx.agora };
-  return sugerir({ f, pedido: e.pedido.trim(), chave: ctx.messageId, ctx, deps });
+  return sugerir({ f, pedido: e.pedido.trim(), chave: ctx.messageId, ctx, deps, inicial: true });
+}
+
+/**
+ * R34: a feature `formularios_v2` saiu do ar com o fluxo de correção aberto. Nada é conduzido, mas o
+ * turno NUNCA vai ao modelo livre quando há risco de ele afirmar uma escrita: com escrita incerta, o
+ * aviso de conferir; com "sim"/"não"/número do menu, a frase de recurso desligado. Outra fala (conversa
+ * comum) segue o caminho normal, com o fluxo encerrado.
+ */
+export function respostaRecursoDesligado(f: FluxoCorrecaoTexto, ctx: ContextoDoTurno): PassoDoFluxo {
+  if (f.chave) return resposta(null, TEXTO_CONFIRA, "texto_fluxo_desligado_incerto");
+  const t = normalizar(ctx.texto);
+  const respondeuMenu = lerConfirmacao(ctx.texto) !== "nenhum" || LER_UM.test(t) || LER_DOIS.test(t) || LER_TRES.test(t) || /^[1-3]$/.test(t);
+  if (respondeuMenu) return resposta(null, TEXTO_RECURSO_DESLIGADO, "texto_fluxo_desligado");
+  return { liberar: true, fluxo: null, evento: "fluxo_v2_desligado" };
 }
 
 // ─── Turno dentro do fluxo ────────────────────────────────────────────────────
@@ -381,8 +425,11 @@ function lerNumero(texto: string, max: number): number | null {
 }
 
 export async function conduzirCorrecaoTexto(f: FluxoCorrecaoTexto, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  // M2: a escrita incerta que passou do prazo não se repete (a chave morreu), mas nunca some sem aviso.
+  if (f.chave && ctx.agora - f.atualizadoEm > FLUXO_TTL_MS) return resposta(null, TEXTO_CONFIRA, "texto_incerta_vencida");
   const bloqueio = gate(ctx);
-  if (bloqueio) return bloqueio;
+  // Com escrita incerta, a recusa não pode sugerir que nada aconteceu.
+  if (bloqueio) return f.chave ? { ...bloqueio, reply: `${bloqueio.reply}\n\n${TEXTO_CONFIRA}` } : bloqueio;
   const agora = ctx.agora;
   const texto = ctx.texto;
   const confirmacao = lerConfirmacao(texto);
@@ -414,6 +461,22 @@ export async function conduzirCorrecaoTexto(f: FluxoCorrecaoTexto, ctx: Contexto
         return resposta({ ...f, atualizadoEm: agora },
           f.link ? `Veja o documento aqui: ${f.link}\n\n${menuDaSugestao(true)}` : "Abra pela tela do sistema para ver o documento. Ainda não mudei nada.",
           "texto_ver_documento");
+      }
+      // R35: outro pedido de correção com a sugestão aberta ABANDONA a anterior (sem aplicar) e refaz, como "Ajustar".
+      const novo = pedeCorrecaoDeTexto(texto);
+      if (novo) {
+        // Citou outro código de proposta: não é o documento aberto.
+        const citou = /prop-\d{4}-\d+/i.exec(texto)?.[0]?.toLowerCase();
+        const outroCodigo = !!citou && !(f.rotulo ?? "").toLowerCase().includes(citou);
+        const domesmo = !outroCodigo && (novo === "indefinido" || (novo === "proposta" && f.alvo === "proposal") || (novo === "captacao" && f.alvo === "captacao"));
+        if (!domesmo) return resposta({ ...f, atualizadoEm: agora }, TEXTO_OUTRO_DOCUMENTO, "texto_outro_documento");
+        const invalido = pedidoValido(texto);
+        if (invalido) return resposta({ ...f, atualizadoEm: agora }, invalido, "texto_pedido_invalido");
+        return sugerir({
+          f: { ...f, paragrafoId: undefined, sugestaoId: undefined, hashParagrafo: undefined, expiraEm: undefined },
+          pedido: texto.trim(), chave: ctx.messageId, ctx, deps,
+          prefixo: "Deixei a sugestão anterior de lado, sem aplicar. ",
+        });
       }
       // "ok", "blz", "pode": não autorizam escrita (R31).
       if (confirmacao === "vago") return resposta({ ...f, atualizadoEm: agora }, TEXTO_PARA_APLICAR, "texto_confirmar");
@@ -470,7 +533,8 @@ async function aplicar(f: FluxoCorrecaoTexto, ctx: ContextoDoTurno, deps: DepsDo
     // Escrita incerta: guarda a chave; o SIM seguinte repete (não duplica).
     return resposta({ ...f, chave: { verbo: verbo(f.alvo, "apply"), valor: chave }, etapa: "sugestao", atualizadoEm: ctx.agora }, TEXTO_ESCRITA_INCERTA, "texto_incerta");
   }
-  if (ehFluxoDesligado(r)) return { liberar: true, fluxo: null, evento: "texto_fluxo_desligado" };
+  // R34: nunca o modelo livre num "sim" de escrita. Com tentativa anterior incerta, a escrita pode ter acontecido.
+  if (ehFluxoDesligado(r)) return resposta(null, f.chave ? TEXTO_CONFIRA : TEXTO_RECURSO_DESLIGADO, "texto_fluxo_desligado");
   const body = r.body ?? {};
   const erro = str(body.error);
 
@@ -497,7 +561,7 @@ async function aplicar(f: FluxoCorrecaoTexto, ctx: ContextoDoTurno, deps: DepsDo
     // O servidor soltou a sugestão: o SIM seguinte tenta de novo, com chave nova (sem retentativa automática).
     return resposta({ ...f, atualizadoEm: ctx.agora }, `${TEXTO_GOOGLE} A correção continua valendo por pouco tempo: responda *SIM* para tentar de novo.`, "texto_documento_indisponivel");
   }
-  if (r.status === 403) return resposta(null, TEXTO_TEXTO_SEM_PERMISSAO(), "texto_sem_permissao");
+  if (r.status === 403) return resposta(null, f.chave ? `${TEXTO_TEXTO_SEM_PERMISSAO()}\n\n${TEXTO_CONFIRA}` : TEXTO_TEXTO_SEM_PERMISSAO(), "texto_sem_permissao");
   if (r.status === 404) return resposta(null, TEXTO_NAO_ACHADO, "texto_nao_achado");
   return resposta(null, `Não consegui aplicar a correção (${r.status}). Confira o documento: nada foi confirmado.`, `texto_apply_${r.status}`);
 }
@@ -514,9 +578,4 @@ async function refazer(f: FluxoCorrecaoTexto, ctx: ContextoDoTurno, deps: DepsDo
   }
   return sugerir({ f: { ...f, chave: undefined }, pedido, chave: `${ctx.messageId}:r`, ctx, deps, paragrafoId: f.paragrafoId,
     prefixo: `${prefixo}Refiz com o texto atual. ` });
-}
-
-/** O fluxo rebaixado: só a escrita incerta sobrevive a uma interrupção (o resto pede de novo). */
-export function rebaixarCorrecaoTexto(f: FluxoCorrecaoTexto): FluxoCorrecaoTexto | null {
-  return f.chave ? f : null;
 }
