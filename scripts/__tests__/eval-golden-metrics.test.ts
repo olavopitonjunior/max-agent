@@ -51,6 +51,10 @@ describe('formato', () => {
   it('WhatsApp normal passa: negrito de uma estrela, URL e prosa', () => {
     expect(violacoesDeFormato('Responda *SIM* para confirmar.\nVeja https://app.imobpro.test/p/rascunho_final.pdf e o item #1.')).toEqual([]);
   });
+  it('CPF mascarado (***.***.777-35) não conta como markdown', () => {
+    expect(violacoesDeFormato('Anotei: CPF ***.***.777-35. Responda *SIM*.')).toEqual([]);
+    expect(violacoesDeFormato('CPF ***.***.777-35 e **negrito**')).toEqual(['**', '**']);
+  });
   it('agrega ocorrências e turnos em goldenMetrics, com meta 0', () => {
     const m = goldenMetrics([row({ formato: ['**', 'n=2'] }), row({ turn: 2 })]);
     expect(m.formato).toMatchObject({ turnos: 1, ocorrencias: 2, meta: 0 });

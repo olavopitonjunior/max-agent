@@ -115,7 +115,8 @@ export function detectaPromessaSemEfeito(text:string,escritas:number):string[]{
 const VERBOS_INTERNOS=/\b(?:deal|proposal|captacao|credit|form|lead|contract|metrics|pending|property|activity|notification|template)\.[a-z_]+(?:\.[a-z_]+)?\b/;
 /** Formato proibido no WhatsApp: markdown `**`/`##`, colchetes ⟨⟩, `n=`, códigos internos (snake_case, verbos). */
 export function violacoesDeFormato(text:string):string[]{
-  const t=text.replace(/https?:\/\/\S+/g,' ');
+  // URL e CPF mascarado (***.***.777-35) não são markdown.
+  const t=text.replace(/https?:\/\/\S+/g,' ').replace(/\*{3}\.\*{3}\.\d{3}-\d{2}/g,' ');
   const out:string[]=[];
   for(const m of t.matchAll(/\*\*/g))out.push(m[0]);
   for(const m of t.matchAll(/^\s*#{2,}\s/gm))out.push('##');

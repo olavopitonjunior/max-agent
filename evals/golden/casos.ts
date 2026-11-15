@@ -70,8 +70,11 @@ export interface CasoGolden {
   turnos: TurnoGolden[];
 }
 
-/** Terceiros padrão do cenário simulado: clientes, nunca o usuário (Olavo). */
-export const TERCEIROS_PADRAO = ["Letícia", "Carlos", "Renato", "João", "Pedro", "Maria", "TESTE Comprador", "Comprador"];
+/**
+ * Terceiros padrão do cenário simulado: clientes, nunca o usuário (Olavo).
+ * "Comprador" sozinho fica de fora: é rótulo do resumo ("Comprador: ..."), não vocativo.
+ */
+export const TERCEIROS_PADRAO = ["Letícia", "Carlos", "Renato", "João", "Pedro", "Maria", "TESTE Comprador"];
 
 /** Regras de formato valem em TODO turno de TODO caso (ver violacoesDeFormato). */
 export const FORMATO_GLOBAL = ["**", "##", "⟨", "n=<dígitos>", "vocativo de terceiro"] as const;
