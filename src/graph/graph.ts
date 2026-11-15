@@ -28,6 +28,7 @@ import {
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
 import { ocrTranscribeFallbackLigado } from "./captacao-flags";
+import { cancelarFicha } from "./formularios/pausa";
 import { camposSemPapel, derivarPapel, fraseDeNaoLido, lerMidia, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
 import {
   comoMensagemDaJanela,
@@ -951,6 +952,30 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
           const { texto, mapa } = comoMensagemDaJanela(janela, state.piiMap);
           return chamarExtracao(SYSTEM_DA_EXTRACAO + INSTRUCAO_DA_JANELA, texto, mapa, tool);
         },
+        // T10: a ficha sai do outbox depois da pausa. Import tardio: o outbox importa o grafo.
+        pausa: {
+          agendar: async (p: { chave: string; dedupeKey: string; quando: Date; texto: string }) => {
+            const { enqueue } = await import("@/lib/outbox");
+            await enqueue({
+              orgId,
+              dedupeKey: p.dedupeKey,
+              audience: "platform_user",
+              phone: state.inbound.fromPhone,
+              recipientName: displayName(state.identity) ?? "corretor",
+              title: "Ficha do rascunho",
+              body: p.texto,
+              linkUrl: null,
+              dealId: null,
+              orgName: state.identity.orgName,
+              kind: null,
+              deliverAfter: p.quando,
+            });
+          },
+          cancelar: async (prefixo: string) => {
+            const { cancelarPendentesPorPrefixo } = await import("@/lib/outbox");
+            await cancelarPendentesPorPrefixo(prefixo);
+          },
+        },
       }
     : {};
   return {
@@ -1126,7 +1151,9 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // formulário). Flag desligada = o Max segue como antes, sem citar crédito.
   const ctxDoTurno = { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
     politicaIndisponivel: state.politicaIndisponivel, agora, orgName: state.identity.orgName,
-    thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) };
+    thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone),
+    subjectKey: JSON.stringify([state.identity.orgId, subjectDe(state.identity)]),
+    podeEscrever: podeEscrever(state.identity) };
   const credito = creditoLigado() && livre && !escritaEmAberto ? pedeCredito(userText) : null;
   if (credito) {
     const deps = depsDoFluxo(state, usage);
@@ -1394,7 +1421,23 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     // se a resposta do modelo terminar em pergunta, o "sim" a ela não pode
     // criar nem enviar (achado N1 do code review).
     return {
-      fluxo: passo.fluxo === null ? null : rebaixarFluxo(atual),
+      // v2: o condutor pode devolver o fluxo v1 (feature desligada no meio do rascunho): vale o que ele devolveu.
+      fluxo: passo.fluxo === null ? null : rebaixarFluxo(atual.kind === "proposta_v2" ? passo.fluxo : atual),
+      ...(usage.length > 0 ? { usage } : {}),
+      toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
+    };
+  }
+  if (passo.silencioso) {
+    // v2 (T10): coletou e não responde; a ficha sai pelo outbox depois da pausa. `halt` pula o
+    // `compact` e a memória (o turno tem dado de documento) e não gera texto. Nunca "anotei":
+    // no Max, um 👍 na própria mensagem do corretor; no Newton a reação não existe e fica mudo.
+    void sendReaction({ to: state.inbound.fromPhone, messageId: state.inbound.messageId, emoji: "👍" });
+    return {
+      fluxo: passo.fluxo,
+      halt: "formulario_coletando",
+      // `halt` desvia do `confirm`: uma pendência antiga não pode sobreviver a ele (consentimento).
+      pendingAction: null,
+      messages: [{ role: "user", content: userText }],
       ...(usage.length > 0 ? { usage } : {}),
       toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
     };
@@ -2460,7 +2503,8 @@ function afterContinuar(state: MaxStateType): "conduzir" | "compose" {
 
 /** O fluxo de criação respondeu? Então o turn está resolvido. */
 function afterConduzir(state: MaxStateType): "confirm" | "compose" {
-  return state.reply ? "compose" : "confirm";
+  // `halt` = o turno do v2 que coletou em silêncio (T10): nada a confirmar, nada a dizer.
+  return state.reply || state.halt ? "compose" : "confirm";
 }
 
 /**
@@ -2957,7 +3001,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   if (daMidia?.tipo === "campos") {
     // A foto não é um "sim": nenhuma pendência de escrita sobrevive a este turno.
     await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
-    const guardou = await guardarLidosNoFluxo(identity.candidate, inbound, daMidia.campos, daMidia.papelIncerto === true);
+    const guardou = await guardarLidosNoFluxo(identity.candidate, inbound, daMidia.campos, daMidia.papelIncerto === true, !turnText);
     if (!guardou) {
       // Sem onde guardar o valor com segurança (sem chave): não mostra nem retém.
       return sair(fraseDeNaoLido("falha", inbound.kind as "image" | "document"), {
@@ -3227,7 +3271,14 @@ async function sujeitoTemCapability(identity: Candidate, phone: string, capabili
  * rascunho. `false` = não guardou (sem fluxo vivo ou sem chave): quem chama não
  * mostra o valor.
  */
-async function guardarLidosNoFluxo(identity: Candidate, inbound: InboundMessage, campos: CampoLido[], semPapel = false): Promise<boolean> {
+async function guardarLidosNoFluxo(
+  identity: Candidate,
+  inbound: InboundMessage,
+  campos: CampoLido[],
+  semPapel = false,
+  /** O turno mostra o card "lido, confira" agora (mídia sem legenda): o próximo SIM já vale. */
+  mostraOCard = false
+): Promise<boolean> {
   try {
     const app = await getApp();
     const thread = currentExecution()?.context.conversationId ?? liveNamespaceFor(identity.orgId, inbound.fromPhone, subjectDe(identity));
@@ -3236,7 +3287,23 @@ async function guardarLidosNoFluxo(identity: Candidate, inbound: InboundMessage,
     if (!fluxo || fluxo.kind !== "proposta_v2") return false;
     const r = registrarLidos(fluxo, { ref: inbound.messageId, campos, ...(semPapel ? { semPapel: true } : {}) }, thread);
     if (!r.ok) return false;
-    await app.updateState(config, { fluxo: r.fluxo });
+    // T10: com o card na tela o corretor JÁ viu o que será gravado (o "sim" do condutor exige isso);
+    // e uma ficha agendada antes da foto ficou velha, então sai da fila.
+    const novo = mostraOCard
+      ? { ...r.fluxo, etapa: "ficha" as const, fichaAgendadaEm: undefined, ultimaEntradaEm: Date.now(), atualizadoEm: Date.now() }
+      : r.fluxo;
+    await app.updateState(config, { fluxo: novo });
+    if (mostraOCard) {
+      try {
+        const { cancelarPendentesPorPrefixo } = await import("@/lib/outbox");
+        await cancelarFicha(
+          { agendar: async () => {}, cancelar: async (p) => void (await cancelarPendentesPorPrefixo(p)) },
+          JSON.stringify([identity.orgId, subjectDe(identity)])
+        );
+      } catch {
+        // Sem a fila, o pior caso é uma ficha repetida.
+      }
+    }
     return true;
   } catch {
     return false;
