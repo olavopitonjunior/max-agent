@@ -2520,6 +2520,8 @@ interface ClassificacaoDeDonos {
 
 const mesmoNome = (a?: string, b?: string) => !!a && !!b && normalizar(a) === normalizar(b);
 const temDadoDePessoa = (p: PessoaLida) => !!(p.cpf || p.cnpj || p.telefone || p.email || p.estadoCivil);
+/** Linha que já começa por dado (rótulo, número ou estado civil): não abre pessoa nova. */
+const SO_DADOS_NA_LINHA = /^\s*(?:cpf|cnpj|rg\b|tel\b|tel\.|telefone|celular|cel\b|cel\.|fone|whats|zap\b|e-?mail|estado civil|casad|solteir|divorciad|vi[uú]v|separad|uni[aã]o est[aá]vel|[\d+(])/i;
 
 /** O que de `falta` o complemento `item` ainda não cobre. */
 function faltaRestante(falta: FaltaDeDono[], item: Record<string, unknown>): FaltaDeDono[] {
@@ -2638,7 +2640,18 @@ async function conduzirProprietarios(f: FluxoCaptacao, t: string, ctx: ContextoD
     const fimNaUltima = FIM.test(normalizar(linhas[linhas.length - 1]!));
     const doBloco = fimNaUltima ? linhas.slice(0, -1) : linhas;
     const partes: PessoaDaLinha[] = [];
-    for (const linha of doBloco) partes.push({ p: await lerPessoa(linha, extrair), linha });
+    for (const linha of doBloco) {
+      const p = await lerPessoa(linha, extrair);
+      // Dono escrito em várias linhas ("Maria Silva, tel …" / "CPF …, casada"): a linha
+      // que começa por dado e não traz nome é continuação da pessoa da linha anterior.
+      const anterior = partes[partes.length - 1];
+      if (anterior && !anterior.p.erro && SO_DADOS_NA_LINHA.test(linha) && p.erro?.startsWith("Não achei o nome") && temDadoDePessoa(p)) {
+        const juntas = `${anterior.linha}, ${linha}`;
+        const pj = await lerPessoa(juntas, extrair);
+        if (!pj.erro) { partes[partes.length - 1] = { p: pj, linha: juntas }; continue; }
+      }
+      partes.push({ p, linha });
+    }
     const c = classificarPessoas(f, partes);
     if (c.novos.length || c.completos.length) return gravarProprietarios(f, c, fimNaUltima, ctx, deps);
   }

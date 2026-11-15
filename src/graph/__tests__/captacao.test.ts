@@ -2493,6 +2493,18 @@ describe("captação fluida: pendências dos proprietários numa mensagem só", 
     expect(fluxoDe(r).proprietarios).toHaveLength(1);
   });
 
+  it("dono escrito em várias linhas: a linha só de dados vai para a pessoa da linha anterior", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const r = await fala(`Maria Silva, tel ${FONE}\nCPF ${CPF}, casada`);
+    expect(ultimo("captacao.create")!.args.dados).toMatchObject({
+      proprietarios: [{ id: "p1", nome: "Maria Silva", cpf: CPF_D, telefone1: `+55${FONE_D}`, estado_civil: "casada" }],
+    });
+    expect(r.reply).not.toContain("linha 2");
+    expect(fluxoDe(r).proprietarios).toEqual([{ id: "p1", nome: "Maria Silva" }]);
+    expect(semDadosPessoais(r.fluxo)).toBe(true);
+  });
+
   it("última linha FIM: grava e já segue para as testemunhas", async () => {
     const fala = conversa();
     await ateOProprietario(fala);
