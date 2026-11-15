@@ -38,6 +38,9 @@ import type {
   InboundKind,
   InboundMessage,
   Interativo,
+  MidiaBaixada,
+  MidiaGrandeDemais,
+  OpcoesDeDownload,
   StatusCallback,
 } from "./transport/types";
 
@@ -298,9 +301,18 @@ export async function markReadTyping(messageId: string): Promise<boolean> {
 /** Mesmo teto da Z-API — amarrado ao limite do transcribe do ImobPro. */
 export const MAX_MEDIA_BYTES = 3 * 1024 * 1024;
 
+export async function downloadMedia(ref: string): Promise<MidiaBaixada | null>;
+/** Com `distinguirTamanho`, a recusa por tamanho volta como `{ erro: "tamanho" }` (o grafo diz "grande demais"). */
 export async function downloadMedia(
-  ref: string
-): Promise<{ data: Buffer; contentType: string | null } | null> {
+  ref: string,
+  opts: OpcoesDeDownload
+): Promise<MidiaBaixada | MidiaGrandeDemais | null>;
+export async function downloadMedia(
+  ref: string,
+  opts?: OpcoesDeDownload
+): Promise<MidiaBaixada | MidiaGrandeDemais | null> {
+  // Passou do teto: só vira valor quando o chamador pediu; corpo vazio e o resto seguem `null`.
+  const grande = (): MidiaGrandeDemais | null => (opts?.distinguirTamanho ? { erro: "tamanho" } : null);
   if (!ref.startsWith(META_MEDIA_PREFIX)) {
     console.warn("[meta] referência de mídia que não é da Meta — ignorada");
     return null;
@@ -317,7 +329,7 @@ export async function downloadMedia(
     }
     if (typeof info.file_size === "number" && info.file_size > MAX_MEDIA_BYTES) {
       console.warn(`[meta] mídia grande demais (${info.file_size} bytes) — ignorada`);
-      return null;
+      return grande();
     }
 
     // A URL temporária também exige o token — sem ele a Meta devolve 401.
@@ -333,7 +345,7 @@ export async function downloadMedia(
     const data = Buffer.from(await res.arrayBuffer());
     if (data.byteLength === 0 || data.byteLength > MAX_MEDIA_BYTES) {
       console.warn(`[meta] mídia fora do limite (${data.byteLength} bytes)`);
-      return null;
+      return data.byteLength > MAX_MEDIA_BYTES ? grande() : null;
     }
     return { data, contentType: res.headers.get("content-type") ?? info.mime_type ?? null };
   } catch (err) {

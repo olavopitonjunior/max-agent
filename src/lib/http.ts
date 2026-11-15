@@ -35,6 +35,12 @@ export const IMOBPRO_TIMEOUT_MS = 8_000;
  */
 export const IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS = 30_000;
 export const IMOBPRO_TRANSCRIBE_TIMEOUT_MS = 45_000;
+/**
+ * `document.read`: o OCR de um PDF de 3 MB passa dos 8 s do teto comum (a rota do servidor tem
+ * `maxDuration` 300). 45 s cabe no teto de 60 s do turno e na janela de claim; estouro é "ainda
+ * processando" (o servidor segue, cobra e guarda a resposta pela `messageId`), nunca "tente de novo".
+ */
+export const IMOBPRO_DOCUMENT_READ_TIMEOUT_MS = 45_000;
 /** `credit.request` (M3): o servidor espera a Upestate até 20 s e responde 202 depois; +10 s de rede. */
 export const IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS = 30_000;
 /**

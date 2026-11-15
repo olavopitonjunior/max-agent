@@ -177,3 +177,41 @@ describe("proposal.remind / proposal.cancel: recusa canônica 5xx chega ao fluxo
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("document.read (Rodada 1, I2): prazo próprio, compatível com o OCR de PDF", () => {
+  it("o prazo do verbo é maior que o teto comum de 8 s e cabe no turno (< 60 s)", async () => {
+    const { timeoutDoVerbo } = await import("../acao");
+    const { IMOBPRO_TIMEOUT_MS } = await import("../http");
+    expect(timeoutDoVerbo("document.read")).toBeGreaterThan(IMOBPRO_TIMEOUT_MS);
+    expect(timeoutDoVerbo("document.read")).toBeLessThan(60_000);
+  });
+
+  it("aguarda uma leitura de 30 s sem cortar aos 8 s (uma única chamada, com a chave)", async () => {
+    const fetch = upstream(30_000);
+    const result = request("document.read");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await result).toEqual({ status: 200, body: { enviada: true } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][1].headers).toHaveProperty("x-idempotency-key", "same-send");
+  });
+
+  it("estouro do prazo NÃO é 'sem resposta': vira o desfecho canônico 'processando' (sem retry)", async () => {
+    const fetch = upstream(300_000);
+    const result = request("document.read");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await result).toEqual({ status: 504, body: { error: "processando" } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("falha de rede que não é timeout segue como sem resposta (null)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+    expect(await request("document.read")).toBeNull();
+  });
+
+  it("o estouro em OUTRO verbo continua null (a exceção é só do document.read)", async () => {
+    upstream(300_000);
+    const result = request("proposal.status");
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await result).toBeNull();
+  });
+});

@@ -4,6 +4,7 @@ import {
   canonicalizarWaId,
   connectionStatus,
   downloadMedia,
+  MAX_MEDIA_BYTES,
   markReadTyping,
   parseWebhook,
   sendTemplate,
@@ -995,6 +996,40 @@ describe("chamadas à Graph API", () => {
       fetchMock.mockResolvedValueOnce(json(200, { url: "https://x", file_size: 20 * 1024 * 1024 }));
       expect(await downloadMedia("meta:BIG")).toBeNull();
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    // Rodada 1, I3: o ADAPTADOR REAL recusa por tamanho, e o grafo precisa saber o motivo para
+    // dizer "grande demais" (e não "tente de novo"). Sem o pedido explícito, `null` como sempre.
+    it("com distinguirTamanho: file_size acima do teto vira { erro: 'tamanho' }, sem baixar o corpo", async () => {
+      fetchMock.mockResolvedValueOnce(json(200, { url: "https://x", file_size: 20 * 1024 * 1024 }));
+      expect(await downloadMedia("meta:BIG", { distinguirTamanho: true })).toEqual({ erro: "tamanho" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("com distinguirTamanho: corpo acima do teto (sem file_size declarado) vira { erro: 'tamanho' }", async () => {
+      fetchMock
+        .mockResolvedValueOnce(json(200, { url: "https://lookaside.fbsbx.com/x", mime_type: "application/pdf" }))
+        .mockResolvedValueOnce(new Response(Buffer.alloc(MAX_MEDIA_BYTES + 1, 1), { status: 200 }));
+      expect(await downloadMedia("meta:GRANDE", { distinguirTamanho: true })).toEqual({ erro: "tamanho" });
+    });
+
+    it("sem o pedido, a recusa por tamanho continua null (chamadores antigos intocados)", async () => {
+      fetchMock.mockResolvedValueOnce(json(200, { url: "https://x", file_size: 20 * 1024 * 1024 }));
+      expect(await downloadMedia("meta:BIG")).toBeNull();
+      fetchMock
+        .mockResolvedValueOnce(json(200, { url: "https://lookaside.fbsbx.com/x" }))
+        .mockResolvedValueOnce(new Response(Buffer.alloc(MAX_MEDIA_BYTES + 1, 1), { status: 200 }));
+      expect(await downloadMedia("meta:GRANDE")).toBeNull();
+    });
+
+    it("com distinguirTamanho, o que NÃO é tamanho segue null (404, corpo vazio, ref alheia)", async () => {
+      fetchMock.mockResolvedValueOnce(json(404, { error: { code: 100 } }));
+      expect(await downloadMedia("meta:SUMIU", { distinguirTamanho: true })).toBeNull();
+      fetchMock
+        .mockResolvedValueOnce(json(200, { url: "https://lookaside.fbsbx.com/x" }))
+        .mockResolvedValueOnce(new Response(Buffer.alloc(0), { status: 200 }));
+      expect(await downloadMedia("meta:VAZIA", { distinguirTamanho: true })).toBeNull();
+      expect(await downloadMedia("zapi:https://x/a.jpg", { distinguirTamanho: true })).toBeNull();
     });
 
     it("referência que não é da Meta, ou erro, é null — mídia é melhor-esforço", async () => {

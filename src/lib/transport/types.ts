@@ -155,5 +155,30 @@ export interface TransportAdapter {
    */
   markReadTyping?(messageId: string): Promise<boolean>;
   connectionStatus(): Promise<ConnectionState>;
-  downloadMedia(ref: string): Promise<{ data: Buffer; contentType: string | null } | null>;
+  downloadMedia: DownloadMediaFn;
+}
+
+/** O que `downloadMedia` devolve quando a mídia chegou. */
+export interface MidiaBaixada {
+  data: Buffer;
+  contentType: string | null;
+}
+
+/** A mídia passou do teto (3 MB): só aparece quando o chamador pediu `distinguirTamanho`. */
+export interface MidiaGrandeDemais {
+  erro: "tamanho";
+}
+
+export interface OpcoesDeDownload {
+  /**
+   * `true` = a recusa POR TAMANHO volta como `{ erro: "tamanho" }` em vez de `null` (o grafo
+   * responde "grande demais", não "tente de novo"). Sem ele, tudo que não chegou é `null`.
+   * Os demais tropeços (404, host, tipo, vazio) são `null` nos dois modos.
+   */
+  distinguirTamanho?: boolean;
+}
+
+export interface DownloadMediaFn {
+  (ref: string): Promise<MidiaBaixada | null>;
+  (ref: string, opts: OpcoesDeDownload): Promise<MidiaBaixada | MidiaGrandeDemais | null>;
 }

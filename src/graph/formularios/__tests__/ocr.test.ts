@@ -79,7 +79,7 @@ const { complete } = await import("@/lib/llm");
 const { saveFacts, extractFacts } = await import("@/lib/memory");
 const { registrarTurn } = await import("@/lib/turnlog");
 const { featureEnabled } = await import("@/lib/runtime/rollout");
-const { gravarLidos, registrarLidos, textoDeConferencia, lidosDoCofre } = await import("../midia");
+const { gravarLidos, registrarLidos, textoDeConferencia, lidosDoCofre, fraseDeNaoLido } = await import("../midia");
 
 const acao = vi.mocked(executarAcao);
 const baixar = vi.mocked(downloadMedia);
@@ -332,6 +332,47 @@ describe("campos lidos entram em lidosPendentes, não no rascunho", () => {
     expect(fluxo.lidosPendentes).toEqual([]);
     expect(fluxo.cofreLidos).toBeUndefined();
     expect(JSON.stringify(values)).not.toContain(CPF);
+  });
+
+  // Rodada 1, M4: a chave do cofre é conferida ANTES do OCR. Sem ela o servidor (que cobra) nem é chamado.
+  it("sem MAX_ENCRYPTION_KEY o OCR nem e pago: document.read nao e chamado e a midia nem e baixada (M4)", async () => {
+    politica(true);
+    vi.stubEnv("MAX_ENCRYPTION_KEY", "");
+
+    await turno(foto());
+
+    expect(acao.mock.calls.filter(([p]) => p.verb === "document.read")).toHaveLength(0);
+    expect(baixar).not.toHaveBeenCalled();
+  });
+
+  // Rodada 1, I3: quem recusa por tamanho é o ADAPTADOR (a mídia nem chega ao grafo); o motivo
+  // precisa chegar até a frase, em vez de virar "tente de novo".
+  it("o adaptador recusou por tamanho: a resposta e 'grande demais', sem chamar o servidor (I3)", async () => {
+    politica(true);
+    baixar.mockResolvedValue({ erro: "tamanho" } as never);
+
+    const { reply } = await turno(foto());
+
+    expect(reply).toBe(fraseDeNaoLido("tamanho", "image"));
+    expect(reply).toMatch(/grande demais/i);
+    expect(acao.mock.calls.filter(([p]) => p.verb === "document.read")).toHaveLength(0);
+    // O grafo pediu a distincao ao transporte (sem ela o adaptador real devolve null).
+    expect(baixar).toHaveBeenCalledWith("meta:MEDIA1", { distinguirTamanho: true });
+  });
+
+  // Rodada 1, I2: o prazo estourou, o servidor segue lendo e cobra uma vez. A frase NAO manda reenviar.
+  it("document.read estourou o prazo (504 processando): 'ainda estou lendo', sem pedir para tentar de novo (I2)", async () => {
+    politica(true);
+    acao.mockResolvedValue({ status: 504, body: { error: "processando" } });
+
+    const { reply, values } = await turno(foto());
+
+    expect(reply).toBe(fraseDeNaoLido("processando", "image"));
+    expect(reply).toMatch(/ainda estou lendo/i);
+    expect(reply).not.toMatch(/tente de novo|tentar de novo/i);
+    // Sem segunda chamada (nova chave = segunda leitura paga).
+    expect(acao.mock.calls.filter(([p]) => p.verb === "document.read")).toHaveLength(1);
+    expect((values.fluxo as { lidosPendentes: unknown[] }).lidosPendentes).toEqual([]);
   });
 });
 

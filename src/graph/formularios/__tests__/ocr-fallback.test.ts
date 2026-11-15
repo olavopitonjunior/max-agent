@@ -10,6 +10,9 @@ import { withExecution } from "@/lib/runtime/context";
  * transcricao e do servidor (AIUsage la): o agente nao reporta em dobro.
  */
 
+// Sem a chave do cofre `lerMidia` nem paga o OCR (Rodada 1, M4).
+process.env.MAX_ENCRYPTION_KEY ||= Buffer.alloc(32, 7).toString("base64");
+
 vi.mock("@langchain/langgraph-checkpoint-postgres", async () => {
   const { MemorySaver } = await import("@langchain/langgraph");
   return { PostgresSaver: class extends MemorySaver { async setup() {} } };

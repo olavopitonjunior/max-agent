@@ -266,6 +266,9 @@ export async function lerDocumento(args: {
         return { ok: false, motivo: "politica" };
       case 502:
         return codigo === "leitura_indisponivel" ? { ok: false, motivo: "indisponivel" } : falha;
+      case 504:
+        // Desfecho canônico do prazo estourado (`acao.ts`): o servidor pode ter terminado a leitura.
+        return codigo === "processando" ? { ok: false, motivo: "processando" } : falha;
       default:
         return falha;
     }
@@ -276,12 +279,13 @@ export async function lerDocumento(args: {
 
 /** Valida o corpo do 200; `null` se não tem a forma do contrato. Valor sempre vira texto. */
 function leituraValida(body: Record<string, unknown>): import("@/graph/formularios/midia").LeituraDeDocumento | null {
-  if (typeof body.documentType !== "string" || typeof body.confianca !== "number" || !Array.isArray(body.campos)) return null;
+  const confiancaValida = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
+  if (typeof body.documentType !== "string" || !confiancaValida(body.confianca) || !Array.isArray(body.campos)) return null;
   const campos: import("@/graph/formularios/midia").CampoLido[] = [];
   for (const c of body.campos) {
     if (!c || typeof c !== "object") return null;
     const o = c as Record<string, unknown>;
-    if (typeof o.path !== "string" || typeof o.confianca !== "number") return null;
+    if (typeof o.path !== "string" || !confiancaValida(o.confianca)) return null;
     if (typeof o.valor !== "string" && typeof o.valor !== "number") return null;
     campos.push({
       path: o.path,

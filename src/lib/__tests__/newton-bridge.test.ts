@@ -206,6 +206,70 @@ describe("newtonBridgeAdapter.downloadMedia", () => {
     expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
   });
 
+  // Rodada 1, I3: o ADAPTADOR REAL diz que recusou por tamanho (o grafo responde "grande demais");
+  // sem o pedido explícito segue `null`, como os chamadores antigos esperam.
+  describe("distinguirTamanho (I3)", () => {
+    const PEDIDO = { distinguirTamanho: true } as const;
+
+    it("Content-Length acima de 3 MB vira { erro: 'tamanho' }, sem ler o corpo", async () => {
+      const res = resposta(JPEG, { headers: { "content-length": String(MB3 + 1) } });
+      const getReader = vi.spyOn(res.body as ReadableStream, "getReader");
+      fetchMock.mockResolvedValue(res);
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toEqual({ erro: "tamanho" });
+      expect(getReader).not.toHaveBeenCalled();
+    });
+
+    it("sem Content-Length, 3 MB + 1 byte vira { erro: 'tamanho' }; exatamente 3 MB devolve o buffer", async () => {
+      const com = (n: number) => Buffer.concat([JPEG, Buffer.alloc(n - JPEG.length)]);
+      fetchMock.mockResolvedValueOnce(resposta(com(MB3 + 1)));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toEqual({ erro: "tamanho" });
+      fetchMock.mockResolvedValueOnce(resposta(com(MB3)));
+      const r = await newtonBridgeAdapter.downloadMedia(REF, PEDIDO);
+      expect(r && "data" in r ? r.data.byteLength : -1).toBe(MB3);
+    });
+
+    it("corpo que estoura no meio do stream vira { erro: 'tamanho' }", async () => {
+      let lidos = 0;
+      const corpo = new ReadableStream<Uint8Array>({
+        pull(c) {
+          lidos += 1;
+          c.enqueue(new Uint8Array(1024 * 1024));
+          if (lidos > 100) c.close();
+        },
+      });
+      fetchMock.mockResolvedValue(new Response(corpo, { status: 200 }));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toEqual({ erro: "tamanho" });
+    });
+
+    it("sem o pedido, a mesma recusa continua null", async () => {
+      fetchMock.mockResolvedValue(resposta(JPEG, { headers: { "content-length": String(MB3 + 1) } }));
+      expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+    });
+
+    it("o que NÃO é tamanho segue null: corpo vazio, 404, host fora da allowlist, tipo desconhecido", async () => {
+      fetchMock.mockResolvedValueOnce(resposta(Buffer.alloc(0)));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toBeNull();
+      fetchMock.mockResolvedValueOnce(new Response("nao", { status: 404 }));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toBeNull();
+      expect(await newtonBridgeAdapter.downloadMedia("zapi:https://evil.example/a.jpg", PEDIDO)).toBeNull();
+      fetchMock.mockResolvedValueOnce(resposta(Buffer.from("<html>x</html>")));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toBeNull();
+    });
+
+    it("o log da recusa por tamanho segue sem a URL (só host e motivo)", async () => {
+      const espioes = (["warn", "error", "log", "info"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+      try {
+        fetchMock.mockResolvedValue(resposta(JPEG, { headers: { "content-length": String(MB3 + 1) } }));
+        await newtonBridgeAdapter.downloadMedia(REF, PEDIDO);
+        const impresso = espioes.flatMap((e) => e.mock.calls).map((c) => c.map(String).join(" ")).join("\n");
+        expect(impresso).not.toContain("segredo-do-cliente");
+        expect(impresso).toContain("media.zapi.example");
+      } finally {
+        espioes.forEach((e) => e.mockRestore());
+      }
+    });
+  });
+
   it("redirect: 302 devolve null, com redirect manual e sem Authorization", async () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 302, headers: { location: "https://evil.example/x" } }));
     expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();

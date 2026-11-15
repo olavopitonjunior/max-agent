@@ -3247,7 +3247,7 @@ async function lerMidiaDoFluxoV2(identity: Candidate, inbound: InboundMessage): 
     if (!fluxo || fluxo.kind !== "proposta_v2" || fluxoExpirou(fluxo, Date.now())) return null;
 
     const deps: DepsDaMidia = {
-      baixar: (ref) => downloadMedia(ref),
+      baixar: (ref, opts) => downloadMedia(ref, opts ?? {}),
       temDocumentRead: await sujeitoTemCapability(identity, inbound.fromPhone, "document.read"),
       // O custo da leitura é registrado pelo servidor (AIUsage): o agente não reporta uso aqui.
       lerDocumento: (p) =>

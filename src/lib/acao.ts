@@ -8,7 +8,7 @@ import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import {
   fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS, IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS, IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS,
-  captacaoSendTimeoutMs,
+  captacaoSendTimeoutMs, IMOBPRO_DOCUMENT_READ_TIMEOUT_MS,
 } from "./http";
 import type { ScopeSubject } from "@/graph/scope-contract";
 
@@ -93,6 +93,8 @@ export function timeoutDoVerbo(verb: VerboDeAcao): number {
   if (verb === "proposal.send" || verb === "proposal.remind") return IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS;
   if (verb === "captacao.send") return captacaoSendTimeoutMs();
   if (verb === "credit.request") return IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS;
+  // OCR de PDF: o teto comum de 8 s cortaria justo a leitura que o servidor termina e cobra.
+  if (verb === "document.read") return IMOBPRO_DOCUMENT_READ_TIMEOUT_MS;
   return IMOBPRO_TIMEOUT_MS;
 }
 
@@ -171,6 +173,12 @@ async function executarAcaoDireta(params: {
       `[acao] ${params.verb} falhou na org ${params.orgId}:`,
       err instanceof Error ? err.message : String(err)
     );
+    // `document.read` estourou o prazo: o servidor pode ter terminado (e cobrado) a leitura e
+    // guarda a resposta pela chave. Devolver `null` levaria o corretor a "tentar de novo" com
+    // outra `messageId` (segundo OCR pago); o desfecho canônico diz "ainda processando".
+    if (params.verb === "document.read" && err instanceof Error && /^timeout de \d+ms em /.test(err.message)) {
+      return { status: 504, body: { error: "processando" } };
+    }
     return null;
   }
 }

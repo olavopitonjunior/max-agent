@@ -12,6 +12,7 @@ vi.mock('../../http', () => ({
   fetchWithTimeout: async (url: string) => { network.requests.push(url); return Response.json({ items: [{ id: 'fixture' }], truncated: false }); },
   imobproBase: () => 'https://fixture.test', IMOBPRO_TIMEOUT_MS: 8000,
   IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS: 30000, IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS: 30000,
+  IMOBPRO_DOCUMENT_READ_TIMEOUT_MS: 45000,
   captacaoSendTimeoutMs: () => 30000,
 }));
 const enabled = JSON.stringify({ 'pilot-org': ['runtime', 'queries', 'marketing', 'handoff'] });

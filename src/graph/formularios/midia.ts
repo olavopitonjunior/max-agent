@@ -50,7 +50,7 @@ export interface CampoLido {
   confianca: number;
 }
 
-export type MotivoNaoLido = "mime" | "heic" | "tamanho" | "ilegivel" | "sem_leitura" | "falha";
+export type MotivoNaoLido = "mime" | "heic" | "tamanho" | "ilegivel" | "sem_leitura" | "falha" | "processando";
 
 export type ResultadoDaMidia =
   | { tipo: "texto"; texto: string }
@@ -60,7 +60,10 @@ export type ResultadoDaMidia =
 /** O que `cm.lerDocumento` devolve; o mapeamento de status HTTP mora lá. */
 export type LeituraDeDocumento =
   | { ok: true; documentType: string; confianca: number; campos: CampoLido[]; ignorados: number }
-  | { ok: false; motivo: "politica" | "mime" | "heic" | "tamanho" | "ilegivel" | "indisponivel" | "falha" };
+  | {
+      ok: false;
+      motivo: "politica" | "mime" | "heic" | "tamanho" | "ilegivel" | "indisponivel" | "processando" | "falha";
+    };
 
 export interface PedidoDeLeitura {
   base64: string;
@@ -75,7 +78,14 @@ export interface PedidoDeLeitura {
 }
 
 export interface DepsDaMidia {
-  baixar(ref: string): Promise<{ data: Buffer; contentType: string | null } | null>;
+  /**
+   * Baixa a mídia. `lerMidia` SEMPRE passa `{ distinguirTamanho: true }`: o adaptador que recusa
+   * por tamanho devolve `{ erro: "tamanho" }` (e não `null`), para a resposta ser "grande demais".
+   */
+  baixar(
+    ref: string,
+    opts?: { distinguirTamanho?: boolean }
+  ): Promise<{ data: Buffer; contentType: string | null } | { erro: "tamanho" } | null>;
   /** O sujeito tem `document.read` na política da org? */
   temDocumentRead: boolean;
   /** Já amarrada a org/telefone/sujeito por quem monta as deps. */
@@ -125,18 +135,29 @@ export function fraseDeNaoLido(motivo: MotivoNaoLido, kind: MidiaRecebida["kind"
         : textoSemLeituraDeMidia(null);
     case "falha":
       return "Não consegui abrir esse arquivo agora; tente de novo ou digite.";
+    case "processando":
+      // O prazo estourou, mas o servidor segue lendo (e cobra uma vez só, pela chave da mensagem).
+      // Mandar a mesma foto de novo seria uma segunda leitura paga: a frase diz para esperar.
+      return "Ainda estou lendo esse documento e pode demorar. Aguarde alguns minutos antes de mandar de novo, para não ler duas vezes.";
   }
 }
 
+type Baixada = { data: Buffer; contentType: string | null };
+
+/** O download ou o MOTIVO de não ter vindo (nunca lança; o teto de 3 MB vale aqui também). */
 async function baixarSeguro(
   deps: DepsDaMidia,
   ref: string
-): Promise<{ data: Buffer; contentType: string | null } | null> {
+): Promise<{ ok: true; midia: Baixada } | { ok: false; motivo: MotivoNaoLido }> {
   try {
-    return await deps.baixar(ref);
+    const r = await deps.baixar(ref, { distinguirTamanho: true });
+    if (!r) return { ok: false, motivo: "falha" };
+    if ("erro" in r) return { ok: false, motivo: "tamanho" };
+    if (r.data.length > TETO_DA_MIDIA_BYTES) return { ok: false, motivo: "tamanho" };
+    return { ok: true, midia: r };
   } catch {
     // A mensagem do erro pode trazer a URL de mídia: descartada de propósito.
-    return null;
+    return { ok: false, motivo: "falha" };
   }
 }
 
@@ -148,7 +169,8 @@ export async function lerMidia(
 ): Promise<ResultadoDaMidia> {
   try {
     // Newton: `zapi:<url>` só com a flag. Sem ela, a URL nem é tocada.
-    if (m.ref.startsWith(ZAPI_PREFIXO) && !deps.newtonMidiaAtiva()) return naoLido("falha");
+    // É "não leio mídia por aqui", não "tente de novo": reenviar não muda nada enquanto a flag estiver off.
+    if (m.ref.startsWith(ZAPI_PREFIXO) && !deps.newtonMidiaAtiva()) return naoLido("sem_leitura");
 
     if (m.kind === "audio") return await lerAudio(deps, m);
 
@@ -164,9 +186,13 @@ export async function lerMidia(
       return naoLido("sem_leitura");
     }
 
-    const baixado = await baixarSeguro(deps, m.ref);
-    if (!baixado) return naoLido("falha");
-    if (baixado.data.length > TETO_DA_MIDIA_BYTES) return naoLido("tamanho");
+    // Fail-closed SEM custo: o valor lido só tem onde ficar com a chave do cofre. Sem ela, ler
+    // (e pagar o OCR) para depois descartar o resultado seria gasto sem entrega.
+    if (!cofreDisponivel()) return naoLido("falha");
+
+    const b = await baixarSeguro(deps, m.ref);
+    if (!b.ok) return naoLido(b.motivo);
+    const baixado = b.midia;
 
     // O tipo vem dos BYTES, não do que o storage ou o cliente declararam.
     const mime = sniffMime(baixado.data);
@@ -218,9 +244,9 @@ export async function lerMidia(
 const PREFIXO_TEXTO_NA_IMAGEM = "Texto na imagem: ";
 
 async function lerImagemPorTranscricao(deps: DepsDaMidia, m: MidiaRecebida): Promise<ResultadoDaMidia> {
-  const baixado = await baixarSeguro(deps, m.ref);
-  if (!baixado) return naoLido("falha");
-  if (baixado.data.length > TETO_DA_MIDIA_BYTES) return naoLido("tamanho");
+  const b = await baixarSeguro(deps, m.ref);
+  if (!b.ok) return naoLido(b.motivo);
+  const baixado = b.midia;
   const mime = sniffMime(baixado.data);
   if (mime === "image/heic" || mime === "image/heif") return naoLido("heic");
   if (mime !== "image/jpeg" && mime !== "image/png" && mime !== "image/webp") return naoLido("mime");
@@ -237,9 +263,9 @@ async function lerImagemPorTranscricao(deps: DepsDaMidia, m: MidiaRecebida): Pro
 
 async function lerAudio(deps: DepsDaMidia, m: MidiaRecebida): Promise<ResultadoDaMidia> {
   if (!deps.transcrever) return naoLido("falha");
-  const baixado = await baixarSeguro(deps, m.ref);
-  if (!baixado) return naoLido("falha");
-  if (baixado.data.length > TETO_DA_MIDIA_BYTES) return naoLido("tamanho");
+  const b = await baixarSeguro(deps, m.ref);
+  if (!b.ok) return naoLido(b.motivo);
+  const baixado = b.midia;
   const texto = await deps.transcrever({
     kind: "audio",
     mimeType: m.mimeType ?? baixado.contentType ?? "audio/ogg",
@@ -268,6 +294,16 @@ function chaveDoCofre(): Buffer {
   if (mestra.length !== 32) throw new Error("MAX_ENCRYPTION_KEY deve ser 32 bytes em base64");
   // Subchave própria: o cofre dos lidos não divide chave com o de crédito nem o de captação.
   return Buffer.from(hkdfSync("sha256", mestra, Buffer.alloc(0), "max-formularios-lidos-cofre", 32));
+}
+
+/** A chave do cofre existe e tem o formato certo? Confere ANTES de pagar o OCR (nunca lança). */
+export function cofreDisponivel(): boolean {
+  try {
+    chaveDoCofre();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function cifrarCofre(texto: string, thread: string): string {

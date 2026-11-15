@@ -17,6 +17,9 @@ import {
  * quando a mídia nem deveria ir).
  */
 
+// A chave do cofre dos lidos: sem ela `lerMidia` nem paga o OCR (Rodada 1, M4).
+process.env.MAX_ENCRYPTION_KEY ||= Buffer.alloc(32, 7).toString("base64");
+
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(2000, 1)]);
 const PDF = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(2000, 2)]);
 const HEIC = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypheic"), Buffer.alloc(2000, 3)]);
@@ -148,6 +151,53 @@ describe("lerMidia: leitura pelo servidor (T7)", () => {
     expect(chaves[1]).not.toBe(chaves[0]);
   });
 
+  it("prazo estourado (processando): NÃO repete (nova chave = segundo OCR pago) e a frase não manda 'tentar de novo'", async () => {
+    const lerDocumento = vi.fn().mockResolvedValue({ ok: false, motivo: "processando" });
+    const d = deps({ lerDocumento });
+    expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "processando" });
+    expect(lerDocumento).toHaveBeenCalledTimes(1);
+    const frase = fraseDeNaoLido("processando", "image");
+    expect(frase).toMatch(/ainda estou lendo/i);
+    expect(frase).not.toMatch(/tente de novo|tentar de novo/i);
+  });
+
+  it("o adaptador recusou por tamanho ({erro:'tamanho'}): motivo 'tamanho', o servidor não é chamado (I3)", async () => {
+    const d = deps({ baixar: vi.fn().mockResolvedValue({ erro: "tamanho" }) });
+    expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "tamanho" });
+    expect(d.lerDocumento).not.toHaveBeenCalled();
+  });
+
+  it("pede ao download que distinga o tamanho (senão o adaptador devolve null e vira 'falha')", async () => {
+    const d = deps();
+    await lerMidia(d, foto(), ctx);
+    expect(d.baixar).toHaveBeenCalledWith("meta:123", { distinguirTamanho: true });
+  });
+
+  it("sem a chave do cofre (M4) nem baixa nem paga o OCR: 'falha', o servidor não é chamado", async () => {
+    const antiga = process.env.MAX_ENCRYPTION_KEY;
+    process.env.MAX_ENCRYPTION_KEY = "";
+    try {
+      const d = deps();
+      expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "falha" });
+      expect(d.baixar).not.toHaveBeenCalled();
+      expect(d.lerDocumento).not.toHaveBeenCalled();
+    } finally {
+      process.env.MAX_ENCRYPTION_KEY = antiga;
+    }
+  });
+
+  it("chave do cofre com tamanho errado também é recusada antes do OCR", async () => {
+    const antiga = process.env.MAX_ENCRYPTION_KEY;
+    process.env.MAX_ENCRYPTION_KEY = Buffer.alloc(8, 1).toString("base64");
+    try {
+      const d = deps();
+      expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "falha" });
+      expect(d.lerDocumento).not.toHaveBeenCalled();
+    } finally {
+      process.env.MAX_ENCRYPTION_KEY = antiga;
+    }
+  });
+
   it("nunca lança: erro inesperado do download vira 'falha'", async () => {
     const d = deps({ baixar: vi.fn().mockRejectedValue(new Error("https://zapi.example/segredo/rg.jpg caiu")) });
     expect(await lerMidia(d, foto(), ctx)).toEqual({ tipo: "nao_lido", motivo: "falha" });
@@ -160,10 +210,10 @@ describe("lerMidia: leitura pelo servidor (T7)", () => {
 });
 
 describe("lerMidia: Newton (zapi:<url>) só com NEWTON_MEDIA_INBOUND", () => {
-  it("flag desligada: não baixa, não chama o servidor", async () => {
+  it("flag desligada: não baixa, não chama o servidor e diz 'não leio' (M6), não 'tente de novo'", async () => {
     const d = deps({ newtonMidiaAtiva: () => false });
     const r = await lerMidia(d, foto({ ref: "zapi:https://media.zapi.example/x/rg.jpeg" }), ctx);
-    expect(r).toEqual({ tipo: "nao_lido", motivo: "falha" });
+    expect(r).toEqual({ tipo: "nao_lido", motivo: "sem_leitura" });
     expect(d.baixar).not.toHaveBeenCalled();
     expect(d.lerDocumento).not.toHaveBeenCalled();
   });
@@ -172,7 +222,7 @@ describe("lerMidia: Newton (zapi:<url>) só com NEWTON_MEDIA_INBOUND", () => {
     const d = deps({ newtonMidiaAtiva: () => true });
     const r = await lerMidia(d, foto({ ref: "zapi:https://media.zapi.example/x/rg.jpeg" }), ctx);
     expect(r.tipo).toBe("campos");
-    expect(d.baixar).toHaveBeenCalledWith("zapi:https://media.zapi.example/x/rg.jpeg");
+    expect(d.baixar).toHaveBeenCalledWith("zapi:https://media.zapi.example/x/rg.jpeg", { distinguirTamanho: true });
   });
 
   it("a URL da Z-API nunca aparece em log nem em erro", async () => {
@@ -212,7 +262,7 @@ describe("lerMidia: áudio", () => {
 
 describe("fraseDeNaoLido", () => {
   it("cada motivo tem frase própria, sem código interno nem URL", () => {
-    const motivos = ["mime", "heic", "tamanho", "ilegivel", "sem_leitura", "falha"] as const;
+    const motivos = ["mime", "heic", "tamanho", "ilegivel", "sem_leitura", "falha", "processando"] as const;
     const frases = motivos.map((m) => fraseDeNaoLido(m, "image"));
     expect(new Set(frases).size).toBe(motivos.length);
     for (const f of frases) expect(f).not.toMatch(/https?:|_|politica|formato_/i);

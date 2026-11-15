@@ -1,7 +1,7 @@
 import { fetchWithTimeout, NEWTON_BRIDGE_TIMEOUT_MS, NEWTON_MEDIA_TIMEOUT_MS } from "../../http";
 import { MAX_MEDIA_BYTES } from "../../meta";
 import { sniffMime, urlDeMidiaPermitida, ZAPI_MEDIA_PREFIX } from "../newton-media";
-import type { TransportAdapter } from "../types";
+import type { DownloadMediaFn, MidiaBaixada, MidiaGrandeDemais, OpcoesDeDownload, TransportAdapter } from "../types";
 
 /**
  * Bridge do Newton (`whatsapp-newton-bridge`, Z-API no número da Newcore).
@@ -69,9 +69,8 @@ export const newtonBridgeAdapter: TransportAdapter = {
   async connectionStatus() {
     return { connected: true, raw: { adapter: "newton-bridge" } };
   },
-  async downloadMedia(ref) {
-    return baixarMidiaZapi(ref);
-  },
+  downloadMedia: ((ref: string, opts?: OpcoesDeDownload) =>
+    baixarMidiaZapi(ref, opts?.distinguirTamanho === true)) as DownloadMediaFn,
 };
 
 /**
@@ -83,7 +82,10 @@ export const newtonBridgeAdapter: TransportAdapter = {
  * não leu) e o log traz só o host e o motivo — nunca a URL nem a mensagem do
  * erro, que o wrapper de timeout monta com o caminho.
  */
-async function baixarMidiaZapi(ref: string): Promise<{ data: Buffer; contentType: string | null } | null> {
+async function baixarMidiaZapi(
+  ref: string,
+  distinguirTamanho = false
+): Promise<MidiaBaixada | MidiaGrandeDemais | null> {
   if (!ref.startsWith(ZAPI_MEDIA_PREFIX)) return null;
   const url = urlDeMidiaPermitida(ref.slice(ZAPI_MEDIA_PREFIX.length));
   if (!url) {
@@ -94,6 +96,11 @@ async function baixarMidiaZapi(ref: string): Promise<{ data: Buffer; contentType
     console.warn(`[newton-bridge] mídia não baixada: host=${url.host} motivo=${motivo}`);
     return null;
   };
+  // Passou do teto: o motivo "tamanho" só sai como valor quando o chamador pediu; vazio segue null.
+  const grande = (): MidiaGrandeDemais | null => {
+    recusar("tamanho");
+    return distinguirTamanho ? { erro: "tamanho" } : null;
+  };
   try {
     const res = await fetchWithTimeout(url.href, { method: "GET", redirect: "manual", headers: {} }, NEWTON_MEDIA_TIMEOUT_MS);
     if (!res.ok) {
@@ -103,10 +110,11 @@ async function baixarMidiaZapi(ref: string): Promise<{ data: Buffer; contentType
     const declarado = Number(res.headers.get("content-length"));
     if (Number.isFinite(declarado) && declarado > MAX_MEDIA_BYTES) {
       await res.body?.cancel().catch(() => {});
-      return recusar("tamanho");
+      return grande();
     }
     const data = await lerAteOTeto(res);
-    if (!data || data.byteLength === 0) return recusar("tamanho");
+    if (!data) return grande();
+    if (data.byteLength === 0) return recusar("vazio");
     const tipo = sniffMime(data);
     if (!tipo) return recusar("tipo");
     return { data, contentType: tipo };

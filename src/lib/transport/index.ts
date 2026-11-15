@@ -25,7 +25,9 @@ import { MetaHttpError, classificarMeta, falhaDaMensagemMeta } from "./erro";
 import type {
   BotaoEnviado,
   ConnectionState,
+  DownloadMediaFn,
   Interativo,
+  OpcoesDeDownload,
   ProviderName,
   SendResult,
   TransportAdapter,
@@ -38,7 +40,10 @@ export type {
   InboundKind,
   InboundMessage,
   Interativo,
+  MidiaBaixada,
+  MidiaGrandeDemais,
   OpcaoInterativa,
+  OpcoesDeDownload,
   ProviderName,
   SendResult,
   StatusCallback,
@@ -209,11 +214,9 @@ export async function connectionStatus(): Promise<ConnectionState> {
   return adapter().connectionStatus();
 }
 
-export async function downloadMedia(
-  ref: string
-): Promise<{ data: Buffer; contentType: string | null } | null> {
-  return adapter().downloadMedia(ref);
-}
+export const downloadMedia: DownloadMediaFn = ((ref: string, opts?: OpcoesDeDownload) =>
+  // Só repassa `opts` quando existe: o adaptador e os mocks veem a chamada de um argumento de sempre.
+  opts ? adapter().downloadMedia(ref, opts) : adapter().downloadMedia(ref)) as DownloadMediaFn;
 
 /** Prefixos de id que o código fabrica (não existem na Meta): Newton, playground e handoff. */
 const SINTETICOS = [NEWTON_SYNTHETIC_PREFIX, "playground-", "human-"];
