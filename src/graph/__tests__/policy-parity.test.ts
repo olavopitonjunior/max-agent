@@ -318,6 +318,9 @@ const CATALOGO_DO_IMOBPRO = [
   "google.calendar.read",
   "google.calendar.write",
   "google.tasks.write",
+  // Leitura de documento (15/11/2026, par do contractmaker §18.13.13): posição 33, FIXA.
+  // Nasce desligada e NUNCA vai ao comissionado.
+  "document.read",
 ];
 
 describe("paridade do catálogo de capabilities", () => {
@@ -340,6 +343,22 @@ describe("paridade do catálogo de capabilities", () => {
       "proposal.send",
       "proposal.delete",
     ]);
+  });
+
+  /** Leitura de documento nasce desligada e o comissionado nunca a recebe (negado antes do permitido). */
+  it("document.read: fora do padrão emitido, nunca ao comissionado; só chega a quem a org liga", () => {
+    const padrao = JSON.parse(
+      '{"byRole":{"*":["deal.list","deal.pending","proposal.list","form.create","proposal.create","proposal.send","proposal.delete"]},' +
+        '"byRecipient":{},"brokerDefault":["deal.list","deal.pending"]}'
+    ) as MaxPolicy;
+    expect(resolverPolitica({ politica: padrao, sujeito: gerente, role: "sales" })).not.toContain("document.read");
+    expect(resolverPolitica({ politica: padrao, sujeito: corretorSemOverride, role: null })).not.toContain("document.read");
+
+    const ligadaAoComissionado = { byRole: { "*": ["document.read"] }, byRecipient: {}, brokerDefault: ["document.read"] } as MaxPolicy;
+    expect(resolverPolitica({ politica: ligadaAoComissionado, sujeito: corretorSemOverride, role: null })).not.toContain("document.read");
+
+    const ligada = JSON.parse('{"byRole":{"*":["proposal.list","document.read"]}}') as MaxPolicy;
+    expect(resolverPolitica({ politica: ligada, sujeito: gerente, role: "sales" })).toEqual(["proposal.list", "document.read"]);
   });
 
   /** Crédito não nasce concedido: só vale quando a org liga em `/admin/max`. */

@@ -27,7 +27,7 @@ import {
 } from "./capacidades";
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
-import { fraseDeNaoLido, lerMidia, type DepsDaMidia } from "./formularios/midia";
+import { fraseDeNaoLido, lerMidia, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
 import {
   comoMensagemDaJanela,
   INSTRUCAO_DA_JANELA,
@@ -51,6 +51,7 @@ import {
   searchKnowledge,
   reportUsage,
   transcribeMedia,
+  lerDocumento,
   criarFormularioVenda,
   criarFormularioLocacao,
   criarRascunhoProposta,
@@ -2725,7 +2726,9 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
    */
   const sair = (
     reply: string | null,
-    extra: { orgId?: string; error?: string } = {}
+    // `replyLog`: o que vai ao log no lugar da resposta, quando a resposta traz valor lido
+    // de documento (nunca em log). Ausente = a resposta, como sempre foi.
+    extra: { orgId?: string; error?: string; replyLog?: string } = {}
   ): TurnResult => ({
     reply,
     afterReply: async () => {
@@ -2735,7 +2738,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
         messageId: inbound.messageId,
         kind: inbound.kind,
         inboundText: texto || null,
-        replyText: reply,
+        replyText: extra.replyLog ?? reply,
         latencyMs: Date.now() - iniciadoEm,
         error: extra.error ?? null,
         // Não chegou ao grafo: o motivo está em `error` (desconhecido, ambíguo…).
@@ -2916,6 +2919,27 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
       return sair(fraseDeNaoLido(daMidia.motivo, inbound.kind as "image" | "document"), {
         orgId: identity.candidate.orgId,
         error: `sem_leitura_${inbound.kind}_${daMidia.motivo}`,
+      });
+    }
+  }
+  if (daMidia?.tipo === "campos") {
+    // A foto não é um "sim": nenhuma pendência de escrita sobrevive a este turno.
+    await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
+    const guardou = await guardarLidosNoFluxo(identity.candidate, inbound, daMidia.campos);
+    if (!guardou) {
+      // Sem onde guardar o valor com segurança (sem chave): não mostra nem retém.
+      return sair(fraseDeNaoLido("falha", inbound.kind as "image" | "document"), {
+        orgId: identity.candidate.orgId,
+        error: `leitura_nao_guardada_${inbound.kind}`,
+      });
+    }
+    // Sem legenda o turno acaba aqui: a ficha "lido — confira". Com legenda, a legenda
+    // é a mensagem e segue o turno normal (o valor lido fica só no cofre do fluxo).
+    if (!turnText) {
+      return sair(textoDeConferencia(daMidia), {
+        orgId: identity.candidate.orgId,
+        error: `leitura_${inbound.kind}_para_conferir`,
+        replyLog: "[documento lido: valores omitidos do log]",
       });
     }
   }
@@ -3165,6 +3189,28 @@ async function sujeitoTemCapability(identity: Candidate, phone: string, capabili
 }
 
 /**
+ * Guarda o que o documento disse como PENDENTE de confirmação no fluxo (T8):
+ * caminho + referência no checkpoint, valor só no cofre cifrado. Não toca o
+ * rascunho. `false` = não guardou (sem fluxo vivo ou sem chave): quem chama não
+ * mostra o valor.
+ */
+async function guardarLidosNoFluxo(identity: Candidate, inbound: InboundMessage, campos: CampoLido[]): Promise<boolean> {
+  try {
+    const app = await getApp();
+    const thread = currentExecution()?.context.conversationId ?? liveNamespaceFor(identity.orgId, inbound.fromPhone, subjectDe(identity));
+    const config = { configurable: { thread_id: thread } };
+    const fluxo = ((await app.getState(config)).values as Partial<MaxStateType> | undefined)?.fluxo;
+    if (!fluxo || fluxo.kind !== "proposta_v2") return false;
+    const r = registrarLidos(fluxo, { ref: inbound.messageId, campos }, thread);
+    if (!r.ok) return false;
+    await app.updateState(config, { fluxo: r.fluxo });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Lê a mídia de um turno de proposta v2 (T7). `null` = não se aplica: feature
  * desligada, sem fluxo `proposta_v2` vivo, ou mensagem que não é foto/PDF. Nunca
  * lança. A referência da mídia não vai a log nem a erro.
@@ -3183,6 +3229,21 @@ async function lerMidiaDoFluxoV2(identity: Candidate, inbound: InboundMessage): 
     const deps: DepsDaMidia = {
       baixar: (ref) => downloadMedia(ref),
       temDocumentRead: await sujeitoTemCapability(identity, inbound.fromPhone, "document.read"),
+      // O custo da leitura é registrado pelo servidor (AIUsage): o agente não reporta uso aqui.
+      lerDocumento: (p) =>
+        lerDocumento({
+          orgId,
+          rawPhone: inbound.fromPhone,
+          subject: subjectDe(identity),
+          base64: p.base64,
+          mimeType: p.mimeType,
+          alvo: p.alvo,
+          idempotencyKey: p.idempotencyKey,
+          ...(p.schemaType ? { schemaType: p.schemaType } : {}),
+          ...(p.tipo ? { tipo: p.tipo } : {}),
+          ...(p.papelSugerido ? { papelSugerido: p.papelSugerido } : {}),
+          ...(p.posicao ? { posicao: p.posicao } : {}),
+        }),
       newtonMidiaAtiva: newtonMediaAtiva,
     };
     return await lerMidia(

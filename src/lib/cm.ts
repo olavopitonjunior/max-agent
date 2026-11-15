@@ -202,6 +202,103 @@ export async function transcribeMedia(
   }
 }
 
+/**
+ * Leitura de documento pelo servidor (`document.read`, max.md §18.13.13): manda a
+ * mídia e recebe os campos lidos, SUGERIDOS para conferir. O verbo nunca grava
+ * negócio. O custo do OCR é registrado (`AIUsage`, `max_document_read`) pelo
+ * SERVIDOR: este lado não reporta uso (não há chamada de modelo daqui).
+ *
+ * Chama `executarAcao` (o funil de ações: política, simulação, execução), por
+ * import dinâmico: `acao.ts` puxa o runtime, que puxa este arquivo.
+ *
+ * O valor lido NUNCA é logado aqui. Falha é `{ ok: false, motivo }`; nada lança.
+ */
+export async function lerDocumento(args: {
+  orgId: string;
+  rawPhone: string;
+  subject: import("@/graph/scope-contract").ScopeSubject;
+  base64: string;
+  mimeType: string;
+  alvo: "proposta" | "captacao";
+  schemaType?: string;
+  tipo?: string;
+  papelSugerido?: string;
+  posicao?: number;
+  captacaoId?: string;
+  /** A `messageId` da mídia: o servidor exige `x-idempotency-key`. */
+  idempotencyKey: string;
+}): Promise<import("@/graph/formularios/midia").LeituraDeDocumento> {
+  type Leitura = import("@/graph/formularios/midia").LeituraDeDocumento;
+  const falha: Leitura = { ok: false, motivo: "falha" };
+  try {
+    const { executarAcao } = await import("./acao");
+    const r = await executarAcao({
+      orgId: args.orgId,
+      rawPhone: args.rawPhone,
+      subject: args.subject,
+      verb: "document.read",
+      idempotencyKey: args.idempotencyKey,
+      args: {
+        alvo: args.alvo,
+        ...(args.schemaType ? { schemaType: args.schemaType } : {}),
+        ...(args.tipo ? { tipo: args.tipo } : {}),
+        ...(args.papelSugerido ? { papel_sugerido: args.papelSugerido } : {}),
+        ...(args.posicao ? { posicao: args.posicao } : {}),
+        ...(args.captacaoId ? { captacaoId: args.captacaoId } : {}),
+        mime_type: args.mimeType,
+        base64: args.base64,
+      },
+    });
+    if (!r) return falha;
+    const codigo = typeof r.body?.error === "string" ? r.body.error : undefined;
+    switch (r.status) {
+      case 200:
+        return leituraValida(r.body) ?? falha;
+      case 413:
+        return { ok: false, motivo: "tamanho" };
+      case 415:
+        return { ok: false, motivo: codigo === "formato_heic_nao_suportado" ? "heic" : "mime" };
+      case 422:
+        return { ok: false, motivo: codigo === "documento_ilegivel" ? "ilegivel" : "falha" };
+      case 403:
+        // Capability não concedida, flag da esteira desligada, sem RBAC: para o corretor
+        // tudo é "não leio documento por aqui"; o motivo exato fica com o servidor.
+        return { ok: false, motivo: "politica" };
+      case 502:
+        return codigo === "leitura_indisponivel" ? { ok: false, motivo: "indisponivel" } : falha;
+      default:
+        return falha;
+    }
+  } catch {
+    return falha;
+  }
+}
+
+/** Valida o corpo do 200; `null` se não tem a forma do contrato. Valor sempre vira texto. */
+function leituraValida(body: Record<string, unknown>): import("@/graph/formularios/midia").LeituraDeDocumento | null {
+  if (typeof body.documentType !== "string" || typeof body.confianca !== "number" || !Array.isArray(body.campos)) return null;
+  const campos: import("@/graph/formularios/midia").CampoLido[] = [];
+  for (const c of body.campos) {
+    if (!c || typeof c !== "object") return null;
+    const o = c as Record<string, unknown>;
+    if (typeof o.path !== "string" || typeof o.confianca !== "number") return null;
+    if (typeof o.valor !== "string" && typeof o.valor !== "number") return null;
+    campos.push({
+      path: o.path,
+      ...(typeof o.chave === "string" ? { chave: o.chave } : {}),
+      valor: String(o.valor),
+      confianca: o.confianca,
+    });
+  }
+  return {
+    ok: true,
+    documentType: body.documentType,
+    confianca: body.confianca,
+    campos,
+    ignorados: typeof body.ignorados === "number" ? body.ignorados : 0,
+  };
+}
+
 export interface FormularioCriado {
   token: string;
   /**

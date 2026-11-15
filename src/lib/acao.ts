@@ -80,6 +80,10 @@ export const VERBOS_DE_ACAO = [
   // Escritas: levam `x-idempotency-key` (a `messageId` do toque).
   "form.remind",
   "activity.postpone",
+  // Leitura de documento (PR-B/T8, par do contractmaker PR5, max.md §18.13.13): OCR da
+  // mídia que o corretor mandou, campos SUGERIDOS para conferir. Leitura (nunca grava),
+  // mas exige `x-idempotency-key` (a `messageId` da mídia): a resposta é cacheada e o OCR custa.
+  "document.read",
 ] as const;
 export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
 
@@ -143,8 +147,11 @@ async function executarAcaoDireta(params: {
     // Tratá-los como "sem resposta" prenderia a pessoa num "ainda não confirmei" eterno, porque a
     // recusa fica no cache de idempotência da chave e o replay devolve o mesmo 5xx.
     const erroDoCorpo = body && typeof body === "object" ? (body as Record<string, unknown>).error : undefined;
+    // `document.read` 502 `leitura_indisponivel` (o OCR falhou): o chamador o traduz e repete UMA
+    // vez com chave nova; tratá-lo como "sem resposta" perderia a distinção do retry.
     const recusaCanonica = (params.verb === "proposal.remind" && erroDoCorpo === "lembrete_recusado") ||
-      (params.verb === "proposal.cancel" && erroDoCorpo === "cancelamento_falhou");
+      (params.verb === "proposal.cancel" && erroDoCorpo === "cancelamento_falhou") ||
+      (params.verb === "document.read" && erroDoCorpo === "leitura_indisponivel");
     if (res.status >= 500 && !naoConfigurado && !falhaDeEnvio && !recusaCanonica) {
       console.warn(`[acao] ${params.verb} ${res.status} na org ${params.orgId}`);
       return null;

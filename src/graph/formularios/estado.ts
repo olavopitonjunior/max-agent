@@ -35,6 +35,12 @@ export interface FluxoFormularioV2 {
   ultimaEntradaEm: number;
   /** Leitura de mídia não confirmada: só caminho + referência, sem valor. */
   lidosPendentes: Array<{ path: string; ref: string }>;
+  /**
+   * O VALOR do que `lidosPendentes` aponta, cifrado (AES-256-GCM, chave derivada da
+   * `MAX_ENCRYPTION_KEY`, amarrado à thread): o checkpoint nunca tem valor lido em
+   * claro. Só `midia.ts` abre. Some quando `lidosPendentes` esvazia.
+   */
+  cofreLidos?: string;
   /** Campos já perguntados (para não repetir a mesma pergunta). Só caminhos. */
   perguntados: string[];
   /** A escrita em curso: a `messageId` do primeiro "sim" (Global Constraint 5). */
