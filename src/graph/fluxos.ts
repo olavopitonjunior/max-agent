@@ -296,7 +296,7 @@ const TEXTO_VENDA_OU_LOCACAO = "É de *venda* ou de *locação*?";
 export const TEXTO_FLUXO_CANCELADO = "Beleza, parei por aqui. Nada foi criado.";
 
 /** Leitura sem resposta: nada foi escrito, então pode dizer que não conseguiu. */
-const TEXTO_SEM_RESPOSTA = "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
+export const TEXTO_SEM_RESPOSTA = "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
 
 /**
  * ESCRITA sem resposta: o servidor pode ter gravado antes de cair. Não afirma
@@ -305,7 +305,7 @@ const TEXTO_SEM_RESPOSTA = "Não consegui falar com o sistema agora. Tenta de no
 export const TEXTO_ESCRITA_INCERTA =
   "O sistema não respondeu e não sei se deu certo. Responda *SIM* de novo para conferir — não duplica.";
 
-const textoSemPermissao = (): string =>
+export const textoSemPermissao = (): string =>
   `Sua conta não tem permissão para isso pelo ${nomeDoAgente()}. Fale com o administrador da imobiliária.`;
 
 /**
@@ -330,7 +330,7 @@ function semModelo(body: Record<string, unknown>): boolean {
   return body.pdfIndisponivel === "sem_modelo";
 }
 
-const TEXTO_NAO_ENCONTREI = "Não encontrei essa proposta para você no sistema.";
+export const TEXTO_NAO_ENCONTREI = "Não encontrei essa proposta para você no sistema.";
 
 const TEXTO_POLITICA_INDISPONIVEL =
   "Não consegui conferir sua permissão agora. Tenta de novo em instantes.";
@@ -920,6 +920,16 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   // como "viu a ficha" por causa de um horário que ninguém confirmou (C1).
   if (f.kind === "proposta_v2") {
     const semAgendada = f.fichaAgendadaEm !== undefined ? { ...f, fichaAgendadaEm: undefined } : f;
+    // PR-D: os cartões do envio (testemunhas, canal, regerar, resumo) também são etapas em que o próximo
+    // "sim" escreve. Uma interrupção os desfaz: o "sim" seguinte cai numa lista, nunca grava nem envia.
+    // Com `chave` (escrita incerta) o passo fica: o "sim" seguinte repete a mesma chave.
+    const as = semAgendada.assinatura;
+    if (as && !f.chave) {
+      if (as.passo === "testemunhas_cartao") return { ...semAgendada, assinatura: { ...as, passo: "testemunhas", testemunhas: undefined } };
+      if (as.passo === "canal_cartao" || as.passo === "regerar" || as.passo === "envio_cartao") {
+        return { ...semAgendada, etapa: "assinatura", assinatura: { ...as, passo: "tipo", mostrado: undefined } };
+      }
+    }
     return f.etapa === "ficha" && !f.chave ? { ...semAgendada, etapa: "compor" } : semAgendada;
   }
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
@@ -1235,10 +1245,33 @@ export async function retomarEnvio(
   };
   const ajuste = prepararCpfDaRetomada(retomado, ctx.texto, ctx);
   if (ajuste) return ajuste;
+  // v2 (PR-D): só com a flag da org ligada E o servidor dizendo `fluxoV2`; qualquer outra coisa devolve
+  // null SEM chamar nada e o v1 segue byte a byte. Uma escrita incerta do v1 (`chave`) nunca vai para o v2.
+  if (!retomado.chave) {
+    const v2 = await tentarEnvioV2(alvo, ctx, deps);
+    if (v2) return v2;
+  }
   const passo = (await oferecerMetodos(retomado, ctx, deps)) as Extract<PassoDoFluxo, { reply: string }>;
   return alvo.codigo && passo.fluxo
     ? { ...passo, reply: `Retomando a proposta ${rotuloDoRascunho(alvo)}.\n${passo.reply}` }
     : passo;
+}
+
+/**
+ * A entrada do envio v2 (PR-D) a partir do v1: `null` = segue o v1 (flag da org desligada, servidor sem
+ * `fluxoV2` para a proposta, sem as deps da janela ou sem a política de envio). O módulo é carregado sob
+ * demanda para o v1 não depender do v2 e para o condutor (que importa este arquivo) não formar ciclo.
+ */
+async function tentarEnvioV2(
+  alvo: { id: string; codigo?: string; titulo?: string },
+  ctx: ContextoDoTurno,
+  deps: DepsDoFluxo
+): Promise<Extract<PassoDoFluxo, { reply: string }> | null> {
+  if (!ctx.orgId) return null;
+  const { abrirEnvioV2 } = await import("./formularios/envio-v2");
+  const r = await abrirEnvioV2({ proposalId: alvo.id, ctx, deps });
+  if (!r) return null;
+  return alvo.codigo && r.fluxo ? { ...r, reply: `Retomando a proposta ${rotuloDoRascunho(alvo)}.\n${r.reply}` } : r;
 }
 
 function prepararCpfDaRetomada(retomado: FluxoProposta, texto: string, ctx: ContextoDoTurno): Extract<PassoDoFluxo, { reply: string }> | null {
@@ -1518,7 +1551,7 @@ export async function conduzirFluxo(
 // ── Negócio ──
 
 type FluxoNegocio = Extract<Fluxo, { kind: "negocio" }>;
-type FluxoProposta = Extract<Fluxo, { kind: "proposta" }>;
+export type FluxoProposta = Extract<Fluxo, { kind: "proposta" }>;
 
 async function carregarCamposDoNegocio(
   tipo: "venda" | "locacao",
@@ -1723,7 +1756,13 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     // dito depois para outra coisa (mesmo padrão da escolha 1/2).
     if (!escolhido) return { liberar: true, fluxo: null, evento: "selecao_encerrada" };
     const retomado: FluxoProposta = { ...f, etapa: "ajustes", propostaId: escolhido.id, codigo: escolhido.codigo, candidatos: undefined, pedido: undefined, atualizadoEm: agora };
-    return prepararCpfDaRetomada(retomado, f.pedido ?? "", ctx) ?? oferecerMetodos(retomado, ctx, deps);
+    const ajusteDaSelecao = prepararCpfDaRetomada(retomado, f.pedido ?? "", ctx);
+    if (ajusteDaSelecao) return ajusteDaSelecao;
+    if (!retomado.chave) {
+      const v2 = await tentarEnvioV2(escolhido, ctx, deps);
+      if (v2) return v2;
+    }
+    return oferecerMetodos(retomado, ctx, deps);
   }
 
   if (f.etapa === "natureza" || (!f.natureza && !f.propostaId)) {
@@ -2168,7 +2207,7 @@ function textoEnvio(f: FluxoProposta): string {
   );
 }
 
-async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+export async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   if (!ctx.policy.includes("proposal.send")) {
     if (ctx.politicaIndisponivel) return { reply: TEXTO_POLITICA_INDISPONIVEL, fluxo: f, evento: "politica_indisponivel" };
     return {
@@ -2222,7 +2261,7 @@ export const TEXTO_AVISO_SEM_ASSINATURA =
   "configurações de assinatura do sistema.";
 
 /** Bloqueios do `proposal.send` (contractmaker `CODIGO_DO_BLOQUEIO`) → fato + caminho. */
-const TEXTO_DO_BLOQUEIO: Record<string, string> = {
+export const TEXTO_DO_BLOQUEIO: Record<string, string> = {
   clicksign_nao_configurada:
     "Sua imobiliária ainda não tem a ClickSign conectada, então não dá para enviar para assinatura. " +
     "Um administrador conecta a conta nas configurações de assinatura do sistema.",

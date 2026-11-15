@@ -28,6 +28,7 @@
 import {
   TEXTO_ESCRITA_INCERTA,
   TEXTO_FLUXO_CANCELADO,
+  pedeEnvio,
   querCancelar,
   textoSemModelo,
   type ContextoDoTurno,
@@ -73,6 +74,7 @@ import {
 } from "./proposta-v2";
 import { itensDaRevisao, lerCorrecaoNumerada, pedeRevisao, textoDaRevisao } from "./revisao";
 import { signatariosPorLado } from "./partes";
+import { conduzirAssinatura, retomarAposCelular } from "./envio-v2";
 import { escolherVersao, rebaixarParaV1 } from "./selecao";
 
 const TEXTO_SEM_SISTEMA = "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
@@ -360,6 +362,14 @@ export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, de
   const options: OptionsV2 = bruto;
   const obrigatorios: CampoObrigatorio[] = options.obrigatorios ?? [];
   const faltandoDoServidor: Pendencia[] = faltandoV2(options) ?? pendenciasIniciais(obrigatorios);
+
+  // 1b. o envio para assinatura (PR-D, T13/T14): testemunhas, tipo, preflight, resumo e o "sim" que
+  // manda. Roda antes do passo 2 porque a `chave` de um envio sem resposta é dele. `null` = a fala não é
+  // do envio (o resto do condutor segue: extração, ficha).
+  if (f0.assinatura || (pedeEnvio(ctx.texto) && f0.proposalId)) {
+    const envio = await conduzirAssinatura({ f0, options, obrigatorios, ctx, deps, cancelar, temPendencia });
+    if (envio) return envio;
+  }
 
   // 2. escrita sem resposta: só o SIM resolve (outra chave geraria um segundo rascunho)
   if (f0.chave && conf !== "sim") {
@@ -802,6 +812,18 @@ async function gravar(a: {
       conflito: undefined,
     };
     const completo = !!faltando && faltando.length === 0;
+
+    // PR-D: o celular do assinante (Aceite) foi gravado: segue para o preflight. Qualquer outra gravação
+    // durante o envio deixa o resumo velho: derruba o passo (o corretor pede o envio de novo).
+    if (base.assinatura) {
+      if (base.assinatura.passo === "celular") {
+        const o2 = await reler();
+        if (o2 && o2.fluxoV2 === true) {
+          return retomarAposCelular({ f: base, options: o2, obrigatorios, ctx, deps, prefixo: partes.join("\n") });
+        }
+      }
+      base = { ...base, assinatura: undefined };
+    }
 
     // T11/T12: revisão em curso (a gravação foi uma correção dela) ou rascunho completo no Max COM Flow.
     // Sem Flow disponível o completo é o do C1, byte a byte (`fluxo: null`).

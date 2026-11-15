@@ -1429,6 +1429,12 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
         policy: state.policy,
         politicaIndisponivel: state.politicaIndisponivel,
         agora,
+        // v2 (PR-D): a org escolhe a versão; thread/pessoa/RBAC/botão são os do turno (a ficha, a pausa e o Flow).
+        orgId: ctxDoTurno.orgId,
+        thread: ctxDoTurno.thread,
+        subjectKey: ctxDoTurno.subjectKey,
+        podeEscrever: ctxDoTurno.podeEscrever,
+        botao: ctxDoTurno.botao,
       },
       depsDoFluxo(state, usage),
       state.fluxo
