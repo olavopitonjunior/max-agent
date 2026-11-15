@@ -85,6 +85,10 @@ const DELIMITADORES = [
   "resumo_da_conversa",
   "fatos_da_pessoa",
   "nome_da_pessoa",
+  // Janela de extração do v2 (`formularios/janela.ts`): as mensagens e o texto
+  // lido de documento vão cercados, e nenhum deles forja a cerca do outro.
+  "mensagem",
+  "documento_lido",
 ];
 
 /** Cada letra aceita as variantes acentuadas: "usuário" não pode escapar de "usuario". */

@@ -48,6 +48,7 @@ import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
 import type { FluxoFormularioV2 } from "./formularios/estado";
+import type { DocumentoLido, JanelaDeExtracao } from "./formularios/janela";
 import { rebaixarParaV1 } from "./formularios/selecao";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
@@ -213,6 +214,17 @@ export interface DepsDoFluxo {
   extrairCredito?(texto: string, campo: CampoCredito): Promise<Record<string, unknown> | null>;
   /** Captação (P9): extrator de UMA seção (imóvel, endereço, pessoa). Opcional: sem ele, só o código interpreta. */
   extrairCaptacao?(texto: string, secao: SecaoDeExtracao): Promise<Record<string, unknown> | null>;
+  /**
+   * v2 (T4): a janela das últimas mensagens do corretor + documentos lidos, para
+   * o extrator juntar o que veio em pedaços. SÓ existe com a feature
+   * `formularios_v2` (sem ela o v1 roda como sempre, sem estes dois métodos).
+   * Tudo que vai ao modelo sai tokenizado; os `args` voltam destokenizados.
+   */
+  janelaDoTurno?(lidos?: DocumentoLido[]): JanelaDeExtracao;
+  extrairComJanela?(
+    janela: JanelaDeExtracao,
+    tool: { name: string; description: string; parameters: Record<string, unknown> }
+  ): Promise<Record<string, unknown> | null>;
   /**
    * Preferências de aviso (M3): leitura e PATCH das preferências da PRÓPRIA pessoa (telefone do turn).
    * `null` = sem resposta utilizável. Opcional: sem ele, o fluxo responde que não conseguiu.

@@ -28,6 +28,13 @@ import {
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
 import {
+  comoMensagemDaJanela,
+  INSTRUCAO_DA_JANELA,
+  montarJanela,
+  type DocumentoLido,
+  type JanelaDeExtracao,
+} from "./formularios/janela";
+import {
   conduzirCredito, continuacaoCredito, creditoLigado, iniciarCredito, pedeCredito, responderStatusCredito,
   toolExtrairCredito, TEXTO_APROVAR, TEXTO_SCORE,
 } from "./credito";
@@ -876,19 +883,15 @@ async function continuar(state: MaxStateType): Promise<MaxUpdate> {
  * (sujeito + telefone, reconferidos no servidor) e o extrator por ferramenta
  * obrigatória. O consumo das extrações entra em `usage` do turn.
  */
-function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
+export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
   const orgId = state.identity.orgId;
-  const extrair = async (texto: string, tool: { name: string; description: string; parameters: Record<string, unknown> }) => {
-    // M1 (PII) — tokeniza SÓ pra esta chamada: `conferirDitado` (fluxos.ts)
-    // compara o que volta com o texto CRU que a pessoa escreveu, então os
-    // `args` precisam estar com o valor real de novo antes de saírem daqui.
-    // Mapa local, não o do turno: destokeniza no mesmo instante em que
-    // tokenizou, não sobra token pendurado pra precisar persistir.
-    const { texto: textoTok, mapa } = tokenizar(texto, state.piiMap);
+  type ToolDeExtracao = { name: string; description: string; parameters: Record<string, unknown> };
+  /** A chamada ao modelo: tool obrigatória, custo no turn e em AIUsage, `args` destokenizados com `mapa`. */
+  const chamarExtracao = async (system: string, conteudo: string, mapa: MapaPii, tool: ToolDeExtracao) => {
     try {
       const r = await complete({
-        system: SYSTEM_DA_EXTRACAO,
-        messages: [{ role: "user", content: comoMensagemDoUsuario(textoTok) }],
+        system,
+        messages: [{ role: "user", content: conteudo }],
         model: state.model,
         tools: [tool],
         toolChoice: tool.name,
@@ -903,7 +906,32 @@ function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo {
       return null;
     }
   };
+  const extrair = async (texto: string, tool: ToolDeExtracao) => {
+    // M1 (PII) — tokeniza SÓ pra esta chamada: `conferirDitado` (fluxos.ts)
+    // compara o que volta com o texto CRU que a pessoa escreveu, então os
+    // `args` precisam estar com o valor real de novo antes de saírem daqui.
+    // Mapa local, não o do turno: destokeniza no mesmo instante em que
+    // tokenizou, não sobra token pendurado pra precisar persistir.
+    const { texto: textoTok, mapa } = tokenizar(texto, state.piiMap);
+    return chamarExtracao(SYSTEM_DA_EXTRACAO, comoMensagemDoUsuario(textoTok), mapa, tool);
+  };
+  // v2 (T4): só com a feature. Sem ela o objeto abaixo não ganha estes dois métodos.
+  const janelaV2 = featureEnabled("formularios_v2", orgId)
+    ? {
+        janelaDoTurno: (lidos: DocumentoLido[] = []) =>
+          montarJanela({
+            atual: textoDoTurno(state).trim(),
+            anteriores: state.messages.filter((m) => m.role === "user").map((m) => m.content),
+            lidos,
+          }),
+        extrairComJanela: async (janela: JanelaDeExtracao, tool: ToolDeExtracao) => {
+          const { texto, mapa } = comoMensagemDaJanela(janela, state.piiMap);
+          return chamarExtracao(SYSTEM_DA_EXTRACAO + INSTRUCAO_DA_JANELA, texto, mapa, tool);
+        },
+      }
+    : {};
   return {
+    ...janelaV2,
     acao: (verb, args, idempotencyKey) =>
       executarAcao({
         orgId,
