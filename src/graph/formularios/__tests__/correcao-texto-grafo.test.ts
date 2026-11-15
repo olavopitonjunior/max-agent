@@ -214,6 +214,35 @@ describe("correção de texto no grafo", () => {
     expect(JSON.stringify(values.fluxo ?? null)).not.toContain("wamid.ANTIGA");
   });
 
+  it.each(["sim", "1", "aplicar", "confirmo"])("N2: sugestão vencida SEM escrita incerta + '%s' tardio: frase fixa, sem apply e sem modelo livre", async (tardio) => {
+    featureV2(true);
+    const velho = Date.now() - 3 * 60 * 60_000;
+    const { r, values } = await turnoComFluxo(tardio, { ...fluxoSugestao(), atualizadoEm: velho, expiraEm: velho + 30 * 60_000 });
+    expect(acao.mock.calls.some(([p]) => String(p.verb).includes(".text."))).toBe(false);
+    expect(llm).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/venceu/);
+    expect(r.reply).toMatch(/peça a correção de novo/);
+    expect(r.reply).toMatch(/Nada foi aplicado/);
+    expect(values.fluxo ?? null).toBeNull();
+  });
+
+  it("N2: com a feature desligada o 'sim' tardio também recebe a frase fixa (nunca o modelo livre)", async () => {
+    featureV2(false);
+    const velho = Date.now() - 3 * 60 * 60_000;
+    const { r } = await turnoComFluxo("sim", { ...fluxoSugestao(), atualizadoEm: velho });
+    expect(acao.mock.calls.some(([p]) => String(p.verb).includes(".text."))).toBe(false);
+    expect(llm).not.toHaveBeenCalled();
+    expect(r.reply).toMatch(/venceu/);
+  });
+
+  it("N2: outra conversa depois do vencimento segue o caminho normal (a frase só vale para o SIM de aplicar)", async () => {
+    featureV2(true);
+    const velho = Date.now() - 3 * 60 * 60_000;
+    const { r } = await turnoComFluxo("oi, tudo bem?", { ...fluxoSugestao(), atualizadoEm: velho });
+    expect(r.reply).not.toMatch(/venceu/);
+    expect(acao.mock.calls.some(([p]) => String(p.verb).includes(".text."))).toBe(false);
+  });
+
   it("M2: escrita incerta vencida no relógio do fluxo: manda conferir, não repete o apply", async () => {
     featureV2(true);
     const velho = Date.now() - 3 * 60 * 60_000;

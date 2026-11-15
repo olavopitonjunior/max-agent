@@ -280,12 +280,15 @@ async function sugerir(c: ContextoDoSugerir): Promise<Resposta | { liberar: true
 
   if (r.status === 200) {
     const estado = str(body.estado);
-    if (estado === "sugestao") return mostrarSugestao(c, body);
-    if (estado === "candidatos") return mostrarCandidatos(c, body);
+    // N3: qualquer 200 que não seja "ainda não há documento" significa que o Doc existe (nasceu neste suggest ou
+    // já existia): `criar_documento` sai do estado e nunca mais é reenviado (Ajustar, R35, escolha, citação).
+    const cc: ContextoDoSugerir = estado !== "sem_documento_proprio" && f.criarDocumento ? { ...c, f: { ...f, criarDocumento: undefined } } : c;
+    if (estado === "sugestao") return mostrarSugestao(cc, body);
+    if (estado === "candidatos") return mostrarCandidatos(cc, body);
     if (estado === "nenhum_paragrafo") {
       // R27: pede a passagem, sem retentativa.
       return resposta(
-        { ...estadoBase({ ...f, etapa: "citar" }, pedido, ctx), etapa: "citar", paragrafoId: undefined },
+        { ...estadoBase({ ...cc.f, etapa: "citar" }, pedido, ctx), etapa: "citar", paragrafoId: undefined },
         "Não achei no documento o trecho que você citou. Cole ou descreva a passagem (por exemplo, o começo da frase) e eu tento de novo.",
         "texto_nenhum_paragrafo");
     }
@@ -408,6 +411,17 @@ export function respostaRecursoDesligado(f: FluxoCorrecaoTexto, ctx: ContextoDoT
 // ─── Turno dentro do fluxo ────────────────────────────────────────────────────
 
 const LER_UM = /^(1|aplicar?|aplica ai|aplica a correcao)$/;
+
+/**
+ * N2: a sugestão venceu sem escrita incerta. O fluxo sai do estado, mas um "sim"/"aplicar" TARDIO não pode
+ * cair no modelo livre (que só vê o marcador e poderia afirmar que aplicou): frase fixa, sem apply.
+ */
+export const TEXTO_SUGESTAO_VENCIDA = "Essa sugestão de correção venceu, então não apliquei nada. Nada foi aplicado ao documento: peça a correção de novo e eu preparo outra.";
+
+/** O texto é um aceite de aplicar ("sim", "1", "aplicar", "confirmo")? Âncorado: "ok"/"blz" não valem. */
+export function ehSimDeAplicar(texto: string): boolean {
+  return lerConfirmacao(texto) === "sim" || LER_UM.test(normalizar(texto));
+}
 const LER_DOIS = /^(2|ajustar?|ajusta)$/;
 const LER_TRES = /^(3|ver|ver no documento|ver documento)$/;
 

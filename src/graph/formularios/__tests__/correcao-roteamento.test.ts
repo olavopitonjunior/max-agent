@@ -71,6 +71,7 @@ const { executarAcao } = await import("@/lib/acao");
 const { fetchProfile } = await import("@/lib/cm");
 const { MARCADOR_DOCUMENTO_LIDO } = await import("../midia");
 const { complete } = await import("@/lib/llm");
+const { registrarTurn } = await import("@/lib/turnlog");
 
 const acao = vi.mocked(executarAcao);
 const perfil = vi.mocked(fetchProfile);
@@ -298,7 +299,8 @@ describe("T17: com feature e capability", () => {
     expect(llm).not.toHaveBeenCalled();
     expect(r.reply).toBe(TEXTO_FLUXO_ABERTO);
     expect(values.fluxo).toMatchObject({ kind: "captacao", etapa: "revisao", captacaoId: "cap-7" });
-    expect(r.sensivel).toBeFalsy();
+    // N1: a fala do corretor vai cega ao checkpoint e ao log (o corretor ainda vê a frase fixa acima).
+    expect(r.sensivel).toBe(true);
   });
 
   it("captação SEM captacaoId no contexto: pergunta qual / manda para a tela, nunca adivinha", async () => {
@@ -322,7 +324,7 @@ describe("T17: com feature e capability", () => {
     expect(acao).not.toHaveBeenCalled();
     expect(r.reply).toMatch(/editor do documento, pela tela do negócio/);
     expect(r.reply).not.toMatch(/Contrato eu não gero/);
-    expect(r.sensivel).toBeFalsy();
+    expect(r.sensivel).toBe(true); // N1: o turno roteado pela correção é cego no checkpoint e no log
   });
 
   it("'corrige o contrato' (sem palavra de texto) também responde com o caminho da tela", async () => {
@@ -415,5 +417,63 @@ describe("R32: a correção nunca substitui um fluxo aberto", () => {
     const fluxo = v2();
     const { values } = await turno("corrige o contrato", fluxo);
     expect(values.fluxo).toMatchObject({ kind: "proposta_v2", fichaAgendadaEm: fluxo.fichaAgendadaEm });
+  });
+
+  it("flag OFF: o desvio da frase fixa não existe (nada de TEXTO_FLUXO_ABERTO, nada de .text.)", async () => {
+    ligar(false);
+    perfil.mockResolvedValue(politica(...CAPS, "captacao.create", "captacao.send"));
+    for (const fluxo of [captacao("revisao"), v2()]) {
+      const { r } = await turno("muda a cláusula de multa da proposta para 10%", fluxo);
+      expect(r.reply).not.toBe(TEXTO_FLUXO_ABERTO);
+      expect(verbos().some((v) => v.includes(".text."))).toBe(false);
+    }
+  });
+});
+
+describe("N1: a fala do corretor nas respostas fixas não vai em claro ao checkpoint nem ao log", () => {
+  const CPF = "52998224725";
+  const CPF_FORMATADO = "529.982.247-25";
+  const agora = () => Date.now();
+  const captacao = () => ({ kind: "captacao", versao: 2, etapa: "proprietarios", captacaoId: "cap-7", codigo: "CAP-7", atualizadoEm: agora() });
+  const v2 = () => novoFluxoV2({ esteira: "venda", agora: agora(), schemaType: "compra_venda_v1" });
+
+  const semEmClaro = (values: Record<string, unknown>, extra: string[] = []) => {
+    const estado = JSON.stringify(values);
+    const log = JSON.stringify(vi.mocked(registrarTurn).mock.calls.at(-1)![0]);
+    for (const s of [CPF, CPF_FORMATADO, ...extra]) {
+      expect(estado).not.toContain(s);
+      expect(log).not.toContain(s);
+    }
+  };
+
+  it.each([["captação", captacao], ["proposta v2", v2]] as const)(
+    "palavra forte com %s aberta: a frase fixa chega ao corretor e o CPF fica fora do checkpoint e do log", async (_nome, abrir) => {
+      ligar(true);
+      perfil.mockResolvedValue(politica(...CAPS, "captacao.create", "captacao.send"));
+      const { r, values } = await turno(`muda a cláusula de multa: o proprietário tem CPF ${CPF} e ${CPF_FORMATADO}`, abrir());
+      expect(r.reply).toBe(TEXTO_FLUXO_ABERTO);
+      expect(acao).not.toHaveBeenCalled();
+      expect(llm).not.toHaveBeenCalled();
+      semEmClaro(values);
+    }
+  );
+
+  it("resposta só de orientação (contrato) com captação aberta: o CPF também não fica em claro", async () => {
+    ligar(true);
+    perfil.mockResolvedValue(politica(...CAPS, "captacao.create", "captacao.send"));
+    const { r, values } = await turno(`corrige a cláusula do contrato, CPF ${CPF}`, captacao());
+    expect(r.reply).toMatch(/pela tela do negócio/);
+    semEmClaro(values);
+    // Só orienta: a captação continua intacta.
+    expect(values.fluxo).toMatchObject({ kind: "captacao", etapa: "proprietarios", captacaoId: "cap-7" });
+  });
+
+  it("o turno que ABRE a correção também não deixa o pedido (nem o CPF colado) no checkpoint nem no log", async () => {
+    ligar(true);
+    servidor();
+    const { values } = await turno(`muda a cláusula de multa da proposta ${CODIGO} para 10% PEDIDO-ABERTURA-MARCADOR CPF ${CPF}`);
+    expect(verbos()).toContain("proposal.text.suggest");
+    semEmClaro(values, ["PEDIDO-ABERTURA-MARCADOR"]);
+    expect(JSON.stringify(values.messages)).not.toContain(ANTES);
   });
 });

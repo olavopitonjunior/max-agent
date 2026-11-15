@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "../../fluxos";
 import { FLUXO_TTL_MS, rebaixarFluxo } from "../../fluxos";
 import {
-  TEXTO_CONFIRA, conduzirCorrecaoTexto, iniciarCorrecaoTexto, renderizarAntesDepois, respostaRecursoDesligado, type FluxoCorrecaoTexto,
+  TEXTO_CONFIRA, TEXTO_SUGESTAO_VENCIDA, conduzirCorrecaoTexto, ehSimDeAplicar, iniciarCorrecaoTexto, renderizarAntesDepois, respostaRecursoDesligado, type FluxoCorrecaoTexto,
 } from "../correcao-texto";
 import { derivarInterativo } from "@/lib/interativo";
 
@@ -804,5 +804,84 @@ describe("M4: criar o documento sem resposta nunca afirma que nada foi alterado"
     acao.mockResolvedValueOnce(null);
     const r = await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada);
     expect(r.reply).toMatch(/Nada foi alterado/);
+  });
+});
+
+describe("N3: o Doc nasceu, então criar_documento sai do fluxo e nunca é reenviado", () => {
+  /** Oferta de criar o documento + SIM; o servidor responde `corpo` (o Doc nasce nesse suggest). */
+  async function aposCriar(corpo: Record<string, unknown>): Promise<FluxoCorrecaoTexto> {
+    acao.mockResolvedValueOnce(ok({ estado: "sem_documento_proprio" }));
+    const oferta = fluxoDe(await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada));
+    acao.mockClear();
+    acao.mockResolvedValueOnce(ok(corpo));
+    const r = await conduzirCorrecaoTexto(oferta, ctx("sim"), deps);
+    expect(acao).toHaveBeenCalledWith("proposal.text.suggest", expect.objectContaining({ criar_documento: true }), expect.any(String));
+    acao.mockClear();
+    return fluxoDe(r);
+  }
+
+  const enviouCriar = () => acao.mock.calls.some(([, args]) => (args as Record<string, unknown>).criar_documento === true);
+
+  it("sugestão 200: a flag some e o Ajustar não a reenvia", async () => {
+    const f = await aposCriar(SUGESTAO);
+    expect(f.criarDocumento).toBeFalsy();
+    const aj = fluxoDe(await conduzirCorrecaoTexto(f, ctx("2"), deps));
+    acao.mockResolvedValueOnce(ok({ ...SUGESTAO, sugestaoId: "sug-2" }));
+    await conduzirCorrecaoTexto(aj, ctx("coloca 12% em vez de 10%"), deps);
+    expect(enviouCriar()).toBe(false);
+  });
+
+  it("sugestão 200: o pedido novo (R35) não a reenvia", async () => {
+    const f = await aposCriar(SUGESTAO);
+    acao.mockResolvedValueOnce(ok({ ...SUGESTAO, sugestaoId: "sug-3" }));
+    await conduzirCorrecaoTexto(f, ctx("muda também a cláusula de prazo para 30 dias"), deps);
+    expect(enviouCriar()).toBe(false);
+  });
+
+  it("candidatos 200: a flag some do estado e a escolha não a reenvia", async () => {
+    const f = await aposCriar({ estado: "candidatos", candidatos: [{ paragrafoId: "p1", trecho: TRECHO_A }, { paragrafoId: "p2", trecho: TRECHO_B }] });
+    expect(f.etapa).toBe("candidatos");
+    expect(f.criarDocumento).toBeFalsy();
+    acao.mockResolvedValueOnce(ok(SUGESTAO));
+    await conduzirCorrecaoTexto(f, ctx("1"), deps);
+    expect(acao).toHaveBeenCalledTimes(1);
+    expect(enviouCriar()).toBe(false);
+  });
+
+  it("nenhum_paragrafo 200: a citação não reenvia, e um 5xx depois não finge que o Doc é incerto", async () => {
+    const f = await aposCriar({ estado: "nenhum_paragrafo" });
+    expect(f.etapa).toBe("citar");
+    expect(f.criarDocumento).toBeFalsy();
+    acao.mockResolvedValueOnce(erro(502, "documento_indisponivel"));
+    const r = await conduzirCorrecaoTexto(f, ctx("a cláusula da multa rescisória"), deps);
+    expect(enviouCriar()).toBe(false);
+    expect(r.reply).not.toMatch(/Não consegui confirmar se o documento/);
+    expect(r.reply).toMatch(/Nada foi alterado/);
+  });
+
+  it("antes de o Doc nascer (sem 200), o SIM de criar continua enviando criar_documento", async () => {
+    acao.mockResolvedValueOnce(ok({ estado: "sem_documento_proprio" }));
+    const oferta = fluxoDe(await iniciarCorrecaoTexto(ctx(PEDIDO), deps, entrada));
+    expect(oferta.criarDocumento).toBeFalsy();
+    acao.mockClear();
+    acao.mockResolvedValueOnce(null);
+    await conduzirCorrecaoTexto(oferta, ctx("sim"), deps);
+    expect(enviouCriar()).toBe(true);
+  });
+});
+
+describe("N2: sugestão vencida sem escrita incerta", () => {
+  it("o texto fixo existe e orienta pedir de novo", () => {
+    expect(TEXTO_SUGESTAO_VENCIDA).toMatch(/venceu/);
+    expect(TEXTO_SUGESTAO_VENCIDA).toMatch(/peça a correção de novo/);
+    expect(TEXTO_SUGESTAO_VENCIDA).toMatch(/Nada foi aplicado/);
+  });
+
+  it.each(["sim", "1", "aplicar", "Aplica", "confirmo"])("ehSimDeAplicar('%s') é verdadeiro", (t) => {
+    expect(ehSimDeAplicar(t)).toBe(true);
+  });
+
+  it.each(["ok", "blz", "não", "2", "qual o status da proposta do João?", "inclui o item churrasqueira"])("ehSimDeAplicar('%s') é falso", (t) => {
+    expect(ehSimDeAplicar(t)).toBe(false);
   });
 });

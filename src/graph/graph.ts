@@ -28,6 +28,7 @@ import {
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
 import { pedeCorrecaoDeTexto, rotearCorrecaoDeTexto, TEXTO_FLUXO_ABERTO } from "./formularios/correcao-roteamento";
+import { ehSimDeAplicar, TEXTO_SUGESTAO_VENCIDA } from "./formularios/correcao-texto";
 import { ocrTranscribeFallbackLigado } from "./captacao-flags";
 import { cancelarFicha } from "./formularios/pausa";
 import { rebaixarParaV1 } from "./formularios/selecao";
@@ -1105,6 +1106,17 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   const atual = vencido ? (sobrevive ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
   const escritaEmAberto = !!(atual && "chave" in atual && atual.chave);
 
+  // N2: a sugestão de correção venceu SEM escrita incerta (o fluxo saiu do estado). Um "sim"/"aplicar" tardio não
+  // pode cair no modelo livre, que só vê o marcador do texto e poderia afirmar que aplicou: frase fixa, sem apply.
+  if (vencido && state.fluxo?.kind === "correcao_texto" && !state.fluxo.chave && ehSimDeAplicar(userText)) {
+    return {
+      fluxo: null,
+      reply: TEXTO_SUGESTAO_VENCIDA,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: TEXTO_SUGESTAO_VENCIDA }],
+      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: "correcao_texto_vencida" }],
+    };
+  }
+
   // O que o Max faz, e o que não faz (contrato, cobrança): resposta do
   // sistema, nunca do modelo (prod 09/10). O fluxo em curso fica como está.
   // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
@@ -1333,7 +1345,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
       ...(fluxoIntacto !== undefined ? { fluxo: fluxoIntacto } : {}),
       reply: TEXTO_FLUXO_ABERTO,
       messages: [{ role: "user", content: userText }, { role: "assistant", content: TEXTO_FLUXO_ABERTO }],
-      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: "correcao_texto_fluxo_aberto" }],
+      // N1: a fala do corretor pode trazer CPF/telefone/trecho colado: cega no checkpoint e no log, como a correção.
+      toolLog: [{ name: "fluxo", args: { kind: "correcao_texto", sensivel: true }, outcome: "correcao_texto_fluxo_aberto" }],
     };
   }
   if (alvoDaCorrecao) {
@@ -1351,8 +1364,9 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
         reply: passo.reply,
         messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
         ...(usage.length > 0 ? { usage } : {}),
-        // O antes/depois é texto de documento: o turno que abre a correção é sensível (R29).
-        toolLog: [{ name: "fluxo", args: orienta ? { kind: "escopo" } : { kind: "correcao_texto", sensivel: true }, outcome: passo.evento }],
+        // O antes/depois é texto de documento e a fala do corretor pode trazer dado pessoal (N1): todo turno
+        // roteado pela correção, inclusive o que só orienta, é sensível (checkpoint e log só veem o marcador).
+        toolLog: [{ name: "fluxo", args: { kind: "correcao_texto", sensivel: true }, outcome: passo.evento }],
       };
     }
   }
