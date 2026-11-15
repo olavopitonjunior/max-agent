@@ -4,7 +4,7 @@ import { novoFluxoV2, type FluxoFormularioV2 } from "../estado";
 import { lidosDoCofre, registrarLidos, type CampoLido } from "../midia";
 import { PAUSA_DA_FICHA_MS } from "../pausa";
 import type { ContextoDoTurno, DepsDoFluxo, RespostaDoServidor } from "../../fluxos";
-import { TEXTO_ESCRITA_INCERTA } from "../../fluxos";
+import { TEXTO_ESCRITA_INCERTA, rebaixarFluxo } from "../../fluxos";
 
 /**
  * O condutor v2 (PR-C1): coleta em silêncio, ficha na pausa de 20 s, "sim" grava.
@@ -44,9 +44,15 @@ interface Montagem {
   texto?: string;
   args?: Record<string, unknown> | null;
   optionsBody?: Record<string, unknown> | null;
+  /** Resposta crua do `proposal.options` (status != 200). Vence `optionsBody`. */
+  optionsResposta?: RespostaDoServidor;
   escrita?: RespostaDoServidor | null;
   semJanela?: boolean;
   semPausa?: boolean;
+  /** A ficha agendada (dedupeKey) já saiu pelo outbox (`sent`)? Padrão: não. */
+  entregue?: boolean;
+  /** Sem o método `entregue` nas deps da pausa (fila antiga): nunca vale como vista. */
+  semEntregue?: boolean;
   agora?: number;
   podeEscrever?: boolean;
   messageId?: string;
@@ -56,6 +62,7 @@ function montar(m: Montagem = {}) {
   const texto = m.texto ?? "";
   const acao = vi.fn(async (verb: string, _args: Record<string, unknown>, _k?: string): Promise<RespostaDoServidor | null> => {
     if (verb === "proposal.options") {
+      if (m.optionsResposta) return m.optionsResposta;
       return m.optionsBody === null ? null : { status: 200, body: m.optionsBody ?? options() };
     }
     if (verb === "proposal.create" || verb === "proposal.update") {
@@ -71,13 +78,18 @@ function montar(m: Montagem = {}) {
     return null;
   });
   const extrairComJanela = vi.fn(async () => (m.args === undefined ? {} : m.args));
-  const pausa = { agendar: vi.fn(async () => undefined), cancelar: vi.fn(async () => undefined) };
+  const pausa = {
+    agendar: vi.fn(async () => undefined),
+    cancelar: vi.fn(async () => undefined),
+    entregue: vi.fn(async (_dedupeKey: string) => m.entregue === true),
+  };
+  const janelaDoTurno = vi.fn((_anteriores: number) => ({ atual: texto, anteriores: [] as string[], lidos: [] as never[] }));
   const deps = {
     acao,
     extrairProposta: vi.fn(),
     extrairCampos: vi.fn(),
-    ...(m.semJanela ? {} : { janelaDoTurno: vi.fn(() => ({ atual: texto, anteriores: [], lidos: [] })), extrairComJanela }),
-    ...(m.semPausa ? {} : { pausa }),
+    ...(m.semJanela ? {} : { janelaDoTurno, extrairComJanela }),
+    ...(m.semPausa ? {} : { pausa: m.semEntregue ? { agendar: pausa.agendar, cancelar: pausa.cancelar } : pausa }),
   } as unknown as DepsDoFluxo;
   const ctx: ContextoDoTurno = {
     texto,
@@ -88,10 +100,12 @@ function montar(m: Montagem = {}) {
     subjectKey: SUBJECT,
     podeEscrever: m.podeEscrever ?? true,
   };
-  return { acao, extrairComJanela, pausa, deps, ctx };
+  return { acao, extrairComJanela, janelaDoTurno, pausa, deps, ctx };
 }
 
 const L = (path: string, valor: string): CampoLido => ({ path, valor, confianca: 0.9 });
+/** Resposta a uma pergunta do Max sobre um campo exato (a posição vem do `faltando` do servidor). */
+const LP = (path: string, valor: string): CampoLido => ({ ...L(path, valor), perguntado: true });
 
 function fluxoBase(extra: Partial<FluxoFormularioV2> = {}): FluxoFormularioV2 {
   return { ...novoFluxoV2({ esteira: "venda", agora: T0, schemaType: "compra_venda_v1" }), ...extra };
@@ -127,13 +141,40 @@ describe("negados: o condutor nunca escreve nem fala fora do que está ligado", 
     expect(escritas(t.acao)).toHaveLength(0);
   });
 
-  it("servidor sem resposta no options: avisa, mantém o fluxo e não extrai nem escreve", async () => {
-    const t = montar({ texto: CPF, optionsBody: null });
-    const passo = await conduzirV2(fluxoBase(), t.ctx, t.deps);
+  it("servidor sem resposta no options e o turno é do fluxo (SIM com pendentes): avisa, mantém o fluxo, não extrai nem escreve", async () => {
+    const t = montar({ texto: "sim", optionsBody: null });
+    const passo = await conduzirV2(comPendentes([L("compradores[0].nome", "Maria Souza Lima")], { etapa: "ficha" }), t.ctx, t.deps);
     expect(passo.liberar).not.toBe(true);
     expect(passo.reply).toMatch(/sistema/i);
-    expect(passo.fluxo).toMatchObject({ kind: "proposta_v2" });
+    expect(passo.fluxo).toMatchObject({ kind: "proposta_v2", mensagensDoFluxo: 1 });
     expect(t.extrairComJanela).not.toHaveBeenCalled();
+    expect(escritas(t.acao)).toHaveLength(0);
+  });
+
+  it("servidor sem resposta no options e o turno NÃO é do fluxo: libera e mantém o fluxo (sem 'sistema fora do ar' à toa)", async () => {
+    const t = montar({ texto: "bom dia, tudo bem?", optionsBody: null });
+    const passo = await conduzirV2(fluxoBase({ proposalId: "prop-1" }), t.ctx, t.deps);
+    expect(passo.liberar).toBe(true);
+    expect(passo.reply).toBeUndefined();
+    expect(passo.fluxo).toMatchObject({ kind: "proposta_v2", proposalId: "prop-1", mensagensDoFluxo: 1 });
+    expect(t.extrairComJanela).not.toHaveBeenCalled();
+  });
+
+  it("options 400 sem alvo (servidor não conhece o fluxo): libera o turno e solta o fluxo, sem texto de sistema", async () => {
+    const t = montar({ texto: "oi", optionsResposta: { status: 400, body: { error: "alvo_obrigatorio" } } });
+    const passo = await conduzirV2(fluxoBase(), t.ctx, t.deps);
+    expect(passo).toMatchObject({ liberar: true, fluxo: null, evento: "fluxo_v2_desligado" });
+    expect(passo.reply).toBeUndefined();
+    expect(t.pausa.cancelar).toHaveBeenCalled();
+    expect(escritas(t.acao)).toHaveLength(0);
+  });
+
+  it("options 403 fluxo_desligado: libera; com rascunho o v1 retoma", async () => {
+    const resp = { status: 403, body: { error: "fluxo_desligado" } };
+    const t = montar({ texto: "sim", optionsResposta: resp });
+    expect(await conduzirV2(fluxoBase(), t.ctx, t.deps)).toMatchObject({ liberar: true, fluxo: null, evento: "fluxo_v2_desligado" });
+    const com = await conduzirV2(fluxoBase({ proposalId: "prop-1" }), t.ctx, t.deps);
+    expect(com).toMatchObject({ liberar: true, fluxo: { kind: "proposta", propostaId: "prop-1" } });
   });
 
   it("cancelar: encerra, cancela a ficha agendada, limpa o cofre e diz a verdade sobre o rascunho", async () => {
@@ -320,11 +361,62 @@ describe("o SIM grava (e só ele)", () => {
     expect((passo.fluxo as FluxoFormularioV2).etapa).toBe("ficha");
   });
 
-  it("SIM depois do horário da ficha agendada: a ficha já saiu pelo outbox, então grava", async () => {
-    const t = montar({ texto: "sim", agora: T0 + 25_000 });
+  it("SIM com a ficha agendada ainda pending (horário passou, mas o outbox não mandou): não grava, mostra a ficha e cancela a linha", async () => {
+    const t = montar({ texto: "sim", agora: T0 + 25_000, entregue: false });
+    const f = comPendentes(PEND, { etapa: "compor", fichaAgendadaEm: T0 + 20_000 });
+    const passo = await conduzirV2(f, t.ctx, t.deps);
+    expect(t.pausa.entregue).toHaveBeenCalledWith(`ficha:${SUBJECT}:${T0}`);
+    expect(escritas(t.acao)).toHaveLength(0);
+    expect(passo.reply).toContain("📋");
+    expect(t.pausa.cancelar).toHaveBeenCalled();
+    expect((passo.fluxo as FluxoFormularioV2).fichaAgendadaEm).toBeUndefined();
+  });
+
+  it("SIM com a ficha agendada já ENTREGUE (linha sent): o corretor viu, então grava", async () => {
+    const t = montar({ texto: "sim", agora: T0 + 25_000, entregue: true });
     const f = comPendentes(PEND, { etapa: "compor", fichaAgendadaEm: T0 + 20_000 });
     await conduzirV2(f, t.ctx, t.deps);
     expect(escritas(t.acao)).toHaveLength(1);
+  });
+
+  it("sem como saber se a ficha saiu (deps da pausa sem `entregue`): nunca vale como vista", async () => {
+    const t = montar({ texto: "sim", agora: T0 + 25_000, semEntregue: true });
+    const f = comPendentes(PEND, { etapa: "compor", fichaAgendadaEm: T0 + 20_000 });
+    const passo = await conduzirV2(f, t.ctx, t.deps);
+    expect(escritas(t.acao)).toHaveLength(0);
+    expect(passo.reply).toContain("📋");
+  });
+
+  it("SIM a uma pergunta do modelo depois de assunto fora: não grava (o assunto fora cancela a ficha e limpa o agendamento)", async () => {
+    const f = comPendentes(PEND, { etapa: "compor", fichaAgendadaEm: T0 + 20_000 });
+    const fora = montar({ texto: "qual a previsão do tempo amanhã?", args: {}, agora: T0 + 5_000 });
+    const p1 = await conduzirV2(f, fora.ctx, fora.deps);
+    expect(p1.liberar).toBe(true);
+    expect(fora.pausa.cancelar).toHaveBeenCalled();
+    expect((p1.fluxo as FluxoFormularioV2).fichaAgendadaEm).toBeUndefined();
+
+    // O grafo rebaixa o fluxo devolvido num turno liberado; o SIM seguinte responde ao MODELO.
+    const rebaixado = rebaixarFluxo(p1.fluxo) as FluxoFormularioV2;
+    const sim = montar({ texto: "sim", agora: T0 + 30_000, entregue: true });
+    const p2 = await conduzirV2(rebaixado, sim.ctx, sim.deps);
+    expect(escritas(sim.acao)).toHaveLength(0);
+    expect(p2.reply).toContain("📋");
+  });
+
+  it("assunto fora com a ficha já vista (etapa ficha): o SIM que responde ao modelo também não grava", async () => {
+    const f = comPendentes(PEND, { etapa: "ficha" });
+    const fora = montar({ texto: "qual a previsão do tempo amanhã?", args: {} });
+    const p1 = await conduzirV2(f, fora.ctx, fora.deps);
+    const sim = montar({ texto: "sim", agora: T0 + 30_000 });
+    await conduzirV2(rebaixarFluxo(p1.fluxo) as FluxoFormularioV2, sim.ctx, sim.deps);
+    expect(escritas(sim.acao)).toHaveLength(0);
+  });
+
+  it("rebaixarFluxo limpa a ficha agendada em qualquer etapa", () => {
+    for (const etapa of ["entender", "compor", "ficha"] as const) {
+      const r = rebaixarFluxo(fluxoBase({ etapa, fichaAgendadaEm: T0 + 20_000 })) as FluxoFormularioV2;
+      expect(r.fichaAgendadaEm).toBeUndefined();
+    }
   });
 
   it("NÃO: descarta o que estava pendente, nada é escrito", async () => {
@@ -378,17 +470,28 @@ describe("o SIM grava (e só ele)", () => {
     expect(passo.fluxo).toBeNull();
   });
 
-  it("o servidor sinaliza bloqueio no 200: o corretor é avisado, sem expor o código", async () => {
+  it("campo `bloqueio` no 200 não existe no contrato (§18.13.5): é ignorado, nada do que ele traz chega ao corretor", async () => {
     const t = montar({
       texto: "sim",
       escrita: {
         status: 200,
-        body: { proposta: { id: "prop-1", codigo: "PROP-1" }, faltando: [falta("negociacao.valor")], bloqueio: { codigo: "sem_modelo", mensagem: "Não há modelo ativo para esta proposta." } },
+        body: { proposta: { id: "prop-1", codigo: "PROP-1" }, faltando: [falta("negociacao.valor")], bloqueio: { codigo: "sem_modelo", mensagem: "Texto inventado pelo servidor." } },
       },
     });
     const passo = await conduzirV2(comPendentes(PEND, { etapa: "ficha", proposalId: "prop-1" }), t.ctx, t.deps);
-    expect(passo.reply).toContain("Não há modelo ativo para esta proposta.");
+    expect(passo.reply).not.toContain("Texto inventado pelo servidor.");
     expect(passo.reply).not.toContain("sem_modelo");
+    expect(passo.reply).toMatch(/Anotei e salvei/);
+  });
+
+  it("409 documento_proprio: explica com o link e SAI (sem oferecer um SIM que só repetiria o 409)", async () => {
+    const link = "https://docs.google.com/document/d/abc/edit";
+    const t = montar({ texto: "sim", escrita: { status: 409, body: { error: "documento_proprio", link } } });
+    const passo = await conduzirV2(comPendentes(PEND, { etapa: "ficha", proposalId: "prop-1" }), t.ctx, t.deps);
+    expect(passo.reply).toContain(link);
+    expect(passo.reply).not.toMatch(/\(SIM\)|refa[cç]a/i);
+    expect(passo.fluxo).toBeNull();
+    expect(escritas(t.acao)).toHaveLength(1);
   });
 });
 
@@ -421,16 +524,178 @@ describe("N1: parte já gravada não é sobrescrita em silêncio", () => {
     const [, corpo] = escritas(t.acao)[0] as [string, { compradores: unknown[] }];
     expect(corpo.compradores).toEqual([{ nome: "João Pereira Alves", substituir: true }]);
   });
+
+  // I1: o documento também é identidade. CPF/CNPJ sem nome, numa posição já ocupada, não diz de QUEM é.
+  const JOAO_CPF_SEM_NOME = [L("compradores[0].cpf", "11144477735")];
+
+  it("I1: CPF sem nome na posição da Maria pergunta e deixa a Maria intacta (nada escrito)", async () => {
+    const t = montar({ texto: "sim", optionsBody: options({ signatarios: MARIA, faltando: [] }) });
+    const passo = await conduzirV2(comPendentes(JOAO_CPF_SEM_NOME, { etapa: "ficha", proposalId: "prop-1" }), t.ctx, t.deps);
+    expect(escritas(t.acao)).toHaveLength(0);
+    expect(passo.reply).toMatch(/Maria/);
+    expect(passo.reply).toMatch(/novo/i);
+    expect((passo.fluxo as FluxoFormularioV2).conflito).toEqual({ grupo: "compradores", posicao: 0 });
+    expect(JSON.stringify(passo.fluxo)).not.toContain("11144477735");
+  });
+
+  it("I1: o mesmo CPF como RESPOSTA ao campo perguntado (posição do `faltando` do servidor) grava, sem pergunta", async () => {
+    const t = montar({ texto: "sim", optionsBody: options({ signatarios: MARIA, faltando: [] }) });
+    const passo = await conduzirV2(comPendentes([LP("compradores[0].cpf", CPF_DIGITOS)], { etapa: "ficha", proposalId: "prop-1" }), t.ctx, t.deps);
+    const [, corpo] = escritas(t.acao)[0] as [string, { compradores: unknown[] }];
+    expect(corpo.compradores).toEqual([{ cpf: CPF_DIGITOS }]);
+    expect((passo.fluxo as FluxoFormularioV2).conflito).toBeUndefined();
+  });
+
+  it("I1: CPF COM o nome da própria Maria (mesma pessoa) grava normalmente", async () => {
+    const t = montar({ texto: "sim", optionsBody: options({ signatarios: MARIA, faltando: [] }) });
+    await conduzirV2(comPendentes([L("compradores[0].nome", "Maria Souza Lima"), L("compradores[0].cpf", CPF_DIGITOS)], { etapa: "ficha", proposalId: "prop-1" }), t.ctx, t.deps);
+    expect(escritas(t.acao)).toHaveLength(1);
+  });
+
+  it("I1: CPF sem nome em posição LIVRE (ninguém lá) grava", async () => {
+    const t = montar({ texto: "sim", optionsBody: options({ signatarios: [], faltando: [] }) });
+    await conduzirV2(comPendentes(JOAO_CPF_SEM_NOME, { etapa: "ficha", proposalId: "prop-1" }), t.ctx, t.deps);
+    expect(escritas(t.acao)).toHaveLength(1);
+  });
+
+  it("I1/M9: 'é o mesmo, troca' num conflito só de documento não manda substituir:true sem nome (o servidor recusaria com 422)", async () => {
+    const t = montar({ texto: "é o mesmo, troca", optionsBody: options({ signatarios: MARIA, faltando: [] }) });
+    const f = comPendentes(JOAO_CPF_SEM_NOME, { etapa: "ficha", proposalId: "prop-1", conflito: { grupo: "compradores", posicao: 0 } });
+    await conduzirV2(f, t.ctx, t.deps);
+    const [, corpo] = escritas(t.acao)[0] as [string, { compradores: Array<Record<string, unknown>> }];
+    expect(corpo.compradores[0]).toEqual({ cpf: "11144477735" });
+    expect(corpo.compradores[0]).not.toHaveProperty("substituir");
+  });
+});
+
+describe("I2: a resposta ao conflito com NEGAÇÃO nunca vira 'é o mesmo'", () => {
+  const MARIA = [{ nome: "Maria Souza Lima", papel: "comprador" }];
+  const OUTRO = [L("compradores[0].nome", "João Pereira Alves")];
+  const aberto = () => comPendentes(OUTRO, { etapa: "ficha", proposalId: "prop-1", conflito: { grupo: "compradores", posicao: 0 } });
+  const opts = () => options({ signatarios: MARIA, faltando: [] });
+
+  it.each(["não troca", "não trocar não", "não corrige", "não é ela", "não substitui a Maria"])("%s: não grava e pergunta de novo", async (texto) => {
+    const t = montar({ texto, optionsBody: opts() });
+    const passo = await conduzirV2(aberto(), t.ctx, t.deps);
+    expect(escritas(t.acao)).toHaveLength(0);
+    expect(passo.reply).toMatch(/novo/i);
+    expect((passo.fluxo as FluxoFormularioV2).conflito).toEqual({ grupo: "compradores", posicao: 0 });
+    expect((passo.fluxo as FluxoFormularioV2).lidosPendentes.length).toBeGreaterThan(0);
+  });
+
+  it("'não' sozinho não descarta os pendentes: pergunta de novo e explica como descartar", async () => {
+    const t = montar({ texto: "não", optionsBody: opts() });
+    const passo = await conduzirV2(aberto(), t.ctx, t.deps);
+    expect(escritas(t.acao)).toHaveLength(0);
+    expect((passo.fluxo as FluxoFormularioV2).lidosPendentes.length).toBeGreaterThan(0);
+    expect((passo.fluxo as FluxoFormularioV2).conflito).toBeDefined();
+    expect(passo.reply).toMatch(/descart/i);
+  });
+
+  it("'descarta isso' descarta (ordem explícita)", async () => {
+    const t = montar({ texto: "descarta isso", optionsBody: opts() });
+    const passo = await conduzirV2(aberto(), t.ctx, t.deps);
+    expect(passo.reply).toMatch(/descartei/i);
+    expect((passo.fluxo as FluxoFormularioV2).lidosPendentes).toEqual([]);
+    expect(escritas(t.acao)).toHaveLength(0);
+  });
+
+  it("'não corrige, é outra' vale como 'é um novo' (a oração negada não vota)", async () => {
+    const t = montar({ texto: "não corrige, é outra", optionsBody: opts() });
+    await conduzirV2(aberto(), t.ctx, t.deps);
+    const [, corpo] = escritas(t.acao)[0] as [string, { compradores: unknown[] }];
+    expect(corpo.compradores).toEqual([{}, { nome: "João Pereira Alves" }]);
+  });
+
+  it("'não é outro, é o mesmo' vale como o mesmo (troca)", async () => {
+    const t = montar({ texto: "não é outro, é o mesmo", optionsBody: opts() });
+    await conduzirV2(aberto(), t.ctx, t.deps);
+    const [, corpo] = escritas(t.acao)[0] as [string, { compradores: unknown[] }];
+    expect(corpo.compradores).toEqual([{ nome: "João Pereira Alves", substituir: true }]);
+  });
+
+  it("'não é o mesmo' continua sendo 'é um novo'", async () => {
+    const t = montar({ texto: "não é o mesmo", optionsBody: opts() });
+    await conduzirV2(aberto(), t.ctx, t.deps);
+    const [, corpo] = escritas(t.acao)[0] as [string, { compradores: unknown[] }];
+    expect(corpo.compradores).toEqual([{}, { nome: "João Pereira Alves" }]);
+  });
+
+  it("resposta contraditória ('novo' e 'o mesmo' juntos) pergunta de novo", async () => {
+    const t = montar({ texto: "é um novo, é o mesmo", optionsBody: opts() });
+    await conduzirV2(aberto(), t.ctx, t.deps);
+    expect(escritas(t.acao)).toHaveLength(0);
+  });
+});
+
+describe("I3: a janela de extração recomeça depois do SIM e do NÃO", () => {
+  const PEND = [L("compradores[0].nome", "Maria Souza Lima"), L("compradores[0].cpf", CPF_DIGITOS)];
+
+  it("depois do SIM a mensagem nova não traz de volta o que foi gravado (janela 0)", async () => {
+    const f = comPendentes(PEND, { etapa: "ficha", mensagensDoFluxo: 3 });
+    const t1 = montar({ texto: "sim" });
+    const p1 = await conduzirV2(f, t1.ctx, t1.deps);
+    const f1 = p1.fluxo as FluxoFormularioV2;
+    expect(f1.mensagensDoFluxo).toBe(4);
+    expect(f1.janelaDesde).toBe(4);
+
+    // (sem a pergunta de campo que o SIM deixou aberta: ela responderia o turno sem extrair)
+    const t2 = montar({ texto: "o valor é 500 mil", args: { negociacao: { valor: 500000 } } });
+    await conduzirV2({ ...f1, aguardaCampo: undefined }, t2.ctx, t2.deps);
+    expect(t2.janelaDoTurno).toHaveBeenCalledWith(0);
+  });
+
+  it("depois do NÃO o descartado não volta (janela 0)", async () => {
+    const f = comPendentes(PEND, { etapa: "ficha", mensagensDoFluxo: 2 });
+    const t1 = montar({ texto: "não" });
+    const p1 = await conduzirV2(f, t1.ctx, t1.deps);
+    const f1 = p1.fluxo as FluxoFormularioV2;
+    expect(f1.janelaDesde).toBe(f1.mensagensDoFluxo);
+
+    const t2 = montar({ texto: "o valor é 500 mil", args: { negociacao: { valor: 500000 } } });
+    await conduzirV2(f1, t2.ctx, t2.deps);
+    expect(t2.janelaDoTurno).toHaveBeenCalledWith(0);
+  });
+
+  it("sem SIM/NÃO a janela segue contando as mensagens do fluxo (sem janelaDesde = desde o começo)", async () => {
+    const t = montar({ texto: "o valor é 500 mil", args: { negociacao: { valor: 500000 } } });
+    await conduzirV2(fluxoBase({ mensagensDoFluxo: 2 }), t.ctx, t.deps);
+    expect(t.janelaDoTurno).toHaveBeenCalledWith(2);
+  });
+
+  it("depois de gravar, mensagens seguintes entram na janela a partir do recomeço", async () => {
+    const t = montar({ texto: "o valor é 500 mil", args: { negociacao: { valor: 500000 } } });
+    await conduzirV2(fluxoBase({ mensagensDoFluxo: 5, janelaDesde: 4 }), t.ctx, t.deps);
+    expect(t.janelaDoTurno).toHaveBeenCalledWith(1);
+  });
 });
 
 describe("contagem de entradas do fluxo (P2)", () => {
-  it("cada turno tratado conta 1 mensagem; turno liberado não conta", async () => {
+  it("cada turno tratado conta 1 mensagem", async () => {
     const tratado = montar({ texto: "o que falta?" });
     const p1 = await conduzirV2(fluxoBase({ proposalId: "prop-1" }), tratado.ctx, tratado.deps);
     expect((p1.fluxo as FluxoFormularioV2).mensagensDoFluxo).toBe(1);
+  });
 
+  // I4: a mensagem liberada para o atendimento entra no histórico do corretor. Se o fluxo continua,
+  // ela conta; do contrário a janela da próxima extração desalinharia e puxaria o "bom dia" junto.
+  it("I4: turno liberado com o fluxo mantido CONTA (assunto fora)", async () => {
     const livre = montar({ texto: "bom dia", args: {} });
     const p2 = await conduzirV2(fluxoBase({ proposalId: "prop-1" }), livre.ctx, livre.deps);
-    expect((p2.fluxo as FluxoFormularioV2).mensagensDoFluxo).toBe(0);
+    expect(p2.liberar).toBe(true);
+    expect((p2.fluxo as FluxoFormularioV2).mensagensDoFluxo).toBe(1);
+  });
+
+  it("I4: turno liberado que encerra o fluxo não tem o que contar", async () => {
+    const livre = montar({ texto: "bom dia", args: {} });
+    const p2 = await conduzirV2(fluxoBase(), livre.ctx, livre.deps);
+    expect(p2.liberar).toBe(true);
+    expect(p2.fluxo).toBeNull();
+  });
+
+  it("I4: 'sistema fora do ar' (options sem resposta) também conta o turno", async () => {
+    const t = montar({ texto: "sim", optionsBody: null });
+    const p = await conduzirV2(comPendentes([L("compradores[0].nome", "Maria Souza Lima")], { etapa: "ficha", mensagensDoFluxo: 2 }), t.ctx, t.deps);
+    expect((p.fluxo as FluxoFormularioV2).mensagensDoFluxo).toBe(3);
   });
 });

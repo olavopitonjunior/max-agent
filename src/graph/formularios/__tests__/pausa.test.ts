@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { agendarFicha, cancelarFicha, chaveDaFicha, PAUSA_DA_FICHA_MS, type DepsDaPausa } from "../pausa";
+import { agendarFicha, cancelarFicha, chaveDaFicha, dedupeKeyDaFicha, fichaFoiEntregue, PAUSA_DA_FICHA_MS, type DepsDaPausa } from "../pausa";
 
 /** Uma fila em memória com a mesma regra do outbox: chave única, cancelar derruba só o pendente. */
 function filaFalsa() {
@@ -63,6 +63,25 @@ describe("agendarFicha", () => {
       cancelar: vi.fn(async () => undefined),
     };
     await expect(agendarFicha(deps, { subjectKey: "s", ultimaEntradaEm: 1, texto: "x" })).resolves.toBe(false);
+  });
+});
+
+describe("fichaFoiEntregue (C1: só a linha ENVIADA prova que o corretor viu a ficha)", () => {
+  it("o dedupeKey consultado é o mesmo do agendamento (subjectKey + ultimaEntradaEm)", async () => {
+    const entregue = vi.fn(async () => true);
+    const deps: DepsDaPausa = { agendar: vi.fn(), cancelar: vi.fn(), entregue };
+    await agendarFicha(deps, { subjectKey: "s", ultimaEntradaEm: 1_000, texto: "x" });
+    expect(await fichaFoiEntregue(deps, "s", 1_000)).toBe(true);
+    expect(entregue).toHaveBeenCalledWith(dedupeKeyDaFicha("s", 1_000));
+    expect(deps.agendar).toHaveBeenCalledWith(expect.objectContaining({ dedupeKey: dedupeKeyDaFicha("s", 1_000) }));
+  });
+
+  it("negados: sem o método, com erro ou com resposta que não é `true`, nunca vale como vista", async () => {
+    const base = { agendar: vi.fn(), cancelar: vi.fn() };
+    expect(await fichaFoiEntregue(base, "s", 1)).toBe(false);
+    expect(await fichaFoiEntregue({ ...base, entregue: vi.fn(async () => false) }, "s", 1)).toBe(false);
+    expect(await fichaFoiEntregue({ ...base, entregue: vi.fn(async () => { throw new Error("db fora"); }) }, "s", 1)).toBe(false);
+    expect(await fichaFoiEntregue({ ...base, entregue: vi.fn(async () => undefined as unknown as boolean) }, "s", 1)).toBe(false);
   });
 });
 

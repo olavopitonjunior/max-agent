@@ -43,10 +43,11 @@ import {
   type OpcoesDaGravacao,
   type PartesGravadas,
 } from "./midia";
-import { agendarFicha, cancelarFicha, PAUSA_DA_FICHA_MS } from "./pausa";
+import { agendarFicha, cancelarFicha, fichaFoiEntregue, PAUSA_DA_FICHA_MS } from "./pausa";
 import {
   caminhoCanonico,
   consultarOptions,
+  consultarOptionsDetalhado,
   faltandoV2,
   lerRespostaAoCampo,
   pendenciasIniciais,
@@ -111,20 +112,47 @@ function perguntaDoConflito(grupo: GrupoDaParte, posicao: number, nomeAtual: str
   const papel = PAPEL_DO_GRUPO[grupo];
   const quem = nomeAtual ? `*${nomeAtual}* como ${papel} ${posicao + 1}` : `o ${papel} ${posicao + 1}`;
   return (
-    `O rascunho já tem ${quem}, e o que você mandou é de outro nome. ` +
-    `Responda *é um novo* (entra mais um ${papel}) ou *é o mesmo, troca* (substitui o que está no rascunho).`
+    `O rascunho já tem ${quem}, e não consegui confirmar que o que você mandou é da mesma pessoa. ` +
+    `Responda *é um novo* (entra mais um ${papel}) ou *é o mesmo, troca* (substitui o que está no rascunho). ` +
+    "Se quiser largar o que você mandou, diga *descarta*."
   );
 }
 
 type RespostaDoConflito = "novo" | "mesmo" | "nao" | null;
 
+/** "não", "nunca", "sem" até duas palavras antes do termo: "não é o mesmo", "não corrige". */
+const NEGACAO_ANTES_DO_TERMO = /\b(?:nao|nunca|jamais|sem)\s+(?:\w+\s+){0,2}$/;
+const TERMO_NOVO = /\b(?:novo|nova|outro|outra|diferente|mais um|mais uma)\b/g;
+const TERMO_MESMO = /\b(?:mesmo|mesma)\b/g;
+const VERBO_DE_TROCA = /\b(?:troca|trocar|substitui|substituir|corrige|corrigir)\b/g;
+const VERBO_DE_DESCARTE = /\b(?:descart\w*|esquec\w*|ignor\w*|deixa pra la|deixa isso pra la)\b/g;
+
+/** Para cada ocorrência do termo na oração: está negada? */
+function ocorrencias(re: RegExp, oracao: string): boolean[] {
+  return [...oracao.matchAll(re)].map((m) => NEGACAO_ANTES_DO_TERMO.test(oracao.slice(0, m.index)));
+}
+
+/**
+ * A resposta ao conflito (N1/I2), oração por oração. A negação vira o voto OPOSTO só onde o
+ * oposto é a leitura natural ("não é o mesmo" = novo; "não é outro" = o mesmo); verbo de troca
+ * negado ("não troca", "não corrige") NÃO vota: o corretor não disse o que quer, pergunta de novo.
+ * Votos divergentes, "não" sozinho e silêncio também perguntam de novo. Só uma ordem explícita
+ * ("descarta", "esquece") descarta: um "não" solto nunca joga fora o que o corretor mandou.
+ */
 function lerConflito(texto: string): RespostaDoConflito {
-  const t = normalizar(texto);
-  if (/\bnao\b.*\bmesm[oa]\b/.test(t)) return "novo";
-  if (/\b(novo|nova|outro|outra|diferente|mais um|mais uma)\b/.test(t)) return "novo";
-  if (/\b(mesmo|mesma|troca|trocar|substitui|substituir|corrige|corrigir)\b/.test(t)) return "mesmo";
-  if (lerConfirmacao(texto) === "nao") return "nao";
-  return null;
+  const votos = new Set<"novo" | "mesmo">();
+  let descarta = false;
+  for (const bruta of texto.split(/[,.;!?\n]+/)) {
+    const o = normalizar(bruta);
+    if (!o) continue;
+    for (const negado of ocorrencias(TERMO_NOVO, o)) votos.add(negado ? "mesmo" : "novo");
+    for (const negado of ocorrencias(TERMO_MESMO, o)) votos.add(negado ? "novo" : "mesmo");
+    for (const negado of ocorrencias(VERBO_DE_TROCA, o)) if (!negado) votos.add("mesmo");
+    for (const negado of ocorrencias(VERBO_DE_DESCARTE, o)) if (!negado) descarta = true;
+  }
+  if (votos.size > 1) return null;
+  if (votos.size === 1) return descarta ? null : [...votos][0]!;
+  return descarta ? "nao" : null;
 }
 
 // ─── Utilidades ─────────────────────────────────────────────────────────────
@@ -150,7 +178,9 @@ function camposDoPatch(patch: unknown): CampoLido[] {
       }
       return;
     }
-    if (prefixo) out.push({ path: prefixo, valor: String(v), confianca: 1 });
+    // `perguntado`: a posição vem do `faltando` do servidor (o Max perguntou por este campo), então
+    // um CPF aqui é do dono da posição mesmo sem nome junto (I1).
+    if (prefixo) out.push({ path: prefixo, valor: String(v), confianca: 1, perguntado: true });
   };
   achatar("", patch);
   return out;
@@ -163,6 +193,14 @@ const mesmoLugar = (path: string): string => path.replace(/\.cnpj$/, ".cpf");
 function faltandoDepoisDosLidos(faltando: Pendencia[], lidos: CampoLido[]): Pendencia[] {
   const cobertos = new Set(lidos.map((c) => mesmoLugar(c.path)));
   return faltando.filter((p) => p.motivo === "minimo_de_testemunhas" || !cobertos.has(mesmoLugar(caminhoCanonico(p.campo, p.signatario))));
+}
+
+/**
+ * I3: depois do SIM (gravou) ou do NÃO (descartou) a janela de extração recomeça. Chamar com o fluxo
+ * já fechado (`fecha`): a mensagem do SIM/NÃO também fica para trás.
+ */
+function recomecaJanela(f: FluxoFormularioV2): FluxoFormularioV2 {
+  return { ...f, janelaDesde: f.mensagensDoFluxo ?? 0 };
 }
 
 function textoDosDescartados(descartados: string[]): string {
@@ -232,8 +270,30 @@ export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, de
     await cancelar();
     return { liberar: true, fluxo: null, evento: "fluxo_v2_desligado" };
   }
-  const bruto = await consultarOptions(deps, f0.proposalId ? { alvo: { proposalId: f0.proposalId } } : { tipo: f0.esteira, schemaType: f0.schemaType });
-  if (!bruto) return { reply: TEXTO_SEM_SISTEMA, fluxo: f0, evento: "formulario_sem_sistema" };
+  const pendentes0 = lidosDoCofre(f0, thread);
+  const temPendencia = pendentes0.length > 0 || f0.lidosPendentes.length > 0;
+  const conf = lerConfirmacao(ctx.texto);
+
+  const consulta = await consultarOptionsDetalhado(deps, f0.proposalId ? { alvo: { proposalId: f0.proposalId } } : { tipo: f0.esteira, schemaType: f0.schemaType });
+  if (!consulta.ok) {
+    if (consulta.motivo === "indisponivel") {
+      // C2: falta de resposta é TRANSITÓRIA. Nunca derruba o fluxo, e só vira "sistema fora do ar"
+      // quando a fala era do fluxo (SIM/NÃO ao que está pendente, pedido da ficha, escrita em aberto);
+      // o resto do atendimento segue sem essa mensagem à toa. O turno conta como do fluxo (I4) para
+      // a janela de extração não perder o passo.
+      if (f0.chave) {
+        return { reply: conf === "sim" ? TEXTO_SEM_SISTEMA : TEXTO_RESOLVER_ANTES, fluxo: contarEntradaDoFluxo(f0), evento: "formulario_sem_sistema" };
+      }
+      const doFluxo = ((conf === "sim" || conf === "nao") && temPendencia) || pediuAFicha(ctx.texto);
+      if (doFluxo) return { reply: TEXTO_SEM_SISTEMA, fluxo: contarEntradaDoFluxo(f0), evento: "formulario_sem_sistema" };
+      return { liberar: true, fluxo: contarEntradaDoFluxo(f0), evento: "formulario_sem_sistema" };
+    }
+    // 400 (o servidor não conhece o alvo/esteira) e 403 `fluxo_desligado` são DEFINITIVOS: o v2 não
+    // tem como continuar. Libera o turno; com rascunho o v1 retoma.
+    await cancelar();
+    return { liberar: true, fluxo: f0.proposalId ? rebaixarParaV1(f0, {}) : null, evento: "fluxo_v2_desligado" };
+  }
+  const bruto = consulta.options;
   if (bruto.fluxoV2 !== true) {
     await cancelar();
     return { liberar: true, fluxo: f0.proposalId ? rebaixarParaV1(f0, {}) : null, evento: "fluxo_v2_desligado" };
@@ -242,16 +302,19 @@ export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, de
   const obrigatorios: CampoObrigatorio[] = options.obrigatorios ?? [];
   const faltandoDoServidor: Pendencia[] = faltandoV2(options) ?? pendenciasIniciais(obrigatorios);
 
-  const pendentes0 = lidosDoCofre(f0, thread);
-  const temPendencia = pendentes0.length > 0 || f0.lidosPendentes.length > 0;
-  const conf = lerConfirmacao(ctx.texto);
-
   // 2. escrita sem resposta: só o SIM resolve (outra chave geraria um segundo rascunho)
   if (f0.chave && conf !== "sim") {
     return { reply: TEXTO_RESOLVER_ANTES, fluxo: f0, evento: "escrita_em_aberto" };
   }
 
-  const fichaVista = f0.etapa === "ficha" || !!f0.chave || (f0.fichaAgendadaEm !== undefined && ctx.agora >= f0.fichaAgendadaEm);
+  // C1: o corretor só "viu" a ficha se ela foi mostrada num turno (etapa `ficha`), se já há escrita em
+  // curso, ou se a linha agendada no outbox foi de fato ENVIADA. Passar do horário não prova nada: o
+  // cron atrasa, a linha pode ser cancelada ou falhar. Sem como confirmar, nunca vale como vista.
+  let fichaVista = f0.etapa === "ficha" || !!f0.chave;
+  if (!fichaVista && temPendencia && (conf === "sim" || conf === "nao") && f0.fichaAgendadaEm !== undefined && ctx.subjectKey && deps.pausa) {
+    const entradaDaFicha = f0.fichaAgendadaEm - PAUSA_DA_FICHA_MS;
+    fichaVista = await fichaFoiEntregue(deps.pausa, ctx.subjectKey, entradaDaFicha);
+  }
 
   // 2b. qual o modelo (locação residencial × comercial), perguntado na hora de gravar
   if (f0.aguardaCampo?.path === "schemaType" && !f0.schemaType) {
@@ -296,7 +359,8 @@ export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, de
   const pediu = pediuAFicha(ctx.texto);
   if (!respondeuCampo && conf === "nenhum" && !pediu) {
     try {
-      const janela = deps.janelaDoTurno(f0.mensagensDoFluxo ?? 0);
+      // I3: só as mensagens depois do último SIM/NÃO (o que veio antes já foi gravado ou descartado).
+      const janela = deps.janelaDoTurno(Math.max(0, (f0.mensagensDoFluxo ?? 0) - (f0.janelaDesde ?? 0)));
       const args = await deps.extrairComJanela(janela, TOOL_PATCH_V2);
       if (args) novos = camposDoPatchExtraido(args, [janela.atual, ...janela.anteriores, ...janela.lidos.map((l) => l.texto)].join("\n"));
     } catch {
@@ -318,7 +382,12 @@ export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, de
   if (novos.length === 0 && !forcarFicha) {
     // Não era do fluxo. O turno segue o atendimento normal; o rascunho (se houver) fica.
     const manter = pendentes.length > 0 || !!f0.proposalId;
-    return { liberar: true, fluxo: manter ? f0 : null, evento: "formulario_assunto_fora" };
+    if (!manter) return { liberar: true, fluxo: null, evento: "formulario_assunto_fora" };
+    // C1: a ficha agendada sairia no meio de outro assunto, e um "sim" a outra pergunta a confirmaria.
+    // Cancela a linha e limpa o agendamento: o próximo "sim" mostra a ficha antes de gravar.
+    if (f0.fichaAgendadaEm !== undefined) await cancelar();
+    // I4: a mensagem entrou no histórico do corretor; conta para a janela de extração não desalinhar.
+    return { liberar: true, fluxo: contarEntradaDoFluxo({ ...f0, fichaAgendadaEm: undefined }), evento: "formulario_assunto_fora" };
   }
 
   // 6. ficha agora, ou silêncio e ficha agendada
@@ -398,7 +467,7 @@ async function descartar(
   await cancelar();
   const limpo = { ...limparLidos(f), etapa: "compor" as const, fichaAgendadaEm: undefined, aguardaCampo: undefined, conflito: undefined };
   void ctx;
-  return { reply: TEXTO_DESCARTADO, fluxo: fecha(limpo), evento: "formulario_descartado" };
+  return { reply: TEXTO_DESCARTADO, fluxo: recomecaJanela(fecha(limpo)), evento: "formulario_descartado" };
 }
 
 // ─── Gravação (o SIM) ───────────────────────────────────────────────────────
@@ -452,7 +521,6 @@ async function gravar(a: {
     }
     const partes = [textoDoParcial(r, {})];
     if (g.descartados.length > 0) partes.push(textoDosDescartados(g.descartados));
-    if (r.bloqueio) partes.push(r.bloqueio.mensagem ?? "O sistema avisou que há uma pendência que impede o envio desta proposta.");
     const base: FluxoFormularioV2 = {
       ...g.fluxo,
       etapa: "compor",
@@ -475,7 +543,7 @@ async function gravar(a: {
     } else {
       partes.push("O que mais você tem?");
     }
-    return { reply: partes.join("\n"), fluxo: fecha(fluxo), evento: "formulario_salvo" };
+    return { reply: partes.join("\n"), fluxo: recomecaJanela(fecha(fluxo)), evento: "formulario_salvo" };
   }
 
   // Falhas. `g.fluxo` já traz a chave quando a escrita ficou incerta.
@@ -500,6 +568,10 @@ async function gravar(a: {
         evento: "fluxo_v2_desligado",
       };
     }
+    case "documento_proprio":
+      // O servidor recusou por causa do documento editado à mão. Um novo "sim" só repetiria o 409,
+      // então o fluxo termina: o texto explica, dá o link e diz que o que veio NÃO foi anotado.
+      return { reply: g.resultado ? textoDoParcial(g.resultado, {}) : "Não anotei o que você mandou.", fluxo: null, evento: "formulario_documento_proprio" };
     case "incerta":
       return { reply: TEXTO_ESCRITA_INCERTA, fluxo: fecha(g.fluxo), evento: "formulario_escrita_incerta" };
     case "cofre_ilegivel":

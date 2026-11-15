@@ -53,6 +53,12 @@ export interface CampoLido {
    * checkpoint em claro) e impede a gravação: ver `montarPatchDosLidos`.
    */
   semPapel?: boolean;
+  /**
+   * Veio como RESPOSTA a uma pergunta do Max sobre esta posição (`faltando.signatario.posicao`).
+   * Um CPF/CNPJ solto numa posição já ocupada só vale se foi perguntado: do contrário não diz de
+   * QUEM é e vira conflito (I1). Só existe dentro do cofre cifrado.
+   */
+  perguntado?: boolean;
 }
 
 export type MotivoNaoLido =
@@ -707,6 +713,13 @@ function montarPatchDosLidos(campos: CampoLido[], op: Pick<OpcoesDaGravacao, "pa
   let observacoes: string | undefined;
   let conflito: ConflitoDeParte | undefined;
 
+  // I1: quem trouxe o NOME da posição neste lote já disse de quem é o documento.
+  const comNomeNoLote = new Set<string>();
+  for (const c of campos) {
+    const m = RE_PARTE.exec(c.path);
+    if (m && !m[3] && m[4] === "nome" && !c.semPapel) comNomeNoLote.add(`${PARTE_DO_PATCH[m[1]!]}:${m[2]}`);
+  }
+
   // "É outro": a posição pedida passa a ser a próxima livre (depois do que já existe e do que veio).
   const nova = op.comoNovaParte;
   let destinoDaNova = -1;
@@ -733,11 +746,23 @@ function montarPatchDosLidos(campos: CampoLido[], op: Pick<OpcoesDaGravacao, "pa
     if (parte) {
       const [, grupoBruto, n, conjuge, campo] = parte;
       const grupo = PARTE_DO_PATCH[grupoBruto!]!;
-      let i = Number(n);
+      const posicaoLida = Number(n);
+      let i = posicaoLida;
       if (nova && nova.grupo === grupo && nova.posicao === i) i = destinoDaNova;
       const nomeAtual = existentes[grupo][i];
       const trocando = op.substituir?.grupo === grupo && op.substituir.posicao === i;
       if (!conjuge && campo === "nome" && nomeAtual && !trocando && !mesmoNome(nomeAtual, c.valor)) {
+        conflito ??= { grupo, posicao: i, nomeAtual };
+      }
+      // I1: documento sem nome, numa posição ocupada, que ninguém perguntou: não diz de quem é.
+      if (
+        !conjuge &&
+        (campo === "cpf" || campo === "cnpj") &&
+        nomeAtual &&
+        !trocando &&
+        !c.perguntado &&
+        !comNomeNoLote.has(`${grupo}:${posicaoLida}`)
+      ) {
         conflito ??= { grupo, posicao: i, nomeAtual };
       }
       const alvo = porGrupo[grupo].get(i) ?? {};
@@ -746,7 +771,9 @@ function montarPatchDosLidos(campos: CampoLido[], op: Pick<OpcoesDaGravacao, "pa
       } else {
         alvo[campo!] = c.valor;
       }
-      if (trocando) alvo.substituir = true;
+      // M9: o servidor só aceita `substituir:true` junto de um nome novo (R38); documento sozinho,
+      // numa troca confirmada, é só o documento.
+      if (trocando && !conjuge && campo === "nome") alvo.substituir = true;
       porGrupo[grupo].set(i, alvo);
       caminhosPorGrupo[grupo].set(i, [...(caminhosPorGrupo[grupo].get(i) ?? []), c.path]);
       continue;

@@ -911,8 +911,11 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (f.kind === "continuidade") return { ...f, etapa: ["concluida", "selecao"].includes(f.etapa) ? f.etapa : "resumo" };
   // v2: a ficha mostrada é a etapa em que o próximo "sim" grava. Uma interrupção (pergunta, outro
   // assunto) a desfaz: o "sim" seguinte exige ficha nova. Com `chave` (escrita incerta) a etapa fica.
+  // O agendamento da ficha some em QUALQUER etapa: num turno interrompido o "sim" não pode valer
+  // como "viu a ficha" por causa de um horário que ninguém confirmou (C1).
   if (f.kind === "proposta_v2") {
-    return f.etapa === "ficha" && !f.chave ? { ...f, etapa: "compor", fichaAgendadaEm: undefined } : f;
+    const semAgendada = f.fichaAgendadaEm !== undefined ? { ...f, fichaAgendadaEm: undefined } : f;
+    return f.etapa === "ficha" && !f.chave ? { ...semAgendada, etapa: "compor" } : semAgendada;
   }
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
   if (f.kind === "assinatura") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };

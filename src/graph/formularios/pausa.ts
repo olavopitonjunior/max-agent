@@ -15,8 +15,11 @@
  * o import estático seria um ciclo). Falha da fila nunca derruba o turno.
  *
  * Limite conhecido: o outbox roda por cron a cada minuto, então a ficha agendada sai
- * com precisão de ~1 min, e uma linha do mesmo telefone enviada há menos de 10 min
- * pode segurá-la até o resumo (M8). O caminho rápido é o turno seguinte.
+ * com precisão de ~1 min. A linha vai sem `dealId` e sem `aviso`, logo não é segurada para o
+ * resumo da manhã (M8 não se aplica a ela). O caminho rápido é o turno seguinte.
+ *
+ * Passar o horário NÃO prova que o corretor viu a ficha: o "sim" só vale se `entregue`
+ * confirma a linha `sent` (C1). Sem `entregue` nunca vale como vista.
  */
 
 export const PAUSA_DA_FICHA_MS = 20_000;
@@ -36,6 +39,26 @@ export interface DepsDaPausa {
   agendar(p: { chave: string; dedupeKey: string; quando: Date; texto: string }): Promise<void>;
   /** Cancela as linhas pendentes cujo `dedupeKey` começa com `prefixo`. */
   cancelar(prefixo: string): Promise<void>;
+  /**
+   * A linha com este `dedupeKey` exato já foi ENVIADA (status `sent`)? Só então o corretor viu a
+   * ficha agendada. Opcional: quem não sabe responder nunca conta como vista.
+   */
+  entregue?(dedupeKey: string): Promise<boolean>;
+}
+
+/** O `dedupeKey` da ficha agendada para a entrada `ultimaEntradaEm` (a mesma conta do `agendarFicha`). */
+export function dedupeKeyDaFicha(subjectKey: string, ultimaEntradaEm: number): string {
+  return `${prefixoDaFicha(subjectKey)}${ultimaEntradaEm}`;
+}
+
+/** A ficha agendada para essa entrada já saiu? Erro, ausência do método ou dúvida = `false`. */
+export async function fichaFoiEntregue(deps: DepsDaPausa, subjectKey: string, ultimaEntradaEm: number): Promise<boolean> {
+  if (!deps.entregue) return false;
+  try {
+    return (await deps.entregue(dedupeKeyDaFicha(subjectKey, ultimaEntradaEm))) === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -50,7 +73,7 @@ export async function agendarFicha(
     await deps.cancelar(prefixoDaFicha(args.subjectKey));
     await deps.agendar({
       chave: chaveDaFicha(args.subjectKey),
-      dedupeKey: `${prefixoDaFicha(args.subjectKey)}${args.ultimaEntradaEm}`,
+      dedupeKey: dedupeKeyDaFicha(args.subjectKey, args.ultimaEntradaEm),
       quando: new Date(args.ultimaEntradaEm + PAUSA_DA_FICHA_MS),
       texto: args.texto,
     });

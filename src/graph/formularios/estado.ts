@@ -55,8 +55,15 @@ export interface FluxoFormularioV2 {
    */
   mensagensDoFluxo?: number;
   /**
-   * Quando a ficha agendada na pausa (T10) sai pelo outbox. Só vale o "sim" depois
-   * dele: antes, o corretor ainda não viu o que vai ser gravado. Sem dado pessoal.
+   * Valor de `mensagensDoFluxo` no recomeço da janela de extração: depois do SIM (gravou) ou do
+   * NÃO (descartou) o que veio antes já foi resolvido e não pode ser extraído de novo (I3). A
+   * janela passada ao modelo tem `mensagensDoFluxo - janelaDesde` mensagens. Ausente = desde o início.
+   */
+  janelaDesde?: number;
+  /**
+   * Quando a ficha agendada na pausa (T10) foi marcada para sair pelo outbox. É só o agendamento:
+   * o horário NÃO prova que o corretor viu a ficha (o cron pode atrasar ou a linha ser cancelada).
+   * O "sim" só vale depois de `pausa.entregue` confirmar a linha enviada. Sem dado pessoal.
    */
   fichaAgendadaEm?: number;
   /**

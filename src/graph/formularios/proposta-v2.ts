@@ -51,14 +51,34 @@ export async function consultarOptions(
   deps: DepsAcao,
   args: { tipo?: "venda" | "locacao"; schemaType?: string; alvo?: { proposalId?: string; codigo?: string } }
 ): Promise<OptionsV1 | OptionsV2 | null> {
+  const r = await consultarOptionsDetalhado(deps, args);
+  return r.ok ? r.options : null;
+}
+
+/**
+ * Por que o `proposal.options` não serviu (C2). A distinção importa ao condutor:
+ *  - `fluxo_desligado` (403) e `sem_alvo` (400: o servidor não conhece o alvo/esteira) são
+ *    DEFINITIVOS: o fluxo v2 não tem como continuar, o turno é liberado e o v1/atendimento assume;
+ *  - `indisponivel` (sem resposta, 5xx, corpo estranho) é TRANSITÓRIO: nunca derruba o fluxo nem
+ *    vira "sistema fora do ar" para uma fala que não era do fluxo.
+ */
+export type MotivoSemOptions = "fluxo_desligado" | "sem_alvo" | "indisponivel";
+
+export async function consultarOptionsDetalhado(
+  deps: DepsAcao,
+  args: { tipo?: "venda" | "locacao"; schemaType?: string; alvo?: { proposalId?: string; codigo?: string } }
+): Promise<{ ok: true; options: OptionsV1 | OptionsV2 } | { ok: false; motivo: MotivoSemOptions }> {
   const corpo: Record<string, unknown> = {};
   if (args.tipo) corpo.tipo = args.tipo;
   if (args.schemaType) corpo.schemaType = args.schemaType;
   if (args.alvo?.proposalId) corpo.proposta_id = args.alvo.proposalId;
   else if (args.alvo?.codigo) corpo.codigo = args.alvo.codigo;
   const r = await deps.acao("proposal.options", corpo);
-  if (!r || r.status !== 200 || !Array.isArray(r.body?.metodos)) return null;
-  return r.body as unknown as OptionsV1 | OptionsV2;
+  if (!r) return { ok: false, motivo: "indisponivel" };
+  if (ehFluxoDesligado(r)) return { ok: false, motivo: "fluxo_desligado" };
+  if (r.status === 400) return { ok: false, motivo: "sem_alvo" };
+  if (r.status !== 200 || !Array.isArray(r.body?.metodos)) return { ok: false, motivo: "indisponivel" };
+  return { ok: true, options: r.body as unknown as OptionsV1 | OptionsV2 };
 }
 
 export type ErroDoParcial =
@@ -86,8 +106,6 @@ export type ResultadoParcial =
       testemunhasSemeadas?: number;
       pdfIndisponivel?: string;
       documento?: { descartado: boolean; link?: string };
-      /** §18.13.5: o servidor gravou, mas diz que algo impede o próximo passo. Nunca o código ao corretor. */
-      bloqueio?: { codigo: string; mensagem?: string };
       /** O fluxo já apontando para o rascunho e sem chave presa. */
       fluxo: FluxoFormularioV2;
     }
@@ -211,14 +229,9 @@ export async function salvarParcial(
   }
 
   const doc = r.body?.documento as { descartado?: unknown; link?: unknown } | undefined;
-  const bl = r.body?.bloqueio as { codigo?: unknown; mensagem?: unknown; message?: unknown } | undefined;
-  const fraseDoBloqueio = bl && typeof bl === "object" ? frase({ message: bl.mensagem ?? bl.message, motivo: (bl as { motivo?: unknown }).motivo }) : undefined;
-  const bloqueio =
-    bl && typeof bl === "object" && typeof bl.codigo === "string" && bl.codigo.length > 0
-      ? { codigo: bl.codigo, ...(fraseDoBloqueio ? { mensagem: fraseDoBloqueio } : {}) }
-      : undefined;
+  // Um campo `bloqueio` no 200 não existe no contrato (§18.13.5): é ignorado de propósito. Texto do
+  // servidor nunca chega ao corretor por um campo que o contrato não declara.
   return {
-    ...(bloqueio ? { bloqueio } : {}),
     ok: true,
     criou: criando,
     proposalId,
@@ -262,11 +275,11 @@ export function textoDoParcial(r: ResultadoParcial, ctx: { codigo?: string }): s
         (r.link ? `\n${r.link}` : "")
       );
     case "documento_proprio":
+      // Sem oferecer "refaça (SIM)": o SIM só repetiria o mesmo 409 (a regeneração é pela tela).
       return (
-        `Essa proposta${codigo} já tem um documento próprio, que pode ter sido editado à mão. ` +
-        "Se eu mudar os dados, o documento precisa ser refeito e o texto editado se perde. " +
-        `Confira o documento atual:${r.link ? `\n${r.link}` : " ele está no sistema."}\n` +
-        "Quer que eu refaça o documento? (SIM)"
+        `Essa proposta${codigo} já tem um documento próprio, que pode ter sido editado à mão, ` +
+        "então não anotei o que você mandou por aqui. O ajuste precisa ser feito pela tela, onde o documento é refeito. " +
+        `Confira o documento atual:${r.link ? `\n${r.link}` : " ele está no sistema."}`
       );
     case "envio_em_andamento":
       return "Tem um envio para assinatura em andamento nessa proposta. Espere terminar para ajustar.";

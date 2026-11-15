@@ -163,10 +163,46 @@ describe("N1: parte já gravada nunca é sobrescrita em silêncio", () => {
     ]);
   });
 
-  it("sem nome na leitura (só CPF) e parte existente: não é conflito detectável, grava", async () => {
+  // I1: o documento também é identidade. Um CPF/CNPJ sem nome, numa posição ocupada e que ninguém
+  // perguntou, não diz de QUEM é: conflito (nada escrito), como o nome diferente.
+  it("I1: só CPF numa posição ocupada que ninguém perguntou: conflito, nada escrito", async () => {
     const acao = vi.fn().mockResolvedValue(OK);
     const f = fluxoCom([L("compradores[0].cpf", "52998224725")]);
     const r = await gravarLidos({ acao }, f, THREAD, { messageIdDoSim: "wamid.SIM", partes: MARIA });
+    expect(r).toMatchObject({ ok: false, erro: "conflito_de_parte", conflito: { grupo: "compradores", posicao: 0 } });
+    expect(acao).not.toHaveBeenCalled();
+  });
+
+  it("I1: o mesmo CPF como RESPOSTA ao campo perguntado (`perguntado`) grava", async () => {
+    const acao = vi.fn().mockResolvedValue(OK);
+    const f = fluxoCom([{ ...L("compradores[0].cpf", "52998224725"), perguntado: true }]);
+    const r = await gravarLidos({ acao }, f, THREAD, { messageIdDoSim: "wamid.SIM", partes: MARIA });
     expect(r.ok).toBe(true);
+  });
+
+  it("I1: CNPJ também vale como identidade (mesma regra do CPF)", async () => {
+    const acao = vi.fn().mockResolvedValue(OK);
+    const f = fluxoCom([L("compradores[0].cnpj", "11222333000181")]);
+    const r = await gravarLidos({ acao }, f, THREAD, { messageIdDoSim: "wamid.SIM", partes: MARIA });
+    expect(r).toMatchObject({ ok: false, erro: "conflito_de_parte" });
+  });
+
+  it("I1: CPF do CÔNJUGE numa posição ocupada não é a identidade do titular (sem conflito)", async () => {
+    const acao = vi.fn().mockResolvedValue(OK);
+    const f = fluxoCom([L("compradores[0].conjuge.cpf", "52998224725")]);
+    const r = await gravarLidos({ acao }, f, THREAD, { messageIdDoSim: "wamid.SIM", partes: MARIA });
+    expect(r.ok).toBe(true);
+  });
+
+  it("I1/M9: troca confirmada só com documento não manda `substituir` (o servidor exige nome novo)", async () => {
+    const acao = vi.fn().mockResolvedValue(OK);
+    const f = fluxoCom([L("compradores[0].cpf", "52998224725")]);
+    const r = await gravarLidos({ acao }, f, THREAD, {
+      messageIdDoSim: "wamid.SIM",
+      partes: MARIA,
+      substituir: { grupo: "compradores", posicao: 0 },
+    });
+    expect(r.ok).toBe(true);
+    expect((acao.mock.calls[0]![1] as { compradores: unknown[] }).compradores).toEqual([{ cpf: "52998224725" }]);
   });
 });
