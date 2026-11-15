@@ -43,6 +43,7 @@ import {
   type OpcoesDaGravacao,
   type PartesGravadas,
 } from "./midia";
+import { lerIntencaoDeFormulario, toleranteNaOrg } from "./intencao";
 import { agendarFicha, cancelarFicha, fichaFoiEntregue, PAUSA_DA_FICHA_MS } from "./pausa";
 import {
   caminhoCanonico,
@@ -120,16 +121,39 @@ function perguntaDoConflito(grupo: GrupoDaParte, posicao: number, nomeAtual: str
 
 type RespostaDoConflito = "novo" | "mesmo" | "nao" | null;
 
-/** "não", "nunca", "sem" até duas palavras antes do termo: "não é o mesmo", "não corrige". */
-const NEGACAO_ANTES_DO_TERMO = /\b(?:nao|nunca|jamais|sem)\s+(?:\w+\s+){0,2}$/;
+const PALAVRA_DE_NEGACAO = /^(?:nao|nunca|jamais|sem)$/;
 const TERMO_NOVO = /\b(?:novo|nova|outro|outra|diferente|mais um|mais uma)\b/g;
 const TERMO_MESMO = /\b(?:mesmo|mesma)\b/g;
 const VERBO_DE_TROCA = /\b(?:troca|trocar|substitui|substituir|corrige|corrigir)\b/g;
 const VERBO_DE_DESCARTE = /\b(?:descart\w*|esquec\w*|ignor\w*|deixa pra la|deixa isso pra la)\b/g;
+/** Palavra que carrega voto/ordem: a janela da negação não a atravessa ("não corrige é outra": o "não" é do "corrige"). */
+const PALAVRA_DE_VOTO = /^(?:novo|nova|outro|outra|diferente|mais|mesmo|mesma|troca|trocar|substitui|substituir|corrige|corrigir|descart\w*|esquec\w*|ignor\w*|deixa)$/;
 
-/** Para cada ocorrência do termo na oração: está negada? */
-function ocorrencias(re: RegExp, oracao: string): boolean[] {
-  return [...oracao.matchAll(re)].map((m) => NEGACAO_ANTES_DO_TERMO.test(oracao.slice(0, m.index)));
+/**
+ * Para cada ocorrência do termo na oração: está negada, e qual "não" a negou? Negação ANTES
+ * (até 2 palavras, sem atravessar outro termo/verbo) ou no FIM da oração ("é a mesma não").
+ * `consumidas` guarda as posições dos "não" que já têm dono.
+ */
+function ocorrencias(re: RegExp, oracao: string, consumidas: Set<number>): boolean[] {
+  const palavras = [...oracao.matchAll(/\w+/g)];
+  return [...oracao.matchAll(re)].map((m) => {
+    const ini = m.index ?? 0;
+    const antes = palavras.filter((p) => (p.index ?? 0) + p[0].length <= ini);
+    for (let i = 1; i <= 3 && i <= antes.length; i++) {
+      const p = antes[antes.length - i]!;
+      if (PALAVRA_DE_NEGACAO.test(p[0])) {
+        consumidas.add(p.index ?? 0);
+        return true;
+      }
+      if (PALAVRA_DE_VOTO.test(p[0])) break;
+    }
+    const depois = /^\s*(nao|nunca)\s*$/.exec(oracao.slice(ini + m[0].length));
+    if (depois) {
+      consumidas.add(oracao.lastIndexOf(depois[1]!));
+      return true;
+    }
+    return false;
+  });
 }
 
 /**
@@ -142,16 +166,25 @@ function ocorrencias(re: RegExp, oracao: string): boolean[] {
 function lerConflito(texto: string): RespostaDoConflito {
   const votos = new Set<"novo" | "mesmo">();
   let descarta = false;
+  // Um "não" que nenhum termo/verbo da oração reivindicou ("não, é o mesmo", "é a mesma, não") é
+  // dúvida: nunca deixa a resposta virar "o mesmo" (que substitui o que está no rascunho).
+  let negacaoSolta = false;
   for (const bruta of texto.split(/[,.;!?\n]+/)) {
     const o = normalizar(bruta);
     if (!o) continue;
-    for (const negado of ocorrencias(TERMO_NOVO, o)) votos.add(negado ? "mesmo" : "novo");
-    for (const negado of ocorrencias(TERMO_MESMO, o)) votos.add(negado ? "novo" : "mesmo");
-    for (const negado of ocorrencias(VERBO_DE_TROCA, o)) if (!negado) votos.add("mesmo");
-    for (const negado of ocorrencias(VERBO_DE_DESCARTE, o)) if (!negado) descarta = true;
+    const consumidas = new Set<number>();
+    for (const negado of ocorrencias(TERMO_NOVO, o, consumidas)) votos.add(negado ? "mesmo" : "novo");
+    for (const negado of ocorrencias(TERMO_MESMO, o, consumidas)) votos.add(negado ? "novo" : "mesmo");
+    for (const negado of ocorrencias(VERBO_DE_TROCA, o, consumidas)) if (!negado) votos.add("mesmo");
+    for (const negado of ocorrencias(VERBO_DE_DESCARTE, o, consumidas)) if (!negado) descarta = true;
+    for (const m of o.matchAll(/\b(?:nao|nunca|jamais|sem)\b/g)) if (!consumidas.has(m.index ?? -1)) negacaoSolta = true;
   }
   if (votos.size > 1) return null;
-  if (votos.size === 1) return descarta ? null : [...votos][0]!;
+  if (votos.size === 1) {
+    if (descarta) return null;
+    const voto = [...votos][0]!;
+    return voto === "mesmo" && negacaoSolta ? null : voto;
+  }
   return descarta ? "nao" : null;
 }
 
@@ -230,6 +263,15 @@ export async function abrirV2(
   const options = await consultarOptions(deps, { tipo: natureza });
   if (!options) return null;
   if (escolherVersao({ orgId: ctx.orgId, options }) !== 2) return null;
+  // P4: a intenção é lida aqui (o servidor já disse `fluxoV2`). Um pedido de CORREÇÃO ("corrige a
+  // proposta da Maria") não abre formulário novo nem entra no extrator como dado de proposta:
+  // pergunta pelo alvo. Pergunta ("corrige?"), negação ("não corrige") e particípio não são pedido.
+  if (pedido && toleranteNaOrg(ctx.orgId, { fluxoV2: (options as OptionsV2).fluxoV2 })) {
+    const intencao = lerIntencaoDeFormulario(pedido);
+    if (intencao && (intencao.tipo === "corrigir_dado" || intencao.tipo === "corrigir_redacao")) {
+      return { reply: TEXTO_CORRECAO_SEM_ALVO, fluxo: null, evento: "formulario_correcao" };
+    }
+  }
   const modalidades = (options as OptionsV2).modalidades ?? [];
   if (modalidades.length > 0 && !modalidades.some((m) => m.esteira === natureza && m.modeloDisponivel)) {
     return { reply: textoSemModelo(natureza), fluxo: null, evento: "proposta_sem_modelo" };
@@ -245,6 +287,9 @@ export async function abrirV2(
     evento: "formulario_aberto",
   };
 }
+
+const TEXTO_CORRECAO_SEM_ALVO =
+  "Isso parece a correção de algo que já existe, e eu ainda não corrijo por aqui. Para começar uma proposta nova, diga *nova proposta*.";
 
 function textoAberturaV2(natureza: "venda" | "locacao"): string {
   const oque = natureza === "locacao" ? "locação" : "compra e venda";

@@ -142,8 +142,11 @@ function esteiraDoTexto(n: string): "venda" | "locacao" | undefined {
  * só a INTENÇÃO `corrigir_redacao` sobre `contrato_do_negocio`: o que o Max
  * responde (o link do Doc) é de outra tarefa (T17).
  *
- * Sem chamador em produção no PR-C1 (só testes): o roteamento da correção entra no
- * PR-C. Não ligar `formularios_v2` esperando que o Max já reconheça "corrige ...".
+ * Único chamador em produção no PR-C1: `abrirV2` (condutor), que lê só a CORREÇÃO na
+ * abertura do v2 e responde `formulario_correcao` em vez de abrir proposta nova. O
+ * roteamento completo da correção entra no PR-C; não ligar `formularios_v2` esperando
+ * que o Max já corrija. Aqui a normalização é sempre tolerante: quem decide se a
+ * tolerância vale para a org é o chamador (`toleranteNaOrg`).
  */
 export function lerIntencaoDeFormulario(texto: string): IntencaoDeFormulario {
   const n = normalizarParaIntencao(texto);

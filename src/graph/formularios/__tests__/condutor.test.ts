@@ -621,6 +621,29 @@ describe("I2: a resposta ao conflito com NEGAÇÃO nunca vira 'é o mesmo'", () 
     expect(corpo.compradores).toEqual([{}, { nome: "João Pereira Alves" }]);
   });
 
+  // Rodada 2: a negação vale em qualquer posição, com e sem pontuação; na dúvida nunca vira "o mesmo".
+  it.each(["não corrige é outra", "nao, é outra", "outra pessoa", "não é a mesma", "é a mesma não", "não é o mesmo, não troca"])(
+    "%s vale como 'é um novo' (nunca substitui)",
+    async (texto) => {
+      const t = montar({ texto, optionsBody: opts() });
+      await conduzirV2(aberto(), t.ctx, t.deps);
+      const [, corpo] = escritas(t.acao)[0] as [string, { compradores: Array<Record<string, unknown>> }];
+      expect(corpo.compradores).toEqual([{}, { nome: "João Pereira Alves" }]);
+      expect(JSON.stringify(corpo)).not.toContain("substituir");
+    }
+  );
+
+  it.each(["não é ela", "é a mesma, não", "não, é o mesmo"])(
+    "%s: na dúvida não grava e pergunta de novo",
+    async (texto) => {
+      const t = montar({ texto, optionsBody: opts() });
+      const passo = await conduzirV2(aberto(), t.ctx, t.deps);
+      expect(escritas(t.acao)).toHaveLength(0);
+      expect(passo.reply).toMatch(/novo/i);
+      expect((passo.fluxo as FluxoFormularioV2).conflito).toEqual({ grupo: "compradores", posicao: 0 });
+    }
+  );
+
   it("resposta contraditória ('novo' e 'o mesmo' juntos) pergunta de novo", async () => {
     const t = montar({ texto: "é um novo, é o mesmo", optionsBody: opts() });
     await conduzirV2(aberto(), t.ctx, t.deps);

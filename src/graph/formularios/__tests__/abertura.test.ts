@@ -81,6 +81,43 @@ describe("abertura v2 (negados primeiro)", () => {
   });
 });
 
+describe("P4: a intenção de formulário é lida na abertura do v2 (correção não abre proposta nova)", () => {
+  it.each(["corrige a proposta da Maria", "preciso corrigir a proposta", "pode corrigir a proposta?"])(
+    "%s: é pedido de correção, não abre formulário novo nem extrai o texto como dado",
+    async (texto) => {
+      const t = montar({ texto, args: { compradores: [{ nome: "Não Deve Extrair" }] } });
+      const p = await iniciarProposta("venda", texto, t.ctx.agora, t.deps, undefined, undefined, t.ctx);
+      expect(p.evento).toBe("formulario_correcao");
+      expect(p.fluxo).toBeNull();
+      expect(t.extrairComJanela).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["não corrige a proposta", "a proposta corrige?", "a proposta foi corrigida ontem", "como corrige a proposta?"])(
+    "%s: pergunta, negação ou particípio NÃO é correção: segue a abertura normal do v2",
+    async (texto) => {
+      const t = montar({ texto, args: {} });
+      const p = await iniciarProposta("venda", texto, t.ctx.agora, t.deps, undefined, undefined, t.ctx);
+      expect(p.evento).not.toBe("formulario_correcao");
+      expect(p.fluxo).toMatchObject({ kind: "proposta_v2", versao: 2 });
+    }
+  );
+
+  it("pedido de criação com 'corrige' junto continua criação", async () => {
+    const t = montar({ texto: "cria uma proposta, depois corrige o valor", args: {} });
+    const p = await iniciarProposta("venda", t.texto, t.ctx.agora, t.deps, undefined, undefined, t.ctx);
+    expect(p.evento).not.toBe("formulario_correcao");
+    expect(p.fluxo).toMatchObject({ kind: "proposta_v2" });
+  });
+
+  it("negado: com o servidor em fluxoV2 false a intenção nem é lida (v1 intacto, sem tolerância)", async () => {
+    const t = montar({ texto: "corrige a proposta da Maria", optionsBody: { ...OPTIONS, fluxoV2: false } });
+    const p = await iniciarProposta("venda", t.texto, t.ctx.agora, t.deps, undefined, undefined, t.ctx);
+    expect(p.evento).not.toBe("formulario_correcao");
+    expect(p.fluxo).toMatchObject({ kind: "proposta" });
+  });
+});
+
 describe("M8: modeloDisponivel ausente conta como sem modelo (igual ao derivarSchema)", () => {
   it("modalidade da esteira sem o campo modeloDisponivel: avisa que não há modelo, não abre o v2", async () => {
     const t = montar({ optionsBody: { ...OPTIONS, modalidades: [{ schemaType: "compra_venda_v1", esteira: "venda", rotulo: "Compra e venda" }] } });
