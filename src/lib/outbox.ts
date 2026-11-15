@@ -8,6 +8,7 @@ import { reservarAvisoNeutro } from "./atividades-pendentes";
 import { seedNotification } from "@/graph/graph";
 import { abrirCorpo, estaSelado, PREFIXO_DO_SELO } from "@/graph/formularios/selo";
 import { MARCADOR_DOCUMENTO_LIDO } from "@/graph/formularios/midia";
+import { featureEnabledForAnyOrg } from "./runtime/rollout";
 import { log } from "./log";
 import { resolveIdentity } from "./identity";
 import { deployProfile } from "./deploy-profile";
@@ -222,18 +223,30 @@ export async function cancelarPendentesPorPrefixo(prefixo: string): Promise<numb
   return r.length;
 }
 
+const LOTE_DA_VARREDURA_DE_SELADOS = 200;
+
 /**
  * I5: zera o corpo SELADO (ficha com valor de documento) das linhas que já não vão
  * mais sair (`sent`, `dropped`, `failed`). Nunca toca `pending`/`sending`. Roda no
  * início de cada despacho; devolve quantas linhas limpou.
  */
 export async function limparCorposSelados(): Promise<number> {
+  // Gate fail-closed (mesmo resolvedor do rollout): sem nenhuma org com `formularios_v2`, nada
+  // foi selado e a varredura nem toca o banco (ela roda a cada minuto). Se a flag for desligada
+  // depois, o que já estava selado fica como cifra (nunca em claro) até ela voltar.
+  if (!featureEnabledForAnyOrg("formularios_v2")) return 0;
+  // Predicado LITERAL e idêntico ao do índice parcial `outbox_ficha_selada_idx` (migration 030),
+  // senão o planner não prova a implicação; lote limitado, linhas travadas puladas.
   const r = await query<{ id: string }>(
     `UPDATE outbox
         SET body = ''
-      WHERE status IN ('sent', 'dropped', 'failed') AND starts_with(body, $1)
-      RETURNING id`,
-    [PREFIXO_DO_SELO]
+      WHERE id IN (
+        SELECT id FROM outbox
+         WHERE status IN ('sent', 'dropped', 'failed') AND starts_with(body, '${PREFIXO_DO_SELO}')
+         LIMIT ${LOTE_DA_VARREDURA_DE_SELADOS}
+         FOR UPDATE SKIP LOCKED
+      )
+      RETURNING id`
   );
   return r.length;
 }

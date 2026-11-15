@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../db", () => ({ query: vi.fn(), db: vi.fn() }));
 
@@ -63,15 +63,41 @@ describe("I5: ficha selada no outbox", () => {
     expect(String(sql)).toMatch(/body = ''/);
   });
 
-  it("varredura: zera só corpo SELADO de linha já enviada/derrubada/falha, nunca de pendente", async () => {
-    vi.mocked(query).mockResolvedValueOnce([{ id: "a" }, { id: "b" }] as never);
-    expect(await limparCorposSelados()).toBe(2);
-    const [sql, params] = vi.mocked(query).mock.calls.at(-1)!;
-    expect(String(sql)).toMatch(/body = ''/);
-    expect(String(sql)).toMatch(/status IN \('sent', 'dropped', 'failed'\)/);
-    expect(String(sql)).not.toMatch(/'pending'/);
-    expect(String(sql)).not.toMatch(/'sending'/);
-    expect(String(sql)).toMatch(/starts_with\(body, \$1\)/);
-    expect(params).toEqual([PREFIXO_DO_SELO]);
+  describe("varredura (limparCorposSelados)", () => {
+    afterEach(() => vi.unstubAllEnvs());
+    const ligar = () => {
+      vi.stubEnv("MAX_FORMULARIOS_V2", "true");
+      vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [ORG]: ["formularios_v2"] }));
+    };
+
+    it("negado: com a flag OFF (global ou sem nenhuma org) nenhuma consulta é feita", async () => {
+      vi.mocked(query).mockClear();
+      vi.stubEnv("MAX_FORMULARIOS_V2", "");
+      vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [ORG]: ["formularios_v2"] }));
+      expect(await limparCorposSelados()).toBe(0);
+      vi.stubEnv("MAX_FORMULARIOS_V2", "true");
+      vi.stubEnv("MAX_ROLLOUT_ORGS", "{}");
+      expect(await limparCorposSelados()).toBe(0);
+      vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [ORG]: ["queries"] }));
+      expect(await limparCorposSelados()).toBe(0);
+      vi.stubEnv("MAX_ROLLOUT_ORGS", "json quebrado");
+      expect(await limparCorposSelados()).toBe(0);
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it("zera só corpo SELADO de linha já enviada/derrubada/falha, nunca de pendente, e com LIMIT", async () => {
+      ligar();
+      vi.mocked(query).mockClear();
+      vi.mocked(query).mockResolvedValueOnce([{ id: "a" }, { id: "b" }] as never);
+      expect(await limparCorposSelados()).toBe(2);
+      const [sql] = vi.mocked(query).mock.calls.at(-1)!;
+      expect(String(sql)).toMatch(/body = ''/);
+      expect(String(sql)).toMatch(/status IN \('sent', 'dropped', 'failed'\)/);
+      expect(String(sql)).not.toMatch(/'pending'/);
+      expect(String(sql)).not.toMatch(/'sending'/);
+      // predicado literal (casa com o índice parcial da migration 030) e lote limitado
+      expect(String(sql)).toContain(`starts_with(body, '${PREFIXO_DO_SELO}')`);
+      expect(String(sql)).toMatch(/LIMIT \d+/);
+    });
   });
 });
