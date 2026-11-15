@@ -36,6 +36,25 @@ describe("document.read: 502 leitura_indisponivel e desfecho canonico", () => {
     expect(await chamar("document.read")).toEqual({ status: 422, body: { error: "documento_ilegivel" } });
   });
 
+  // PR-C1/M5: o verbo custa Gemini; o kill switch de gasto o desliga mesmo sendo uma leitura.
+  it("MAX_PAID_KILL=true: document.read nao chama o servidor (503 paid_disabled)", async () => {
+    vi.stubEnv("MAX_PAID_KILL", "true");
+    const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    expect(await chamar("document.read")).toEqual({ status: 503, body: { error: "paid_disabled" } });
+    expect(fetch).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it("MAX_PAID_KILL=true nao afeta uma leitura que nao custa (proposal.status)", async () => {
+    vi.stubEnv("MAX_PAID_KILL", "true");
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    await chamar("proposal.status");
+    expect(fetch).toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
   it("manda a chave de idempotencia (a messageId da midia)", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ campos: [] }), { status: 200 }));
     vi.stubGlobal("fetch", fetch);

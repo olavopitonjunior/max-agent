@@ -42,6 +42,13 @@ describe("lerDocumento: status do servidor -> motivo", () => {
     expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "politica" });
   });
 
+  it("503 paid_disabled (kill switch de gasto) vira 'politica', sem repetir; outro 503 segue 'falha'", async () => {
+    executarAcao.mockResolvedValue({ status: 503, body: { error: "paid_disabled" } });
+    expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "politica" });
+    executarAcao.mockResolvedValue({ status: 503, body: { error: "nao_configurado" } });
+    expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "falha" });
+  });
+
   it("sem resposta (null) segue 'falha'", async () => {
     executarAcao.mockResolvedValue(null);
     expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "falha" });

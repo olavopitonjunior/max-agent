@@ -267,6 +267,9 @@ export async function lerDocumento(args: {
         return { ok: false, motivo: codigo === "fluxo_desligado" ? "fluxo_desligado" : "politica" };
       case 502:
         return codigo === "leitura_indisponivel" ? { ok: false, motivo: "indisponivel" } : falha;
+      case 503:
+        // Kill switch de gasto (`MAX_PAID_KILL`): não repete e não promete voltar; segue como "não leio por aqui".
+        return codigo === "paid_disabled" ? { ok: false, motivo: "politica" } : falha;
       case 504:
         // Desfecho canônico do prazo estourado (`acao.ts`): o servidor pode ter terminado a leitura.
         return codigo === "processando" ? { ok: false, motivo: "processando" } : falha;

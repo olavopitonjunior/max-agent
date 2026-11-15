@@ -190,7 +190,11 @@ export async function executarAcao(params: Parameters<typeof executarAcaoDireta>
   if (e && (e.context.orgId !== params.orgId || contentDigest(e.context.subject) !== contentDigest(params.subject))) throw new Error("execution_tenant_mismatch");
   runEvent("tool.started", params.verb);
   if (e?.context.mode === "simulation") { runEvent("tool.simulated", params.verb); return { status: 409, body: { error: "simulation_effect_denied", simulated: true } }; }
-  if (!isWriteVerb(params.verb)) return executarAcaoDireta(params);
+  if (!isWriteVerb(params.verb)) {
+    // M5: `document.read` é leitura (sem confirmação), mas custa OCR (Gemini): o kill switch de gasto o cobre.
+    if (params.verb === "document.read" && process.env.MAX_PAID_KILL === "true") return { status: 503, body: { error: "paid_disabled" } };
+    return executarAcaoDireta(params);
+  }
   if (process.env.MAX_WRITES_KILL === "true" || ((params.verb === "marketing.generate" || params.verb === "credit.request") && process.env.MAX_PAID_KILL === "true")) return { status: 503, body: { error: "writes_disabled" } };
   if (e) {
     await assertBotWrite(e.context, params.rawPhone);
