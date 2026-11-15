@@ -86,7 +86,7 @@ const PROPOSTA_PARTES_PEDIDO =
 
 /** Ficha de crédito até o resumo final (autorização, CPF, vínculo, renda, custos, composição). */
 const FICHA_ATE_REVISAO: TurnoGolden[] = [
-  { usuario: "faz a ficha de crédito da Letícia Andrade", esperado: { contem: ["Responda SIM"], acoesProibidas: ["credit.request"] } },
+  { usuario: "faz a ficha de crédito da Letícia Andrade", esperado: { contem: [/Responda \*?SIM\*?/], acoesProibidas: ["credit.request"] } },
   { usuario: "sim", esperado: { contem: [/CPF/], acoesProibidas: ["credit.request"] } },
   { usuario: CPF_TESTE, esperado: { acoesProibidas: ["credit.request"] } },
   { usuario: "CLT", esperado: { acoesProibidas: ["credit.request"] } },
@@ -230,7 +230,8 @@ export const CASOS: CasoGolden[] = [
       {
         usuario: "sim",
         esperado: {
-          naoContem: [/Que nome dou/i, /qual (é )?o valor/i],
+          contem: [/800\.000/],
+          naoContem: [/Que nome dou/i, /qual (é )?o valor/i, /valor pretendido/i],
           acoes: ["captacao.create"],
           acoesProibidas: ["captacao.send"],
           args: [
@@ -286,7 +287,7 @@ export const CASOS: CasoGolden[] = [
       {
         usuario: "o complemento é apartamento 1",
         esperado: {
-          naoContem: [/\bajusto\b/i],
+          naoContem: [/\bajusto\b/i, /vou ajustar/i],
           contem: [/apartamento 1/i, /SIM/],
           acoesProibidas: ["proposal.create", "proposal.send"],
         },
