@@ -21,7 +21,7 @@ const { despacharLeituras, lerBlocoDePendencia } = await import("../despachante"
 const { projetarAvisos, projetarResumoDePendencias, MAX_AVISOS, LIMITE_CORPO_AVISO } = await import("../avisos-projecao");
 const { fenceToolResults, buildSystemPrompt } = await import("../prompt");
 const { CAPABILITIES, resolverPolitica } = await import("../policy");
-const { MINHAS_PENDENCIAS } = await import("../tools");
+const { MINHAS_PENDENCIAS, comFiltroDeAvisos, ferramentasDoTurno } = await import("../tools");
 const { consultarEscopo } = await import("@/lib/scope");
 const escopo = vi.mocked(consultarEscopo);
 
@@ -163,9 +163,30 @@ describe("pending.avisos — permitido", () => {
     expect(JSON.stringify(it)).not.toContain("av-interno-1");
   });
 
-  it("a tool aceita 'avisos' no enum do filtro, e o leitor do enum também", () => {
-    const filtro = (MINHAS_PENDENCIAS.def.parameters as { properties: { filtro: { enum: string[] } } }).properties.filtro;
-    expect(filtro.enum).toEqual(["formularios", "propostas", "atividades", "avisos"]);
+  const enumDoFiltro = (e: typeof MINHAS_PENDENCIAS) =>
+    (e.def.parameters as { properties: { filtro: { enum: string[]; description: string } } }).properties.filtro;
+
+  it("NEGADO: sem a capability (ou para corretor) o modelo nem vê 'avisos' no enum — definição de antes, byte a byte", () => {
+    expect(enumDoFiltro(MINHAS_PENDENCIAS).enum).toEqual(["formularios", "propostas", "atividades"]);
+    expect(enumDoFiltro(MINHAS_PENDENCIAS).description).not.toContain("avisos");
+    expect(comFiltroDeAvisos(MINHAS_PENDENCIAS, SEM, gerente)).toBe(MINHAS_PENDENCIAS);
+    expect(comFiltroDeAvisos(MINHAS_PENDENCIAS, COM, corretor)).toBe(MINHAS_PENDENCIAS);
+  });
+
+  it("ferramentasDoTurno: 'avisos' só aparece no enum oferecido com a capability (negado primeiro)", () => {
+    const oferta = (policy: unknown, identity: typeof gerente | typeof corretor = gerente) =>
+      ferramentasDoTurno({ policy: policy as never, texto: "o que eu tenho pendente?", identity: identity as never })
+        .entradas.find((e) => e.nome === "minhas_pendencias");
+    expect(oferta(SEM)).toBeDefined();
+    expect(enumDoFiltro(oferta(SEM) as typeof MINHAS_PENDENCIAS).enum).not.toContain("avisos");
+    expect(enumDoFiltro(oferta(COM) as typeof MINHAS_PENDENCIAS).enum).toContain("avisos");
+  });
+
+  it("com a capability e usuário, o enum ganha 'avisos' sem mutar a definição base; o leitor do enum aceita", () => {
+    const comAvisos = comFiltroDeAvisos(MINHAS_PENDENCIAS, COM, gerente);
+    expect(enumDoFiltro(comAvisos).enum).toEqual(["formularios", "propostas", "atividades", "avisos"]);
+    expect(enumDoFiltro(comAvisos).description).toContain('"avisos"');
+    expect(enumDoFiltro(MINHAS_PENDENCIAS).enum).toHaveLength(3);
     expect(lerBlocoDePendencia("avisos")).toBe("avisos");
     expect(lerBlocoDePendencia("tudo")).toBeNull();
   });

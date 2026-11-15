@@ -661,9 +661,8 @@ export const MINHAS_PENDENCIAS: ToolDef = {
       properties: {
         filtro: {
           type: "string",
-          enum: ["formularios", "propostas", "atividades", "avisos"],
-          description:
-            "Só o bloco pedido. Omita quando a pergunta for geral. \"avisos\" são os avisos da fila do sistema, só quando liberados. Opcional.",
+          enum: ["formularios", "propostas", "atividades"],
+          description: "Só o bloco pedido. Omita quando a pergunta for geral. Opcional.",
         },
         negocio_id: {
           type: "string",
@@ -1224,6 +1223,30 @@ function comDataDeHoje(e: EntradaDeEscrita, agora?: number): EntradaDeEscrita {
   };
 }
 
+/**
+ * `minhas_pendencias` com o filtro "avisos" (2.8b). O valor só entra no enum
+ * quando a política traz `pending.avisos` e a identidade é usuário da
+ * plataforma — o mesmo predicado do despachante. Sem isso o modelo vê a
+ * definição de antes da 2.8b, byte a byte, e nem sabe que o filtro existe
+ * (achado do orchestrator no #171: oferecer "avisos" a todos mudava a escolha
+ * do filtro em "meus avisos" para quem não pode recebê-los).
+ */
+export function comFiltroDeAvisos<E extends EntradaDeTool>(e: E, policy: readonly Capability[], identity: Candidate): E {
+  if (e.nome !== MINHAS_PENDENCIAS.nome) return e;
+  if (!policy.includes("pending.avisos") || identity.kind !== "user") return e;
+  const params = e.def.parameters as { properties: Record<string, { enum?: string[]; description?: string }> };
+  const filtro = params.properties.filtro;
+  if (!filtro?.enum) return e;
+  return {
+    ...e,
+    def: { ...e.def, parameters: { ...params, properties: { ...params.properties, filtro: {
+      ...filtro,
+      enum: [...filtro.enum, "avisos"],
+      description: "Só o bloco pedido. Omita quando a pergunta for geral. \"avisos\" são os avisos da fila do sistema desta pessoa. Opcional.",
+    } } } },
+  };
+}
+
 export function ferramentasDoTurno(params: {
   policy: Capability[];
   texto: string;
@@ -1251,7 +1274,13 @@ export function ferramentasDoTurno(params: {
     orgId: params.identity.orgId,
     catalogo: leiturasDosPacks.length ? [...TOOLS_DE_LEITURA, ...leiturasDosPacks] : undefined,
   });
-  return { entradas: [...escrita.map((e) => comDataDeHoje(e, params.agora)), ...leitura.tools], cortadas: leitura.cortadas };
+  return {
+    entradas: [
+      ...escrita.map((e) => comDataDeHoje(e, params.agora)),
+      ...leitura.tools.map((e) => comFiltroDeAvisos(e, params.policy, params.identity)),
+    ],
+    cortadas: leitura.cortadas,
+  };
 }
 
 /**
