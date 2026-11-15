@@ -147,6 +147,38 @@ beforeEach(() => {
   } as never);
 });
 
+describe("tolerância a erro de digitação (P1) só com feature E servidor v2", () => {
+  async function semFluxo(texto: string) {
+    const app = await getApp();
+    const thread = `tolerancia-${Math.random()}`;
+    await app.getState({ configurable: { thread_id: thread } });
+    return withExecution(
+      {
+        orgId: ORG, subject: { kind: "user", userId: "u1" }, conversationId: thread,
+        taskId: "00000000-0000-4000-8000-000000000002", mode: "live", workflowVersion: "max-v1",
+        controlVersion: 0, deadline: Date.now() + 30_000, budgetUsd: 0.25, maxConcurrency: 1,
+      },
+      () => runTurn(msg(texto))
+    );
+  }
+
+  it("NEGADO: servidor com fluxoV2 false, o 'propsta' não é pedido de criação (o modelo segue o caminho de hoje)", async () => {
+    featureV2(true);
+    acao.mockResolvedValue({ status: 200, body: { ...OPTIONS, fluxoV2: false } });
+    llm.mockResolvedValue({ text: "Como posso ajudar?", toolCalls: [], usage: { model: "x", promptTokens: 1, completionTokens: 1, latencyMs: 1, success: true } } as never);
+    await semFluxo("quero criar uma propsta de venda");
+    expect(llm).toHaveBeenCalled();
+  });
+
+  it("feature + servidor v2: o 'propsta' é reconhecido como criação (sem permissão de criar, responde o template e não chama o modelo)", async () => {
+    featureV2(true);
+    llm.mockResolvedValue({ text: "Como posso ajudar?", toolCalls: [], usage: { model: "x", promptTokens: 1, completionTokens: 1, latencyMs: 1, success: true } } as never);
+    const r = await semFluxo("quero criar uma propsta de venda");
+    expect(llm).not.toHaveBeenCalled();
+    expect(r.reply).toBeTruthy();
+  });
+});
+
 describe("rebaixarFluxo no v2", () => {
   it("a ficha mostrada sem chave volta para compor e apaga o agendamento", async () => {
     const { rebaixarFluxo } = await import("../../fluxos");

@@ -896,6 +896,31 @@ async function continuar(state: MaxStateType): Promise<MaxUpdate> {
   };
 }
 
+const FLUXO_V2_MEMO = new Map<string, boolean>();
+
+/**
+ * O servidor fala v2 nesta org? (`options.fluxoV2`, §18.13.3). Só consulta com a feature
+ * `formularios_v2` ligada (org sem ela = v1 byte a byte, sem chamada extra). Uma consulta
+ * por mensagem (memo), falha = `false`: a tolerância a erro de digitação nunca liga sozinha.
+ */
+async function fluxoV2DoServidor(state: MaxStateType): Promise<{ fluxoV2: boolean }> {
+  const orgId = state.identity.orgId;
+  if (!featureEnabled("formularios_v2", orgId)) return { fluxoV2: false };
+  const chave = `${orgId}:${state.inbound.messageId}`;
+  const memo = FLUXO_V2_MEMO.get(chave);
+  if (memo !== undefined) return { fluxoV2: memo };
+  let v = false;
+  try {
+    const { consultarOptions } = await import("./formularios/proposta-v2");
+    v = (await consultarOptions(depsDoFluxo(state, []), {}))?.fluxoV2 === true;
+  } catch {
+    v = false;
+  }
+  if (FLUXO_V2_MEMO.size > 200) FLUXO_V2_MEMO.clear();
+  FLUXO_V2_MEMO.set(chave, v);
+  return { fluxoV2: v };
+}
+
 /**
  * As dependências do fluxo neste turn: o `scope-action` como ESTA pessoa
  * (sujeito + telefone, reconferidos no servidor) e o extrator por ferramenta
@@ -1253,7 +1278,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     }
     assinatura = null;
   }
-  const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText, { tolerante: toleranteNaOrg(state.identity.orgId) }) : null;
+  const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText, { tolerante: toleranteNaOrg(state.identity.orgId, await fluxoV2DoServidor(state)) }) : null;
   // "Não converte a proposta da X" é o contrário do pedido: a negação vem antes.
   const negada = !atual ? negaAcao(userText) : null;
   const continuidade = podeEscrever(state.identity) && !negada && pedeContinuidade(userText);
@@ -1329,7 +1354,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // Ajuste curto de uma lista ("Que sou responsável", "Todos") herda o pedido anterior.
   const textoConsulta = textoDaConsulta(userText, state.messages);
   if (livre && !emSelecao && podeEscrever(state.identity) &&
-      !pedeEnvio(userText) && pedeConsulta(textoConsulta, { tolerante: toleranteNaOrg(state.identity.orgId) })) {
+      !pedeEnvio(userText) && pedeConsulta(textoConsulta, { tolerante: toleranteNaOrg(state.identity.orgId, await fluxoV2DoServidor(state)) })) {
     // Reconhecer a consulta independe da permissão: sem leitura, recusa aqui.
     // Deixar passar ao modelo oferece criação e pode converter o código citado
     // em continuidade de proposta, mesmo quando a pessoa pediu só o status.
@@ -1745,7 +1770,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
 
   // Pedido EXPLÍCITO de criação a quem não pode criar agora: template, sem
   // modelo — é onde o nano mais tende a encenar a ação. Só na volta 0.
-  if (state.toolRounds === 0 && criacao !== "disponivel" && ehPedidoDeCriacao(pedidoBruto, { tolerante: toleranteNaOrg(state.identity.orgId) })) {
+  if (state.toolRounds === 0 && criacao !== "disponivel" && ehPedidoDeCriacao(pedidoBruto, { tolerante: toleranteNaOrg(state.identity.orgId, await fluxoV2DoServidor(state)) })) {
     const texto = textoCriacaoIndisponivel(criacao, state.politicaIndisponivel);
     return {
       toolsOferecidas: [],
@@ -1808,6 +1833,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
           texto: `${userText} ${contextoLeitura}`,
           identity: state.identity,
           textoAnterior: pedidoEmAberto(history),
+          ...(await fluxoV2DoServidor(state)),
         })
       : { entradas: [], cortadas: 0 };
 

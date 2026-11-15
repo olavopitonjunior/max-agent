@@ -1167,6 +1167,7 @@ export function selecionarTools(params: {
   texto: string;
   catalogo?: ToolDef[];
   orgId?: string;
+  fluxoV2?: boolean;
 }): { tools: ToolDef[]; cortadas: number } {
   const catalogo = params.catalogo ?? TOOLS_DE_LEITURA;
   const texto = params.texto;
@@ -1176,7 +1177,7 @@ export function selecionarTools(params: {
   // em texto misto ("cria uma proposta e me diz como estão meus negócios"),
   // que perde a leitura NESTE turn. Troca deliberada: a criação é a única
   // escrita do Max, e a consulta pode ser refeita na mensagem seguinte.
-  if (ehPedidoDeCriacao(texto, { tolerante: toleranteNaOrg(params.orgId) })) return { tools: [], cortadas: 0 };
+  if (ehPedidoDeCriacao(texto, { tolerante: toleranteNaOrg(params.orgId, { fluxoV2: params.fluxoV2 }) })) return { tools: [], cortadas: 0 };
 
   const elegiveis = catalogo
     .filter(t => !TOOLS_EXTENDIDAS.includes(t) || featureEnabled("queries",params.orgId))
@@ -1249,6 +1250,8 @@ export function ferramentasDoTurno(params: {
   agora?: number;
   /** Packs do perfil (testes); o padrão é `packsDoPerfil()`. */
   packs?: readonly ToolPack[];
+  /** `options.fluxoV2` do servidor: com a feature da org, liga a tolerância a erro de digitação (T3). */
+  fluxoV2?: boolean;
 }): { entradas: EntradaDeTool[]; cortadas: number } {
   const registro = entradasDoDeploy(params.packs);
   const escrita = registro.filter(
@@ -1264,6 +1267,7 @@ export function ferramentasDoTurno(params: {
     policy: params.policy,
     texto: params.texto,
     orgId: params.identity.orgId,
+    fluxoV2: params.fluxoV2,
     catalogo: leiturasDosPacks.length ? [...TOOLS_DE_LEITURA, ...leiturasDosPacks] : undefined,
   });
   return { entradas: [...escrita.map((e) => comDataDeHoje(e, params.agora)), ...leitura.tools], cortadas: leitura.cortadas };
