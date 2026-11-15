@@ -1152,6 +1152,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   const ctxDoTurno = { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
     politicaIndisponivel: state.politicaIndisponivel, agora, orgName: state.identity.orgName,
     thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone),
+    orgId: state.identity.orgId,
     subjectKey: JSON.stringify([state.identity.orgId, subjectDe(state.identity)]),
     podeEscrever: podeEscrever(state.identity) };
   const credito = creditoLigado() && livre && !escritaEmAberto ? pedeCredito(userText) : null;
@@ -2093,6 +2094,11 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
             nomeCliente: args.nomeCliente,
             policy: state.policy,
             agora: Date.now(),
+            ctx: { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+              politicaIndisponivel: state.politicaIndisponivel, agora: Date.now(), orgName: state.identity.orgName,
+              thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone), orgId: state.identity.orgId,
+              subjectKey: JSON.stringify([state.identity.orgId, subjectDe(state.identity)]),
+              podeEscrever: podeEscrever(state.identity) },
           },
           depsDoFluxo(state, extra)
         );

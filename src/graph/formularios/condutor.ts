@@ -24,13 +24,14 @@ import {
   TEXTO_ESCRITA_INCERTA,
   TEXTO_FLUXO_CANCELADO,
   querCancelar,
+  textoSemModelo,
   type ContextoDoTurno,
   type DepsDoFluxo,
   type PassoDoFluxo,
 } from "../fluxos";
 import { lerConfirmacao, normalizar } from "../tools";
 import type { CampoObrigatorio, OptionsV2, Pendencia } from "./contrato";
-import { contarEntradaDoFluxo, type FluxoFormularioV2 } from "./estado";
+import { contarEntradaDoFluxo, novoFluxoV2, type FluxoFormularioV2 } from "./estado";
 import { camposDoPatchExtraido, TOOL_PATCH_V2 } from "./extracao";
 import { deveMostrarFicha, montarResumo, pediuAFicha, renderizarFicha } from "./ficha";
 import {
@@ -53,7 +54,7 @@ import {
   registrarPergunta,
   textoDoParcial,
 } from "./proposta-v2";
-import { rebaixarParaV1 } from "./selecao";
+import { escolherVersao, rebaixarParaV1 } from "./selecao";
 
 const TEXTO_SEM_SISTEMA = "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
 const TEXTO_SEM_COFRE =
@@ -171,6 +172,46 @@ function textoDosDescartados(descartados: string[]): string {
 }
 
 // ─── O turno ────────────────────────────────────────────────────────────────
+
+/**
+ * Abertura do fluxo v2 (D3: a versão é decidida aqui, uma vez). `null` = segue o v1
+ * (feature da org desligada, servidor sem `fluxoV2` ou sem resposta: nunca inventa o v2).
+ *
+ * Se o pedido que abriu o fluxo é a própria fala deste turno, ele já passa pelo condutor
+ * (sem fila: a abertura nunca fica em silêncio, a ficha vem na hora). Senão (o "1" da
+ * escolha, a natureza dita depois) o v2 abre e convida o corretor a mandar os dados.
+ */
+export async function abrirV2(
+  natureza: "venda" | "locacao",
+  pedido: string | undefined,
+  agora: number,
+  deps: DepsDoFluxo,
+  ctx: ContextoDoTurno
+): Promise<Extract<Passo, { reply: string }> | null> {
+  if (!ctx.orgId || !deps.janelaDoTurno || !deps.extrairComJanela) return null;
+  const options = await consultarOptions(deps, { tipo: natureza });
+  if (!options) return null;
+  if (escolherVersao({ orgId: ctx.orgId, options }) !== 2) return null;
+  const modalidades = (options as OptionsV2).modalidades ?? [];
+  if (modalidades.length > 0 && !modalidades.some((m) => m.esteira === natureza && m.modeloDisponivel !== false)) {
+    return { reply: textoSemModelo(natureza), fluxo: null, evento: "proposta_sem_modelo" };
+  }
+  const f0 = novoFluxoV2({ esteira: natureza, agora });
+  if (pedido && pedido === ctx.texto) {
+    const passo = await conduzirV2(f0, { ...ctx, agora, subjectKey: undefined }, deps);
+    if (!passo.liberar && passo.reply) return passo;
+  }
+  return {
+    reply: textoAberturaV2(natureza),
+    fluxo: { ...f0, ultimaEntradaEm: agora, atualizadoEm: agora },
+    evento: "formulario_aberto",
+  };
+}
+
+function textoAberturaV2(natureza: "venda" | "locacao"): string {
+  const oque = natureza === "locacao" ? "locação" : "compra e venda";
+  return `Certo, vamos montar a proposta de ${oque}. Pode mandar os dados do jeito que preferir: texto, áudio ou foto dos documentos. Quando terminar, é só dizer *ficha* e eu mostro o que entendi.`;
+}
 
 export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<Passo> {
   const thread = ctx.thread ?? "";

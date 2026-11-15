@@ -252,6 +252,8 @@ export interface ContextoDoTurno {
   orgName?: string;
   /** Thread do checkpoint — AAD do cofre da ficha de crédito. */
   thread?: string;
+  /** v2: a org da conversa (escolha da versão do fluxo ao abrir). */
+  orgId?: string;
   /** v2 (T10): chave da pessoa (`JSON.stringify([orgId, subject])`) — agrupa/cancela a ficha agendada. */
   subjectKey?: string;
   /** v2: quem fala pode escrever (RBAC de identidade). `false` = o "sim" nunca grava. */
@@ -1309,6 +1311,8 @@ export async function iniciarFluxo(
     nomeCliente?: string;
     policy: readonly Capability[];
     agora: number;
+    /** v2: contexto do turno (org, thread, messageId) para abrir a proposta no condutor novo. */
+    ctx?: ContextoDoTurno;
   },
   deps: DepsDoFluxo
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
@@ -1334,7 +1338,7 @@ export async function iniciarFluxo(
   // em 10/11/2026. A pergunta fica só para o pedido ambíguo ("uma proposta").
   const explicita = propostaExplicitaNoPedido(params.pedido);
   if (podeProposta && explicita) {
-    return iniciarProposta(explicita.natureza ?? params.natureza, params.pedido, params.agora, deps);
+    return iniciarProposta(explicita.natureza ?? params.natureza, params.pedido, params.agora, deps, undefined, undefined, params.ctx);
   }
   if (podeProposta && podeNegocio) {
     return {
@@ -1343,7 +1347,7 @@ export async function iniciarFluxo(
       evento: "fluxo_escolha",
     };
   }
-  if (podeProposta) return iniciarProposta(params.natureza, params.pedido, params.agora, deps);
+  if (podeProposta) return iniciarProposta(params.natureza, params.pedido, params.agora, deps, undefined, undefined, params.ctx);
   if (podeNegocio) {
     if (params.natureza) return carregarCamposDoNegocio(params.natureza, params.agora, deps, tituloDoPedido);
     return {
@@ -1367,7 +1371,9 @@ export async function iniciarProposta(
   agora: number,
   deps: DepsDoFluxo,
   prefill?: DadosDaProposta,
-  leaseClientId?: string
+  leaseClientId?: string,
+  /** v2: o contexto do turno. Sem ele (ou sem feature/servidor) a proposta abre no v1, como sempre. */
+  ctx?: ContextoDoTurno
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
   if (!natureza) {
     return {
@@ -1375,6 +1381,12 @@ export async function iniciarProposta(
       fluxo: { kind: "proposta", etapa: "natureza", dados: {}, pedido, leaseClientId, atualizadoEm: agora },
       evento: "fluxo_proposta",
     };
+  }
+  // v2 (D3): a versão é decidida aqui, uma vez. Crédito aprovado (prefill/lead) segue no v1.
+  if (ctx?.orgId && !prefill && !leaseClientId && deps.janelaDoTurno && deps.extrairComJanela) {
+    const { abrirV2 } = await import("./formularios/condutor");
+    const v2 = await abrirV2(natureza, pedido, agora, deps, ctx);
+    if (v2) return v2;
   }
   // Antes de pedir qualquer dado: há modelo ativo para gerar o PDF? Sem
   // resposta do servidor o fluxo segue — o `proposal.create` avisa de novo.
@@ -1479,7 +1491,7 @@ export async function conduzirFluxo(
     // Pergunta de 1/2 sem resposta: ENCERRA. Pendurada, ela capturava um "2"
     // dito minutos depois para outra coisa e criava um formulário (prod 07/10).
     if (!escolha) return { liberar: true, fluxo: null, evento: "escolha_encerrada" };
-    if (escolha === "proposta") return iniciarProposta(fluxo.natureza, fluxo.pedido, agora, deps);
+    if (escolha === "proposta") return iniciarProposta(fluxo.natureza, fluxo.pedido, agora, deps, undefined, undefined, ctx);
     const tipo = fluxo.natureza ?? lerNatureza(ctx.texto) ?? undefined;
     if (!tipo) {
       return {
@@ -1709,7 +1721,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   if (f.etapa === "natureza" || (!f.natureza && !f.propostaId)) {
     const natureza = lerNatureza(ctx.texto);
     if (!natureza) return { liberar: true, fluxo: null, evento: "natureza_encerrada" };
-    return iniciarProposta(natureza, f.pedido, agora, deps, undefined, f.leaseClientId);
+    return iniciarProposta(natureza, f.pedido, agora, deps, undefined, f.leaseClientId, ctx);
   }
 
   // O `proposal.create` recusou o vínculo com o lead: este "sim"/"não" é da
