@@ -1,5 +1,6 @@
 import { consultarEscopo, subjectDe } from "@/lib/scope";
 import type { Candidate } from "@/lib/identity";
+import { imobproBase } from "@/lib/http";
 
 /**
  * Negócio citado PELO NOME ("pendências do negócio TESTE assinatura 4",
@@ -45,7 +46,10 @@ export function nomeDeNegocioCitado(texto: string): { frase: string; explicita: 
     const todos = [...t.matchAll(re)];
     const m = todos[todos.length - 1];
     if (!m) continue;
+    // "o formulário do comprador do TESTE1": o 1º casamento já engoliu o papel
+    // ("comprador do TESTE1"); tira os papéis de cabeça para sobrar só o nome.
     const frase = m[1]
+      .replace(/^(?:(?:contrato|comprador(?:a)?|vendedor(?:a)?|locat[aá]ri[oa]|formul[aá]rio)\s+d[oa]s?\s+(?:neg[oó]cio\s+)?)+/iu, "")
       .replace(/\s+(?:por favor|pf|pra mim|para mim|agora|aí|ai)\s*$/iu, "")
       .replace(/^["“'‘]+|["”'’]+$/gu, "")
       .trim();
@@ -117,14 +121,24 @@ export type ResolucaoPorNome =
  */
 export function textoDeNegocioExistente(res: Extract<ResolucaoPorNome, { tipo: "um" | "varios" }>): string {
   if (res.tipo === "um") {
-    return (
-      `Esse negócio já existe: *${res.negocio.titulo}*. Não abri um formulário novo para não duplicar. ` +
-      "Se quiser, te mostro as pendências ou a situação do contrato dele."
-    );
+    // O Max não tem verbo que gere o link do formulário de uma PARTE de negócio
+    // já aberto (`form.create` só abre negócio novo). Em vez de prometer, entrega
+    // o caminho que existe: o negócio no ImobPro, logado.
+    const titulo = res.negocio.titulo.length > 80 ? `${res.negocio.titulo.slice(0, 77)}...` : res.negocio.titulo;
+    return [
+      `Esse negócio já existe: *${titulo}*. Não abri um negócio novo para não duplicar.`,
+      "Eu não gero o link do formulário de uma parte de um negócio já aberto. Pelo ImobPro, logado, você manda o link dali:",
+      new URL(`/deals/${res.negocio.id}`, imobproBase()).toString(),
+      "Se quiser, te mostro as pendências ou a situação do contrato dele.",
+    ].join("\n");
   }
-  const lista = res.negocios.map((n, i) => `${i + 1}. ${n.titulo}`).join("\n");
-  return `Achei mais de um negócio com esse nome. Qual deles?\n${lista}`;
+  const mostrados = res.negocios.slice(0, MAX_OPCOES);
+  const lista = mostrados.map((n, i) => `${i + 1}. ${n.titulo.length > 80 ? `${n.titulo.slice(0, 77)}...` : n.titulo}`).join("\n");
+  return `Achei mais de um negócio com esse nome. Qual deles?\n${lista}\nMe diga o nome completo do que você quer.`;
 }
+
+/** Opções numeradas na pergunta de ambiguidade (o resto some: "nome completo"). */
+const MAX_OPCOES = 3;
 
 /** Páginas de `deal.list` varridas para achar o nome (limite do servidor por página). */
 const PAGINAS_MAX = 3;
