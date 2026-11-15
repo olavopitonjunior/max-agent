@@ -2305,3 +2305,121 @@ describe("lerImovel: Cidade/UF, Cidade - UF, Cidade, UF vão para cidade e uf, n
     expect(r.dados).toMatchObject({ cidade: "Campinas", uf: "SP" });
   });
 });
+
+describe("donosDaPrimeiraMensagem: só com rótulo explícito, em código", () => {
+  it("proprietário rotulado: nome e telefone, cortando no imóvel", async () => {
+    const r = await cap.donosDaPrimeiraMensagem("nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999063228, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000");
+    expect(r).toEqual([{ nome: "Pedro TESTE Captação", telefone: "11999063228" }]);
+  });
+
+  it("vendedor e locador contam; dois rótulos = duas pessoas", async () => {
+    const r = await cap.donosDaPrimeiraMensagem(`captação de venda. vendedor Maria Silva, CPF ${CPF}, ${EMAIL}; proprietário João Souza, tel ${FONE}. Rua A, 10`);
+    expect(r).toEqual([
+      { nome: "Maria Silva", cpf: CPF_D, email: EMAIL },
+      { nome: "João Souza", telefone: FONE_D },
+    ]);
+  });
+
+  it("negativos: 'Dona Maria' no apelido do imóvel, 'e' entre dois nomes, sem rótulo e CPF inválido", async () => {
+    expect(await cap.donosDaPrimeiraMensagem("cria uma captação de venda do Apto da Dona Maria, Rua A, 10")).toEqual([]);
+    expect(await cap.donosDaPrimeiraMensagem("proprietários Pedro Alves e Maria Alves, Rua A, 10")).toEqual([]);
+    expect(await cap.donosDaPrimeiraMensagem("captação de venda, Maria Silva, tel 11999063228, Rua A, 10")).toEqual([]);
+    expect(await cap.donosDaPrimeiraMensagem("proprietário Maria Silva, CPF 111.444.777-36, Rua A, 10")).toEqual([]);
+  });
+
+  it("um proprietário só e um telefone só no texto: o telefone solto depois do imóvel é dele", async () => {
+    const r = await cap.donosDaPrimeiraMensagem("proprietário Pedro Alves, imóvel Rua A, 10, venda 500 mil, contato 11999063228");
+    expect(r).toEqual([{ nome: "Pedro Alves", telefone: "11999063228" }]);
+  });
+});
+
+describe("captação fluida: o pedido de uma mensagem só não vira interrogatório", () => {
+  const FONE_PEDRO = "11999063228";
+  const MSG = `nova captação TESTE: proprietário Pedro TESTE Captação, tel ${FONE_PEDRO}, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000`;
+  type ArgsCriacao = { nome: string; dados: { imovel: Record<string, unknown>; condicoes: Record<string, unknown>; proprietarios?: Record<string, unknown>[] } };
+  const semTelefoneDoPedro = (x: unknown) => !JSON.stringify(x ?? null).includes("999063228");
+
+  it("caso real de 10/11: um create só, com nome derivado, proprietário, valor, cidade e UF", async () => {
+    const fala = conversa();
+    extracao = { rua: "Rua TESTE Captação", numero: "5", bairro: "São Paulo/SP" };
+    const r = await fala(MSG);
+    const criacoes = verbos("captacao.create");
+    expect(criacoes).toHaveLength(1);
+    const args = criacoes[0]!.args as unknown as ArgsCriacao;
+    expect(args.nome).toBe("Pedro TESTE Captação — Rua TESTE Captação, 5");
+    expect(args.dados.condicoes).toMatchObject({ valor: 800000 });
+    expect(args.dados.imovel).toMatchObject({ rua: "Rua TESTE Captação", numero: "5", cidade: "São Paulo", uf: "SP" });
+    expect(args.dados.imovel.bairro).toBeUndefined();
+    expect(args.dados.proprietarios).toEqual([
+      { id: "p1", papel: "proprietario", tipo_pessoa: "fisica", nome: "Pedro TESTE Captação", telefone1: "+5511999063228" },
+    ]);
+    expect(r.reply).not.toContain("Que nome dou");
+    expect(r.reply).not.toContain("valor pretendido");
+    expect(r.reply).toContain("Criei o rascunho");
+    expect(r.reply).toContain("Pedro TESTE Captação");
+    expect(r.reply).not.toContain("um por mensagem");
+    // O que vai ao checkpoint e ao extrator (LLM) não carrega o telefone.
+    const vazou = Object.entries(r).filter(([k, v]) => k !== "inbound" && !semTelefoneDoPedro(v)).map(([k]) => k);
+    expect(vazou).toEqual([]);
+    expect(semTelefoneDoPedro(llm.mock.calls)).toBe(true);
+    const fluxo = r.fluxo as { proprietarios?: unknown[]; pessoasCifradas?: string };
+    expect(fluxo.proprietarios).toEqual([{ id: "p1", nome: "Pedro TESTE Captação" }]);
+    expect(fluxo.pessoasCifradas).toBeUndefined();
+  });
+
+  it("só o endereço: o nome vem do endereço e nada de proprietário é inventado", async () => {
+    const fala = conversa();
+    extracao = { rua: "Rua TESTE Captação", numero: "5" };
+    const r = await fala("nova captação de venda, imóvel Rua TESTE Captação, 5, Campinas - SP, R$ 500 mil");
+    const args = verbos("captacao.create")[0]!.args as unknown as ArgsCriacao;
+    expect(args.nome).toBe("Rua TESTE Captação, 5");
+    expect(args.dados.proprietarios).toBeUndefined();
+    expect(args.dados.imovel).toMatchObject({ cidade: "Campinas", uf: "SP" });
+    expect(r.reply).not.toContain("Que nome dou");
+  });
+
+  it("só o proprietário: o nome vem dele, pergunta só o imóvel e leva o proprietário até o create", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    const p = await fala(`cria uma captação de venda, proprietário Pedro Alves, tel ${FONE_PEDRO}`);
+    expect(p.reply).not.toContain("Que nome dou");
+    expect(p.reply).toContain("Pedro Alves");
+    expect(p.reply).toContain("Qual o imóvel?");
+    expect(verbos("captacao.create")).toEqual([]);
+    expect(semTelefoneDoPedro(p.fluxo)).toBe(true);
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    const args = verbos("captacao.create")[0]!.args as unknown as ArgsCriacao;
+    expect(args.nome).toBe("Pedro Alves");
+    expect(args.dados.proprietarios).toMatchObject([{ id: "p1", nome: "Pedro Alves", telefone1: "+5511999063228" }]);
+  });
+
+  it("sem proprietário e sem endereço: continua perguntando o nome (e o pedido é conservado)", async () => {
+    const fala = conversa();
+    const p = await fala("quero fazer uma captação de venda");
+    expect(p.reply).toContain("Que nome dou");
+  });
+
+  it("o nome derivado respeita o limite de 120 caracteres", async () => {
+    const fala = conversa();
+    const longo = "Rua " + "Muito Longa ".repeat(9).trim();
+    extracao = { rua: longo, numero: "5" };
+    await fala(`nova captação de venda, proprietário Pedro Alves, imóvel ${longo}, 5, R$ 500 mil`);
+    const args = verbos("captacao.create")[0]!.args as unknown as ArgsCriacao;
+    expect(args.nome.length).toBeLessThanOrEqual(120);
+  });
+
+  it("CPF, e-mail e telefone do 1º pedido vão só ao create; nunca ao checkpoint nem ao extrator", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    const r = await fala(`cria uma captação de venda, proprietário Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada, Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP, valor 850 mil`);
+    const args = verbos("captacao.create")[0]!.args as unknown as ArgsCriacao;
+    expect(args.dados.proprietarios).toMatchObject([
+      { id: "p1", nome: "Maria Silva", cpf: CPF_D, email: EMAIL, telefone1: "+55" + FONE_D, estado_civil: "casada" },
+    ]);
+    const vazou = Object.entries(r).filter(([k, v]) => k !== "inbound" && !semDadosPessoais(v)).map(([k]) => k);
+    expect(vazou).toEqual([]);
+    expect(JSON.stringify(llm.mock.calls)).not.toContain(CPF_D);
+    expect(JSON.stringify(llm.mock.calls)).not.toContain(FONE_D);
+  });
+});

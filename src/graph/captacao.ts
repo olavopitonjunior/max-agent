@@ -68,6 +68,7 @@ export interface DadosDeCaptacao {
 }
 
 export type CanalDeEnvio = "email" | "whatsapp" | "aceite";
+export type FaltaDeDono = "cpf" | "cnpj" | "contato" | "estado_civil";
 
 export interface FluxoCaptacao {
   kind: "captacao";
@@ -95,6 +96,15 @@ export interface FluxoCaptacao {
    * `aproveitarPedidoOriginal`. Limpo (achado 1) assim que consumido, pra não
    * sobreviver no checkpoint depois de ter servido. */
   pedidoOriginal?: string;
+  /**
+   * Proprietários que a pessoa já disse no 1º pedido ("proprietário Pedro, tel …"),
+   * lidos do texto cru em código e levados até o `captacao.create` CIFRADOS (mesmo
+   * cofre do resto — CPF/e-mail/telefone nunca ficam em claro no checkpoint).
+   * Limpo assim que o rascunho nasce com eles. Sem `MAX_ENCRYPTION_KEY`, não se leva nada.
+   */
+  pessoasCifradas?: string;
+  /** Proprietários gravados com dado ainda faltando (só ids e códigos, sem valor): o que se pergunta numa mensagem só. */
+  donosEmAberto?: { id: string; falta: FaltaDeDono[] }[];
   /** Canal já dito pela pessoa (ou escolhido na pergunta de canal). Aplicado aos proprietários ao gravar. */
   canalDito?: CanalDeEnvio;
   modelos?: ModeloDeCaptacao[];
@@ -933,6 +943,66 @@ export async function lerPessoa(texto: string, extrair: ExtratorDeSecao): Promis
   return out;
 }
 
+/** O item de `dados.proprietarios` que o ImobPro aceita (mesma forma para o 1º pedido e para as mensagens seguintes). */
+export function itemDeProprietario(p: PessoaLida, id: string, canal?: CanalDeEnvio): Record<string, unknown> {
+  return {
+    id, papel: "proprietario", tipo_pessoa: p.pj ? "juridica" : "fisica",
+    ...(p.pj ? { razao_social: p.nome, ...(p.cnpj ? { cnpj: p.cnpj } : {}) } : { nome: p.nome, ...(p.cpf ? { cpf: p.cpf } : {}) }),
+    ...(p.email ? { email: p.email } : {}), ...(p.telefone ? { telefone1: normalizeBrPhone(p.telefone) ?? p.telefone } : {}),
+    ...(p.estadoCivil ? { estado_civil: p.estadoCivil } : {}), ...(p.percentual !== undefined ? { percentual: p.percentual } : {}),
+    ...(canal ? { canal } : {}),
+  };
+}
+
+// Rótulo EXPLÍCITO de dono. "dono/dona" fica de fora de propósito: "Apto da Dona Maria" é o apelido do imóvel.
+const RE_ROTULO_DE_DONO = /\b(?:propriet[aá]ri[oa]s?|vendedor(?:a|es|as)?|locador(?:a|es|as)?)\b/giu;
+// Onde a descrição da pessoa termina e começa outra coisa do pedido.
+const RE_FIM_DA_PESSOA = /\b(?:im[oó]vel|endere[cç]o|rua|avenida|alameda|travessa|rodovia|venda|loca[cç][aã]o|valor|comiss\w*|prazo|exclusiv\w*|aceite)\b|\bav\.|(?<![\p{L}])R\$/iu;
+const RE_NOME_COM_E = /\s(?:e|&)\s/i;
+
+/**
+ * Proprietários já ditos na 1ª mensagem ("proprietário Pedro Alves, tel …,
+ * imóvel Rua X…"): SÓ com rótulo explícito, e em CÓDIGO (o texto cru nunca vai
+ * ao extrator — tem CPF/e-mail/telefone). Quem vem sem nome completo, com
+ * documento inválido, ou como "Pedro e Maria" (duas pessoas num nome só) fica
+ * de fora: o fluxo pergunta depois, como sempre.
+ */
+export async function donosDaPrimeiraMensagem(texto: string): Promise<PessoaLida[]> {
+  const rotulos = [...texto.matchAll(RE_ROTULO_DE_DONO)];
+  const sem = async () => null;
+  const donos: PessoaLida[] = [];
+  for (let i = 0; i < rotulos.length && donos.length < 10; i++) {
+    const ini = (rotulos[i]!.index ?? 0) + rotulos[i]![0].length;
+    const fim = rotulos[i + 1]?.index ?? texto.length;
+    let trecho = texto.slice(ini, fim);
+    const corte = RE_FIM_DA_PESSOA.exec(trecho);
+    if (corte) trecho = trecho.slice(0, corte.index);
+    trecho = trecho.replace(/^\s*[:\-–]?\s*(?:(?:é|eh|se chama|chamad[oa])\s+)?/i, "");
+    if (!trecho.trim()) continue;
+    const p = await lerPessoa(trecho, sem);
+    if (p.erro || !p.nome) continue;
+    if (!p.pj && RE_NOME_COM_E.test(p.nome)) continue;
+    donos.push(p);
+  }
+  // Um dono e um telefone (ou e-mail) só no texto inteiro: o contato solto, depois do imóvel, é dele.
+  if (donos.length === 1) {
+    const n = lerNumeros(texto);
+    if (!donos[0]!.telefone && n.telefones.length === 1) donos[0]!.telefone = n.telefones[0];
+    const emails = lerEmails(texto);
+    if (!donos[0]!.email && emails.length === 1) donos[0]!.email = emails[0];
+  }
+  return donos;
+}
+
+/** Nome da captação quando a pessoa não deu um: "<proprietário> — <rua>, <número>", só o endereço ou só o proprietário. */
+export function nomeDerivado(dono: string | null | undefined, imovel: Record<string, unknown> | undefined): string | null {
+  const rua = str(imovel?.rua);
+  const numero = str(imovel?.numero);
+  const endereco = rua ? (numero ? `${rua}, ${numero}` : rua) : null;
+  const nome = dono && endereco ? `${dono} — ${endereco}` : (dono ?? endereco);
+  return nome ? nome.slice(0, 120).trim() : null;
+}
+
 const TIPOS_DE_IMOVEL = ["apartamento", "casa", "terreno", "sala", "loja", "galpao", "cobertura", "sobrado", "chacara", "sitio", "fazenda", "kitnet", "studio", "flat"];
 
 export interface ImovelLido { dados: Record<string, unknown>; erro?: string }
@@ -1508,6 +1578,38 @@ const TEXTO_PROPRIETARIOS =
   "Agora os proprietários, um por mensagem: nome completo, CPF (ou CNPJ), telefone, e-mail e estado civil. " +
   "Quando acabar, diga FIM.";
 
+const ROTULO_DA_FALTA: Record<FaltaDeDono, string> = { cpf: "CPF", cnpj: "CNPJ", contato: "telefone ou e-mail", estado_civil: "estado civil" };
+
+/** O que ainda falta de um proprietário já enviado (PF: CPF e estado civil; PJ: CNPJ; todos: um contato). */
+function faltaDoDono(d: Record<string, unknown>): FaltaDeDono[] {
+  const pj = d.tipo_pessoa === "juridica";
+  const falta: FaltaDeDono[] = [];
+  if (pj ? !str(d.cnpj) : !str(d.cpf)) falta.push(pj ? "cnpj" : "cpf");
+  if (!str(d.telefone1) && !str(d.email)) falta.push("contato");
+  if (!pj && !str(d.estado_civil)) falta.push("estado_civil");
+  return falta;
+}
+
+/** "Anotei Pedro (telefone)." por proprietário do 1º pedido, sem repetir o valor. */
+function anoteiDosDonos(donos: Record<string, unknown>[]): string {
+  return donos.map((d) => {
+    const campos = [
+      str(d.cpf) ? "CPF" : str(d.cnpj) ? "CNPJ" : "", str(d.telefone1) ? "telefone" : "", str(d.email) ? "e-mail" : "", str(d.estado_civil) ? "estado civil" : "",
+    ].filter(Boolean);
+    return `Anotei ${str(d.nome) ?? str(d.razao_social) ?? "o proprietário"}${campos.length ? ` (${campos.join(", ")})` : ""}.`;
+  }).join(" ");
+}
+
+/** Pede, numa mensagem só, o que falta dos proprietários (e abre espaço para os demais, um por linha). */
+function textoDosProprietarios(f: FluxoCaptacao): string {
+  if (!f.proprietarios?.length) return TEXTO_PROPRIETARIOS;
+  const abertos = f.donosEmAberto ?? [];
+  if (!abertos.length) return "Se houver mais proprietários, mande todos juntos, um por linha, ou diga FIM.";
+  const linhas = abertos.map((a) => `${nomeDoDono(f, a.id) ?? "o proprietário"}: ${a.falta.map((x) => ROTULO_DA_FALTA[x]).join(", ")}`);
+  return `Falta pouco dos proprietários — ${linhas.join("; ")}. Mande numa mensagem só (ou PULAR). ` +
+    "Se houver mais proprietários, um por linha; quando acabar, diga FIM.";
+}
+
 /** "Cria uma captação de venda para o Apto da Dona Maria": gate → natureza → modelo → imóvel. */
 export async function iniciarCaptacao(ctx: ContextoDoTurno, deps: DepsDoFluxo, podeEscrever: boolean): Promise<Resposta> {
   const barrado = gatePolitica(ctx, podeEscrever, "captacao.create");
@@ -1519,9 +1621,13 @@ export async function iniciarCaptacao(ctx: ContextoDoTurno, deps: DepsDoFluxo, p
   // saem redigidos ANTES de entrar no estado (que o LangGraph GRAVA a cada
   // super-step) e antes de qualquer chance de ir ao extrator por LLM.
   const pedidoOriginal = redigir(ctx.texto, ["CPF", "CNPJ", "EMAIL", "TEL"]);
+  // Proprietários ditos no pedido: lidos aqui, do texto cru, em código (nunca pelo extrator), e levados CIFRADOS até o create.
+  const donos = await donosDaPrimeiraMensagem(ctx.texto);
+  const pessoasCifradas = donos.length ? fecharPessoas(donos.map((p, i) => itemDeProprietario(p, `p${i + 1}`, canalDito)), ctx) : undefined;
   const f: FluxoCaptacao = {
     kind: "captacao", etapa: "natureza", tentativas: 0, atualizadoEm: ctx.agora, pedidoOriginal,
     ...(nome ? { nome } : {}), ...(tipo ? { tipo } : {}), ...(canalDito ? { canalDito } : {}),
+    ...(pessoasCifradas ? { pessoasCifradas } : {}),
   };
   if (!tipo) return resposta(f, TEXTO_NATUREZA, "captacao_natureza");
   return depoisDaNatureza(f, ctx, deps, "");
@@ -1559,8 +1665,22 @@ async function depoisDaNatureza(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: De
 }
 
 async function seguirParaNomeOuImovel(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, prefixo: string): Promise<Resposta> {
-  if (!f.nome) return resposta(g(f, ctx, { etapa: "nome" }), `${prefixo}${TEXTO_NOME}`, "captacao_nome");
+  // Sem nome dito, só pergunta se não há de onde tirar um: nem proprietário nem endereço no pedido.
+  const temDeOndeDerivar = !!f.pessoasCifradas || (!!f.pedidoOriginal && PARECE_ENDERECO.test(f.pedidoOriginal));
+  if (!f.nome && !temDeOndeDerivar) return resposta(g(f, ctx, { etapa: "nome" }), `${prefixo}${TEXTO_NOME}`, "captacao_nome");
   return aproveitarPedidoOriginal(f, ctx, deps, prefixo);
+}
+
+/** Cifra/abre os proprietários do 1º pedido (mesmo cofre e mesma thread do resto da captação). */
+function fecharPessoas(itens: Record<string, unknown>[], ctx: ContextoDoTurno): string | undefined {
+  try { return cifrarCofreCaptacao(JSON.stringify(itens), threadDaCaptacao(ctx)); } catch { return undefined; }
+}
+function abrirPessoas(f: FluxoCaptacao, ctx: ContextoDoTurno): Record<string, unknown>[] {
+  if (!f.pessoasCifradas) return [];
+  try {
+    const v: unknown = JSON.parse(decifrarCofreCaptacao(f.pessoasCifradas, threadDaCaptacao(ctx)));
+    return Array.isArray(v) ? v.map(obj).filter((x) => Object.keys(x).length > 0) : [];
+  } catch { return []; }
 }
 
 // Sem "apto" solto: "Apto da Dona Maria" é NOME da captação, não endereço — só
@@ -1574,10 +1694,7 @@ const PARECE_ENDERECO = /\brua\b|\bavenida\b|\bav\.?\s|\bendere[çc]o\b|\d{5}-?\
  */
 async function aproveitarPedidoOriginal(fOriginal: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, prefixo: string): Promise<Resposta> {
   const pedido = fOriginal.pedidoOriginal;
-  // Achado 1 (revisão opus): consumido uma vez só — não sobrevive no estado
-  // depois desta chamada, em NENHUM dos desfechos abaixo.
-  const f = g(fOriginal, ctx, { pedidoOriginal: undefined });
-  const lidas = pedido ? lerCondicoes(pedido, f.tipo ?? "venda") : { condicoes: {}, locacao: {} };
+  const lidas = pedido ? lerCondicoes(pedido, fOriginal.tipo ?? "venda") : { condicoes: {}, locacao: {} };
   const dados: DadosDeCaptacao = {};
   if (Object.keys(lidas.condicoes).length) dados.condicoes = lidas.condicoes;
   if (Object.keys(lidas.locacao).length) dados.locacao = lidas.locacao;
@@ -1590,6 +1707,20 @@ async function aproveitarPedidoOriginal(fOriginal: FluxoCaptacao, ctx: ContextoD
   }
   if (imovel) dados.imovel = imovel;
 
+  // Sem nome dito: deriva de "<proprietário> — <rua>, <número>" (ou só um deles). Só pergunta se não há nenhum dos dois.
+  let derivado: string | undefined;
+  if (!fOriginal.nome) {
+    const dono = abrirPessoas(fOriginal, ctx)[0];
+    derivado = nomeDerivado(str(dono?.nome) ?? str(dono?.razao_social), imovel) ?? undefined;
+    // O pedido NÃO é consumido aqui: segue no estado para a próxima tentativa (depois do nome dito).
+    if (!derivado) return resposta(g(fOriginal, ctx, { etapa: "nome" }), `${prefixo}${TEXTO_NOME}`, "captacao_nome");
+  }
+  // Achado 1 (revisão opus): consumido uma vez só — não sobrevive no estado
+  // depois desta chamada, em NENHUM dos desfechos abaixo.
+  const f = g(fOriginal, ctx, { pedidoOriginal: undefined, ...(derivado ? { nome: derivado } : {}) });
+  // Na criação o próprio "Criei o rascunho (…)" já mostra o nome; nas outras respostas, avisa qual foi.
+  const aviso = derivado ? `Vou chamar a captação de "${derivado}". ` : "";
+
   if (imovel && temCondicoesEm(dados)) {
     const eco = `Já anotei do seu pedido: imóvel ${ecoDoImovel(imovel)}; ${ecoDasCondicoes(lidas)}.\n`;
     // Confirmação única (26/10): com imóvel e condições, cria direto — o único "sim" do fluxo é o do resumo final.
@@ -1597,13 +1728,13 @@ async function aproveitarPedidoOriginal(fOriginal: FluxoCaptacao, ctx: ContextoD
   }
   if (imovel) {
     const eco = `Já anotei o imóvel do seu pedido: ${ecoDoImovel(imovel)}.\n`;
-    return resposta(g(f, ctx, { etapa: "condicoes", criacao: { chave: "", dados } }), `${prefixo}${eco}${textoDasCondicoes(f.tipo ?? "venda")}`, "captacao_condicoes");
+    return resposta(g(f, ctx, { etapa: "condicoes", criacao: { chave: "", dados } }), `${prefixo}${aviso}${eco}${textoDasCondicoes(f.tipo ?? "venda")}`, "captacao_condicoes");
   }
   if (temCondicoesEm(dados)) {
     const eco = `Já anotei do seu pedido: ${ecoDasCondicoes(lidas)}.\n`;
-    return resposta(g(f, ctx, { etapa: "imovel", criacao: { chave: "", dados } }), `${prefixo}${eco}${TEXTO_IMOVEL}`, "captacao_imovel");
+    return resposta(g(f, ctx, { etapa: "imovel", criacao: { chave: "", dados } }), `${prefixo}${aviso}${eco}${TEXTO_IMOVEL}`, "captacao_imovel");
   }
-  return resposta(g(f, ctx, { etapa: "imovel" }), `${prefixo}${TEXTO_IMOVEL}`, "captacao_imovel");
+  return resposta(g(f, ctx, { etapa: "imovel" }), `${prefixo}${aviso}${TEXTO_IMOVEL}`, "captacao_imovel");
 }
 
 // ─── Consulta (listar / status) ──────────────────────────────────────────
@@ -1998,9 +2129,13 @@ const comOuSem = (b: boolean) => (b ? "com" : "sem");
 async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, dados: DadosDeCaptacao, prefixo: string): Promise<Resposta> {
   const chave = f.criacao?.chave || ctx.messageId;
   const guardado: FluxoCaptacao = g(f, ctx, { etapa: "condicoes", criacao: { chave, dados } });
+  // Os proprietários do 1º pedido entram só nos args desta chamada (nunca em `f.criacao.dados`, que o
+  // checkpoint guarda): o replay com a mesma chave reabre o mesmo cofre e manda exatamente o mesmo corpo.
+  const donosLidos = abrirPessoas(f, ctx);
+  const dadosEnviados: DadosDeCaptacao = donosLidos.length ? { ...dados, proprietarios: donosLidos } : dados;
   const args: Record<string, unknown> = {
     tipo: f.tipo, nome: f.nome, ...(f.modeloId ? { modeloId: f.modeloId } : {}),
-    ...(Object.keys(dados).length ? { dados } : {}),
+    ...(Object.keys(dadosEnviados).length ? { dados: dadosEnviados } : {}),
   };
   const r = await deps.acao("captacao.create", args, chave);
   if (!r) {
@@ -2013,9 +2148,14 @@ async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, 
     const criado: FluxoCaptacao = g(f, ctx, {
       etapa: "proprietarios", captacaoId: id, codigo: str(c.codigo) ?? undefined, version: typeof c.version === "number" ? c.version : 0,
       versaoGravada: typeof c.version === "number" ? c.version : 0,
-      criacao: undefined, proprietarios: [], tentativas: 0, ...comResumo(f, dados),
+      criacao: undefined, tentativas: 0, ...comResumo(f, dados),
+      proprietarios: donosLidos.map((d) => ({ id: str(d.id) ?? "p1", nome: str(d.nome) ?? str(d.razao_social) ?? "", ...(d.tipo_pessoa === "juridica" ? { pj: true } : {}) })),
+      pessoasCifradas: undefined,
+      donosEmAberto: donosLidos.map((d) => ({ id: str(d.id) ?? "p1", falta: faltaDoDono(d) })).filter((x) => x.falta.length),
+      ...(donosLidos.length && f.canalDito ? { canalAplicado: f.canalDito } : {}),
     });
-    const texto = `${prefixo}Criei o rascunho${lembrete(criado)} ("${f.nome}", ${nomeDaEsteira(f)}).`;
+    const anotados = donosLidos.length ? `\n${anoteiDosDonos(donosLidos)}` : "";
+    const texto = `${prefixo}Criei o rascunho${lembrete(criado)} ("${f.nome}", ${nomeDaEsteira(f)}).${anotados}`;
     // Item 6: o modelo diz uma exclusividade e a pessoa disse outra — avisa UMA vez e pergunta qual vale.
     const doModelo = exclusivaDoServidor(r.body) ?? f.modeloExclusiva;
     const disse = dados.condicoes?.exclusiva;
@@ -2026,7 +2166,7 @@ async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, 
         "captacao_exclusividade_conflito"
       );
     }
-    return resposta(criado, `${texto} ${TEXTO_PROPRIETARIOS}`, "captacao_criada");
+    return resposta(criado, `${texto} ${textoDosProprietarios(criado)}`, "captacao_criada");
   }
   const erro = str(r.body.error);
   if (r.status === 409 && erro === "escolher_modelo") {
@@ -2073,14 +2213,14 @@ async function conduzirExclusividade(f: FluxoCaptacao, t: string, ctx: ContextoD
     const aviso = typeof doModelo === "boolean" && doModelo !== escolha
       ? ` O texto do modelo é ${comOuSem(doModelo)} exclusividade; para o contrato sair ${comOuSem(escolha)}, troque o modelo na tela: ${linkDe(f.captacaoId)}`
       : "";
-    return resposta(g(f, ctx, { etapa: "proprietarios", tentativas: 0 }), `Certo, fica ${comOuSem(escolha)} exclusividade.${aviso}\n${TEXTO_PROPRIETARIOS}`, "captacao_exclusividade_mantida");
+    return resposta(g(f, ctx, { etapa: "proprietarios", tentativas: 0 }), `Certo, fica ${comOuSem(escolha)} exclusividade.${aviso}\n${textoDosProprietarios(f)}`, "captacao_exclusividade_mantida");
   }
   const patch: DadosDeCaptacao = { condicoes: { exclusiva: escolha } };
   const r = await complementar(f, ctx, deps, patch);
   if (!r.ok) return r.r;
   return resposta(
     g(r.f, ctx, { etapa: "proprietarios", tentativas: 0, ...comResumo(f, patch) }),
-    `${r.prefixo}Certo: ${comOuSem(escolha)} exclusividade, como no modelo. ${TEXTO_PROPRIETARIOS}`,
+    `${r.prefixo}Certo: ${comOuSem(escolha)} exclusividade, como no modelo. ${textoDosProprietarios(f)}`,
     "captacao_exclusividade_do_modelo"
   );
 }
@@ -2386,13 +2526,7 @@ async function conduzirProprietarios(f: FluxoCaptacao, t: string, ctx: ContextoD
   }
   const canalDito = canalDoTexto(ctx.texto) ?? f.canalDito;
   const id = `p${donos.length + 1}`;
-  const item: Record<string, unknown> = {
-    id, papel: "proprietario", tipo_pessoa: p.pj ? "juridica" : "fisica",
-    ...(p.pj ? { razao_social: p.nome, cnpj: p.cnpj } : { nome: p.nome, cpf: p.cpf }),
-    ...(p.email ? { email: p.email } : {}), ...(p.telefone ? { telefone1: normalizeBrPhone(p.telefone) ?? p.telefone } : {}),
-    ...(p.estadoCivil ? { estado_civil: p.estadoCivil } : {}), ...(p.percentual !== undefined ? { percentual: p.percentual } : {}),
-    ...(canalDito ? { canal: canalDito } : {}),
-  };
+  const item = itemDeProprietario(p, id, canalDito);
   const r = await complementar(f, ctx, deps, { proprietarios: [item] });
   if (!r.ok) return r.r;
   // `canalAplicado`: o canal que TODOS os proprietários já têm gravado. Um
