@@ -141,14 +141,33 @@ describe("detalhar_negocio — broker (projeção mínima)", () => {
     expect(dump).not.toMatch(PROIBIDAS_AO_BROKER);
   });
 
-  it("campo da lista proibida (cpf, titulo...) no broker continua sendo barrado antes, por descartarSeVazou (defesa já existente)", async () => {
+  it("item do broker com campo da lista proibida (partes[0].cpf): descartarSeVazou barra, e o resultado é FALHA, nunca 'não encontrei'", async () => {
     const vazou = { ...itensDoVetor(VETOR_DEAL_DETAIL_BROKER)[0], partes: [{ papel: "vendedor", cpf: "52998224725" }] };
     escopo.mockResolvedValue(resposta([vazou]));
     const erro = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const r = await despacharLeituras({ ...base, identity: corretor, chamadas: [{ name: "detalhar_negocio", args: { numero: 1 } }] });
     erro.mockRestore();
+    expect(r.resultados[0].items).toBeNull();
+    expect(r.trilha[0].outcome).toBe("falha_na_consulta");
     expect(doModelo(r)).not.toContain("52998224725");
+    expect(doModelo(r)).not.toMatch(/não encontrei|acesso/i);
     expect(doModelo(r)).not.toContain("Etapa");
+  });
+
+  it("o descarte do descartarSeVazou NÃO muda os outros verbos (lista do broker segue como antes)", async () => {
+    const vazou = { id: "d1", etapa: "Docs", pendencias: [], atualizadoEm: "2026-10-20T12:00:00.000Z", referencia: "Negócio #D1", cpf: "52998224725" };
+    escopo.mockResolvedValue(resposta([vazou]));
+    const erro = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const r = await despacharLeituras({
+      ...base,
+      oferecidas: ["listar_negocios"],
+      policy: ["deal.list"] as never,
+      identity: corretor,
+      chamadas: [{ name: "listar_negocios", args: {} }],
+    });
+    erro.mockRestore();
+    expect(r.trilha[0].outcome).toBe("ok");
+    expect(doModelo(r)).not.toContain("52998224725");
   });
 });
 
@@ -203,6 +222,29 @@ describe("detalhar_negocio — usuário (render sem inventar)", () => {
     expect(texto).not.toMatch(/recusad/);
     expect(texto).toContain("Situação da assinatura: em andamento");
     expect(texto).not.toMatch(/enviada em/);
+  });
+
+  it("proposta sem código: mostra só o estado, nunca 'sem código'; sem código e sem estado a linha some", () => {
+    const base0 = itensDoVetor(VETOR_DEAL_DETAIL_USER)[0] as Record<string, unknown>;
+    const semCodigo = renderDealDetalhado({ ...base0, proposta: { id: "prop-1", codigo: null, estado: "convertida" } } as never, "user");
+    expect(semCodigo).toContain("Proposta: convertida");
+    expect(semCodigo).not.toMatch(/sem código|null|\(\)/);
+    const vazia = renderDealDetalhado({ ...base0, proposta: { id: "prop-1", codigo: null, estado: "" } } as never, "user");
+    expect(vazia).not.toMatch(/Proposta/);
+  });
+
+  it("assinatura com total 0 suprime a linha de contagem (não escreve '0 de 0 assinadas')", () => {
+    const base0 = itensDoVetor(VETOR_DEAL_DETAIL_USER)[0] as Record<string, unknown>;
+    const texto = renderDealDetalhado(
+      { ...base0, assinatura: { estado: "running", enviadoEm: null, concluidoEm: null, total: 0, assinadas: 0, recusadas: 0, pendentes: 0 } } as never,
+      "user"
+    );
+    expect(texto).not.toMatch(/Assinaturas:|0 de 0/);
+    const broker = renderDealDetalhado(
+      { ...(itensDoVetor(VETOR_DEAL_DETAIL_BROKER)[0] as Record<string, unknown>), assinatura: { estado: "running", total: 0, assinadas: 0, recusadas: 0, pendentes: 0 } } as never,
+      "broker"
+    );
+    expect(broker).not.toMatch(/Assinaturas:|0 de 0/);
   });
 
   it("plural: 2 de 3 assinadas e 2 recusadas; concluída traz a data", () => {

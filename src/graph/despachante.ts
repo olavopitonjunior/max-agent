@@ -295,8 +295,11 @@ export async function despacharLeituras(params: {
       const lidos = r.items.map((it) => lerDealDetalhado(it, sujeito));
       const validos = lidos.filter((d): d is NonNullable<typeof d> => d !== null && d.id === idPedido);
       // Item que não confere com o contrato (ou com o id pedido) NÃO vira "sem acesso": é falha, e alta.
-      if (validos.length !== r.items.length) {
-        console.error(`[despachante] deal.detail fora do contrato na org ${params.identity.orgId}: ${r.items.length - validos.length} item(ns) descartado(s)`);
+      // O que `descartarSeVazou` já removeu (broker com campo proibido) também é falha: sem isso o
+      // item sumia e a resposta virava "Não encontrei... ou sem acesso", escondendo a regressão do servidor.
+      const barrados = r.descartados ?? 0;
+      if (barrados > 0 || validos.length !== r.items.length) {
+        console.error(`[despachante] deal.detail fora do contrato na org ${params.identity.orgId}: ${barrados + r.items.length - validos.length} item(ns) descartado(s)`);
         resultados.push({ tool: chamada.name, items: null, truncated: false });
         trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
         continue;
@@ -464,8 +467,9 @@ export function renderDealDetalhado(item: DealDetalhadoUser | DealDetalhadoBroke
     }
     if (user.proposta) {
       const estado = rotulo({}, user.proposta.estado);
-      const codigo = limpo(user.proposta.codigo) ?? "sem código";
-      linhas.push(`Proposta: ${codigo}${estado ? ` (${estado})` : ""}`);
+      const codigo = limpo(user.proposta.codigo);
+      if (codigo) linhas.push(`Proposta: ${codigo}${estado ? ` (${estado})` : ""}`);
+      else if (estado) linhas.push(`Proposta: ${estado}`);
     }
   } else {
     const b = broker as DealDetalhadoBroker;
@@ -479,7 +483,8 @@ export function renderDealDetalhado(item: DealDetalhadoUser | DealDetalhadoBroke
 
   const assinatura = item.assinatura;
   if (assinatura) {
-    linhas.push(`Assinaturas: ${contagemDeAssinaturas(assinatura)}`);
+    // total 0 = nenhum signatário: "0 de 0 assinadas" seria uma frase sem fato por trás.
+    if (assinatura.total > 0) linhas.push(`Assinaturas: ${contagemDeAssinaturas(assinatura)}`);
     const situacao = rotulo(ESTADO_DO_ENVELOPE, assinatura.estado);
     if (situacao) {
       let fim = "";
@@ -546,7 +551,7 @@ async function executarLeitura(params: {
   identity: Candidate;
   subject: ReturnType<typeof subjectDe>;
   fromPhone: string;
-}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification; naoMedidos?: number } | null> {
+}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification; naoMedidos?: number; descartados?: number } | null> {
   // Preferências de aviso (M3): rota própria, sempre da PRÓPRIA pessoa (telefone do turn). Só usuário
   // da plataforma tem preferência; qualquer outra identidade volta como "sem permissão", nunca como lista vazia.
   if (params.entrada.verb === "prefs.get") {
@@ -563,7 +568,9 @@ async function executarLeitura(params: {
   });
   if (!r) return null;
   // Rede de segurança da regra 5 — a projeção que VALE é a do servidor.
-  return { items: descartarSeVazou(r.items, params.identity.kind), truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}), ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) };
+  const seguros = descartarSeVazou(r.items, params.identity.kind);
+  // `descartados`: quantos itens a rede removeu. Só o `deal.detail` lê (vazio por vazamento é FALHA, não "sem acesso").
+  return { items: seguros, descartados: r.items.length - seguros.length, truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}), ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) };
 }
 
 // ─── Executor de ESCRITA (proposta, nunca execução) ───────────────────────
