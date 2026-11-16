@@ -106,9 +106,8 @@ describe("eval fv2: achados", () => {
     expect(t.reply).not.toMatch(/CPF|CNPJ|telefone|e-mail|email/i);
   });
 
-  // F2: a conferência de uma foto sem legenda mostra o CPF lido em claro (a resposta é `sensivel`), enquanto
-  // a ficha o mascara. Decisão de produto: manter assim ou mascarar também a conferência.
-  it.todo("F2: a conferência da foto sem legenda mascara o CPF como a ficha");
+  // F2: CORRIGIDO (decisão do Olavo, 16/11: mascarar também a conferência). `textoDeConferencia` passa o
+  // valor por `mascararValor`, como a ficha; o caso vive em `foto.eval.ts` ("sem legenda").
 
   // F6: `lerDocumento` e `transcribeMedia` são cobrados pelo servidor, sem `reportUsage` do lado do agente.
   // O transversal T4 só conta as chamadas ao modelo (`complete`).

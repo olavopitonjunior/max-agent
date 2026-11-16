@@ -95,6 +95,10 @@ describe("eval fv2: foto e documento", () => {
     );
 
     const t1 = await s.midia({ mimeType: "image/jpeg", bytes: JPEG });
+    // F2 (decisão do Olavo, 16/11): a conferência mascara o CPF como a ficha.
+    expect(t1.reply).toContain("***.982.247-**");
+    expect(t1.reply).not.toContain(CPF_SINTETICO);
+    expect(t1.reply).not.toContain(formatarCpf(CPF_SINTETICO));
     expect(t1.reply).toContain("De quem é esse documento?");
     expect(t1.reply).toContain("Nada foi anotado ainda.");
     expect(s.servidor.escritas()).toHaveLength(0);

@@ -26,6 +26,7 @@ import { textoSemLeituraDeMidia } from "../prompt";
 import type { DepsDoFluxo } from "../fluxos";
 import type { ParteV2, PatchV2 } from "./contrato";
 import type { FluxoFormularioV2 } from "./estado";
+import { mascararValor } from "./mascara";
 import { salvarParcial, type ErroDoParcial, type ResultadoParcial } from "./proposta-v2";
 
 /** Mesmo teto do servidor (`midia_grande`, 3 MB decodificados). */
@@ -661,7 +662,8 @@ export function textoDeConferencia(l: {
   for (const c of l.campos) {
     const { grupo, campo } = rotuloDoPath(c.path);
     const itens = grupos.get(grupo) ?? [];
-    itens.push(`• ${campo}: ${valorParaTela(c.valor)}`);
+    // F2 (16/11): mascarado como na ficha. O corretor confere pelos dígitos do meio.
+    itens.push(`• ${campo}: ${mascararValor(c.path, valorParaTela(c.valor))}`);
     grupos.set(grupo, itens);
   }
   for (const [grupo, itens] of grupos) linhas.push("", grupo, ...itens);

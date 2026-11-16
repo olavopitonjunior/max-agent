@@ -643,7 +643,9 @@ describe("texto de conferência", () => {
     const t = textoDeConferencia({ documentType: "rg", confianca: 0.9, campos, ignorados: 0 });
     expect(t).toMatch(/lido — confira/i);
     expect(t).toContain(NOME);
-    expect(t).toContain(CPF);
+    // F2 (16/11): o CPF lido sai mascarado, como na ficha.
+    expect(t).toContain("***.982.247-**");
+    expect(t).not.toContain(CPF);
     expect(t).not.toMatch(/atenção/i);
     expect(t).not.toMatch(/✅|anotei|salvei|gravei/i);
   });
