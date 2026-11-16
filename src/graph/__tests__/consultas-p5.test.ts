@@ -112,8 +112,9 @@ describe("detalhar_proposta / detalhar_negocio — o despachante", () => {
   });
 
   it("negócio: traduz o número em negocio_id e entrega o resumo (o JSON do servidor não chega ao modelo)", async () => {
-    // Forma do contrato (PR-O4a). O item solto de antes ({id,titulo,etapa}) agora é descartado no parse:
-    // ver `detalhar-negocio.test.ts` para o render e para o descarte.
+    // Forma do contrato (PR-O4a). O item solto de antes ({id,titulo,etapa}) não tem as chaves
+    // obrigatórias (pendencias, tipo, partes...) e seria descartado: o ajuste continua valendo mesmo com
+    // chave extra tolerada. Ver `detalhar-negocio.test.ts` para o render e para o descarte.
     escopo.mockResolvedValue({
       items: [{
         id: "negocio-id-1", etapa: "Docs", pendencias: [], atualizadoEm: "2026-10-20T12:00:00.000Z",

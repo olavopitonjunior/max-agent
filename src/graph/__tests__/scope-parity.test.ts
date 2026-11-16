@@ -208,21 +208,53 @@ describe("paridade de deal.detail (vetores do CM #3167)", () => {
   });
 });
 
-describe("lerDealDetalhado — parse defensivo (campo extra = item descartado)", () => {
+describe("lerDealDetalhado — parse defensivo (chave extra é removida; obrigatória ausente derruba)", () => {
   const user = JSON.parse(VETOR_DEAL_DETAIL_USER).items[0] as Record<string, unknown>;
   const broker = JSON.parse(VETOR_DEAL_DETAIL_BROKER).items[0] as Record<string, unknown>;
 
+  // O CM pode ganhar campo ADITIVO: isso não pode derrubar o Max em produção. O parse monta o objeto
+  // campo a campo a partir da allowlist, então a chave extra nunca é copiada nem renderizada.
   it.each([
-    ["cpf no topo (user)", { ...user, cpf: "52998224725" }, "user"],
-    ["cpf no topo (broker)", { ...broker, cpf: "52998224725" }, "broker"],
-    ["email aninhado em partes (user)", { ...user, partes: [{ papel: "vendedor", nome: "A", email: "a@b.c" }] }, "user"],
-    ["nome aninhado em partes (broker)", { ...broker, partes: [{ papel: "vendedor", nome: "João Souza" }] }, "broker"],
-    ["campo extra em contrato", { ...user, contrato: { estado: "aprovado", versao: 2, atualizadoEm: "2026-10-19T12:00:00.000Z", url: "https://x" } }, "user"],
-    ["campo extra em assinatura (broker)", { ...broker, assinatura: { estado: "running", total: 1, assinadas: 0, recusadas: 0, pendentes: 1, signatarios: ["a"] } }, "broker"],
-    ["link no broker", { ...broker, link: "/deals/deal-1" }, "broker"],
-    ["titulo no broker", { ...broker, titulo: "Apto" }, "broker"],
-  ] as const)("%s -> null", (_t, item, kind) => {
-    expect(lerDealDetalhado(item, kind)).toBeNull();
+    ["cpf no topo (user)", { ...user, cpf: "52998224725" }, "user", user],
+    ["cpf no topo (broker)", { ...broker, cpf: "52998224725" }, "broker", broker],
+    ["email, url e dataJson no topo (user)", { ...user, email: "a@b.c", url: "https://x", dataJson: { a: 1 } }, "user", user],
+    [
+      "email aninhado em partes (user)",
+      { ...user, partes: [{ papel: "vendedor", nome: "João Souza", email: "a@b.c" }, { papel: "comprador", nome: "Maria Silva", cpf: "52998224725" }] },
+      "user",
+      user,
+    ],
+    [
+      "nome aninhado em partes (broker)",
+      { ...broker, partes: [{ papel: "vendedor", nome: "João Souza" }, { papel: "comprador", cpf: "52998224725" }] },
+      "broker",
+      broker,
+    ],
+    ["campo extra em contrato", { ...user, contrato: { ...(user.contrato as object), url: "https://x" } }, "user", user],
+    ["campo extra em proposta", { ...user, proposta: { ...(user.proposta as object), cpf: "52998224725" } }, "user", user],
+    ["campo extra em assinatura (user)", { ...user, assinatura: { ...(user.assinatura as object), signatarios: ["a"] } }, "user", user],
+    ["campo extra em assinatura (broker)", { ...broker, assinatura: { ...(broker.assinatura as object), signatarios: ["a"] } }, "broker", broker],
+    ["link e titulo no broker", { ...broker, link: "/deals/deal-1", titulo: "Apto" }, "broker", broker],
+  ] as const)("%s -> item mantido, chave extra ausente do objeto parseado", (_t, item, kind, esperado) => {
+    const lido = lerDealDetalhado(item, kind);
+    expect(lido).toEqual(esperado);
+    expect(JSON.stringify(lido)).not.toMatch(/52998224725|a@b\.c|https:\/\/x|dataJson|signatarios/);
+    if (kind === "broker") expect(JSON.stringify(lido)).not.toMatch(/João|titulo|"link"|Apto/);
+  });
+
+  it("chave obrigatória ausente derruba o item (fail-closed), em qualquer nível", () => {
+    const sem = (o: Record<string, unknown>, k: string) => Object.fromEntries(Object.entries(o).filter(([c]) => c !== k));
+    const casos: [string, unknown, "user" | "broker"][] = [
+      ["id", sem(user, "id"), "user"],
+      ["link (user)", sem(user, "link"), "user"],
+      ["referencia (broker)", sem(broker, "referencia"), "broker"],
+      ["partes[].nome (user)", { ...user, partes: [{ papel: "vendedor" }] }, "user"],
+      ["partes[].papel (broker)", { ...broker, partes: [{}] }, "broker"],
+      ["contrato.versao", { ...user, contrato: sem(user.contrato as Record<string, unknown>, "versao") }, "user"],
+      ["assinatura.total", { ...user, assinatura: sem(user.assinatura as Record<string, unknown>, "total") }, "user"],
+      ["assinatura.pendentes (broker)", { ...broker, assinatura: sem(broker.assinatura as Record<string, unknown>, "pendentes") }, "broker"],
+    ];
+    for (const [, item, kind] of casos) expect(lerDealDetalhado(item, kind)).toBeNull();
   });
 
   it.each([

@@ -193,17 +193,17 @@ const CHAVES_ASSINATURA_BROKER = ["estado", "total", "assinadas", "recusadas", "
 type Objeto = Record<string, unknown>;
 
 const ehObjeto = (v: unknown): v is Objeto => !!v && typeof v === "object" && !Array.isArray(v);
-/** O objeto tem EXATAMENTE estas chaves: faltou ou sobrou uma, a forma não é a do contrato. */
-const chavesExatas = (v: Objeto, chaves: readonly string[]): boolean => {
-  const tem = Object.keys(v);
-  return tem.length === chaves.length && chaves.every((c) => Object.hasOwn(v, c));
-};
+/**
+ * O objeto tem TODAS estas chaves (faltou uma, a forma não é a do contrato). Chave a MAIS é
+ * tolerada de propósito: o contrato é aditivo, e o objeto devolvido é montado só com a allowlist.
+ */
+const temChaves = (v: Objeto, chaves: readonly string[]): boolean => chaves.every((c) => Object.hasOwn(v, c));
 const texto = (v: unknown): v is string => typeof v === "string";
 const textoOuNulo = (v: unknown): v is string | null => v === null || typeof v === "string";
 const contagem = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
 
 function lerAssinatura(v: unknown, chaves: readonly string[], user: boolean): boolean {
-  if (!ehObjeto(v) || !chavesExatas(v, chaves)) return false;
+  if (!ehObjeto(v) || !temChaves(v, chaves)) return false;
   if (!texto(v.estado)) return false;
   if (!(contagem(v.total) && contagem(v.assinadas) && contagem(v.recusadas) && contagem(v.pendentes))) return false;
   return !user || (textoOuNulo(v.enviadoEm) && textoOuNulo(v.concluidoEm));
@@ -212,15 +212,13 @@ function lerAssinatura(v: unknown, chaves: readonly string[], user: boolean): bo
 /**
  * Lê UM item de `deal.detail` como o contrato diz, ou devolve `null`.
  *
- * **Parse defensivo e fail-closed, não whitelist que poda.** Chave a mais (um `cpf`, um `email`, um
- * `nome` na parte do broker), chave a menos ou valor de tipo errado em QUALQUER nível descarta o
- * item inteiro: podar produziria um item meio-certo que parece correto; descartar produz uma
- * ausência que alguém investiga (mesma razão de `descartarSeVazou`, que vigia só o broker e só
- * os campos que conhece). Aqui vale para os DOIS sujeitos, e o sujeito errado também é recusado:
- * a forma do broker lida como usuário (ou o inverso) é sinal de que alguém confundiu o `subject`.
- *
- * O valor devolvido é um objeto NOVO, montado campo a campo: nada do que o servidor mandou além
- * disto sobrevive, nem por referência.
+ * **Allowlist que monta, fail-closed no que falta.** Chave OBRIGATÓRIA ausente ou de tipo errado em
+ * QUALQUER nível descarta o item inteiro (ausência que alguém investiga, não item meio-certo).
+ * Chave a MAIS (um `cpf`, um `email`, um `nome` na parte do broker, ou um campo aditivo legítimo
+ * do CM) NÃO derruba o item: é REMOVIDA, porque o objeto devolvido é NOVO, montado campo a campo
+ * só com o que o contrato lista; o que o servidor mandar além disso nunca é copiado, nem por
+ * referência, e portanto nunca é renderizado. Vale para os DOIS sujeitos. A forma do broker lida
+ * como usuário (ou o inverso) continua recusada, pois falta chave obrigatória (`referencia`/`titulo`).
  */
 export function lerDealDetalhado(item: unknown, kind: "user"): DealDetalhadoUser | null;
 export function lerDealDetalhado(item: unknown, kind: "broker"): DealDetalhadoBroker | null;
@@ -228,7 +226,7 @@ export function lerDealDetalhado(item: unknown, kind: "user" | "broker"): DealDe
 export function lerDealDetalhado(item: unknown, kind: "user" | "broker"): DealDetalhadoUser | DealDetalhadoBroker | null {
   if (!ehObjeto(item)) return null;
   const user = kind === "user";
-  if (!chavesExatas(item, user ? CHAVES_USER : CHAVES_BROKER)) return null;
+  if (!temChaves(item, user ? CHAVES_USER : CHAVES_BROKER)) return null;
 
   if (!(texto(item.id) && textoOuNulo(item.etapa) && texto(item.atualizadoEm))) return null;
   if (!Array.isArray(item.pendencias) || !item.pendencias.every(texto)) return null;
@@ -242,14 +240,14 @@ export function lerDealDetalhado(item: unknown, kind: "user" | "broker"): DealDe
 
     const partes: DealDetalhadoUser["partes"] = [];
     for (const p of item.partes) {
-      if (!ehObjeto(p) || !chavesExatas(p, ["papel", "nome"]) || !texto(p.papel) || !texto(p.nome)) return null;
+      if (!ehObjeto(p) || !temChaves(p, ["papel", "nome"]) || !texto(p.papel) || !texto(p.nome)) return null;
       partes.push({ papel: p.papel, nome: p.nome });
     }
 
     let contrato: DealDetalhadoUser["contrato"] = null;
     if (item.contrato !== null) {
       const c = item.contrato;
-      if (!ehObjeto(c) || !chavesExatas(c, ["estado", "versao", "atualizadoEm"])) return null;
+      if (!ehObjeto(c) || !temChaves(c, ["estado", "versao", "atualizadoEm"])) return null;
       if (!(texto(c.estado) && contagem(c.versao) && texto(c.atualizadoEm))) return null;
       contrato = { estado: c.estado, versao: c.versao, atualizadoEm: c.atualizadoEm };
     }
@@ -257,7 +255,7 @@ export function lerDealDetalhado(item: unknown, kind: "user" | "broker"): DealDe
     let proposta: DealDetalhadoUser["proposta"] = null;
     if (item.proposta !== null) {
       const p = item.proposta;
-      if (!ehObjeto(p) || !chavesExatas(p, ["id", "codigo", "estado"])) return null;
+      if (!ehObjeto(p) || !temChaves(p, ["id", "codigo", "estado"])) return null;
       if (!(texto(p.id) && textoOuNulo(p.codigo) && texto(p.estado))) return null;
       proposta = { id: p.id, codigo: p.codigo, estado: p.estado };
     }
@@ -297,14 +295,14 @@ export function lerDealDetalhado(item: unknown, kind: "user" | "broker"): DealDe
   if (!texto(item.referencia)) return null;
   const partes: DealDetalhadoBroker["partes"] = [];
   for (const p of item.partes) {
-    if (!ehObjeto(p) || !chavesExatas(p, ["papel"]) || !texto(p.papel)) return null;
+    if (!ehObjeto(p) || !temChaves(p, ["papel"]) || !texto(p.papel)) return null;
     partes.push({ papel: p.papel });
   }
 
   let contrato: DealDetalhadoBroker["contrato"] = null;
   if (item.contrato !== null) {
     const c = item.contrato;
-    if (!ehObjeto(c) || !chavesExatas(c, ["estado"]) || !texto(c.estado)) return null;
+    if (!ehObjeto(c) || !temChaves(c, ["estado"]) || !texto(c.estado)) return null;
     contrato = { estado: c.estado };
   }
 

@@ -286,8 +286,8 @@ export async function despacharLeituras(params: {
     if (entrada.verb === "notification.list") r.items = r.items.map(projetarNotificacao);
     if (entrada.verb === "activity.list" || entrada.verb === "activity.get") r.items = r.items.map(atividadeEmHoraLocal);
 
-    // `deal.detail` (PR-O4a): o item é LIDO como o contrato manda (chave a mais, a menos ou de tipo
-    // errado descarta) e vira um resumo pronto em PT-BR. O modelo nunca vê o JSON do servidor, só o
+    // `deal.detail` (PR-O4a): o item é LIDO como o contrato manda (chave obrigatória ausente ou de
+    // tipo errado descarta; chave extra é removida) e vira um resumo pronto em PT-BR. O modelo nunca vê o JSON do servidor, só o
     // texto que este módulo montou — e o que o render não escreve, ele não pode repetir.
     if (entrada.verb === "deal.detail") {
       const sujeito = params.identity.kind;

@@ -10,7 +10,8 @@ import { VETOR_DEAL_DETAIL_BROKER, VETOR_DEAL_DETAIL_USER } from "./deal-detail-
  *  - sem `deal.detail` na política a tool não é oferecida e o verbo nunca é chamado;
  *  - o broker nunca recebe título, cliente, valor, nome, link nem proposta, nem no texto
  *    nem em nenhuma chave do que vai ao modelo;
- *  - campo inesperado na resposta (ex.: cpf) descarta o item, e o parse nunca renderiza.
+ *  - campo extra na resposta (ex.: cpf) é removido no parse e nunca renderizado; campo
+ *    obrigatório ausente descarta o item.
  *
  * CPF só o sintético 52998224725.
  */
@@ -125,13 +126,29 @@ describe("detalhar_negocio — broker (projeção mínima)", () => {
     expect(texto).not.toMatch(PROIBIDAS_AO_BROKER);
   });
 
-  it("resposta do broker que traz nome de parte (regressão do servidor) é descartada: falha, nunca render", async () => {
-    const vazou = { ...itensDoVetor(VETOR_DEAL_DETAIL_BROKER)[0], partes: [{ papel: "vendedor", nome: "João Souza" }] };
+  it("resposta do broker que traz nome de parte (regressão do servidor): o item segue, o nome é removido e nunca renderizado", async () => {
+    const vazou = {
+      ...itensDoVetor(VETOR_DEAL_DETAIL_BROKER)[0],
+      partes: [{ papel: "vendedor", nome: "João Souza" }, { papel: "comprador" }],
+      link: "/deals/deal-1",
+    };
     escopo.mockResolvedValue(resposta([vazou]));
     const r = await despacharLeituras({ ...base, identity: corretor, chamadas: [{ name: "detalhar_negocio", args: { numero: 1 } }] });
-    expect(r.resultados[0].items).toBeNull();
-    expect(doModelo(r)).not.toContain("João");
-    expect(r.trilha[0].outcome).toBe("falha_na_consulta");
+    const dump = doModelo(r);
+    expect(r.trilha[0].outcome).toBe("ok");
+    expect(dump).toContain("Partes: vendedor, comprador");
+    expect(dump).not.toMatch(/João/);
+    expect(dump).not.toMatch(PROIBIDAS_AO_BROKER);
+  });
+
+  it("campo da lista proibida (cpf, titulo...) no broker continua sendo barrado antes, por descartarSeVazou (defesa já existente)", async () => {
+    const vazou = { ...itensDoVetor(VETOR_DEAL_DETAIL_BROKER)[0], partes: [{ papel: "vendedor", cpf: "52998224725" }] };
+    escopo.mockResolvedValue(resposta([vazou]));
+    const erro = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const r = await despacharLeituras({ ...base, identity: corretor, chamadas: [{ name: "detalhar_negocio", args: { numero: 1 } }] });
+    erro.mockRestore();
+    expect(doModelo(r)).not.toContain("52998224725");
+    expect(doModelo(r)).not.toContain("Etapa");
   });
 });
 
@@ -269,14 +286,28 @@ describe("detalhar_negocio — vazio e falha são coisas diferentes", () => {
     expect(r.trilha[0].outcome).toBe("falha_na_consulta");
   });
 
-  it("campo extra inesperado (cpf) descarta o item: nunca renderizado, e vira falha (não 'sem acesso')", async () => {
-    const comCpf = { ...itensDoVetor(VETOR_DEAL_DETAIL_USER)[0], cpf: "52998224725" };
+  it("campo extra inesperado (cpf, em qualquer nível) é removido: item mantido, nunca renderizado", async () => {
+    const base0 = itensDoVetor(VETOR_DEAL_DETAIL_USER)[0] as Record<string, unknown>;
+    const comCpf = {
+      ...base0,
+      cpf: "52998224725",
+      partes: [{ papel: "vendedor", nome: "João Souza", cpf: "52998224725" }],
+      assinatura: { ...(base0.assinatura as object), email: "x@y.z" },
+    };
     escopo.mockResolvedValue(resposta([comCpf]));
+    const r = await despacharLeituras({ ...base, identity: usuario, chamadas: [{ name: "detalhar_negocio", args: { numero: 1 } }] });
+    expect(r.trilha[0].outcome).toBe("ok");
+    expect(doModelo(r)).toContain("Apto Centro");
+    expect(doModelo(r)).not.toMatch(/52998224725|x@y\.z/);
+  });
+
+  it("campo obrigatório ausente descarta o item: vira falha, não 'sem acesso'", async () => {
+    const { etapa: _e, ...semEtapa } = itensDoVetor(VETOR_DEAL_DETAIL_USER)[0] as Record<string, unknown>;
+    escopo.mockResolvedValue(resposta([semEtapa]));
     const erro = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const r = await despacharLeituras({ ...base, identity: usuario, chamadas: [{ name: "detalhar_negocio", args: { numero: 1 } }] });
     erro.mockRestore();
     expect(r.resultados[0].items).toBeNull();
-    expect(doModelo(r)).not.toContain("52998224725");
     expect(doModelo(r)).not.toContain("Apto Centro");
     expect(r.trilha[0].outcome).toBe("falha_na_consulta");
   });
