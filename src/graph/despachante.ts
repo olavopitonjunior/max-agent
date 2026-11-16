@@ -22,6 +22,7 @@ import { projetarParaOModelo } from "./preferencias";
 import { projetarNotificacao } from "./notificacao-projecao";
 import { projetarResumoDePendencias } from "./avisos-projecao";
 import { atividadeEmHoraLocal } from "./atividade-hora-local";
+import { lerCertidaoStatus, renderCertidoes, type CertidaoStatusItem } from "./certidao-status";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -48,6 +49,8 @@ export type Recusa =
   | "nao_oferecida"
   | "capability_negada"
   | "identidade_nao_escreve"
+  /** Leitura só de usuário da plataforma (`certidao.status`): o corretor comissionado nunca a recebe. */
+  | "identidade_nao_le"
   /** Nome histórico na trilha: argumento fora do enum da `propor_criacao`. */
   | "tipo_invalido";
 
@@ -70,6 +73,12 @@ export function autorizarChamada(params: {
 
   if (!params.oferecidas.includes(entrada.nome)) {
     return { ok: false, motivo: "nao_oferecida", entrada };
+  }
+
+  // Leitura restrita a usuário (`certidao.status`): vale mesmo com a capability na política. Antes de
+  // (c) pelo mesmo motivo de (d): é a recusa estável, não depende de política nem de argumento.
+  if (entrada.tipo === "leitura" && entrada.soUsuario && params.identity.kind !== "user") {
+    return { ok: false, motivo: "identidade_nao_le", entrada };
   }
 
   // (d) antes de (c) na escrita: "quem não pode escrever" é a recusa mais
@@ -196,6 +205,19 @@ export async function despacharLeituras(params: {
     }
     // Sem argumento nenhum: o servidor responde pela org da sessão, o modelo não escolhe nada.
     if (entrada.verb === "template.decisions") args = {};
+    // Certidões: o modelo aponta pelo número da lista (e, se for de proposta, diz `de: "proposta"`); o
+    // servidor recebe EXATAMENTE um id (`negocio_id` ou `proposta_id`) e mais nada do que o modelo mandou.
+    let certidaoDe: "negocio" | "proposta" | null = null;
+    if (entrada.verb === "certidao.status") {
+      certidaoDe = args.de === "proposta" ? "proposta" : "negocio";
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: certidaoDe });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      args = { [certidaoDe === "proposta" ? "proposta_id" : "negocio_id"]: selected.item.id };
+    }
     if (entrada.verb === "activity.get") {
       // O modelo aponta pelo número da lista; o id interno nunca passa por ele.
       const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "atividade" });
@@ -269,6 +291,25 @@ export async function despacharLeituras(params: {
     if (!r) {
       resultados.push({ tool: chamada.name, items: null, truncated: false });
       trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+      continue;
+    }
+
+    // Certidões: parse ESTRITO (R54). Chave a mais, a menos ou de tipo errado em QUALQUER item derruba a
+    // resposta inteira: nunca se repassa item que o contrato não descreve, nem se mostra parte dele. Vazio
+    // (e negado, e sem módulo, que chegam iguais) vira a frase única, sem distinguir. O resultado é UM
+    // resumo já formatado e marcado como dado de terceiros; o id do servidor não chega ao prompt.
+    if (entrada.verb === "certidao.status" && certidaoDe) {
+      const lidos = r.items.map(lerCertidaoStatus);
+      if (lidos.some((it) => it === null)) {
+        // Sem o conteúdo do item no log: é dado de terceiros (parte, documento).
+        console.error(`[despachante] certidao.status fora do contrato na org ${params.identity.orgId} (${lidos.filter((it) => it === null).length}/${lidos.length} itens)`);
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+      const resumo = renderCertidoes(lidos as CertidaoStatusItem[], certidaoDe, r.truncated);
+      resultados.push({ tool: chamada.name, items: [{ resumo, _untrusted: true }], truncated: r.truncated });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
       continue;
     }
 

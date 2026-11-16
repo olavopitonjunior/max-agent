@@ -48,6 +48,8 @@ export const VERBOS_DE_LEITURA = [
   "template.decisions",
   /** Pendências e avisos (24/10/2026): formulários, propostas e atividades pendentes. */
   "pending.summary",
+  /** Situação das certidões de UM negócio ou proposta (PR-O4b, 16/11/2026). Só usuário; corretor recebe `{items:[]}`. */
+  "certidao.status",
 ] as const;
 
 export type ScopeQueryVerb = (typeof VERBOS_DE_LEITURA)[number];

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { CAPABILITIES, resolverPolitica, type Capability, type MaxPolicy } from "../policy";
 import { VERBOS_DE_LEITURA } from "../scope-contract";
 import { VERBOS_DE_ACAO } from "@/lib/acao";
@@ -12,10 +12,16 @@ import { REGISTRO_DE_TOOLS, capabilitiesDeOferta, ferramentasDoTurno, selecionar
  * fora do padrão e do `brokerDefault`. Ligar uma delas na política (a org em
  * `/admin/max`) não pode oferecer nada ao modelo enquanto não houver verbo.
  *
+ * PR-O4b (16/11/2026): `certidao.status` GANHOU verbo e tool (`situacao_certidoes`) e SAI da
+ * lista de reservadas. Continua na posição 34, fora do padrão e do `brokerDefault`. Ficam
+ * reservadas `document.list` e `charge.status`: o que vale para elas abaixo não mudou.
+ *
  * Os literais abaixo são copiados do CM, de propósito (regra 1 da governança do Max):
  * derivar da constante deste lado acompanharia uma divergência em silêncio.
  */
-const RESERVADAS = ["certidao.status", "document.list", "charge.status"] as const;
+const CATALOGO_34_A_36 = ["certidao.status", "document.list", "charge.status"] as const;
+/** O que continua reservado (sem verbo, sem tool) depois do PR-O4b. */
+const RESERVADAS = ["document.list", "charge.status"] as const;
 
 /** `POLITICA_PADRAO` do CM, como a rota `/api/agents/profile` a emite. */
 const PADRAO_DO_CM: MaxPolicy = JSON.parse(
@@ -35,22 +41,27 @@ const corretor = {
 describe("capabilities reservadas do PR-O4cat (inertes)", () => {
   it("estão no catálogo, ao FIM e nesta ordem: posições 34, 35 e 36 (0-based)", () => {
     expect(CAPABILITIES).toHaveLength(37);
-    expect(CAPABILITIES.slice(34)).toEqual([...RESERVADAS]);
-    RESERVADAS.forEach((c, i) => expect(CAPABILITIES.indexOf(c)).toBe(34 + i));
+    expect(CAPABILITIES.slice(34)).toEqual([...CATALOGO_34_A_36]);
+    CATALOGO_34_A_36.forEach((c, i) => expect(CAPABILITIES.indexOf(c)).toBe(34 + i));
+  });
+
+  it("certidao.status saiu da lista de reservadas (tem verbo e tool); document.list e charge.status ficam", () => {
     expect([...CAPABILITIES_RESERVADAS]).toEqual([...RESERVADAS]);
+    expect(CAPABILITIES_RESERVADAS).not.toContain("certidao.status");
+    expect(VERBOS_DE_LEITURA as readonly string[]).toContain("certidao.status");
   });
 
   it("o padrão do CM espelhado no MA não concede nenhuma das 3", () => {
     for (const role of ["owner", "admin", "finance", "sales", "viewer", "member", "custom:cr_x"]) {
       const efetivas = resolverPolitica({ politica: PADRAO_DO_CM, sujeito: gerente, role });
-      for (const c of RESERVADAS) expect(efetivas).not.toContain(c);
+      for (const c of CATALOGO_34_A_36) expect(efetivas).not.toContain(c);
     }
   });
 
   it("brokerDefault não contém; o corretor comissionado não recebe nenhuma das 3", () => {
-    for (const c of RESERVADAS) expect(PADRAO_DO_CM.brokerDefault).not.toContain(c);
+    for (const c of CATALOGO_34_A_36) expect(PADRAO_DO_CM.brokerDefault).not.toContain(c);
     const efetivas = resolverPolitica({ politica: PADRAO_DO_CM, sujeito: corretor, role: null });
-    for (const c of RESERVADAS) expect(efetivas).not.toContain(c);
+    for (const c of CATALOGO_34_A_36) expect(efetivas).not.toContain(c);
   });
 
   it("são concedíveis (conhecidas): a org que liga em /admin/max as vê na política efetiva", () => {
@@ -67,12 +78,10 @@ describe("capabilities reservadas do PR-O4cat (inertes)", () => {
 
   describe("nenhuma tool é oferecida por elas (não existe tool nova)", () => {
     const ligada = JSON.parse(
-      '{"byRole":{"*":["deal.list","certidao.status","document.list","charge.status"]}}'
+      '{"byRole":{"*":["deal.list","document.list","charge.status"]}}'
     ) as MaxPolicy;
     const semElas = JSON.parse('{"byRole":{"*":["deal.list"]}}') as MaxPolicy;
-    const so3 = JSON.parse(
-      '{"byRole":{"*":["certidao.status","document.list","charge.status"]}}'
-    ) as MaxPolicy;
+    const so2 = JSON.parse('{"byRole":{"*":["document.list","charge.status"]}}') as MaxPolicy;
 
     const efetivas = (p: MaxPolicy): Capability[] => resolverPolitica({ politica: p, sujeito: gerente, role: "sales" });
 
@@ -82,11 +91,13 @@ describe("capabilities reservadas do PR-O4cat (inertes)", () => {
       "status das certidões, lista de documentos e status da cobrança do negócio, " +
       "propostas, atividades, pendências, contrato e imóvel";
 
-    const envOriginal = process.env.MAX_EXTENDED_QUERIES;
-    afterEach(() => {
-      if (envOriginal === undefined) delete process.env.MAX_EXTENDED_QUERIES;
-      else process.env.MAX_EXTENDED_QUERIES = envOriginal;
+    // A consulta nova (extended) só é oferecida com o rollout da org E a flag: liga os dois
+    // para que "não muda a oferta" seja uma afirmação de verdade, e não efeito de flag desligada.
+    beforeEach(() => {
+      vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ org1: ["queries"] }));
+      vi.stubEnv("MAX_EXTENDED_QUERIES", "true");
     });
+    afterEach(() => vi.unstubAllEnvs());
 
     it("nenhuma entrada do registro declara uma delas como capability", () => {
       for (const e of REGISTRO_DE_TOOLS) {
@@ -109,20 +120,24 @@ describe("capabilities reservadas do PR-O4cat (inertes)", () => {
       }
     });
 
-    it("ligar as 3 na política não muda a oferta: selecionarTools devolve o mesmo com e sem elas", () => {
-      process.env.MAX_EXTENDED_QUERIES = "true";
+    it("ligar as 2 na política não muda a oferta: selecionarTools devolve o mesmo com e sem elas", () => {
       const com = selecionarTools({ policy: efetivas(ligada), texto: TEXTO, orgId: "org1" });
       const sem = selecionarTools({ policy: efetivas(semElas), texto: TEXTO, orgId: "org1" });
       expect(com.tools.map((t) => t.nome)).toEqual(sem.tools.map((t) => t.nome));
       expect(com.cortadas).toBe(sem.cortadas);
     });
 
-    it("ligar as 3 não muda a oferta do turno (escrita + leitura), nem com a política só com elas", () => {
-      process.env.MAX_EXTENDED_QUERIES = "true";
+    it("ligar as 2 não muda a oferta do turno (escrita + leitura), nem com a política só com elas", () => {
       const nomes = (p: MaxPolicy): string[] =>
         ferramentasDoTurno({ policy: efetivas(p), texto: TEXTO, identity: gerente }).entradas.map((e) => e.nome);
       expect(nomes(ligada)).toEqual(nomes(semElas));
-      expect(nomes(so3)).toEqual([]);
+      expect(nomes(so2)).toEqual([]);
+    });
+
+    it("certidao.status NÃO é mais inerte: ligada na política, com rollout e flag, oferece situacao_certidoes", () => {
+      const comCertidao = JSON.parse('{"byRole":{"*":["certidao.status"]}}') as MaxPolicy;
+      const nomes = ferramentasDoTurno({ policy: efetivas(comCertidao), texto: TEXTO, identity: gerente }).entradas.map((e) => e.nome);
+      expect(nomes).toEqual(["situacao_certidoes"]);
     });
   });
 });
