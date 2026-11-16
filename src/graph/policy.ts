@@ -182,6 +182,18 @@ export const CAPABILITIES = [
    * não herda o curinga. Sem ela o Max nem pede o bloco.
    */
   "pending.avisos",
+  /**
+   * PR-O4cat (16/11/2026, par do contractmaker `feat/max-o4cat`): três leituras
+   * futuras, INERTES — "reservada, verbo não implementado, nasce OFF". `certidao.status`
+   * (status de certidões), `document.list` (documentos do negócio) e `charge.status`
+   * (status de cobrança). Sem tool, sem verbo, fora do padrão e do `brokerDefault`
+   * (fail-closed): a org pode ligar em `/admin/max`, mas enquanto não houver verbo
+   * isso não oferece nada ao modelo. Posições 34, 35 e 36 FIXAS (0-based, ao FIM,
+   * nesta ordem): mesma posição da lista do ImobPro (teste de paridade).
+   */
+  "certidao.status",
+  "document.list",
+  "charge.status",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

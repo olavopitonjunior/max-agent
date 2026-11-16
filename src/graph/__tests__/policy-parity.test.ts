@@ -320,6 +320,11 @@ const CATALOGO_DO_IMOBPRO = [
   "google.tasks.write",
   // Avisos da fila no pending.summary (2.8b, 15/11/2026): posição 33 (0-based), ao FIM, fora do padrão.
   "pending.avisos",
+  // PR-O4cat (16/11/2026): três leituras futuras INERTES (sem verbo, fora do padrão e do
+  // brokerDefault). Posições 34, 35 e 36 (0-based), ao FIM, nesta ordem.
+  "certidao.status",
+  "document.list",
+  "charge.status",
 ];
 
 describe("paridade do catálogo de capabilities", () => {

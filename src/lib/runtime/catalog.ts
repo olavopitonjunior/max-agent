@@ -8,6 +8,13 @@ import { CATALOG_VERSION, WORKFLOW_VERSION } from './contracts';
 import { deployProfile } from '../deploy-profile';
 export const READ_ACTIONS = new Set<string>(['google.availability','google.activities','proposal.list','proposal.status','proposal.options','proposal.preflight','form.options','credit.preflight','credit.status','captacao.options','captacao.preflight','captacao.list','captacao.autorizacao.listar','marketing.options','marketing.library','marketing.status']);
 export function isWriteVerb(verb:string):boolean {return !READ_ACTIONS.has(verb);}
+/**
+ * PR-O4cat (16/11/2026): capabilities do catálogo SEM tool e SEM verbo — "reservada, verbo
+ * não implementado". `catalog()` deriva as tools dos verbos, então nenhuma delas aparece
+ * aqui; esta lista só declara o fato para o teste trancar (`capabilities-reservadas.test.ts`).
+ * Ao implementar o verbo, a capability sai desta lista no mesmo PR.
+ */
+export const CAPABILITIES_RESERVADAS: readonly Capability[] = ['certidao.status','document.list','charge.status'];
 export const NEW_QUERIES=['notification.list','activity.list','activity.get','metrics.get','property.list','property.detail','contract.status','template.decisions'];
 export interface CatalogTool {
  id:string;version:string;status:'current'|'disabled'|'planned';installed:boolean;enabled:boolean;executor:'scope-action'|'scope-query'|'graph'|null;effect:'read'|'write'|'paid';flag?:string;recoveryOnly?:boolean;
