@@ -59,7 +59,12 @@ function resumoDe(r: Awaited<ReturnType<typeof despacharLeituras>>): string {
   return item?.resumo ?? "";
 }
 
-beforeEach(() => vi.clearAllMocks());
+const ORIGEM = "https://staging.imobpro.ia.br";
+beforeEach(() => {
+  vi.clearAllMocks();
+  // Rodada 1: o link sai ABSOLUTO, com o domínio da própria plataforma (`imobproBase()`).
+  vi.stubEnv("CONTRACTMAKER_API_URL", ORIGEM);
+});
 afterEach(() => vi.unstubAllEnvs());
 
 function ligar(): void {
@@ -224,9 +229,9 @@ describe("listar_documentos — parse estrito (R54): forma errada vira falha_na_
     ["link protocolo-relativo", (it: Record<string, unknown>) => { it.link = "//evil.example/x"; }],
     ["link sem barra inicial", (it: Record<string, unknown>) => { it.link = "deals/deal-1?tab=anexos"; }],
     ["link com ://  no meio", (it: Record<string, unknown>) => { it.link = "/redir?u=ftp://x"; }],
-    ["link com http escondido", (it: Record<string, unknown>) => { it.link = "/redir?u=http%3A%2F%2Fx"; }],
     ["link com espaço ou quebra de linha", (it: Record<string, unknown>) => { it.link = "/deals/1\n- Fake: x"; }],
-    ["link nulo", (it: Record<string, unknown>) => { it.link = null; }],
+    ["link relativo que o linkSeguro recusa (longo demais)", (it: Record<string, unknown>) => { it.link = `/deals/${"a".repeat(300)}`; }],
+    ["link nulo",(it: Record<string, unknown>) => { it.link = null; }],
     ["link vazio", (it: Record<string, unknown>) => { it.link = ""; }],
   ])("NEGADO: %s", async (_t, mexe) => {
     const r = await falha({ items: comItem(mexe) });
@@ -292,9 +297,9 @@ describe("listar_documentos — o texto (WhatsApp)", () => {
     const t = resumoDe(r);
     expect(t.startsWith("Documentos do negócio:")).toBe(true);
     expect(t.split("\n").filter((l) => l.startsWith("- "))).toEqual([
-      "- Contrato de Compra e Venda — Contrato aprovado v2, 19/10/2026 — abra no sistema: /deals/deal-1?tab=contratos",
-      "- Contrato de Compra e Venda — Contrato assinado, 18/10/2026 — abra no sistema: /deals/deal-1?tab=contratos",
-      "- RG do vendedor.pdf — Anexo (rg), 17/10/2026 — abra no sistema: /deals/deal-1?tab=anexos",
+      `- Contrato de Compra e Venda — Contrato aprovado v2, 19/10/2026 — abra no sistema: ${ORIGEM}/deals/deal-1?tab=contratos`,
+      `- Contrato de Compra e Venda — Contrato assinado, 18/10/2026 — abra no sistema: ${ORIGEM}/deals/deal-1?tab=contratos`,
+      `- RG do vendedor.pdf — Anexo (rg), 17/10/2026 — abra no sistema: ${ORIGEM}/deals/deal-1?tab=anexos`,
     ]);
   });
 
@@ -304,9 +309,12 @@ describe("listar_documentos — o texto (WhatsApp)", () => {
     expect(resumoDe(await rodar([v]))).toContain("17/10/2026");
   });
 
-  it("o resumo NUNCA contém http, **, id cru nem código interno", async () => {
+  it("todo https?:// do resumo começa com a origem de imobproBase(); nunca blob, S3 nem ClickSign; sem **, id cru nem código interno", async () => {
     const t = resumoDe(await rodar());
-    expect(t).not.toMatch(/http/i);
+    const urls = t.match(/https?:\/\/\S+/g) ?? [];
+    expect(urls.length).toBe(3);
+    for (const u of urls) expect(u.startsWith(`${ORIGEM}/`), u).toBe(true);
+    for (const x of ["blob", "amazonaws", "clicksign"]) expect(t.toLowerCase(), x).not.toContain(x);
     expect(t).not.toContain("**");
     expect(t).not.toMatch(/\*/);
     for (const proibido of ["ct-1", "env-1", "att-1", "contrato_assinado", "\"id\"", "criadoEm", "versao", "origem", "negocio-id"]) {
@@ -314,12 +322,36 @@ describe("listar_documentos — o texto (WhatsApp)", () => {
     }
   });
 
-  it("o link vira 'abra no sistema: <caminho>' e continua relativo, nunca URL", async () => {
+  it("o link vira 'abra no sistema: <URL absoluta da plataforma>' (o caminho do CM resolvido contra imobproBase())", async () => {
     const t = resumoDe(await rodar());
     for (const l of t.split("\n").filter((x) => x.startsWith("- "))) {
-      expect(l).toMatch(/abra no sistema: \/[^\s]+$/);
+      expect(l.endsWith(`abra no sistema: ${l.slice(l.indexOf(ORIGEM))}`)).toBe(true);
+      expect(l.slice(l.indexOf(ORIGEM)).startsWith(`${ORIGEM}/`)).toBe(true);
+      expect(l.slice(l.indexOf(ORIGEM))).not.toMatch(/\s/);
     }
-    expect(t).not.toContain("://");
+  });
+
+  it("segue a base configurada: outra CONTRACTMAKER_API_URL muda a origem do link", async () => {
+    vi.stubEnv("CONTRACTMAKER_API_URL", "https://imobpro.ia.br");
+    const t = resumoDe(await rodar());
+    expect(t).toContain("abra no sistema: https://imobpro.ia.br/deals/deal-1?tab=anexos");
+    expect(t).not.toContain("staging");
+  });
+
+  it("id com 'http' dentro (cuid) no caminho PASSA: não é URL, só uma sequência de letras", async () => {
+    const v = clone(vetor.items[2]);
+    v.link = "/deals/chttpx9k2abc?tab=anexos";
+    const r = await rodar([v]);
+    expect(r.trilha[0].outcome).toBe("ok");
+    expect(resumoDe(r)).toContain(`abra no sistema: ${ORIGEM}/deals/chttpx9k2abc?tab=anexos`);
+  });
+
+  it("'http' em parâmetro codificado, sem ://, é aceito e sai preso à origem da plataforma", async () => {
+    const v = clone(vetor.items[2]);
+    v.link = "/redir?u=http%3A%2F%2Fx";
+    const t = resumoDe(await rodar([v]));
+    const url = (t.match(/https?:\/\/\S+/g) ?? [])[0];
+    expect(url?.startsWith(`${ORIGEM}/`)).toBe(true);
   });
 
   it("texto de terceiros com * _ ~ crase e quebra de linha não forja formatação nem linha nova", async () => {
@@ -367,7 +399,7 @@ describe("listar_documentos — o texto (WhatsApp)", () => {
     const r = await despacharLeituras({ ...neg, referencias: mapa("proposta"), chamadas: [{ name: "listar_documentos", args: { numero: 1, de: "proposta" } }] });
     const t = resumoDe(r);
     expect(t.startsWith("Documentos da proposta:")).toBe(true);
-    expect(t).toContain("abra no sistema: /pipeline/propostas/prop-1");
+    expect(t).toContain(`abra no sistema: ${ORIGEM}/pipeline/propostas/prop-1`);
   });
 
   describe("vazio e truncado", () => {

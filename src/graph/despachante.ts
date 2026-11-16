@@ -329,7 +329,7 @@ export async function despacharLeituras(params: {
 
     // Documentos: parse ESTRITO por item (R54), como as certidões. Item com campo a mais (um `url`), forma
     // errada ou `link` que não seja caminho relativo derruba a resposta inteira. Vazio (e negado, sem
-    // módulo, inexistente) vira a frase única. O Max só diz onde abrir na tela: nunca arquivo nem URL.
+    // módulo, inexistente) vira a frase única. O Max só diz onde abrir na tela (URL da própria plataforma): nunca link de arquivo.
     if (entrada.verb === "document.list" && documentosDe) {
       const lidos = r.items.map(lerDocumento);
       if (lidos.some((it) => it === null)) {

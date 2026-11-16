@@ -1,12 +1,14 @@
-import { texto } from "./notificacao-projecao";
+import { linkSeguro, texto } from "./notificacao-projecao";
 
 /**
  * `document.list` (PR-O4c-MA, par do contractmaker PR-O4c-CM, `docs/max.md` §19.5): os documentos
  * de UM negócio ou de UMA proposta.
  *
  * Só leitura, só metadado. O Max diz QUE o documento existe e ONDE ele mora na tela; quem abre é a
- * pessoa, logada. Este módulo nunca produz arquivo nem URL: o `link` do contrato é um caminho
- * RELATIVO da tela, e qualquer coisa que não seja isso derruba a resposta.
+ * pessoa, logada. Este módulo nunca produz link de arquivo: o `link` do contrato é um caminho
+ * RELATIVO da tela, e qualquer coisa que não seja isso derruba a resposta. Na conversa o caminho
+ * sai ABSOLUTO, resolvido por `linkSeguro` (mesma origem de `imobproBase()`, https), para ser
+ * clicável no WhatsApp: é sempre uma tela da plataforma, nunca blob, S3 nem ClickSign.
  *
  * ── Parse ESTRITO (R54), o mesmo do `certidao.status` ───────────────────────
  *
@@ -48,14 +50,15 @@ const textoNaoVazio = (v: unknown): v is string => typeof v === "string" && v.tr
 const ehInstante = (v: unknown): v is string => textoNaoVazio(v) && !Number.isNaN(new Date(v).getTime());
 
 /**
- * Caminho relativo da tela: começa com UMA barra, só caracteres de caminho/consulta e nada de
- * `http` (nem escondido em parâmetro). Nunca URL absoluta nem protocolo-relativa, nunca espaço
- * nem quebra de linha (forjariam linha de lista). Os marcadores `* ~` e crase ficam de fora de
+ * Caminho relativo da tela: começa com UMA barra e só tem caracteres de caminho/consulta. Nunca URL
+ * absoluta nem protocolo-relativa (`://` e `//` caem), nunca espaço nem quebra de linha (forjariam
+ * linha de lista). Não procura "http" no texto: um cuid pode conter essas letras; o que decide é a
+ * forma (barra inicial, sem `://`) e, depois, o `linkSeguro` (mesma origem da plataforma). Os marcadores `* ~` e crase ficam de fora de
  * propósito (formatação do WhatsApp); `_` é permitido (cuid e abas o usam).
  */
 const CAMINHO_RELATIVO = /^\/(?!\/)[A-Za-z0-9\-._/?=&%]*$/;
 function ehCaminhoRelativo(v: unknown): v is string {
-  return typeof v === "string" && CAMINHO_RELATIVO.test(v) && !v.includes("://") && !/http/i.test(v);
+  return typeof v === "string" && CAMINHO_RELATIVO.test(v) && !v.includes("://");
 }
 
 /** Lê UM item pelo contrato; `null` = fora do contrato (a resposta inteira vira falha). */
@@ -65,6 +68,9 @@ export function lerDocumento(item: unknown): DocumentoItem | null {
   if (!ORIGENS_DE_DOCUMENTO.includes(item.origem as OrigemDeDocumento)) return null;
   if (!(item.categoria === null || textoNaoVazio(item.categoria))) return null;
   if (!ehCaminhoRelativo(item.link)) return null;
+  // O render o resolve contra a origem da plataforma; se o `linkSeguro` o recusa (longo demais,
+  // origem estranha), o item está fora do contrato e a resposta vira `falha_na_consulta`.
+  if (linkSeguro(item.link) === null) return null;
   // `versao`: número inteiro ≥ 1 SÓ no contrato aprovado; a chave existe em todos, `null` nos demais.
   if (item.versao !== null && !(typeof item.versao === "number" && Number.isInteger(item.versao) && item.versao >= 1)) return null;
   if ((item.origem === "contrato") !== (item.versao !== null)) return null;
@@ -120,12 +126,12 @@ function linhaDoDocumento(d: DocumentoItem): string {
   const categoria = d.origem === "anexo" && d.categoria ? limpo(d.categoria.replace(/_/g, " ")) : "";
   const quando = dataLocal(d.criadoEm);
   const origem = `${origemLegivel(d)}${categoria ? ` (${categoria})` : ""}${quando ? `, ${quando}` : ""}`;
-  return `- ${nome} — ${origem} — abra no sistema: ${d.link}`;
+  return `- ${nome} — ${origem} — abra no sistema: ${linkSeguro(d.link)}`;
 }
 
 /**
  * O resumo dos documentos de UM negócio/proposta, pronto para a conversa: uma linha por documento,
- * PT-BR, sem negrito (nada de `**`), sem id, sem URL. Recebe itens JÁ lidos por `lerDocumento`,
+ * PT-BR, sem negrito (nada de `**`), sem id, sem link de arquivo (só a URL da tela). Recebe itens JÁ lidos por `lerDocumento`,
  * nunca o JSON cru. O arquivo nunca sai daqui: o caminho é da tela, onde a pessoa abre logada.
  */
 export function renderDocumentos(itens: readonly DocumentoItem[], origem: "negocio" | "proposta", truncado: boolean): string {
