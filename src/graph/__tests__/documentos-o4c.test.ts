@@ -106,7 +106,8 @@ describe("listar_documentos — a oferta (negado primeiro)", () => {
   });
 
   it("a tool vem do verbo document.list, no fim da lista de verbos de leitura, sem produzir lista", () => {
-    expect(VERBOS_DE_LEITURA[VERBOS_DE_LEITURA.length - 1]).toBe("document.list");
+    // PR-O4d acrescentou `charge.status` no fim: o `document.list` é o penúltimo.
+    expect(VERBOS_DE_LEITURA[VERBOS_DE_LEITURA.length - 2]).toBe("document.list");
     const e = REGISTRO_DE_TOOLS.find((x) => x.nome === "listar_documentos");
     expect(e).toMatchObject({ tipo: "leitura", capability: "document.list", verb: "document.list", risco: "nenhum", confirmacao: false, soUsuario: true });
     // Não numera nada: o "n" da lista de negócios continua valendo no turno seguinte.
@@ -127,8 +128,9 @@ describe("listar_documentos — a oferta (negado primeiro)", () => {
 });
 
 describe("listar_documentos — o catálogo", () => {
-  it("document.list saiu de CAPABILITIES_RESERVADAS; só charge.status segue reservada", () => {
-    expect([...CAPABILITIES_RESERVADAS]).toEqual(["charge.status"]);
+  it("document.list saiu de CAPABILITIES_RESERVADAS (e, desde o PR-O4d, não resta nenhuma reservada)", () => {
+    expect(CAPABILITIES_RESERVADAS).not.toContain("document.list");
+    expect([...CAPABILITIES_RESERVADAS]).toEqual([]);
   });
 });
 

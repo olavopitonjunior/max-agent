@@ -52,6 +52,8 @@ export const VERBOS_DE_LEITURA = [
   "certidao.status",
   /** Documentos de UM negócio ou proposta (PR-O4c, 16/11/2026). Só usuário; corretor recebe `{items:[]}`. Só metadado: nunca arquivo nem URL. */
   "document.list",
+  /** Cobranças de comissão de UM negócio (PR-O4d, 16/11/2026). Só usuário e só leitura; corretor recebe `{items:[]}`. Nunca link, boleto nem PIX. */
+  "charge.status",
 ] as const;
 
 export type ScopeQueryVerb = (typeof VERBOS_DE_LEITURA)[number];

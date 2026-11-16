@@ -12,6 +12,8 @@ import { VETOR_CERTIDAO_STATUS_USER } from "./certidao-status-vectors";
 import { lerCertidaoStatus, CHAVES_DE_CERTIDAO_STATUS } from "../certidao-status";
 import { VETOR_DOCUMENT_LIST_USER } from "./documentos-vectors";
 import { lerDocumento, CHAVES_DE_DOCUMENTO } from "../documentos";
+import { VETOR_CHARGE_STATUS_USER } from "./cobranca-vectors";
+import { lerCobranca, CHAVES_DE_COBRANCA } from "../cobranca";
 
 /**
  * Vetor fixo do contrato de `POST /api/agents/scope-query` — a metade daqui.
@@ -116,7 +118,7 @@ describe("paridade do contrato de scope-query", () => {
  * (`contractmaker/apps/web/src/lib/max/`). Literal de propósito: derivar da
  * constante deste lado acompanharia uma divergência em silêncio. Verbo que o
  * ImobPro aceita e este lado não conhece nunca é chamado; o contrário volta 400.
- * `certidao.status` (PR-O4b, 16/11/2026) vem depois de `pending.summary`; `document.list` (PR-O4c) é o último.
+ * `certidao.status` (PR-O4b, 16/11/2026) vem depois de `pending.summary`; `document.list` (PR-O4c) vem depois; `charge.status` (PR-O4d) é o último.
  */
 const VERBOS_DE_LEITURA_DO_IMOBPRO = [
   "deal.list",
@@ -135,6 +137,7 @@ const VERBOS_DE_LEITURA_DO_IMOBPRO = [
   "pending.summary",
   "certidao.status",
   "document.list",
+  "charge.status",
 ];
 
 describe("paridade dos verbos de leitura", () => {
@@ -274,5 +277,58 @@ describe("paridade do vetor document.list", () => {
     expect(lerDocumento(null)).toBeNull();
     expect(lerDocumento("texto")).toBeNull();
     expect(lerDocumento([])).toBeNull();
+  });
+});
+
+/**
+ * `charge.status` (PR-O4d): vetor fixo copiado byte a byte do CM
+ * (`apps/web/src/lib/max/__tests__/query-vectors.ts`, chave `charge.status.user`).
+ * Só a forma do usuário: o corretor comissionado nunca recebe o verbo (o servidor responde `{"items":[]}`).
+ */
+describe("paridade do vetor charge.status", () => {
+  const corpo = JSON.parse(VETOR_CHARGE_STATUS_USER) as { items: Array<Record<string, unknown>>; truncated: unknown };
+
+  it("charge.status é leitura, atrás de MAX_EXTENDED_QUERIES (nasce desligada), com a capability de mesmo nome", () => {
+    const t = catalog("org1").tools.find((x) => x.id === "charge.status");
+    expect(t).toMatchObject({
+      executor: "scope-query",
+      effect: "read",
+      flag: "MAX_EXTENDED_QUERIES",
+      permission: "charge.status",
+      policyCapability: "charge.status",
+    });
+    vi.stubEnv("MAX_EXTENDED_QUERIES", "false");
+    try {
+      expect(executableTool("charge.status", "scope-query", "org1")).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("a ordem das chaves do item é a do CM (o corpo HTTP a preserva)", () => {
+    expect(corpo.items.length).toBeGreaterThan(0);
+    for (const it of corpo.items) expect(Object.keys(it)).toEqual([...CHAVES_DE_COBRANCA]);
+    expect(Object.keys(corpo)).toEqual(["items", "truncated"]);
+    expect(corpo.truncated).toBe(false);
+  });
+
+  it("parse ESTRITO: cada item do vetor é aceito e reserializa idêntico", () => {
+    const lidos = corpo.items.map((it) => lerCobranca(it));
+    expect(lidos.every((x) => x !== null)).toBe(true);
+    expect(JSON.stringify({ items: lidos, truncated: corpo.truncated })).toBe(VETOR_CHARGE_STATUS_USER);
+  });
+
+  it("parse ESTRITO: qualquer chave a mais ou a menos é recusada, nunca repassada", () => {
+    for (const it of corpo.items) {
+      expect(lerCobranca({ ...it, invoiceUrl: "https://x/y" })).toBeNull();
+      for (const k of Object.keys(it)) {
+        const sem = { ...it };
+        delete sem[k];
+        expect(lerCobranca(sem), `sem ${k}`).toBeNull();
+      }
+    }
+    expect(lerCobranca(null)).toBeNull();
+    expect(lerCobranca("texto")).toBeNull();
+    expect(lerCobranca([])).toBeNull();
   });
 });

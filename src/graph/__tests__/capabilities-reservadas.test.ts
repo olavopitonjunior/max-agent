@@ -20,12 +20,17 @@ import { REGISTRO_DE_TOOLS, capabilitiesDeOferta, ferramentasDoTurno, selecionar
  * reservadas. Continua na posição 35, fora do padrão e do `brokerDefault`. Só `charge.status` segue
  * reservada (sem verbo, sem tool).
  *
+ * PR-O4d (16/11/2026): `charge.status` GANHOU verbo e tool (`status_cobranca`) e SAI da lista de
+ * reservadas. Continua na posição 36, fora do padrão e do `brokerDefault`. Não resta nenhuma
+ * reservada: `CAPABILITIES_RESERVADAS` fica vazia (os testes de "inerte" abaixo derivam de
+ * `RESERVADAS` e voltam a valer, de verdade, se alguma capability voltar a ser reservada).
+ *
  * Os literais abaixo são copiados do CM, de propósito (regra 1 da governança do Max):
  * derivar da constante deste lado acompanharia uma divergência em silêncio.
  */
 const CATALOGO_34_A_36 = ["certidao.status", "document.list", "charge.status"] as const;
-/** O que continua reservado (sem verbo, sem tool) depois do PR-O4c. */
-const RESERVADAS = ["charge.status"] as const;
+/** O que continua reservado (sem verbo, sem tool) depois do PR-O4d: nada. */
+const RESERVADAS: readonly Capability[] = [];
 
 /** `POLITICA_PADRAO` do CM, como a rota `/api/agents/profile` a emite. */
 const PADRAO_DO_CM: MaxPolicy = JSON.parse(
@@ -49,12 +54,14 @@ describe("capabilities reservadas do PR-O4cat (inertes)", () => {
     CATALOGO_34_A_36.forEach((c, i) => expect(CAPABILITIES.indexOf(c)).toBe(34 + i));
   });
 
-  it("certidao.status e document.list saíram da lista de reservadas (têm verbo e tool); só charge.status fica", () => {
+  it("as 3 saíram da lista de reservadas (têm verbo e tool): não resta nenhuma", () => {
     expect([...CAPABILITIES_RESERVADAS]).toEqual([...RESERVADAS]);
     expect(CAPABILITIES_RESERVADAS).not.toContain("certidao.status");
     expect(CAPABILITIES_RESERVADAS).not.toContain("document.list");
+    expect(CAPABILITIES_RESERVADAS).not.toContain("charge.status");
     expect(VERBOS_DE_LEITURA as readonly string[]).toContain("certidao.status");
     expect(VERBOS_DE_LEITURA as readonly string[]).toContain("document.list");
+    expect(VERBOS_DE_LEITURA as readonly string[]).toContain("charge.status");
   });
 
   it("o padrão do CM espelhado no MA não concede nenhuma das 3", () => {
@@ -83,11 +90,11 @@ describe("capabilities reservadas do PR-O4cat (inertes)", () => {
   });
 
   describe("nenhuma tool é oferecida por elas (não existe tool nova)", () => {
-    const ligada = JSON.parse(
-      '{"byRole":{"*":["deal.list","charge.status"]}}'
-    ) as MaxPolicy;
+    // Montadas a partir de `RESERVADAS`: com a lista vazia, "ligada" = "sem elas" e a política só
+    // com elas é vazia; o caso volta a ser forte se alguma capability voltar a ser reservada.
+    const ligada: MaxPolicy = { byRole: { "*": ["deal.list", ...RESERVADAS] } };
     const semElas = JSON.parse('{"byRole":{"*":["deal.list"]}}') as MaxPolicy;
-    const so1 = JSON.parse('{"byRole":{"*":["charge.status"]}}') as MaxPolicy;
+    const so1: MaxPolicy = { byRole: { "*": [...RESERVADAS] } };
 
     const efetivas = (p: MaxPolicy): Capability[] => resolverPolitica({ politica: p, sujeito: gerente, role: "sales" });
 
@@ -150,6 +157,12 @@ describe("capabilities reservadas do PR-O4cat (inertes)", () => {
       const comDocumentos = JSON.parse('{"byRole":{"*":["document.list"]}}') as MaxPolicy;
       const nomes = ferramentasDoTurno({ policy: efetivas(comDocumentos), texto: TEXTO, identity: gerente }).entradas.map((e) => e.nome);
       expect(nomes).toEqual(["listar_documentos"]);
+    });
+
+    it("charge.status NÃO é mais inerte: ligada na política, com rollout e flag, oferece status_cobranca", () => {
+      const comCobranca = JSON.parse('{"byRole":{"*":["charge.status"]}}') as MaxPolicy;
+      const nomes = ferramentasDoTurno({ policy: efetivas(comCobranca), texto: TEXTO, identity: gerente }).entradas.map((e) => e.nome);
+      expect(nomes).toEqual(["status_cobranca"]);
     });
   });
 });

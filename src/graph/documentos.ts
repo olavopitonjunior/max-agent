@@ -101,7 +101,7 @@ const NOME_DE_RESERVA = "Documento";
  * formatação (`*` negrito, `_` itálico, `~` riscado, crase monoespaçado: forjariam formatação) e
  * sem sobra de espaço. Mesma regra do `certidao-status.ts`.
  */
-function limpo(v: string): string {
+export function limpo(v: string): string {
   return (texto(v) ?? "").replace(/[*_~`]+/g, "").replace(/\s+/g, " ").trim();
 }
 

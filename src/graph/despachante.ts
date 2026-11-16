@@ -24,6 +24,7 @@ import { projetarResumoDePendencias } from "./avisos-projecao";
 import { atividadeEmHoraLocal } from "./atividade-hora-local";
 import { lerCertidaoStatus, renderCertidoes, type CertidaoStatusItem } from "./certidao-status";
 import { lerDocumento, renderDocumentos, type DocumentoItem } from "./documentos";
+import { lerCobranca, renderCobrancas, type CobrancaItem } from "./cobranca";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -50,7 +51,7 @@ export type Recusa =
   | "nao_oferecida"
   | "capability_negada"
   | "identidade_nao_escreve"
-  /** Leitura só de usuário da plataforma (`certidao.status`, `document.list`): o corretor comissionado nunca a recebe. */
+  /** Leitura só de usuário da plataforma (`certidao.status`, `document.list`, `charge.status`): o corretor comissionado nunca a recebe. */
   | "identidade_nao_le"
   /** Nome histórico na trilha: argumento fora do enum da `propor_criacao`. */
   | "tipo_invalido";
@@ -76,7 +77,7 @@ export function autorizarChamada(params: {
     return { ok: false, motivo: "nao_oferecida", entrada };
   }
 
-  // Leitura restrita a usuário (`certidao.status`, `document.list`): vale mesmo com a capability na política. Antes de
+  // Leitura restrita a usuário (`certidao.status`, `document.list`, `charge.status`): vale mesmo com a capability na política. Antes de
   // (c) pelo mesmo motivo de (d): é a recusa estável, não depende de política nem de argumento.
   if (entrada.tipo === "leitura" && entrada.soUsuario && params.identity.kind !== "user") {
     return { ok: false, motivo: "identidade_nao_le", entrada };
@@ -232,6 +233,17 @@ export async function despacharLeituras(params: {
       }
       args = { [documentosDe === "proposta" ? "proposta_id" : "negocio_id"]: selected.item.id };
     }
+    // Cobranças: SÓ de negócio, pelo número da lista (nunca `de: "proposta"`, nunca id cru). O servidor
+    // recebe EXATAMENTE `negocio_id` e mais nada (sem `limite`, sem filtro de provedor: o teto é dele).
+    if (entrada.verb === "charge.status") {
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "negocio" });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      args = { negocio_id: selected.item.id };
+    }
     if (entrada.verb === "activity.get") {
       // O modelo aponta pelo número da lista; o id interno nunca passa por ele.
       const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "atividade" });
@@ -340,6 +352,25 @@ export async function despacharLeituras(params: {
         continue;
       }
       const resumo = renderDocumentos(lidos as DocumentoItem[], documentosDe, r.truncated);
+      resultados.push({ tool: chamada.name, items: [{ resumo, _untrusted: true }], truncated: r.truncated });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+      continue;
+    }
+
+    // Cobranças: parse ESTRITO por item (R54), como as certidões e os documentos. Item com campo a mais (um
+    // `invoiceUrl`), `valor` que não seja centavo inteiro, enum fora do mapa fechado ou data que não seja ISO
+    // derruba a resposta inteira. Vazio (e negado, sem permissão, sem módulo, negócio alheio: chegam iguais) vira
+    // a frase única. O resumo é montado aqui, sem link, sem id e sem ação: a pessoa age na tela, logada.
+    if (entrada.verb === "charge.status") {
+      const lidos = r.items.map(lerCobranca);
+      if (lidos.some((it) => it === null)) {
+        // Sem o conteúdo do item no log: é dinheiro de terceiros (valor, vencimento).
+        console.error(`[despachante] charge.status fora do contrato na org ${params.identity.orgId} (${lidos.filter((it) => it === null).length}/${lidos.length} itens)`);
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+      const resumo = renderCobrancas(lidos as CobrancaItem[], r.truncated);
       resultados.push({ tool: chamada.name, items: [{ resumo, _untrusted: true }], truncated: r.truncated });
       trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
       continue;
