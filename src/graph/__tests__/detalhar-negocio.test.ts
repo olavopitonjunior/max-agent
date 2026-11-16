@@ -119,7 +119,7 @@ describe("detalhar_negocio — broker (projeção mínima)", () => {
         "Contrato: aprovado",
         "Assinaturas: 1 de 3 assinadas, 1 recusada, 1 pendente",
         "Situação da assinatura: em andamento",
-        "Pendências: Conferir documento",
+        "Pendências: atividade pendente",
         "Atualizado em 20/10/2026",
       ].join("\n")
     );
