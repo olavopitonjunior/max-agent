@@ -819,11 +819,14 @@ export const DETALHAR_NEGOCIO: ToolDef = {
   def: {
     name: "detalhar_negocio",
     description:
-      "Mostra a etapa e as pendências de UM negócio que já apareceu numa lista, " +
-      "escolhido pelo número dele (o \"n\" da lista anterior). Use quando a pessoa " +
-      "pedir o detalhe de um negócio específico pelo número. Se não houver lista " +
-      "anterior, chame listar_negocios primeiro; nunca escolha um negócio por " +
-      "conta própria nem assuma o mais recente.",
+      "Mostra o detalhe de UM negócio que já apareceu numa lista, escolhido pelo número " +
+      "dele (o \"n\" da lista anterior): etapa, pendências, partes, contrato, proposta e " +
+      "andamento das assinaturas, conforme o que o papel da pessoa pode ver. Use quando a " +
+      "pessoa pedir o detalhe ou como está um negócio específico. O resultado vem pronto " +
+      "em \"resumo\": repasse-o fielmente, sem acrescentar dado, sem trocar número e sem " +
+      "inventar o que não estiver nele. Se não houver lista anterior, chame " +
+      "listar_negocios primeiro; nunca escolha um negócio por conta própria nem assuma o " +
+      "mais recente.",
     parameters: {
       type: "object",
       properties: {

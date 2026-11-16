@@ -145,6 +145,188 @@ export interface DealProjetadoBroker {
   referencia: string;
 }
 
+/** A assinatura do contrato principal: só contagens, nunca o signatário individual. */
+export interface AssinaturaDoUser {
+  estado: string;
+  enviadoEm: string | null;
+  concluidoEm: string | null;
+  total: number;
+  assinadas: number;
+  recusadas: number;
+  pendentes: number;
+}
+
+/**
+ * `deal.detail` do USUÁRIO (PR-O4a, par do contractmaker#3167): as 7 chaves de `deal.list`, na
+ * mesma ordem, e as 6 novas. `contrato`/`proposta`/`assinatura` são `null` quando não há.
+ * `proposta.id` e `id` existem no fio e NUNCA chegam ao modelo nem à pessoa.
+ */
+export interface DealDetalhadoUser extends DealProjetadoUser {
+  tipo: "venda" | "locacao";
+  partes: { papel: string; nome: string }[];
+  contrato: { estado: string; versao: number; atualizadoEm: string } | null;
+  proposta: { id: string; codigo: string | null; estado: string } | null;
+  assinatura: AssinaturaDoUser | null;
+  link: string;
+}
+
+/**
+ * `deal.detail` do CORRETOR COMISSIONADO: só PAPEL das partes (nome identifica o cliente), sem
+ * `proposta` (não tem trilha de proposta), sem `link`, sem datas de envio.
+ */
+export interface DealDetalhadoBroker extends DealProjetadoBroker {
+  partes: { papel: string }[];
+  contrato: { estado: string } | null;
+  assinatura: { estado: string; total: number; assinadas: number; recusadas: number; pendentes: number } | null;
+}
+
+const CHAVES_USER = [
+  "id", "etapa", "pendencias", "atualizadoEm", "titulo", "cliente", "valor",
+  "tipo", "partes", "contrato", "proposta", "assinatura", "link",
+] as const;
+const CHAVES_BROKER = [
+  "id", "etapa", "pendencias", "atualizadoEm", "referencia", "partes", "contrato", "assinatura",
+] as const;
+const CHAVES_ASSINATURA_USER = ["estado", "enviadoEm", "concluidoEm", "total", "assinadas", "recusadas", "pendentes"] as const;
+const CHAVES_ASSINATURA_BROKER = ["estado", "total", "assinadas", "recusadas", "pendentes"] as const;
+
+type Objeto = Record<string, unknown>;
+
+const ehObjeto = (v: unknown): v is Objeto => !!v && typeof v === "object" && !Array.isArray(v);
+/** O objeto tem EXATAMENTE estas chaves: faltou ou sobrou uma, a forma não é a do contrato. */
+const chavesExatas = (v: Objeto, chaves: readonly string[]): boolean => {
+  const tem = Object.keys(v);
+  return tem.length === chaves.length && chaves.every((c) => Object.hasOwn(v, c));
+};
+const texto = (v: unknown): v is string => typeof v === "string";
+const textoOuNulo = (v: unknown): v is string | null => v === null || typeof v === "string";
+const contagem = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
+
+function lerAssinatura(v: unknown, chaves: readonly string[], user: boolean): boolean {
+  if (!ehObjeto(v) || !chavesExatas(v, chaves)) return false;
+  if (!texto(v.estado)) return false;
+  if (!(contagem(v.total) && contagem(v.assinadas) && contagem(v.recusadas) && contagem(v.pendentes))) return false;
+  return !user || (textoOuNulo(v.enviadoEm) && textoOuNulo(v.concluidoEm));
+}
+
+/**
+ * Lê UM item de `deal.detail` como o contrato diz, ou devolve `null`.
+ *
+ * **Parse defensivo e fail-closed, não whitelist que poda.** Chave a mais (um `cpf`, um `email`, um
+ * `nome` na parte do broker), chave a menos ou valor de tipo errado em QUALQUER nível descarta o
+ * item inteiro: podar produziria um item meio-certo que parece correto; descartar produz uma
+ * ausência que alguém investiga (mesma razão de `descartarSeVazou`, que vigia só o broker e só
+ * os campos que conhece). Aqui vale para os DOIS sujeitos, e o sujeito errado também é recusado:
+ * a forma do broker lida como usuário (ou o inverso) é sinal de que alguém confundiu o `subject`.
+ *
+ * O valor devolvido é um objeto NOVO, montado campo a campo: nada do que o servidor mandou além
+ * disto sobrevive, nem por referência.
+ */
+export function lerDealDetalhado(item: unknown, kind: "user"): DealDetalhadoUser | null;
+export function lerDealDetalhado(item: unknown, kind: "broker"): DealDetalhadoBroker | null;
+export function lerDealDetalhado(item: unknown, kind: "user" | "broker"): DealDetalhadoUser | DealDetalhadoBroker | null;
+export function lerDealDetalhado(item: unknown, kind: "user" | "broker"): DealDetalhadoUser | DealDetalhadoBroker | null {
+  if (!ehObjeto(item)) return null;
+  const user = kind === "user";
+  if (!chavesExatas(item, user ? CHAVES_USER : CHAVES_BROKER)) return null;
+
+  if (!(texto(item.id) && textoOuNulo(item.etapa) && texto(item.atualizadoEm))) return null;
+  if (!Array.isArray(item.pendencias) || !item.pendencias.every(texto)) return null;
+  if (!Array.isArray(item.partes)) return null;
+  const pendencias = [...(item.pendencias as string[])];
+
+  if (user) {
+    if (!(texto(item.titulo) && textoOuNulo(item.cliente) && texto(item.link))) return null;
+    if (!(item.valor === null || (typeof item.valor === "number" && Number.isFinite(item.valor)))) return null;
+    if (item.tipo !== "venda" && item.tipo !== "locacao") return null;
+
+    const partes: DealDetalhadoUser["partes"] = [];
+    for (const p of item.partes) {
+      if (!ehObjeto(p) || !chavesExatas(p, ["papel", "nome"]) || !texto(p.papel) || !texto(p.nome)) return null;
+      partes.push({ papel: p.papel, nome: p.nome });
+    }
+
+    let contrato: DealDetalhadoUser["contrato"] = null;
+    if (item.contrato !== null) {
+      const c = item.contrato;
+      if (!ehObjeto(c) || !chavesExatas(c, ["estado", "versao", "atualizadoEm"])) return null;
+      if (!(texto(c.estado) && contagem(c.versao) && texto(c.atualizadoEm))) return null;
+      contrato = { estado: c.estado, versao: c.versao, atualizadoEm: c.atualizadoEm };
+    }
+
+    let proposta: DealDetalhadoUser["proposta"] = null;
+    if (item.proposta !== null) {
+      const p = item.proposta;
+      if (!ehObjeto(p) || !chavesExatas(p, ["id", "codigo", "estado"])) return null;
+      if (!(texto(p.id) && textoOuNulo(p.codigo) && texto(p.estado))) return null;
+      proposta = { id: p.id, codigo: p.codigo, estado: p.estado };
+    }
+
+    let assinatura: DealDetalhadoUser["assinatura"] = null;
+    if (item.assinatura !== null) {
+      if (!lerAssinatura(item.assinatura, CHAVES_ASSINATURA_USER, true)) return null;
+      const a = item.assinatura as unknown as AssinaturaDoUser;
+      assinatura = {
+        estado: a.estado,
+        enviadoEm: a.enviadoEm,
+        concluidoEm: a.concluidoEm,
+        total: a.total,
+        assinadas: a.assinadas,
+        recusadas: a.recusadas,
+        pendentes: a.pendentes,
+      };
+    }
+
+    return {
+      id: item.id,
+      etapa: item.etapa,
+      pendencias,
+      atualizadoEm: item.atualizadoEm,
+      titulo: item.titulo,
+      cliente: item.cliente,
+      valor: item.valor,
+      tipo: item.tipo,
+      partes,
+      contrato,
+      proposta,
+      assinatura,
+      link: item.link,
+    };
+  }
+
+  if (!texto(item.referencia)) return null;
+  const partes: DealDetalhadoBroker["partes"] = [];
+  for (const p of item.partes) {
+    if (!ehObjeto(p) || !chavesExatas(p, ["papel"]) || !texto(p.papel)) return null;
+    partes.push({ papel: p.papel });
+  }
+
+  let contrato: DealDetalhadoBroker["contrato"] = null;
+  if (item.contrato !== null) {
+    const c = item.contrato;
+    if (!ehObjeto(c) || !chavesExatas(c, ["estado"]) || !texto(c.estado)) return null;
+    contrato = { estado: c.estado };
+  }
+
+  let assinatura: DealDetalhadoBroker["assinatura"] = null;
+  if (item.assinatura !== null) {
+    if (!lerAssinatura(item.assinatura, CHAVES_ASSINATURA_BROKER, false)) return null;
+    const a = item.assinatura as unknown as NonNullable<DealDetalhadoBroker["assinatura"]>;
+    assinatura = { estado: a.estado, total: a.total, assinadas: a.assinadas, recusadas: a.recusadas, pendentes: a.pendentes };
+  }
+
+  return {
+    id: item.id,
+    etapa: item.etapa,
+    pendencias,
+    atualizadoEm: item.atualizadoEm,
+    referencia: item.referencia,
+    partes,
+    contrato,
+    assinatura,
+  };
+}
+
 /** Campos que a projeção do broker NUNCA pode conter. Ver o teste de paridade. */
 export const CAMPOS_PROIBIDOS_AO_BROKER = [
   "titulo",

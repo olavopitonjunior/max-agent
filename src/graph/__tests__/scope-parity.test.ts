@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   CAMPOS_PROIBIDOS_AO_BROKER,
+  lerDealDetalhado,
+  type DealDetalhadoBroker,
+  type DealDetalhadoUser,
   type DealProjetadoBroker,
   type DealProjetadoUser,
   type ScopeQueryRequest,
@@ -8,6 +11,7 @@ import {
   VERBOS_DE_LEITURA,
 } from "../scope-contract";
 import { catalog, executableTool } from "@/lib/runtime/catalog";
+import { VETOR_DEAL_DETAIL_BROKER, VETOR_DEAL_DETAIL_USER } from "./deal-detail-vectors";
 
 /**
  * Vetor fixo do contrato de `POST /api/agents/scope-query` — a metade daqui.
@@ -162,5 +166,83 @@ describe("paridade dos verbos de leitura", () => {
   it("os outros verbos de consulta nova continuam atrás de MAX_EXTENDED_QUERIES", () => {
     const t = catalog("org1").tools.find((x) => x.id === "activity.list");
     expect(t).toMatchObject({ flag: "MAX_EXTENDED_QUERIES" });
+  });
+});
+
+/**
+ * `deal.detail` enriquecido (PR-O4a): os literais vivem em `deal-detail-vectors.ts`,
+ * copiados byte a byte do `query-vectors.ts` do contractmaker (#3167).
+ */
+describe("paridade de deal.detail (vetores do CM #3167)", () => {
+  const user = JSON.parse(VETOR_DEAL_DETAIL_USER) as ScopeQueryResponse<DealDetalhadoUser>;
+  const broker = JSON.parse(VETOR_DEAL_DETAIL_BROKER) as ScopeQueryResponse<DealDetalhadoBroker>;
+
+  it("o vetor do usuário re-serializa idêntico (ordem de chave do contrato)", () => {
+    expect(JSON.stringify(user)).toBe(VETOR_DEAL_DETAIL_USER);
+  });
+
+  it("o vetor do broker re-serializa idêntico (ordem de chave do contrato)", () => {
+    expect(JSON.stringify(broker)).toBe(VETOR_DEAL_DETAIL_BROKER);
+  });
+
+  it("o detalhe do usuário começa pelas 7 chaves de deal.list, na mesma ordem", () => {
+    expect(Object.keys(user.items[0]).slice(0, 7)).toEqual(Object.keys(ITEM_USER));
+    expect(Object.keys(user.items[0]).slice(7)).toEqual(["tipo", "partes", "contrato", "proposta", "assinatura", "link"]);
+  });
+
+  it("o vetor do broker NÃO contém nenhum campo proibido (ausência, em qualquer profundidade)", () => {
+    for (const proibido of [...CAMPOS_PROIBIDOS_AO_BROKER, "nome", "link", "proposta", "url"]) {
+      expect(VETOR_DEAL_DETAIL_BROKER).not.toContain(`"${proibido}"`);
+    }
+    expect(VETOR_DEAL_DETAIL_BROKER).not.toMatch(/Maria|João|Apto Centro|850000/);
+  });
+
+  it("o parser aceita os dois vetores, do jeito que vieram", () => {
+    expect(lerDealDetalhado(user.items[0], "user")).toEqual(user.items[0]);
+    expect(lerDealDetalhado(broker.items[0], "broker")).toEqual(broker.items[0]);
+  });
+
+  it("a mesma resposta em outro sujeito NÃO é aceita (user lê com forma de broker e vice-versa)", () => {
+    expect(lerDealDetalhado(user.items[0], "broker")).toBeNull();
+    expect(lerDealDetalhado(broker.items[0], "user")).toBeNull();
+  });
+});
+
+describe("lerDealDetalhado — parse defensivo (campo extra = item descartado)", () => {
+  const user = JSON.parse(VETOR_DEAL_DETAIL_USER).items[0] as Record<string, unknown>;
+  const broker = JSON.parse(VETOR_DEAL_DETAIL_BROKER).items[0] as Record<string, unknown>;
+
+  it.each([
+    ["cpf no topo (user)", { ...user, cpf: "52998224725" }, "user"],
+    ["cpf no topo (broker)", { ...broker, cpf: "52998224725" }, "broker"],
+    ["email aninhado em partes (user)", { ...user, partes: [{ papel: "vendedor", nome: "A", email: "a@b.c" }] }, "user"],
+    ["nome aninhado em partes (broker)", { ...broker, partes: [{ papel: "vendedor", nome: "João Souza" }] }, "broker"],
+    ["campo extra em contrato", { ...user, contrato: { estado: "aprovado", versao: 2, atualizadoEm: "2026-10-19T12:00:00.000Z", url: "https://x" } }, "user"],
+    ["campo extra em assinatura (broker)", { ...broker, assinatura: { estado: "running", total: 1, assinadas: 0, recusadas: 0, pendentes: 1, signatarios: ["a"] } }, "broker"],
+    ["link no broker", { ...broker, link: "/deals/deal-1" }, "broker"],
+    ["titulo no broker", { ...broker, titulo: "Apto" }, "broker"],
+  ] as const)("%s -> null", (_t, item, kind) => {
+    expect(lerDealDetalhado(item, kind)).toBeNull();
+  });
+
+  it.each([
+    ["sem etapa", (({ etapa: _e, ...r }) => r)(user)],
+    ["pendencias não é lista", { ...user, pendencias: "x" }],
+    ["tipo desconhecido", { ...user, tipo: "permuta" }],
+    ["contagem negativa", { ...user, assinatura: { ...(user.assinatura as object), pendentes: -1 } }],
+    ["contagem decimal", { ...user, assinatura: { ...(user.assinatura as object), total: 1.5 } }],
+    ["versão não numérica", { ...user, contrato: { ...(user.contrato as object), versao: "2" } }],
+  ])("forma inválida (%s) -> null", (_t, item) => {
+    expect(lerDealDetalhado(item, "user")).toBeNull();
+  });
+
+  it.each([null, undefined, "x", 3, [], [{}]])("não-objeto %j -> null", (v) => {
+    expect(lerDealDetalhado(v, "user")).toBeNull();
+    expect(lerDealDetalhado(v, "broker")).toBeNull();
+  });
+
+  it("null em contrato, proposta e assinatura é válido (a chave existe, o valor é null)", () => {
+    expect(lerDealDetalhado({ ...user, contrato: null, proposta: null, assinatura: null }, "user")).not.toBeNull();
+    expect(lerDealDetalhado({ ...broker, contrato: null, assinatura: null }, "broker")).not.toBeNull();
   });
 });
