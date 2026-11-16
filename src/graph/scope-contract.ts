@@ -122,6 +122,12 @@ export interface ScopeQueryRequest {
     periodo?: (typeof PERIODOS_DE_METRICA)[number];
     /** `metrics.get`: quebra pedida por gestor (par do contractmaker, plano notificações por papel PR6/v3). */
     quebra?: (typeof QUEBRAS_DE_METRICA)[number];
+    /**
+     * `deal.list`: nome do negócio ou do cliente (1 a 80 caracteres depois do trim; o servidor soma ao escopo
+     * e procura em título OU cliente, sem diferenciar maiúsculas). Só o USUÁRIO manda: o corretor comissionado
+     * nunca envia o termo (e recebe `{items:[]}` se ele chegasse). Um CM antigo o ignora: o Max refiltra.
+     */
+    busca?: string;
   };
 }
 

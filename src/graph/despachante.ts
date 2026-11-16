@@ -25,6 +25,7 @@ import { atividadeEmHoraLocal } from "./atividade-hora-local";
 import { lerCertidaoStatus, renderCertidoes, type CertidaoStatusItem } from "./certidao-status";
 import { lerDocumento, renderDocumentos, type DocumentoItem } from "./documentos";
 import { lerCobranca, renderCobrancas, type CobrancaItem } from "./cobranca";
+import { filtrarPorBusca, lerBusca } from "./busca";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -281,6 +282,14 @@ export async function despacharLeituras(params: {
       // Só `periodo` e `quebra`, ambos dentro do enum: `estado`, `numero`, `mais` e o resto do modelo somem.
       args = lerArgsDeMetrica(args);
     }
+    // Busca de negócio por nome: só o USUÁRIO manda o termo (o corretor comissionado nunca; a projeção dele
+    // não tem título nem cliente). Aparado e cortado em 80; vazio some. O mesmo termo refiltra a resposta abaixo.
+    let buscaLocal: string | null = null;
+    if (entrada.verb === "deal.list") {
+      buscaLocal = params.identity.kind === "user" ? lerBusca(args.busca) : null;
+      if (buscaLocal) args.busca = buscaLocal;
+      else delete args.busca;
+    }
     if (paginada) {
       const continuation = referencias?.continuacao;
       if (args.mais === true) {
@@ -400,6 +409,10 @@ export async function despacharLeituras(params: {
       trilha.push({ name: chamada.name, args: chamada.args, outcome: chamada.args.opcoes_etapas === true ? "opcoes_consulta" : "filtro_invalido" });
       continue;
     }
+
+    // Fail-closed contra CM antigo: ele descarta `busca` em silêncio e devolve a lista inteira. Só o que casa
+    // por título ou cliente segue; o resto sai ANTES de numerar e nunca ganha número.
+    if (buscaLocal) r.items = filtrarPorBusca(r.items, buscaLocal);
 
     // G2: o código numera, o modelo vê só número + rótulo. Leitura que não
     // declara o que produz passa como veio (nenhuma hoje).

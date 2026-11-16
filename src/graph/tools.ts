@@ -565,6 +565,13 @@ export const LISTAR_NEGOCIOS: ToolDef = {
           type: "integer",
           description: "Quantos negócios trazer. Padrão 10.",
         },
+        busca: {
+          type: "string",
+          maxLength: 80,
+          description:
+            "Nome do negócio ou do cliente. Use quando o corretor citar o negócio pelo nome ou pelo cliente; " +
+            "depois use o número da lista nas tools de detalhe. Opcional.",
+        },
       },
       additionalProperties: false,
     },

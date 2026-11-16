@@ -18,6 +18,7 @@ import { payloadDoNumero } from "@/lib/aviso/numero";
 import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
 import { iniciarPreferencias, preferenciasPermitidas, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
 import { resolverReferencia } from "./referencias";
+import { lerBusca } from "./busca";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
 import { iniciarAssinatura, pedeAssinatura } from "./assinatura";
@@ -1587,10 +1588,12 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   if (state.toolRounds > 0 && singleDeal && !singleDeal.clarification && (selectedDeal || singleDeal.items?.length === 0)) {
     const completed = [...state.toolLog].reverse().find(entry => entry.name === "listar_negocios" && entry.outcome === "ok");
     const stage = typeof completed?.args.estado === "string" ? completed.args.estado.trim() : "";
+    // Busca por nome vale só para o usuário (o corretor nunca manda o termo): vazio com busca = nome não achado.
+    const buscou = state.identity.kind === "user" && lerBusca(completed?.args.busca) !== null;
     const draft = singleDeal.items === null || !completed
       ? "Não consegui consultar seus negócios agora. Tente novamente mais tarde."
       : singleDeal.items.length === 0
-        ? `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`
+        ? (buscou ? "Não encontrei negócio com esse nome visível para você." : `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`)
         : renderizarNegociosSelecionados(singleDeal.items, state.referencias, singleDeal.truncated);
     return { selectedDealQuery: null, queryOptions: null, restoDaResposta: null, draft };
   }
