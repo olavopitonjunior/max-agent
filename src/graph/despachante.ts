@@ -120,6 +120,8 @@ export interface ResultadoDeTool {
   clarification?: StageClarification;
   /** `template.decisions`: modelos não medidos (o modelo nunca diz "sem pendência" com isso > 0). */
   naoMedidos?: number;
+  /** `deal.list` com `busca` de corretor comissionado: o CM não foi chamado; `items` vazio NÃO é "não achei". */
+  buscaIndisponivel?: boolean;
 }
 
 /**
@@ -286,7 +288,15 @@ export async function despacharLeituras(params: {
     // não tem título nem cliente). Aparado e cortado em 80; vazio some. O mesmo termo refiltra a resposta abaixo.
     let buscaLocal: string | null = null;
     if (entrada.verb === "deal.list") {
-      buscaLocal = params.identity.kind === "user" ? lerBusca(args.busca) : null;
+      const termo = lerBusca(args.busca);
+      // Corretor comissionado com termo: busca indisponível. NENHUMA chamada ao CM (o termo não sai daqui) e
+      // lista vazia marcada, para a resposta fixa dizer isso em vez de "não encontrei" ou da lista dele sem filtro.
+      if (termo && params.identity.kind !== "user") {
+        resultados.push({ tool: chamada.name, items: [], truncated: false, buscaIndisponivel: true });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "busca_indisponivel" });
+        continue;
+      }
+      buscaLocal = termo;
       if (buscaLocal) args.busca = buscaLocal;
       else delete args.busca;
     }

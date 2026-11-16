@@ -139,18 +139,32 @@ describe("o que vai ao CM", () => {
     expect(escopo.mock.calls[0][0].args?.busca).toBe("TESTE1");
   });
 
-  it("BROKER: o termo nunca vai ao CM e a lista não é filtrada pelo nome", async () => {
+  it("BROKER com `busca`: NENHUMA chamada ao CM; lista vazia, marcada como busca indisponível, mapa vazio", async () => {
     escopo.mockResolvedValue({
-      items: [{ id: "D1", etapa: "Documentação", referencia: "Negócio #AAAAAA" }, { id: "D2", etapa: "Formulário", referencia: "Negócio #BBBBBB" }],
+      items: [{ id: "D1", etapa: "Documentação", referencia: "Negócio #AAAAAA" }],
       truncated: false,
     });
     const r = await despacharLeituras({
       ...lista, identity: corretor, chamadas: [{ name: "listar_negocios", args: { busca: "TESTE1" } }],
     });
+    expect(escopo).not.toHaveBeenCalled();
+    expect(r.resultados).toEqual([expect.objectContaining({ tool: "listar_negocios", items: [], truncated: false, buscaIndisponivel: true })]);
+    expect(idsNoMapa(r)).toEqual([]);
+    expect(r.trilha).toEqual([expect.objectContaining({ name: "listar_negocios", outcome: "busca_indisponivel" })]);
+  });
+
+  it("BROKER com `busca` só de espaços: sem busca, a lista dele segue normal", async () => {
+    escopo.mockResolvedValue({
+      items: [{ id: "D1", etapa: "Documentação", referencia: "Negócio #AAAAAA" }],
+      truncated: false,
+    });
+    const r = await despacharLeituras({
+      ...lista, identity: corretor, chamadas: [{ name: "listar_negocios", args: { busca: "   " } }],
+    });
+    expect(escopo).toHaveBeenCalledTimes(1);
     expect(escopo.mock.calls[0][0].args).not.toHaveProperty("busca");
-    expect(JSON.stringify(escopo.mock.calls[0][0])).not.toContain("TESTE1");
-    // Sem `titulo`/`cliente` no corretor, filtrar por nome esvaziaria a lista: ele recebe a dele, sem busca.
-    expect(idsNoMapa(r)).toEqual(["D1", "D2"]);
+    expect(r.resultados[0]).not.toHaveProperty("buscaIndisponivel");
+    expect(idsNoMapa(r)).toEqual(["D1"]);
   });
 });
 

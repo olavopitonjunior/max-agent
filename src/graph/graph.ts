@@ -1590,10 +1590,17 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
     const stage = typeof completed?.args.estado === "string" ? completed.args.estado.trim() : "";
     // Busca por nome vale só para o usuário (o corretor nunca manda o termo): vazio com busca = nome não achado.
     const buscou = state.identity.kind === "user" && lerBusca(completed?.args.busca) !== null;
-    const draft = singleDeal.items === null || !completed
+    const draft = singleDeal.buscaIndisponivel
+      ? "A busca por nome não está disponível para o seu perfil. Peça seus negócios e escolha pelo número."
+      : singleDeal.items === null || !completed
       ? "Não consegui consultar seus negócios agora. Tente novamente mais tarde."
       : singleDeal.items.length === 0
-        ? (buscou ? "Não encontrei negócio com esse nome visível para você." : `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`)
+        ? (buscou
+          // Lista cortada pelo CM: o nome pode estar além do corte, então não se afirma que não existe.
+          ? (singleDeal.truncated
+            ? "Não encontrei esse nome entre os negócios que consegui consultar. Pode haver outros."
+            : "Não encontrei negócio com esse nome visível para você.")
+          : `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`)
         : renderizarNegociosSelecionados(singleDeal.items, state.referencias, singleDeal.truncated);
     return { selectedDealQuery: null, queryOptions: null, restoDaResposta: null, draft };
   }
