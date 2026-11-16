@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CPF_SINTETICO, ModeloFalso, PESSOAS, Sessao, formatarCpf } from "./harness";
-import { lerIntencaoDeFormulario } from "../../../formularios/intencao";
+import { lerIntencaoDeFormulario, normalizarParaIntencao } from "../../../formularios/intencao";
 
 /**
  * ACHADOS dos evals (Tarefa 18). Cada caso afirma o comportamento DESEJADO; enquanto o código tem o defeito,
@@ -57,6 +57,22 @@ describe("eval fv2: achados", () => {
       expect(lerIntencaoDeFormulario(t), t).toBeNull();
     }
   });
+  // M2: a tolerância é só para erro de digitação. Palavra real do português (a 1-2 edições de uma
+  // palavra-chave) nunca vira "proposta"/"captação", nem sozinha, nem dentro da frase.
+  it.each([
+    "cotação", "cotações", "captado", "captada", "captados", "captadas", "proponha", "proponho", "resposta", "respostas",
+    "aposta", "apostas", "capacitação", "capacitações", "propósito", "propósitos", "protesta", "protestar", "proposição",
+  ])("F5c: %j não é corrigida para uma palavra-chave", (palavra) => {
+    expect(normalizarParaIntencao(palavra)).toBe(palavra.normalize("NFD").replace(/\p{Diacritic}/gu, ""));
+    expect(lerIntencaoDeFormulario(palavra), palavra).toBeNull();
+    expect(lerIntencaoDeFormulario(`quero criar uma ${palavra}`), palavra).toBeNull();
+  });
+  it.each(["propsta", "porposta", "proposa", "propota", "proposat", "capitação", "captaçao", "captacão", "capatação", "captacoa"])(
+    "F5c: o erro de digitação %j continua entendido",
+    (palavra) => {
+      expect(lerIntencaoDeFormulario(`quero criar uma ${palavra}`), palavra).toMatchObject({ tipo: "criar" });
+    }
+  );
 
   // F4 e F4b: mais casos em `dado-repetido.eval.ts` (mesma pessoa vira uma parte só; nomes ou lados diferentes
   // são perguntados antes do sim) e em `documento-repetido.test.ts` (texto do 409 sem inventar a causa).

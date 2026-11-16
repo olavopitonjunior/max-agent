@@ -63,10 +63,9 @@ const PROTEGIDAS = new Set([
   // F5: reais a 1-2 edições (preposta = representante; posposta = adiada).
   "preposta", "prepostas", "preposto", "prepostos", "posposta", "pospostas", "pospostos",
   "capacitacao", "capacitacoes", "adaptacao", "adaptacoes", "formulacao", "formulacoes",
+  // M2: reais a 1 edição de "captação" ("cotação" é só inserir um p) e particípios de "captar".
+  "cotacao", "cotacoes", "captado", "captada", "captados", "captadas", "protesta", "protestas",
 ]);
-
-/** Palavras que aceitam 2 edições (mesma inicial); as demais, só 1. */
-const ACEITAM_DUAS_EDICOES = new Set(["proposta", "propostas", "captacao", "captacoes"]);
 
 const MINIMO_DE_LETRAS = 7;
 
@@ -96,9 +95,16 @@ function corrigirPalavra(palavra: string): string {
   for (const chave of PALAVRAS_CHAVE) {
     if (Math.abs(chave.length - palavra.length) <= 1 && distancia(palavra, chave) <= 1) return chave;
   }
-  for (const chave of PALAVRAS_CHAVE) {
-    if (!ACEITAM_DUAS_EDICOES.has(chave) || palavra[0] !== chave[0]) continue;
-    if (Math.abs(chave.length - palavra.length) <= 2 && distancia(palavra, chave) <= 2) return chave;
+  // M2: 2 edições só em palavra longa (8+ letras) com o MESMO começo (3 letras) e o MESMO fim (2 letras)
+  // da palavra-chave ("capitaao"). Antes valia qualquer palavra a 2 edições da mesma inicial e pegava
+  // palavra real ("proponha", "captadas"): a tolerância é para erro de digitação, não para adivinhar.
+  // Palavra real que ainda passe por aqui ou por 1 edição entra em PROTEGIDAS.
+  if (palavra.length >= 8) {
+    for (const chave of PALAVRAS_CHAVE) {
+      if (Math.abs(chave.length - palavra.length) > 1) continue;
+      if (palavra.slice(0, 3) !== chave.slice(0, 3) || palavra.slice(-2) !== chave.slice(-2)) continue;
+      if (distancia(palavra, chave) <= 2) return chave;
+    }
   }
   return palavra;
 }

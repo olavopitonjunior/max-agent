@@ -107,7 +107,7 @@ describe("F5: erro de digitação, negados primeiro (palavra comum não vira pro
 
 describe("F5: erro de digitação ampliado", () => {
   it.each([
-    ["porposa", "proposta"],
+    ["porposta", "proposta"],
     ["propsota", "proposta"],
     ["prposta", "proposta"],
     ["capitaao", "captacao"],
@@ -117,20 +117,26 @@ describe("F5: erro de digitação ampliado", () => {
     expect(normalizarParaIntencao(entrada)).toBe(esperado);
   });
 
-  it.each(["propsta", "porposta", "proposa", "porposa", "captaçao", "capitação", "captacão", "capitaao"])(
+  it.each(["propsta", "porposta", "proposa", "captaçao", "capitação", "captacão", "capitaao"])(
     "a palavra sozinha, com erro (%s), é pedido de criação",
     (palavra) => {
       expect(lerIntencaoDeFormulario(palavra)).toMatchObject({ tipo: "criar", alvo: palavra.startsWith("cap") ? "captacao" : "proposta" });
     }
   );
 
-  it.each(["uma propsta", "Propsta!", "nova porposa", "uma captaçao"])("com artigo ou 'nova' (%s)", (texto) => {
+  it.each(["uma propsta", "Propsta!", "nova porposta", "uma captaçao"])("com artigo ou 'nova' (%s)", (texto) => {
     expect(lerIntencaoDeFormulario(texto)).toMatchObject({ tipo: "criar" });
   });
 
-  it("com verbo e 2 edições", () => {
-    expect(lerIntencaoDeFormulario("quero criar uma porposa de venda")).toEqual({ tipo: "criar", alvo: "proposta", esteira: "venda" });
+  it("com verbo, 1 edição e 2 edições só em palavra longa (8+ letras)", () => {
+    expect(lerIntencaoDeFormulario("quero criar uma porposta de venda")).toEqual({ tipo: "criar", alvo: "proposta", esteira: "venda" });
     expect(lerIntencaoDeFormulario("faz uma capitaao")).toEqual({ tipo: "criar", alvo: "captacao" });
+  });
+
+  // M2: palavra curta com 2 edições não é mais adivinhada (era como "cotação"/"proponha" entravam).
+  it("2 edições em palavra de 7 letras não é corrigida", () => {
+    expect(normalizarParaIntencao("porposa")).toBe("porposa");
+    expect(lerIntencaoDeFormulario("quero criar uma porposa de venda")).toBeNull();
   });
 });
 
