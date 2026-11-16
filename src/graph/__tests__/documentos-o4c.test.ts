@@ -231,6 +231,16 @@ describe("listar_documentos — parse estrito (R54): forma errada vira falha_na_
     ["link com ://  no meio", (it: Record<string, unknown>) => { it.link = "/redir?u=ftp://x"; }],
     ["link com espaço ou quebra de linha", (it: Record<string, unknown>) => { it.link = "/deals/1\n- Fake: x"; }],
     ["link relativo que o linkSeguro recusa (longo demais)", (it: Record<string, unknown>) => { it.link = `/deals/${"a".repeat(300)}`; }],
+    ["redirect com http codificado (/redir?u=http%3A%2F%2Fx)", (it: Record<string, unknown>) => { it.link = "/redir?u=http%3A%2F%2Fx"; }],
+    ["qualquer % no caminho", (it: Record<string, unknown>) => { it.link = "/deals/abc%20def?tab=anexos"; }],
+    ["caminho com ..", (it: Record<string, unknown>) => { it.link = "/deals/x/../y"; }],
+    ["host forjado (//evil.com)", (it: Record<string, unknown>) => { it.link = "//evil.com"; }],
+    ["parametro a mais (?tab=x&u=y)", (it: Record<string, unknown>) => { it.link = "/deals/abc?tab=x&u=y"; }],
+    ["rota desconhecida (/admin/x)", (it: Record<string, unknown>) => { it.link = "/admin/x"; }],
+    ["rota conhecida sem id (/deals/)", (it: Record<string, unknown>) => { it.link = "/deals/"; }],
+    ["rota conhecida com subcaminho (/deals/a/b)", (it: Record<string, unknown>) => { it.link = "/deals/a/b"; }],
+    ["aba em maiusculas (?tab=ANEXOS)", (it: Record<string, unknown>) => { it.link = "/deals/abc?tab=ANEXOS"; }],
+    ["fragmento (#x)", (it: Record<string, unknown>) => { it.link = "/deals/abc#x"; }],
     ["link nulo",(it: Record<string, unknown>) => { it.link = null; }],
     ["link vazio", (it: Record<string, unknown>) => { it.link = ""; }],
   ])("NEGADO: %s", async (_t, mexe) => {
@@ -346,12 +356,19 @@ describe("listar_documentos — o texto (WhatsApp)", () => {
     expect(resumoDe(r)).toContain(`abra no sistema: ${ORIGEM}/deals/chttpx9k2abc?tab=anexos`);
   });
 
-  it("'http' em parâmetro codificado, sem ://, é aceito e sai preso à origem da plataforma", async () => {
+  it.each([
+    ["/deals/deal-1", "/deals/deal-1"],
+    ["/deals/deal-1?tab=anexos", "/deals/deal-1?tab=anexos"],
+    ["/locacao/deals/deal-9?tab=documentos", "/locacao/deals/deal-9?tab=documentos"],
+    ["/locacao/deals/deal_9", "/locacao/deals/deal_9"],
+    ["/pipeline/propostas/prop-1", "/pipeline/propostas/prop-1"],
+    ["/deals/chttpx9k2abc?tab=contratos", "/deals/chttpx9k2abc?tab=contratos"],
+  ])("os 3 formatos do CM passam (%s)", async (link, esperado) => {
     const v = clone(vetor.items[2]);
-    v.link = "/redir?u=http%3A%2F%2Fx";
-    const t = resumoDe(await rodar([v]));
-    const url = (t.match(/https?:\/\/\S+/g) ?? [])[0];
-    expect(url?.startsWith(`${ORIGEM}/`)).toBe(true);
+    v.link = link;
+    const r = await rodar([v]);
+    expect(r.trilha[0].outcome).toBe("ok");
+    expect(resumoDe(r)).toContain(`abra no sistema: ${ORIGEM}${esperado}`);
   });
 
   it("texto de terceiros com * _ ~ crase e quebra de linha não forja formatação nem linha nova", async () => {

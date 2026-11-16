@@ -50,15 +50,17 @@ const textoNaoVazio = (v: unknown): v is string => typeof v === "string" && v.tr
 const ehInstante = (v: unknown): v is string => textoNaoVazio(v) && !Number.isNaN(new Date(v).getTime());
 
 /**
- * Caminho relativo da tela: começa com UMA barra e só tem caracteres de caminho/consulta. Nunca URL
- * absoluta nem protocolo-relativa (`://` e `//` caem), nunca espaço nem quebra de linha (forjariam
- * linha de lista). Não procura "http" no texto: um cuid pode conter essas letras; o que decide é a
- * forma (barra inicial, sem `://`) e, depois, o `linkSeguro` (mesma origem da plataforma). Os marcadores `* ~` e crase ficam de fora de
- * propósito (formatação do WhatsApp); `_` é permitido (cuid e abas o usam).
+ * WHITELIST FECHADA de caminhos de tela. Vem do CM: `dealHref` (`/deals/<id>` e `/locacao/deals/<id>`,
+ * com `?tab=<aba>` opcional) e `/pipeline/propostas/<id>` (`docs/max.md` §19.5,
+ * `scope-query-documentos.ts`). Não há outro formato: rota desconhecida, `%`, `..`, `//`, `://`,
+ * parâmetro a mais, fragmento, espaço e quebra de linha (forjariam linha de lista) ficam de fora,
+ * e o item inteiro cai (a resposta vira `falha_na_consulta`). O id é `[A-Za-z0-9_-]+` (um cuid pode
+ * conter "http"; por isso não se procura essa palavra no texto). Se o CM criar um formato novo,
+ * este lado precisa ser aberto de propósito: nada passa por semelhança.
  */
-const CAMINHO_RELATIVO = /^\/(?!\/)[A-Za-z0-9\-._/?=&%]*$/;
+const CAMINHO_DE_TELA = /^\/(deals|locacao\/deals|pipeline\/propostas)\/[A-Za-z0-9_-]+(\?tab=[a-z0-9_-]+)?$/;
 function ehCaminhoRelativo(v: unknown): v is string {
-  return typeof v === "string" && CAMINHO_RELATIVO.test(v) && !v.includes("://");
+  return typeof v === "string" && CAMINHO_DE_TELA.test(v);
 }
 
 /** Lê UM item pelo contrato; `null` = fora do contrato (a resposta inteira vira falha). */
