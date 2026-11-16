@@ -428,13 +428,53 @@ const RECEBIDO_POR: Record<"audio" | "image", string> = {
  * consultar" e "você não tem negócio" são respostas diferentes; apresentar a
  * primeira como a segunda mentiria para a pessoa sobre a carteira dela.
  */
+/** Um bloco da visão agrupada (ver `ResultadoDeTool.blocos` no despachante). */
+interface BlocoDoResultado {
+  rotulo: string;
+  items: unknown[];
+  truncado: boolean;
+}
+
+/**
+ * Visão agrupada ("minhas atividades"): um bloco por recorte, cada um com a própria contagem. Bloco vazio sem corte é
+ * "nenhuma" (a consulta respondeu); bloco com corte nunca é "nenhuma". A visão NÃO tem "ver mais": quem quer o resto
+ * de um bloco pede o recorte, e a regra abaixo impede o modelo de prometer paginação que não existe.
+ */
+function cercaAgrupada(tool: string, blocos: BlocoDoResultado[]): string {
+  const secoes = blocos.map((b) => {
+    if (b.items.length === 0 && !b.truncado) return `${b.rotulo}: nenhuma.`;
+    let mostrados = b.items.length;
+    let corpo = escaparDelimitadores(JSON.stringify(b.items, null, 1));
+    while (corpo.length > 2500 && mostrados > 1) {
+      mostrados -= 1;
+      corpo = escaparDelimitadores(JSON.stringify(b.items.slice(0, mostrados), null, 1));
+    }
+    corpo = corpo.slice(0, 2500);
+    const haMais = b.truncado || mostrados < b.items.length;
+    const cabeca = haMais ? `${b.rotulo}: mostrando ${mostrados}; há mais.` : `${b.rotulo}: mostrando ${mostrados} (completo).`;
+    return `${cabeca}\n${corpo}`;
+  });
+  const algumCorte = blocos.some((b) => b.truncado);
+  const regra =
+    "Apresente os blocos na ordem, cada um com o seu título, citando exatamente a contagem de cada um. " +
+    "Bloco marcado como nenhuma: diga que não há atividade ali; não é falha." +
+    (algumCorte
+      ? '\nNão ofereça ver mais: esta visão não tem continuação. Num bloco com "há mais", diga "mostrando N" e sugira pedir só as atrasadas, só as de hoje ou só as da semana. Não informe total nem outro número.'
+      : "");
+  return `<dados_do_sistema origem="${tool}" agrupado="true">
+${secoes.join("\n")}
+${regra}
+</dados_do_sistema>`;
+}
+
 export function fenceToolResults(
-  results: { tool: string; items: unknown[] | null; truncated: boolean; hasMore?: boolean; clarification?: { field: "estado"; options: string[] } }[]
+  results: { tool: string; items: unknown[] | null; truncated: boolean; hasMore?: boolean; clarification?: { field: "estado"; options: string[] }; blocos?: BlocoDoResultado[] }[]
 ): string {
   if (results.length === 0) return "";
 
   const blocos = results
     .map((r) => {
+      if (r.items !== null && !r.clarification && r.blocos && r.blocos.length > 0) return cercaAgrupada(r.tool, r.blocos);
       if (r.clarification) {
         const options = escaparDelimitadores(JSON.stringify(r.clarification.options));
         return `Uma consulta tem filtro de etapa inválido, não carteira vazia. Responda os outros resultados disponíveis.
@@ -536,7 +576,7 @@ export function buildSystemPrompt(params: {
    */
   criacao?: "disponivel" | "sem_login" | "sem_politica";
   /** Resultado das tools de leitura deste turn, já cercado. */
-  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean; clarification?: { field: "estado"; options: string[] } }[];
+  toolResults?: { tool: string; items: unknown[] | null; truncated: boolean; hasMore?: boolean; clarification?: { field: "estado"; options: string[] }; blocos?: BlocoDoResultado[] }[];
   /** Flag `MAX_CREDITO` ligada: entra a regra de crédito. */
   credito?: boolean;
 }): string {

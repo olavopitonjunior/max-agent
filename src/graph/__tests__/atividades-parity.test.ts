@@ -3,6 +3,8 @@ import { CAPABILITIES, resolverPolitica, type MaxPolicy } from "../policy";
 import { VERBOS_DE_LEITURA } from "../scope-contract";
 import { VERBOS_DE_ACAO } from "@/lib/acao";
 import { catalog } from "@/lib/runtime/catalog";
+import { argsDoVerbo } from "../atividades";
+import { argsMontadosPorEsteLado } from "@/lib/__tests__/vetores-activity-postpone-cm";
 
 /**
  * Paridade com o contractmaker (Atividades v2 / PR11, `MAX_CAPABILITIES` e os
@@ -60,6 +62,23 @@ describe("paridade de atividades com o contractmaker", () => {
       expect(tools.find((t) => t.id === v)?.effect).toBe("write");
       expect(tools.find((t) => t.id === v)?.confirmation).toBe(true);
     }
+  });
+
+  it("activity.postpone: o verbo existe, reusa activity.write, e o args montado é o vetor do CM (act1, 2026-11-20, 09:30), sem `dias`", () => {
+    expect(VERBOS_DE_ACAO as readonly string[]).toContain("activity.postpone");
+    expect(catalog("org1").tools.find((t) => t.id === "activity.postpone")).toMatchObject({ permission: "activity.write", effect: "write", confirmation: true });
+    // Vetor LITERAL do teste do CM (vetores-activity-postpone-cm.ts); a asserção é sobre a saída de produção.
+    const comHora = { atividade_id: "act1", ate: "2026-11-20", hora: "09:30" };
+    expect(argsMontadosPorEsteLado(comHora)).toEqual(comHora);
+    expect(argsMontadosPorEsteLado({ atividade_id: "act1", ate: "2026-11-20" })).toEqual({ atividade_id: "act1", ate: "2026-11-20" });
+    // O fluxo confirmado vira exatamente isso, e nunca mistura `ate` com `dias`.
+    const direto = argsDoVerbo({ kind: "atividade", operacao: "reagendar", etapa: "confirmacao", alvo: { id: "act1", rotulo: "x" }, dados: { ate: "2026-11-20", hora: "09:30" }, atualizadoEm: 0 });
+    expect(direto).toEqual(comHora);
+    expect(Object.keys(direto)).not.toContain("dias");
+    // O que o CM recusa (ate+dias, hora sem ate, formato) este lado não envia.
+    expect(argsMontadosPorEsteLado({ atividade_id: "act1", hora: "09:30" })).toBeNull();
+    expect(argsMontadosPorEsteLado({ atividade_id: "act1", ate: "20/11/2026" })).toBeNull();
+    expect(Object.keys(argsMontadosPorEsteLado({ atividade_id: "act1", ate: "2026-11-20", dias: 1 })!)).not.toContain("dias");
   });
 
   it("fail-closed: o padrão do ImobPro não concede activity.write; só a org que liga", () => {

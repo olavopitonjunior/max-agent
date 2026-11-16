@@ -108,6 +108,20 @@ export interface ResultadoDeTool {
   clarification?: StageClarification;
   /** `template.decisions`: modelos não medidos (o modelo nunca diz "sem pendência" com isso > 0). */
   naoMedidos?: number;
+  /**
+   * "Minhas atividades" agrupada (O3): os mesmos `items` (numeração contínua), separados por bloco. Vazio de um bloco é
+   * "nenhuma" (a consulta respondeu); falha de qualquer consulta vira `items: null`, nunca um bloco vazio.
+   */
+  blocos?: BlocoDeAtividades[];
+}
+
+export interface BlocoDeAtividades {
+  bloco: "atrasadas" | "hoje" | "semana";
+  rotulo: string;
+  /** Já numerados e sem `id` (o que o modelo vê). */
+  items: unknown[];
+  /** O servidor (ou o nosso teto) deixou itens de fora deste bloco. */
+  truncado: boolean;
 }
 
 /**
@@ -232,6 +246,21 @@ export async function despacharLeituras(params: {
     if (entrada.verb === "metrics.get") {
       // Só `periodo` e `quebra`, ambos dentro do enum: `estado`, `numero`, `mais` e o resto do modelo somem.
       args = lerArgsDeMetrica(args);
+    }
+    // "Minhas atividades" (sem recorte, sem estado, sem pedir mais) vira a visão agrupada: 3 leituras, numeração contínua.
+    if (agrupaMinhasAtividades(entrada.verb, args)) {
+      const agrupada = await lerMinhasAtividadesAgrupadas({
+        entrada, chamada, identity: params.identity, subject, fromPhone: params.fromPhone, referencias, turno: params.turno, agora,
+      });
+      if (!agrupada) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+      referencias = agrupada.referencias;
+      resultados.push(agrupada.resultado);
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+      continue;
     }
     if (paginada) {
       const continuation = referencias?.continuacao;
@@ -362,6 +391,86 @@ function ehResumoDePendencias(v: unknown): boolean {
 /** Recortes que o servidor aceita em `activity.list`. Valor fora da lista some (sem filtro). */
 export function lerFiltroDeAtividade(v: unknown): "minhas" | "atrasadas" | "hoje" | null {
   return v === "minhas" || v === "atrasadas" || v === "hoje" ? v : null;
+}
+
+/**
+ * A visão agrupada só vale para `filtro: "minhas"` SEM `estado` e sem `mais` (ela não pagina), com a flag das consultas
+ * estendidas ligada. Qualquer outro pedido segue a consulta única de sempre.
+ */
+export function agrupaMinhasAtividades(verbo: string, args: Record<string, unknown>): boolean {
+  return (
+    verbo === "activity.list" &&
+    process.env.MAX_EXTENDED_QUERIES === "true" &&
+    lerFiltroDeAtividade(args.filtro) === "minhas" &&
+    typeof args.estado !== "string" &&
+    args.mais !== true
+  );
+}
+
+/**
+ * 3 leituras (`atrasadas`, `hoje`, `7d`), todas com `filtro: "minhas"`. `7d` INCLUI hoje no servidor, então "semana" tira
+ * o que já está em "atrasadas" e "hoje". Qualquer consulta que falhe (ou peça esclarecimento) derruba a visão inteira:
+ * "nenhuma atividade" só vale quando o servidor respondeu vazio.
+ */
+async function lerMinhasAtividadesAgrupadas(params: {
+  entrada: EntradaDeLeitura;
+  chamada: LlmToolCall;
+  identity: Candidate;
+  subject: ReturnType<typeof subjectDe>;
+  fromPhone: string;
+  referencias: MapaDeReferencias | null;
+  turno: string;
+  agora: number;
+}): Promise<{ resultado: ResultadoDeTool; referencias: MapaDeReferencias } | null> {
+  const estados = ["atrasadas", "hoje", "7d"] as const;
+  const lidos = await Promise.all(
+    estados.map((estado) =>
+      executarLeitura({
+        entrada: params.entrada,
+        chamada: { ...params.chamada, args: { filtro: "minhas", estado, limite: ITENS_POR_LISTA } },
+        identity: params.identity,
+        subject: params.subject,
+        fromPhone: params.fromPhone,
+      })
+    )
+  );
+  if (lidos.some((l) => !l || l.clarification)) return null;
+  const [atrasadas, hoje, sete] = lidos as NonNullable<(typeof lidos)[number]>[];
+
+  const idDe = (it: unknown) => (it && typeof it === "object" ? (it as { id?: unknown }).id : undefined);
+  const jaMostrados = new Set([...atrasadas!.items, ...hoje!.items].map(idDe));
+  const semana = sete!.items.filter((it) => !jaMostrados.has(idDe(it)));
+
+  const plano: { bloco: BlocoDeAtividades["bloco"]; rotulo: string; items: unknown[]; truncado: boolean }[] = [
+    { bloco: "atrasadas", rotulo: "Atrasadas", items: atrasadas!.items, truncado: atrasadas!.truncated || !!atrasadas!.nextCursor },
+    { bloco: "hoje", rotulo: "Hoje", items: hoje!.items, truncado: hoje!.truncated || !!hoje!.nextCursor },
+    { bloco: "semana", rotulo: "Semana (próximos 7 dias)", items: semana, truncado: sete!.truncated || !!sete!.nextCursor },
+  ];
+
+  let mapa: MapaDeReferencias | null = params.referencias;
+  const blocos: BlocoDeAtividades[] = [];
+  for (const p of plano) {
+    // Numeração contínua: o mesmo `turno` faz `numerarLista` seguir de onde o bloco anterior parou.
+    const numerada = numerarLista({
+      items: p.items.map(atividadeEmHoraLocal),
+      tipo: "atividade",
+      anterior: mapa,
+      turno: params.turno,
+      agora: params.agora,
+    });
+    mapa = numerada.mapa;
+    blocos.push({ bloco: p.bloco, rotulo: p.rotulo, items: numerada.paraOModelo, truncado: p.truncado || numerada.cortados > 0 });
+  }
+  return {
+    // Sem `continuacao`: a visão agrupada não pagina (quem quer mais de um bloco pede o recorte).
+    referencias: mapa as MapaDeReferencias,
+    resultado: {
+      tool: params.chamada.name,
+      items: blocos.flatMap((b) => b.items),
+      truncated: blocos.some((b) => b.truncado),
+      blocos,
+    },
+  };
 }
 
 /** O executor de leitura: `scope-query` no servidor + a rede da regra 5. */

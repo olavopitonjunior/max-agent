@@ -42,7 +42,7 @@ const PAYLOAD = /^atv:([A-Za-z0-9_-]{1,64}):(concluir|comentar|recusar)$/;
 
 export interface PayloadDeAtividade {
   atividadeId: string;
-  acao: Exclude<OperacaoDeAtividade, "criar">;
+  acao: Exclude<OperacaoDeAtividade, "criar" | "reagendar">;
 }
 
 /** O payload é DESTE roteamento? (Mesmo malformado: quem decide é `parsePayloadDeAtividade`.) */
