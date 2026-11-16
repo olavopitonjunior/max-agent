@@ -297,7 +297,26 @@ export function consultaGolden({ verb, args = {} }: { verb: string; args?: Recor
     case "deal.detail": {
       const n = negocioDe(args);
       if (!n) return { items: [], truncated: false };
-      return { items: [{ id: n.id, titulo: n.titulo, etapa: n.etapa, valor: n.valor, paradoHaDias: n.paradoHaDias, pendencias: n.etapa === "Assinatura" ? ["Assinatura do comprador"] : [] }], truncated: false };
+      // Forma exata do contrato `deal.detail` (CM #3167, usuário): o leitor descarta item com chave faltando ou sobrando.
+      const cliente = (n as { cliente?: unknown }).cliente;
+      return {
+        items: [{
+          id: n.id,
+          etapa: n.etapa,
+          pendencias: n.etapa === "Assinatura" ? ["Assinatura do comprador"] : [],
+          atualizadoEm: "2026-11-10T12:00:00.000Z",
+          titulo: n.titulo,
+          cliente: typeof cliente === "string" ? cliente : null,
+          valor: typeof n.valor === "number" ? n.valor : null,
+          tipo: "venda",
+          partes: [],
+          contrato: null,
+          proposta: null,
+          assinatura: null,
+          link: `/deals/${n.id}`,
+        }],
+        truncated: false,
+      };
     }
     case "certidao.status":
       return { items: negocioDe(args) ? CERTIDOES_SIM.map((c) => ({ ...c })) : [], truncated: false };

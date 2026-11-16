@@ -176,7 +176,14 @@ describe("um turno: buscar pelo nome e detalhar pelo número", () => {
     expect(idsNoMapa(primeira)).toEqual(["D-joao"]);
 
     escopo.mockReset();
-    escopo.mockResolvedValue({ items: [{ id: "D-joao", etapa: "Em contrato", pendencias: [] }], truncated: false });
+    escopo.mockResolvedValue({
+      items: [{
+        id: "D-joao", etapa: "Em contrato", pendencias: [], atualizadoEm: "2026-11-10T12:00:00.000Z",
+        titulo: "Casa Vila Nova", cliente: "João Silva", valor: null, tipo: "venda", partes: [],
+        contrato: null, proposta: null, assinatura: null, link: "/deals/D-joao",
+      }],
+      truncated: false,
+    });
     const segunda = await despacharLeituras({
       ...comTudo, referencias: primeira.referencias, chamadas: [{ name: "detalhar_negocio", args: { numero: 1 } }],
     });

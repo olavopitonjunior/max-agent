@@ -91,8 +91,13 @@ describe("as consultas de UM negócio (O4), apontadas pelo número da lista", ()
     const r = await comNumero("detalhar_negocio");
     expect(escopo).toHaveBeenCalledWith(expect.objectContaining({ verb: "deal.detail", args: { negocio_id: "dn-teste1" } }));
     expect(r.trilha[0]!.outcome).toBe("ok");
-    expect(r.resultados[0]!.items).toEqual([expect.objectContaining({ n: 1, titulo: "TESTE1", etapa: "Formulário" })]);
-    expect(JSON.stringify(r.resultados)).not.toContain("dn-teste1");
+    // O4a: o detalhe vira um resumo pronto (sem campo id); o id só aparece dentro do link logado da tela.
+    const item = r.resultados[0]!.items![0] as Record<string, unknown>;
+    expect(Object.keys(item).sort()).toEqual(["_untrusted", "n", "resumo"]);
+    expect(item.n).toBe(1);
+    expect(item.resumo).toContain("*TESTE1*");
+    expect(item.resumo).toContain("Etapa: Formulário");
+    expect(JSON.stringify(r.resultados).replaceAll("/deals/dn-teste1", "")).not.toContain("dn-teste1");
   });
 
   it("situacao_certidoes: o vetor passa no parse estrito e o resumo não traz id nem link", async () => {
