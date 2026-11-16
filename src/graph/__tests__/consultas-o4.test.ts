@@ -377,3 +377,53 @@ describe("situacao_certidoes — o texto (WhatsApp)", () => {
     });
   });
 });
+
+/** Rodada 1 da revisão: cada item com o vermelho antes. */
+describe("situacao_certidoes — rodada 1 da revisão", () => {
+  const rodarDe = async (items: unknown[], de: "negocio" | "proposta"): Promise<Awaited<ReturnType<typeof despacharLeituras>>> => {
+    escopo.mockResolvedValue({ items, truncated: false });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    return despacharLeituras({
+      ...neg,
+      referencias: mapa(de),
+      chamadas: [{ name: "situacao_certidoes", args: { numero: 1, de } }],
+    });
+  };
+
+  it("1: falta dado em PROPOSTA manda completar 'na proposta', não 'no negócio'", async () => {
+    const t = resumoDe(await rodarDe([vetor.items[2]], "proposta"));
+    expect(t).toContain("complete na proposta");
+    expect(t).not.toContain("complete no negócio");
+  });
+
+  it("1: falta dado em NEGÓCIO segue 'complete no negócio'", async () => {
+    const t = resumoDe(await rodarDe([vetor.items[2]], "negocio"));
+    expect(t).toContain("complete no negócio");
+    expect(t).not.toContain("complete na proposta");
+  });
+
+  it("2: marcadores _, ~ e crase saem de certidao e modelo (como o *)", async () => {
+    const it = clone(vetor.items[3]);
+    it.certidao = "_CND_ ~Federal~ `x`";
+    it.modelo = "_Fal_ ~ên~ `cias`";
+    const t = resumoDe(await rodarDe([it], "negocio"));
+    expect(t).not.toMatch(/[_~`*]/);
+    expect(t).toContain("- CND Federal x (Fal ên cias) — Vendedor 1:");
+  });
+
+  it("3: certidao que fica vazia depois da limpeza vira o nome de reserva 'Certidão'", async () => {
+    const it = clone(vetor.items[0]);
+    it.certidao = "***";
+    const t = resumoDe(await rodarDe([it], "negocio"));
+    expect(t).toContain("- Certidão — Vendedor 1: Saiu");
+    expect(t).not.toMatch(/^- \(/m);
+  });
+
+  it("3: rotulo que fica vazio depois da limpeza derruba a resposta inteira (falha_na_consulta)", async () => {
+    const it = clone(vetor.items[0]);
+    it.rotulo = "*_~`";
+    const r = await rodarDe([vetor.items[1], it], "negocio");
+    expect(r.trilha[0].outcome).toBe("falha_na_consulta");
+    expect(r.resultados[0].items).toBeNull();
+  });
+});

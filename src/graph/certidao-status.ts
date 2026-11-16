@@ -79,6 +79,8 @@ function ehDiaCivil(v: unknown): v is string {
 export function lerCertidaoStatus(item: unknown): CertidaoStatusItem | null {
   if (!ehObjeto(item) || !chavesExatas(item, CHAVES_DE_CERTIDAO_STATUS)) return null;
   if (!(textoNaoVazio(item.id) && textoNaoVazio(item.certidao) && textoOuNulo(item.modelo) && textoNaoVazio(item.rotulo))) return null;
+  // Rótulo que some na limpeza (só marcadores) deixaria a linha sem a situação: fora do contrato, como qualquer outro desvio.
+  if (limpo(item.rotulo as string) === "") return null;
   if (!SITUACOES_DE_CERTIDAO.includes(item.situacao as SituacaoDeCertidao)) return null;
   if (typeof item.faltaDado !== "boolean") return null;
   if (!ehInstante(item.atualizadoEm)) return null;
@@ -120,6 +122,9 @@ export const SEM_CERTIDOES_PROPOSTA = "Não encontrei certidões nessa proposta.
 export const ONDE_RESOLVER_NEGOCIO = "Veja e resolva na tela: Negócio → aba Certidões.";
 export const ONDE_RESOLVER_PROPOSTA = "Veja e resolva na tela: Proposta → aba Certidões.";
 export const FALTA_DADO_DA_PARTE = "falta dado da parte (ex.: data de nascimento) — complete no negócio";
+export const FALTA_DADO_DA_PARTE_PROPOSTA = "falta dado da parte (ex.: data de nascimento) — complete na proposta";
+/** Nome de reserva quando o nome vindo do servidor some depois da limpeza. */
+const NOME_DE_RESERVA = "Certidão";
 export const HA_MAIS_CERTIDOES = "Há mais certidões do que as mostradas aqui; o restante está na aba Certidões.";
 
 /** Catálogo fechado do CM (`TARGET_KINDS`). Papel desconhecido vira "Parte": código interno nunca sai. */
@@ -138,9 +143,13 @@ const NOME_DO_PAPEL: Record<string, string> = {
   conjuge_locatario: "Cônjuge do locatário",
 };
 
-/** Texto vindo do servidor dentro de uma linha de WhatsApp: sem controle, sem `*` (forjaria negrito), sem sobra de espaço. */
+/**
+ * Texto vindo do servidor dentro de uma linha de WhatsApp: sem controle, sem os marcadores de
+ * formatação (`*` negrito, `_` itálico, `~` riscado, crase monoespaçado: forjariam formatação) e
+ * sem sobra de espaço.
+ */
 function limpo(v: string): string {
-  return (texto(v) ?? "").replace(/\*+/g, "").replace(/\s+/g, " ").trim();
+  return (texto(v) ?? "").replace(/[*_~`]+/g, "").replace(/\s+/g, " ").trim();
 }
 
 const FUSO = "America/Sao_Paulo";
@@ -162,13 +171,13 @@ function nomeDoPapel(papel: string): string {
   return Object.hasOwn(NOME_DO_PAPEL, papel) ? NOME_DO_PAPEL[papel] : "Parte";
 }
 
-function linhaDaCertidao(c: CertidaoStatusItem): string {
-  const nome = limpo(c.certidao);
+function linhaDaCertidao(c: CertidaoStatusItem, origem: "negocio" | "proposta"): string {
+  const nome = limpo(c.certidao) || NOME_DE_RESERVA;
   const modelo = c.modelo ? limpo(c.modelo) : "";
   const alvo = `${nomeDoPapel(c.alvo.papel)} ${c.alvo.indice}`;
   const rotulo = limpo(c.rotulo);
   const detalhes: string[] = [];
-  if (c.faltaDado) detalhes.push(FALTA_DADO_DA_PARTE);
+  if (c.faltaDado) detalhes.push(origem === "proposta" ? FALTA_DADO_DA_PARTE_PROPOSTA : FALTA_DADO_DA_PARTE);
   if (c.previsao) {
     const quando = dataLocal(c.previsao);
     if (quando) detalhes.push(`previsão ${quando}`);
@@ -187,7 +196,7 @@ function linhaDaCertidao(c: CertidaoStatusItem): string {
  */
 export function renderCertidoes(itens: readonly CertidaoStatusItem[], origem: "negocio" | "proposta", truncado: boolean): string {
   if (itens.length === 0) return origem === "proposta" ? SEM_CERTIDOES_PROPOSTA : SEM_CERTIDOES_NEGOCIO;
-  const linhas = [origem === "proposta" ? "Certidões da proposta:" : "Certidões do negócio:", ...itens.map(linhaDaCertidao)];
+  const linhas = [origem === "proposta" ? "Certidões da proposta:" : "Certidões do negócio:", ...itens.map((c) => linhaDaCertidao(c, origem))];
   if (itens.some((c) => c.situacao === "precisa_de_voce" || c.faltaDado)) {
     linhas.push(origem === "proposta" ? ONDE_RESOLVER_PROPOSTA : ONDE_RESOLVER_NEGOCIO);
   }
