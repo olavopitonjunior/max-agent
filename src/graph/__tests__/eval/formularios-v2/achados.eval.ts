@@ -58,10 +58,37 @@ describe("eval fv2: achados", () => {
     }
   });
 
-  // F4: o mesmo CPF em duas posições só é barrado pelo servidor (409 `signatarios_duplicados`), depois do
-  // "sim". A ficha deveria avisar antes. O 409 ainda diz "telefone ou e-mail diferente" quando a causa foi o CPF.
-  it.todo("F4: a ficha avisa quando o mesmo CPF aparece em duas partes, antes do sim");
-  it.todo("F4b: o 409 signatarios_duplicados por CPF fala de CPF, não de 'telefone ou e-mail'");
+  // F4 e F4b: mais casos em `dado-repetido.eval.ts` (mesma pessoa vira uma parte só; nomes ou lados diferentes
+  // são perguntados antes do sim) e em `documento-repetido.test.ts` (texto do 409 sem inventar a causa).
+  it("F4: o mesmo CPF em duas pessoas é perguntado antes do sim, nunca gravado", async () => {
+    const modelo = new ModeloFalso().roteiro(({ tokens }) => ({
+      compradores: [{ nome: PESSOAS.comprador, cpf: tokens.CPF[0] }],
+      vendedores: [{ nome: PESSOAS.vendedor, cpf: tokens.CPF[0] }],
+      negociacao: { valor: 500000 },
+    }));
+    const s = new Sessao({ modelo, nomes: [PESSOAS.comprador, PESSOAS.vendedor], cpfs: [CPF_SINTETICO] });
+    await s.preparar();
+    await s.semear();
+    const t = await s.fala(
+      `comprador ${PESSOAS.comprador} CPF ${formatarCpf(CPF_SINTETICO)}, vendedor ${PESSOAS.vendedor} CPF ${formatarCpf(CPF_SINTETICO)}, valor R$ 500.000, ficha`
+    );
+    expect(t.reply).toContain("O mesmo CPF/CNPJ apareceu para duas pessoas");
+    expect((await s.fala("sim")).escritas).toEqual([]);
+  });
+  it("F4b: o 409 signatarios_duplicados com CPF no corpo fala de CPF, não de 'telefone ou e-mail'", async () => {
+    const modelo = new ModeloFalso().roteiro(({ tokens }) => ({
+      compradores: [{ nome: PESSOAS.comprador, cpf: tokens.CPF[0] }],
+      negociacao: { valor: 500000 },
+    }));
+    const s = new Sessao({ modelo, nomes: [PESSOAS.comprador], cpfs: [CPF_SINTETICO] });
+    await s.preparar();
+    await s.semear();
+    s.servidor.programar("proposal.create", { status: 409, body: { error: "signatarios_duplicados", campo: "cpf" } });
+    await s.fala(`comprador ${PESSOAS.comprador} CPF ${formatarCpf(CPF_SINTETICO)} valor R$ 500.000, ficha`);
+    const t = await s.fala("sim");
+    expect(t.reply).toMatch(/CPF/);
+    expect(t.reply).not.toMatch(/telefone|e-mail|email/i);
+  });
 
   // F2: a conferência de uma foto sem legenda mostra o CPF lido em claro (a resposta é `sensivel`), enquanto
   // a ficha o mascara. Decisão de produto: manter assim ou mascarar também a conferência.

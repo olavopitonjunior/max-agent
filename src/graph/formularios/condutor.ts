@@ -51,10 +51,13 @@ import { contarEntradaDoFluxo, novoFluxoV2, type FluxoFormularioV2, type PassoDe
 import { camposDoPatchExtraido, TOOL_PATCH_V2 } from "./extracao";
 import { deveMostrarFicha, montarResumo, pediuAFicha, renderizarFicha } from "./ficha";
 import {
+  documentoRepetido,
   gravarLidos,
   lidosDoCofre,
+  nomeLidoDaParte,
   registrarLidos,
   type CampoLido,
+  type DocumentoRepetido,
   type GrupoDaParte,
   type OpcoesDaGravacao,
   type PartesGravadas,
@@ -127,6 +130,23 @@ function perguntaDoConflito(grupo: GrupoDaParte, posicao: number, nomeAtual: str
     `O rascunho já tem ${quem}, e não consegui confirmar que o que você mandou é da mesma pessoa. ` +
     `Responda *é um novo* (entra mais um ${papel}) ou *é o mesmo, troca* (substitui o que está no rascunho). ` +
     "Se quiser largar o que você mandou, diga *descarta*."
+  );
+}
+
+/**
+ * F4: o mesmo CPF/CNPJ em duas pessoas diferentes (lados distintos ou nomes diferentes). Nada é
+ * anotado e o número não aparece: o corretor corrige o de uma delas. O mesmo documento duas vezes
+ * para a MESMA pessoa já foi unificado antes (`unificarDocumentoRepetido`).
+ */
+function perguntaDoDocumentoRepetido(rep: DocumentoRepetido, lidos: CampoLido[], options: OptionsV2): string {
+  const quem = (p: DocumentoRepetido["a"]): string => {
+    const nome = nomeLidoDaParte(lidos, p.grupo, p.posicao) ?? partesDe(options)[p.grupo][p.posicao];
+    const papel = `${PAPEL_DO_GRUPO[p.grupo]} ${p.posicao + 1}`;
+    return nome ? `*${nome}* (${papel})` : `o ${papel}`;
+  };
+  return (
+    `O mesmo CPF/CNPJ apareceu para duas pessoas: ${quem(rep.a)} e ${quem(rep.b)}. Cada pessoa tem o seu, então não anotei nada. ` +
+    "Me mande o documento certo de uma delas."
   );
 }
 
@@ -471,6 +491,7 @@ export async function conduzirV2(f0: FluxoFormularioV2, ctx: ContextoDoTurno, de
   const mostrar =
     forcarFicha ||
     semFila ||
+    documentoRepetido(pendentes) !== null ||
     deveMostrarFicha(f0, ctx.agora, ctx.texto, { completo: restante.length === 0 && pendentes.length > 0, temMidiaLida });
 
   if (mostrar) {
@@ -716,6 +737,12 @@ async function mostrarFicha(a: {
   comPergunta: boolean;
 }): Promise<Passo> {
   await a.cancelar();
+  // F4: com o mesmo documento em duas pessoas não há cartão para confirmar: a pergunta vem no lugar dele.
+  const repetido = documentoRepetido(a.pendentes);
+  if (repetido) {
+    const f: FluxoFormularioV2 = { ...a.f, etapa: "compor", fichaAgendadaEm: undefined, aguardaCampo: undefined };
+    return { reply: perguntaDoDocumentoRepetido(repetido, a.pendentes, a.options), fluxo: a.fecha(f), evento: "formulario_documento_repetido" };
+  }
   const restante = faltandoDepoisDosLidos(a.faltandoDoServidor, a.pendentes);
   let reply = renderizarFicha({
     rascunho: montarResumo({ obrigatorios: a.obrigatorios, faltando: a.faltandoDoServidor }),
@@ -879,6 +906,12 @@ async function gravar(a: {
         evento: "formulario_conflito",
       };
     }
+    case "documento_repetido":
+      return {
+        reply: perguntaDoDocumentoRepetido(g.repetido!, lidosDoCofre(g.fluxo, thread), options),
+        fluxo: fecha({ ...g.fluxo, etapa: "compor", fichaAgendadaEm: undefined }),
+        evento: "formulario_documento_repetido",
+      };
     case "fluxo_desligado": {
       const v1 = g.resultado && g.resultado.ok === false ? g.resultado.fluxo : null;
       return {
