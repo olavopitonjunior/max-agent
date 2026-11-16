@@ -1,6 +1,6 @@
 import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { ContextoDoTurno, DepsDoFluxo, Fluxo, PassoDoFluxo } from "./fluxos";
-import { lerConfirmacao } from "./tools";
+import { dataDeHojeEmSaoPaulo, lerConfirmacao, normalizar } from "./tools";
 
 /**
  * Atividades pelo WhatsApp (Atividades v2 / M1, par do contractmaker PR11).
@@ -22,7 +22,7 @@ import { lerConfirmacao } from "./tools";
  *    pessoa escreveu.
  */
 
-export type OperacaoDeAtividade = "criar" | "comentar" | "concluir" | "recusar";
+export type OperacaoDeAtividade = "criar" | "comentar" | "concluir" | "recusar" | "reagendar";
 
 export const TIPOS_DE_ATIVIDADE = ["ligacao", "visita", "reuniao", "documento", "pendencia", "outro", "vistoria", "assinatura", "contato", "prazo_documental"] as const;
 export type TipoDeAtividade = (typeof TIPOS_DE_ATIVIDADE)[number];
@@ -48,6 +48,9 @@ export const VERBO_DE_ATIVIDADE: Record<OperacaoDeAtividade, string> = {
   comentar: "activity.comment",
   concluir: "activity.complete",
   recusar: "activity.refuse",
+  // O3: reagendar para uma DATA (`ate`, `hora?`). O adiamento de 1 dia do botão do aviso (`dias: 1`) é outro
+  // caminho (`aviso-botao.ts`) e usa o mesmo verbo.
+  reagendar: "activity.postpone",
 };
 
 export interface DadosDeAtividade {
@@ -58,6 +61,10 @@ export interface DadosDeAtividade {
   notas?: string;
   texto?: string;
   motivo?: string;
+  /** Reagendar: o novo dia, `AAAA-MM-DD` (São Paulo). Já validado e nunca no passado. */
+  ate?: string;
+  /** Reagendar: a hora, `HH:MM` (São Paulo). Sem ela, o servidor mantém o horário da atividade (ou o dia inteiro). */
+  hora?: string;
 }
 
 export interface FluxoAtividade {
@@ -86,6 +93,15 @@ export const TEXTO_ATIVIDADE_SEM_VERIFICAR =
   "Não consegui validar sua permissão agora. Nada foi alterado; tente de novo em instantes.";
 /** A resposta neutra: a mesma para id malformado, outra org e inexistente. Não revela existência. */
 export const TEXTO_ATIVIDADE_INDISPONIVEL = "Essa atividade não está mais disponível.";
+/**
+ * O reagendar por data só vale para a lista de atividades do sistema (`listar_atividades`). Se a última lista
+ * numerada é a da agenda Google, o número é de um evento: `reagendar_atividade` não resolve e nada é chamado
+ * (o evento se reagenda pelo caminho do Google, `google_propor`, que tem versão e confirmação próprias).
+ */
+export const TEXTO_LISTA_DO_GOOGLE =
+  "Esse número é de um evento da agenda Google, não de uma atividade do sistema. " +
+  "Para mudar o horário do evento, diga qual é e o novo dia e horário. " +
+  "Para reagendar uma atividade do sistema, peça a lista de atividades e me diga o número. Nada foi alterado.";
 
 /** Escrita incerta pendente: a chave fica, e só um SIM (ou a conferência na tela) fecha o assunto. */
 export const TEXTO_ATIVIDADE_CONFERIR =
@@ -139,6 +155,31 @@ export function lerTipoDeAtividade(v: unknown): TipoDeAtividade | null {
   return typeof v === "string" && (TIPOS_DE_ATIVIDADE as readonly string[]).includes(v) ? (v as TipoDeAtividade) : null;
 }
 
+const HORA = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** `HH:MM` (24h, São Paulo). Qualquer outra forma é recusada: o servidor também recusa, e chutar mudaria o compromisso de hora. */
+export function lerHora(v: unknown): string | null {
+  return typeof v === "string" && HORA.test(v.trim()) ? v.trim() : null;
+}
+
+/** Reagendar: `ate` é só `AAAA-MM-DD`, de um dia que existe. Data com hora/fuso, formato brasileiro e texto livre são recusados. */
+export function lerDiaDoReagendamento(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return SO_DATA.test(t) && dataExiste(t) ? t : null;
+}
+
+/** Dia do reagendamento para a frase: `21/11`, ou `21/11/2027` quando o ano não é o atual (São Paulo). */
+function diaLegivel(ate: string, agora: number): string {
+  const [a, m, d] = ate.split("-") as [string, string, string];
+  return a === dataDeHojeEmSaoPaulo(agora).slice(0, 4) ? `${d}/${m}` : `${d}/${m}/${a}`;
+}
+
+function quandoLegivel(f: FluxoAtividade): string {
+  const dia = diaLegivel(f.dados.ate ?? "", f.atualizadoEm);
+  return f.dados.hora ? `${dia} às ${f.dados.hora}` : dia;
+}
+
 // ─── Capability ───────────────────────────────────────────────────────────
 
 /** A política deste turn concede escrever atividade? Fail-closed: política indisponível = não. */
@@ -165,6 +206,8 @@ export interface PedidoDeAtividade {
   notas?: unknown;
   texto?: unknown;
   motivo?: unknown;
+  ate?: unknown;
+  hora?: unknown;
 }
 
 function textoOpcional(v: unknown): string | undefined {
@@ -191,6 +234,23 @@ export function iniciarAtividade(pedido: PedidoDeAtividade, ctx: ContextoDoTurno
   };
 
   if (pedido.operacao === "concluir") return resumo({ ...base, etapa: "confirmacao" });
+
+  if (pedido.operacao === "reagendar") {
+    const ate = lerDiaDoReagendamento(pedido.ate);
+    if (!ate) {
+      return resposta(null, "Para qual dia você quer reagendar a atividade? Diga a data (por exemplo, 21/11). Nada foi alterado.", "atividade_dado_invalido");
+    }
+    // O servidor recusa o dia anterior a hoje (SP) e aceita hoje: a mesma régua, para não ir e voltar.
+    if (ate < dataDeHojeEmSaoPaulo(ctx.agora)) {
+      return resposta(null, "Essa data já passou. Diga uma data de hoje em diante para eu reagendar a atividade. Nada foi alterado.", "atividade_dado_invalido");
+    }
+    const informouHora = pedido.hora !== undefined && pedido.hora !== null && pedido.hora !== "";
+    const hora = informouHora ? lerHora(pedido.hora) : null;
+    if (informouHora && !hora) {
+      return resposta(null, "Não entendi a hora. Diga no formato de 24 horas (por exemplo, 14:30), ou só o dia. Nada foi alterado.", "atividade_dado_invalido");
+    }
+    return resumo({ ...base, etapa: "confirmacao", dados: { ate, ...(hora ? { hora } : {}) } });
+  }
 
   if (pedido.operacao === "criar") {
     const tipo = lerTipoDeAtividade(pedido.tipo);
@@ -260,6 +320,9 @@ function resumo(f: FluxoAtividade): Resposta {
     case "recusar":
       texto = `Vou recusar a atividade ${alvo} e devolvê-la a quem a passou, com o motivo ${citar(f.dados.motivo ?? "", 300)}. Confirma?`;
       break;
+    case "reagendar":
+      texto = `Vou reagendar a atividade ${alvo} para ${quandoLegivel(f)}. Confirma?`;
+      break;
   }
   return resposta({ ...f, etapa: "confirmacao" }, `${texto}${SIM_OU_NAO}`, "atividade_resumo");
 }
@@ -277,6 +340,9 @@ export function argsDoVerbo(f: FluxoAtividade): Record<string, unknown> {
       return { atividade_id: f.alvo.id };
     case "recusar":
       return { atividade_id: f.alvo.id, motivo: d.motivo };
+    case "reagendar":
+      // Nunca `dias` junto de `ate` (o servidor responde 400 invalid_args), nem `hora` sem `ate`.
+      return { atividade_id: f.alvo.id, ate: d.ate, ...(d.hora ? { hora: d.hora } : {}) };
   }
 }
 
@@ -316,6 +382,11 @@ export function textoDoErro(op: OperacaoDeAtividade, status: number, body: Recor
     return "O sistema não aceitou o pedido. Nada foi alterado.";
   }
   if (status === 400) {
+    if (op === "reagendar") {
+      return erro === "DATE_IN_PAST" || razao === "DATE_IN_PAST"
+        ? "Essa data já passou. Diga uma data de hoje em diante e peça de novo. Nada foi alterado."
+        : "O sistema não aceitou a data ou a hora do pedido. Diga o dia de novo; nada foi alterado.";
+    }
     return razao === "vencimento_invalido"
       ? "O sistema não aceitou o vencimento. Diga a data de novo; nada foi criado."
       : "O sistema não aceitou os dados do pedido. Confira e tente de novo; nada foi alterado.";
@@ -335,10 +406,26 @@ function textoDeSucesso(f: FluxoAtividade): string {
       return `Atividade ${alvo} concluída.`;
     case "recusar":
       return `Atividade ${alvo} recusada e devolvida.`;
+    case "reagendar":
+      return `Atividade ${alvo} reagendada para ${quandoLegivel(f)}.`;
   }
 }
 
 // ─── Condução ─────────────────────────────────────────────────────────────
+
+/**
+ * Reagendar muda o compromisso de outra pessoa na agenda: só um SIM explícito escreve. "ok", "blz", 👍 e afins
+ * (que `lerConfirmacao` aceita nos outros fluxos) aqui só reapresentam o resumo.
+ */
+const ACENO_FRACO =
+  /^(ok|okay|okey|blz|beleza|certo|ta|ta bom|ta certo|claro|perfeito|positivo|aham|uhum|vai|bora|👍|✅|👌|🙏)$/;
+
+function simExplicito(f: FluxoAtividade, texto: string, confirmacao: string): boolean {
+  if (confirmacao !== "sim") return false;
+  // Com a chave em mãos (escrita incerta) a pessoa já disse SIM antes: o aceno só reconcilia o mesmo pedido.
+  if (f.operacao !== "reagendar" || f.chave) return true;
+  return !ACENO_FRACO.test(normalizar(texto));
+}
 
 const CANCELAR = /^(cancelar|cancela|pare|parar|desistir|esquece|deixa pra la)[.!]?$/i;
 
@@ -374,7 +461,7 @@ export async function conduzirAtividade(f: FluxoAtividade, ctx: ContextoDoTurno,
   if (confirmacao === "nenhum") return { liberar: true, fluxo: f, evento: "atividade_outro_assunto" };
   // `resumo` (rebaixado por interrupção): o SIM só reapresenta, nunca escreve.
   // Com a chave em mãos (escrita incerta) o SIM SEMPRE reconcilia: mesma chave, o servidor devolve a resposta guardada.
-  if ((f.etapa === "resumo" && !f.chave) || confirmacao !== "sim") return resumo({ ...f, atualizadoEm: ctx.agora });
+  if ((f.etapa === "resumo" && !f.chave) || !simExplicito(f, ctx.texto, confirmacao)) return resumo({ ...f, atualizadoEm: ctx.agora });
 
   const chave = f.chave ?? { verbo: VERBO_DE_ATIVIDADE[f.operacao], valor: ctx.messageId };
   const emCurso: FluxoAtividade = { ...f, chave, atualizadoEm: ctx.agora };

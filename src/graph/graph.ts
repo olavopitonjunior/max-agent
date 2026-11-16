@@ -15,7 +15,7 @@ import { interceptar, repassarDesconhecido } from "@/lib/aceite";
 import { rotearBotaoDeAtividade } from "@/lib/atividade-botao";
 import { ehPayloadDeAviso, rotearBotaoDeAviso } from "@/lib/aviso-botao";
 import { payloadDoNumero } from "@/lib/aviso/numero";
-import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
+import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, TEXTO_LISTA_DO_GOOGLE, type OperacaoDeAtividade } from "./atividades";
 import { iniciarPreferencias, preferenciasPermitidas, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
 import { resolverReferencia } from "./referencias";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
@@ -933,6 +933,7 @@ const OPERACAO_DA_TOOL_DE_ATIVIDADE: Record<string, OperacaoDeAtividade | undefi
   comentar_atividade: "comentar",
   concluir_atividade: "concluir",
   recusar_atividade: "recusar",
+  reagendar_atividade: "reagendar",
 };
 
 function googleContext(state: MaxStateType) {
@@ -1866,6 +1867,12 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
       if (state.fluxo) {
         return responder(textoDeOcupado(state.fluxo), "fluxo_em_andamento");
       }
+      // Os números da lista do Google também entram em `referencias` (tipo "atividade"), mas o evento da
+      // agenda se reagenda por `google_propor`. `googleRefs` só está de pé enquanto a lista numerada vigente é a
+      // do Google (qualquer lista do CM o zera), então é o marcador de origem: falha fechado, sem verbo.
+      if (operacaoDeAtividade === "reagendar" && state.googleRefs) {
+        return responder(TEXTO_LISTA_DO_GOOGLE, "lista_do_google");
+      }
       const alvo = resolverReferencia(state.referencias, chamada.args.numero, {
         agora: Date.now(), tipo: operacaoDeAtividade === "criar" ? "negocio" : "atividade",
       });
@@ -1880,7 +1887,8 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
       const passo = iniciarAtividade(
         { operacao: operacaoDeAtividade, alvo: { id: alvo.item.id, rotulo: alvo.item.rotulo },
           tipo: chamada.args.tipo, titulo: chamada.args.titulo, vencimento: chamada.args.vencimento,
-          notas: chamada.args.notas, texto: chamada.args.texto, motivo: chamada.args.motivo },
+          notas: chamada.args.notas, texto: chamada.args.texto, motivo: chamada.args.motivo,
+          ate: chamada.args.ate, hora: chamada.args.hora },
         { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
           politicaIndisponivel: state.politicaIndisponivel, agora: Date.now(), orgName: state.identity.orgName,
           thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) }
