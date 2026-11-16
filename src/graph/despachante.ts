@@ -23,6 +23,7 @@ import { projetarNotificacao } from "./notificacao-projecao";
 import { projetarResumoDePendencias } from "./avisos-projecao";
 import { atividadeEmHoraLocal } from "./atividade-hora-local";
 import { lerCertidaoStatus, renderCertidoes, type CertidaoStatusItem } from "./certidao-status";
+import { lerDocumento, renderDocumentos, type DocumentoItem } from "./documentos";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -49,7 +50,7 @@ export type Recusa =
   | "nao_oferecida"
   | "capability_negada"
   | "identidade_nao_escreve"
-  /** Leitura só de usuário da plataforma (`certidao.status`): o corretor comissionado nunca a recebe. */
+  /** Leitura só de usuário da plataforma (`certidao.status`, `document.list`): o corretor comissionado nunca a recebe. */
   | "identidade_nao_le"
   /** Nome histórico na trilha: argumento fora do enum da `propor_criacao`. */
   | "tipo_invalido";
@@ -75,7 +76,7 @@ export function autorizarChamada(params: {
     return { ok: false, motivo: "nao_oferecida", entrada };
   }
 
-  // Leitura restrita a usuário (`certidao.status`): vale mesmo com a capability na política. Antes de
+  // Leitura restrita a usuário (`certidao.status`, `document.list`): vale mesmo com a capability na política. Antes de
   // (c) pelo mesmo motivo de (d): é a recusa estável, não depende de política nem de argumento.
   if (entrada.tipo === "leitura" && entrada.soUsuario && params.identity.kind !== "user") {
     return { ok: false, motivo: "identidade_nao_le", entrada };
@@ -218,6 +219,19 @@ export async function despacharLeituras(params: {
       }
       args = { [certidaoDe === "proposta" ? "proposta_id" : "negocio_id"]: selected.item.id };
     }
+    // Documentos: o mesmo molde das certidões. Número da lista (e `de: "proposta"`); o servidor recebe
+    // EXATAMENTE um id e mais nada (nem `limite`, nem `cursor`: o padrão do servidor basta).
+    let documentosDe: "negocio" | "proposta" | null = null;
+    if (entrada.verb === "document.list") {
+      documentosDe = args.de === "proposta" ? "proposta" : "negocio";
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: documentosDe });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      args = { [documentosDe === "proposta" ? "proposta_id" : "negocio_id"]: selected.item.id };
+    }
     if (entrada.verb === "activity.get") {
       // O modelo aponta pelo número da lista; o id interno nunca passa por ele.
       const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "atividade" });
@@ -308,6 +322,24 @@ export async function despacharLeituras(params: {
         continue;
       }
       const resumo = renderCertidoes(lidos as CertidaoStatusItem[], certidaoDe, r.truncated);
+      resultados.push({ tool: chamada.name, items: [{ resumo, _untrusted: true }], truncated: r.truncated });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+      continue;
+    }
+
+    // Documentos: parse ESTRITO por item (R54), como as certidões. Item com campo a mais (um `url`), forma
+    // errada ou `link` que não seja caminho relativo derruba a resposta inteira. Vazio (e negado, sem
+    // módulo, inexistente) vira a frase única. O Max só diz onde abrir na tela: nunca arquivo nem URL.
+    if (entrada.verb === "document.list" && documentosDe) {
+      const lidos = r.items.map(lerDocumento);
+      if (lidos.some((it) => it === null)) {
+        // Sem o conteúdo do item no log: é dado de terceiros (nome de arquivo, parte).
+        console.error(`[despachante] document.list fora do contrato na org ${params.identity.orgId} (${lidos.filter((it) => it === null).length}/${lidos.length} itens)`);
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+      const resumo = renderDocumentos(lidos as DocumentoItem[], documentosDe, r.truncated);
       resultados.push({ tool: chamada.name, items: [{ resumo, _untrusted: true }], truncated: r.truncated });
       trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
       continue;

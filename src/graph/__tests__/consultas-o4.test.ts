@@ -99,7 +99,8 @@ describe("situacao_certidoes — a oferta (negado primeiro)", () => {
   });
 
   it("a tool vem do verbo certidao.status, no fim da lista de verbos de leitura, sem produzir lista", () => {
-    expect(VERBOS_DE_LEITURA[VERBOS_DE_LEITURA.length - 1]).toBe("certidao.status");
+    // PR-O4c acrescentou `document.list` no fim: o `certidao.status` é o penúltimo.
+    expect(VERBOS_DE_LEITURA[VERBOS_DE_LEITURA.length - 2]).toBe("certidao.status");
     const e = REGISTRO_DE_TOOLS.find((x) => x.nome === "situacao_certidoes");
     expect(e).toMatchObject({ tipo: "leitura", capability: "certidao.status", verb: "certidao.status", risco: "nenhum", confirmacao: false });
     // Não numera nada: o "n" da lista de negócios continua valendo no turno seguinte.

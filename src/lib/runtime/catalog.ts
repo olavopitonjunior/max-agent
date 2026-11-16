@@ -13,10 +13,11 @@ export function isWriteVerb(verb:string):boolean {return !READ_ACTIONS.has(verb)
  * não implementado". `catalog()` deriva as tools dos verbos, então nenhuma delas aparece
  * aqui; esta lista só declara o fato para o teste trancar (`capabilities-reservadas.test.ts`).
  * Ao implementar o verbo, a capability sai desta lista no mesmo PR (`certidao.status` saiu no
- * PR-O4b: verbo de leitura + tool `situacao_certidoes`, atrás de `MAX_EXTENDED_QUERIES`).
+ * PR-O4b: verbo de leitura + tool `situacao_certidoes`, atrás de `MAX_EXTENDED_QUERIES`; `document.list`
+ * saiu no PR-O4c: verbo de leitura + tool `listar_documentos`, no mesmo molde; só `charge.status` segue reservada).
  */
-export const CAPABILITIES_RESERVADAS: readonly Capability[] = ['document.list','charge.status'];
-export const NEW_QUERIES=['notification.list','activity.list','activity.get','metrics.get','property.list','property.detail','contract.status','template.decisions','certidao.status'];
+export const CAPABILITIES_RESERVADAS: readonly Capability[] = ['charge.status'];
+export const NEW_QUERIES=['notification.list','activity.list','activity.get','metrics.get','property.list','property.detail','contract.status','template.decisions','certidao.status','document.list'];
 export interface CatalogTool {
  id:string;version:string;status:'current'|'disabled'|'planned';installed:boolean;enabled:boolean;executor:'scope-action'|'scope-query'|'graph'|null;effect:'read'|'write'|'paid';flag?:string;recoveryOnly?:boolean;
  schema:Record<string,unknown>;permission:Capability|null;policyCapability:Capability|null;domainScope:string;projection:string;dataClass:string;timeoutMs:number;retry:string;reconciliation:string;confirmation:boolean;evaluationCases:string[];provenance:string;

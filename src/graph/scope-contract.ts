@@ -50,6 +50,8 @@ export const VERBOS_DE_LEITURA = [
   "pending.summary",
   /** Situação das certidões de UM negócio ou proposta (PR-O4b, 16/11/2026). Só usuário; corretor recebe `{items:[]}`. */
   "certidao.status",
+  /** Documentos de UM negócio ou proposta (PR-O4c, 16/11/2026). Só usuário; corretor recebe `{items:[]}`. Só metadado: nunca arquivo nem URL. */
+  "document.list",
 ] as const;
 
 export type ScopeQueryVerb = (typeof VERBOS_DE_LEITURA)[number];

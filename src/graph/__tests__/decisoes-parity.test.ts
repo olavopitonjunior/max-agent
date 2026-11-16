@@ -25,6 +25,8 @@ const VERBOS_DE_LEITURA_DO_CM = [
   "property.list", "property.detail", "contract.status", "template.decisions", "pending.summary",
   // PR-O4b: situação das certidões (par do contractmaker `feat/max-o4b-certidao-status`).
   "certidao.status",
+  // PR-O4c: documentos do negócio/proposta (par do contractmaker `feat/max-o4c-document-list`).
+  "document.list",
 ];
 
 const CHAVES_PROIBIDAS = [
