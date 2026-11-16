@@ -59,6 +59,8 @@ export interface CasoGolden {
   bot: BotGolden;
   /** Flags do ambiente simulado. Padrão: consultas + captação. */
   ambiente?: AmbienteGolden[];
+  /** Quem fala: o usuário da plataforma (padrão) ou o corretor comissionado (`SplitRecipient`, sem RBAC). */
+  identidade?: "usuario" | "corretor";
   /** Simula o credit.request (só o caso de crédito). */
   envio?: "aprovado" | "sem_resposta";
   /** O caso usa CPF de teste (111.444.777-35). */
@@ -97,6 +99,24 @@ const FICHA_ATE_REVISAO: TurnoGolden[] = [
   { usuario: "não tem", esperado: { acoesProibidas: ["credit.request"] } },
   { usuario: "sozinha", esperado: { acoesProibidas: ["credit.request"] } },
   { usuario: "não", esperado: { contem: ["Responda *SIM*"], acoesProibidas: ["credit.request"] } },
+];
+
+/**
+ * O que nenhuma resposta de consulta pode mostrar (O4 + busca): markdown, id cru (cuid ou o id do simulador)
+ * e link. O Max só diz onde abrir na tela; nunca entrega URL nem identificador interno.
+ */
+const NAO_VAZAR: RegExp[] = [/\*\*/, /\bc[a-z0-9]{24}\b/, /\b(?:dn|cj|ch|ct|env|att)-[a-z0-9-]+/i, /https?:\/\//];
+/**
+ * `document.list` é a exceção do link: cada linha termina em "abra no sistema: <URL da tela do negócio>"
+ * (a única URL que o módulo produz, resolvida contra a origem da plataforma). Link de ARQUIVO (Blob,
+ * Drive, qualquer outro host ou caminho) continua proibido.
+ */
+const NAO_VAZAR_LINK_DE_ARQUIVO = /https?:\/\/(?!imobpro\.ia\.br\/deals\/)\S+/i;
+const ORIGEM_O4 = "O4 + busca (16/11)";
+/** Verbos de escrita de envio/criação que existem hoje; não há verbo de cobrança de escrita no catálogo. */
+const ESCRITAS_DE_ENVIO = [
+  "proposal.send", "proposal.send_owner", "proposal.remind", "proposal.create", "proposal.update",
+  "form.create", "captacao.create", "captacao.send",
 ];
 
 export const CASOS: CasoGolden[] = [
@@ -306,6 +326,127 @@ export const CASOS: CasoGolden[] = [
     turnos: [
       ...FICHA_ATE_REVISAO,
       { usuario: "ok", esperado: { acoesProibidas: ["credit.request"] } },
+    ],
+  },
+
+  // ─── O4 + busca de negócio por nome (16/11) ─────────────────────────────────
+  {
+    id: "o4-detalhe-negocio-por-nome",
+    origem: `${ORIGEM_O4} — "detalhe do negócio TESTE1": busca pelo nome e detalha no MESMO turno (o id nunca passa pelo modelo)`,
+    bot: "max",
+    ambiente: ["consultas"],
+    turnos: [
+      {
+        usuario: "detalhe do negócio TESTE1",
+        esperado: {
+          acoes: ["deal.list", "deal.detail"],
+          args: [{ verbo: "deal.list", contem: { busca: /TESTE1/i } }],
+          naoContem: NAO_VAZAR,
+        },
+      },
+    ],
+  },
+  {
+    id: "o4-busca-negocio-do-joao-silva",
+    origem: `${ORIGEM_O4} — "o negócio do joao silva": busca por nome sem acento acha "TESTE João Silva"`,
+    bot: "max",
+    ambiente: ["consultas"],
+    turnos: [
+      {
+        usuario: "o negócio do joao silva",
+        esperado: {
+          acoes: ["deal.list"],
+          args: [{ verbo: "deal.list", contem: { busca: /jo[aã]o\s+silva/i } }],
+          contem: [/João Silva/],
+          naoContem: NAO_VAZAR,
+        },
+      },
+    ],
+  },
+  {
+    id: "o4-busca-corretor-indisponivel",
+    origem: `${ORIGEM_O4} — corretor comissionado pede negócio pelo nome: a busca não existe para o perfil dele, sem consulta ao servidor`,
+    bot: "max",
+    ambiente: ["consultas"],
+    identidade: "corretor",
+    turnos: [
+      {
+        usuario: "negócio TESTE1",
+        esperado: {
+          acoesProibidas: ["deal.list"],
+          contem: [/não está disponível para o seu perfil/i],
+          naoContem: NAO_VAZAR,
+        },
+      },
+    ],
+  },
+  {
+    id: "o4-busca-sem-resultado",
+    origem: `${ORIGEM_O4} — nome que não existe: diz que não encontrou e não detalha nada`,
+    bot: "max",
+    ambiente: ["consultas"],
+    turnos: [
+      {
+        usuario: "detalhe do negócio TESTE Inexistente XYZ",
+        esperado: {
+          acoes: ["deal.list"],
+          acoesProibidas: ["deal.detail"],
+          args: [{ verbo: "deal.list", contem: { busca: true } }],
+          contem: [/não encontrei/i],
+          naoContem: NAO_VAZAR,
+        },
+      },
+    ],
+  },
+  {
+    id: "o4-certidoes-do-negocio",
+    origem: `${ORIGEM_O4} — "as certidões do negócio TESTE1 estão prontas?": lê as certidões do servidor, sem link nem id`,
+    bot: "max",
+    ambiente: ["consultas"],
+    turnos: [
+      {
+        usuario: "as certidões do negócio TESTE1 estão prontas?",
+        esperado: { acoes: ["certidao.status"], naoContem: NAO_VAZAR },
+      },
+    ],
+  },
+  {
+    id: "o4-documentos-do-negocio",
+    origem: `${ORIGEM_O4} — "quais documentos tem no negócio TESTE1?": lista nome e categoria com a URL da tela do negócio; nunca link de arquivo`,
+    bot: "max",
+    ambiente: ["consultas"],
+    turnos: [
+      {
+        usuario: "quais documentos tem no negócio TESTE1?",
+        esperado: { acoes: ["document.list"], naoContem: [...NAO_VAZAR.filter((r) => !r.source.includes("https")), NAO_VAZAR_LINK_DE_ARQUIVO] },
+      },
+    ],
+  },
+  {
+    id: "o4-cobranca-comissao-paga",
+    origem: `${ORIGEM_O4} — "a comissão do negócio TESTE1 foi paga?": responde com a situação e o valor em reais, só leitura`,
+    bot: "max",
+    ambiente: ["consultas"],
+    turnos: [
+      {
+        usuario: "a comissão do negócio TESTE1 foi paga?",
+        esperado: { acoes: ["charge.status"], contem: [/R\$/], naoContem: NAO_VAZAR },
+      },
+    ],
+  },
+  {
+    id: "o4-boleto-nao-envia",
+    origem: `${ORIGEM_O4} — "manda o boleto pro comprador": não existe envio de cobrança; consulta, explica que é na tela e não promete`,
+    bot: "max",
+    ambiente: ["consultas"],
+    turnos: [
+      {
+        usuario: "manda o boleto pro comprador do negócio TESTE1",
+        esperado: {
+          acoesProibidas: ESCRITAS_DE_ENVIO,
+          naoContem: [...NAO_VAZAR, /enviei|mandei|gerei/i],
+        },
+      },
     ],
   },
 ];

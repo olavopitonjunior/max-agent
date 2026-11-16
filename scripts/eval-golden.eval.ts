@@ -61,12 +61,15 @@ const POLITICA = {
       "deal.list", "deal.detail", "deal.pending", "proposal.list", "proposal.create", "proposal.send", "proposal.delete",
       "form.create", "credit.read", "credit.request", "captacao.create", "captacao.send", "captacao.list",
       "metrics.get", "contract.status", "pending.summary", "property.list", "notification.list", "activity.list",
+      "certidao.status", "document.list", "charge.status",
     ],
   },
   byRecipient: {},
-  brokerDefault: [],
+  // O corretor comissionado enxerga a lista dele (`deal.list`); a busca por nome é só do usuário (o despachante a recusa).
+  brokerDefault: ["deal.list"],
 };
 const usuario = { orgId: "org-eval", orgName: "FINCasa", kind: "user" as const, userId: "u1", userName: "Olavo" };
+const corretor = { orgId: "org-eval", orgName: "FINCasa", kind: "broker" as const, splitRecipientId: "sr-eval", label: "TESTE Corretor" };
 
 // ─── Checagens ──────────────────────────────────────────────────────────────
 
@@ -173,7 +176,7 @@ it("golden set", { timeout: 30 * 60_000 }, async () => {
         const messageId = `g${++msg}`;
         const s = await app.invoke(
           { inbound: { messageId, fromPhone: "5511987654321", groupId: null, kind: "text" as const, text: t.usuario, mediaUrl: null, mimeType: null, timestampMs: null, senderName: "Olavo", replyToMessageId: null },
-            identity: usuario, ...RESET_DO_TURN },
+            identity: c.identidade === "corretor" ? corretor : usuario, ...RESET_DO_TURN },
           { configurable: { thread_id: thread } },
         );
         const ms = Date.now() - t0;

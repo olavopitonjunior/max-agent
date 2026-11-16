@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { CASOS, TERCEIROS_PADRAO, type CasoGolden } from '../../evals/golden/casos';
 import { BASE_GOLDEN, NEGOCIOS_GOLDEN } from '../eval-simulador';
+import { VERBOS_DE_LEITURA } from '../../src/graph/scope-contract';
+import { VERBOS_DE_ACAO } from '../../src/lib/acao';
 
 const ids = (bot?: string) => CASOS.filter((c) => !bot || c.bot === bot).map((c) => c.id);
 const todoTexto = (c: CasoGolden) => JSON.stringify(c, (_k, v) => (v instanceof RegExp ? v.source : v));
@@ -71,5 +73,58 @@ describe('golden: arquivo de casos', () => {
     expect(ids('max')).toContain('r4-propostas-da-imobiliaria-mes-max');
     expect(ids('newton')).toContain('r4-propostas-da-imobiliaria-mes-newton');
     expect(CASOS.find((c) => c.id === 'w46-credito-ok-nao-executa')!.envio).toBe('aprovado');
+  });
+
+  it('todo verbo citado (acoes, acoesProibidas, args) existe no catálogo de leitura ou de ação', () => {
+    const conhecidos = new Set<string>([...VERBOS_DE_LEITURA, ...VERBOS_DE_ACAO]);
+    for (const c of CASOS) {
+      for (const t of c.turnos) {
+        const e = t.esperado;
+        const citados = [...(e.acoes ?? []), ...(e.acoesProibidas ?? []), ...(e.args ?? []).map((a) => a.verbo)];
+        for (const v of citados) expect(conhecidos.has(v), `${c.id}: verbo desconhecido ${v}`).toBe(true);
+      }
+    }
+  });
+
+  it('O4 + busca: os oito casos existem, no ambiente de consultas, com a origem datada', () => {
+    const o4 = CASOS.filter((c) => c.origem.includes('O4 + busca (16/11)'));
+    expect(o4.map((c) => c.id).sort()).toEqual([
+      'o4-boleto-nao-envia', 'o4-busca-corretor-indisponivel', 'o4-busca-negocio-do-joao-silva', 'o4-busca-sem-resultado',
+      'o4-certidoes-do-negocio', 'o4-cobranca-comissao-paga', 'o4-detalhe-negocio-por-nome', 'o4-documentos-do-negocio',
+    ]);
+    for (const c of o4) {
+      expect(c.bot, c.id).toBe('max');
+      expect(c.ambiente, c.id).toEqual(['consultas']);
+      expect(c.turnos, c.id).toHaveLength(1);
+    }
+  });
+
+  it('O4 + busca: todo caso nega markdown, id cru e link; só o corretor muda de identidade', () => {
+    const exemplos = ['**negrito**', 'ccccccccccccccccccccccccc', 'dn-teste1', 'veja https://x.test/a'];
+    for (const c of CASOS.filter((x) => x.origem.includes('O4 + busca'))) {
+      const nao = c.turnos[0]!.esperado.naoContem ?? [];
+      for (const exemplo of exemplos) expect(nao.some((r) => (r instanceof RegExp ? r.test(exemplo) : exemplo.includes(r))), `${c.id} deixa passar ${exemplo}`).toBe(true);
+      expect(c.identidade ?? 'usuario', c.id).toBe(c.id === 'o4-busca-corretor-indisponivel' ? 'corretor' : 'usuario');
+    }
+  });
+
+  it('O4 + busca: expectativas do brief (verbos, argumentos e frases)', () => {
+    const e = (id: string) => CASOS.find((c) => c.id === id)!.turnos[0]!.esperado;
+    expect(e('o4-detalhe-negocio-por-nome').acoes).toEqual(['deal.list', 'deal.detail']);
+    expect(e('o4-detalhe-negocio-por-nome').args![0]!.contem.busca).toEqual(/TESTE1/i);
+    expect(e('o4-busca-negocio-do-joao-silva').acoes).toEqual(['deal.list']);
+    expect(e('o4-busca-corretor-indisponivel').acoesProibidas).toEqual(['deal.list']);
+    expect(e('o4-busca-sem-resultado').acoesProibidas).toEqual(['deal.detail']);
+    expect(e('o4-certidoes-do-negocio').acoes).toEqual(['certidao.status']);
+    expect(e('o4-documentos-do-negocio').acoes).toEqual(['document.list']);
+    // document.list termina cada linha com a URL da tela do negócio: ela passa, link de arquivo não.
+    const docNao = e('o4-documentos-do-negocio').naoContem as RegExp[];
+    expect(docNao.some((r) => r.test('https://imobpro.ia.br/deals/deal-1?tab=anexos'))).toBe(false);
+    expect(docNao.some((r) => r.test('https://abc.public.blob.vercel-storage.com/rg.pdf'))).toBe(true);
+    expect(docNao.some((r) => r.test('https://imobpro.ia.br/api/files/rg.pdf'))).toBe(true);
+    expect(e('o4-cobranca-comissao-paga').acoes).toEqual(['charge.status']);
+    // O pedido de envio de boleto não pode escrever nada: sem proposta, formulário nem captação.
+    expect(e('o4-boleto-nao-envia').acoesProibidas).toEqual(expect.arrayContaining(['proposal.send', 'proposal.create', 'form.create', 'captacao.send']));
+    expect(e('o4-boleto-nao-envia').naoContem!.some((r) => r instanceof RegExp && r.test('Enviei o boleto'))).toBe(true);
   });
 });

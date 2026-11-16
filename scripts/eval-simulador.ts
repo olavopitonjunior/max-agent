@@ -11,11 +11,15 @@
  * Dados 100% sintéticos (nomes "TESTE", telefone 11999990000).
  */
 
+import { VETOR_CERTIDAO_STATUS_USER } from "../src/graph/__tests__/certidao-status-vectors";
+import { VETOR_DOCUMENT_LIST_USER } from "../src/graph/__tests__/documentos-vectors";
+import { VETOR_CHARGE_STATUS_USER } from "../src/graph/__tests__/cobranca-vectors";
+
 export type Prop = { id: string; codigo: string; titulo: string; status: string; estado: string; signatarios: { nome: string; status: string }[] };
 export type EnvioSim = "aprovado" | "sem_resposta";
 type LeadSim = { id: string; nome: string; cpf: string; credito: Record<string, Record<string, unknown>> };
 type Cap = { id: string; codigo: string; nome: string; tipo: string; modeloId: string; version: number; status: "rascunho" | "em_assinatura"; dados: Record<string, unknown> };
-export type Negocio = { id: string; titulo: string; etapa: string; valor: number; paradoHaDias: number };
+export type Negocio = { id: string; titulo: string; etapa: string; valor: number; paradoHaDias: number; cliente?: string };
 
 export const BASE: Prop[] = [
   { id: "p1", codigo: "PROP-2026-0011", titulo: "Apto 302 Rua das Flores", status: "assinada_proponente", estado: "Assinada pelo proponente", signatarios: [{ nome: "Letícia Moraes", status: "assinou" }] },
@@ -37,6 +41,8 @@ export const NEGOCIOS_GOLDEN: Negocio[] = [
   { id: "dn-parado-b", titulo: "TESTE parado B", etapa: "Contrato", valor: 390000, paradoHaDias: 33 },
   { id: "dn-parado-c", titulo: "TESTE parado C", etapa: "Proposta", valor: 370000, paradoHaDias: 28 },
   { id: "dn-parado-d", titulo: "TESTE parado D", etapa: "Formulário", valor: 360000, paradoHaDias: 22 },
+  /** Alvo da busca por nome ("o negócio do joao silva"): fora dos cinco primeiros, sem acento no pedido e com no título. */
+  { id: "dn-joao-silva", titulo: "TESTE João Silva", etapa: "Contrato", valor: 520000, paradoHaDias: 4 },
 ];
 
 export const S = {
@@ -251,6 +257,24 @@ export async function imobpro({ verb, args = {}, idempotencyKey }: { verb: strin
 }
 
 /**
+ * Leituras de UM negócio (O4: certidões, documentos, cobrança). Os corpos vêm dos vetores de paridade
+ * (`src/graph/__tests__/*-vectors.ts`, copiados do contractmaker), sem mudar a forma nem a ordem das chaves.
+ * Só o `negocioId` da cobrança é reescrito: o despachante derruba item de outro negócio. Negócio que o
+ * simulador não conhece volta `[]`, como o servidor faz com negado/inexistente.
+ */
+const itensDoVetor = (vetor: string): Record<string, unknown>[] => (JSON.parse(vetor) as { items: Record<string, unknown>[] }).items;
+const CERTIDOES_SIM = itensDoVetor(VETOR_CERTIDAO_STATUS_USER);
+const DOCUMENTOS_SIM = itensDoVetor(VETOR_DOCUMENT_LIST_USER);
+const COBRANCAS_SIM = itensDoVetor(VETOR_CHARGE_STATUS_USER);
+const negocioDe = (args: Record<string, unknown>): Negocio | undefined => S.negocios.find((x) => x.id === args.negocio_id);
+
+/** `busca` do `deal.list`: o servidor procura em título OU cliente, sem acento nem maiúscula. */
+const casaNegocio = (n: Negocio, busca: string): boolean => {
+  const alvo = norm(busca).replace(/\s+/g, " ").trim();
+  return !alvo || [n.titulo, n.cliente].some((c) => typeof c === "string" && norm(c).includes(alvo));
+};
+
+/**
  * Leituras (`scope-query`) do golden. Os formatos de item seguem o que as tools
  * numeram (`id`, `titulo`, ...); o contrato exato do servidor não está neste
  * repo, então os campos além de `id`/`titulo`/`etapa`/`valor` são inferidos.
@@ -266,9 +290,21 @@ export function consultaGolden({ verb, args = {} }: { verb: string; args?: Recor
       return { items: l.items, truncated: equipe ? true : l.total > l.items.length };
     }
     case "deal.list": {
-      const items = [...S.negocios].map(({ paradoHaDias, ...n }) => ({ ...n, paradoHaDias }));
+      const busca = typeof args.busca === "string" ? args.busca : "";
+      const items = S.negocios.filter((n) => casaNegocio(n, busca)).map((n) => ({ ...n }));
       return { items: items.slice(0, 10), truncated: items.length > ITENS };
     }
+    case "deal.detail": {
+      const n = negocioDe(args);
+      if (!n) return { items: [], truncated: false };
+      return { items: [{ id: n.id, titulo: n.titulo, etapa: n.etapa, valor: n.valor, paradoHaDias: n.paradoHaDias, pendencias: n.etapa === "Assinatura" ? ["Assinatura do comprador"] : [] }], truncated: false };
+    }
+    case "certidao.status":
+      return { items: negocioDe(args) ? CERTIDOES_SIM.map((c) => ({ ...c })) : [], truncated: false };
+    case "document.list":
+      return { items: negocioDe(args) ? DOCUMENTOS_SIM.map((d) => ({ ...d })) : [], truncated: false };
+    case "charge.status":
+      return { items: negocioDe(args) ? COBRANCAS_SIM.map((c) => ({ ...c, negocioId: args.negocio_id })) : [], truncated: false };
     case "deal.pending": {
       const items = S.negocios.filter((n) => n.etapa === "Assinatura").map((n) => ({ id: n.id, titulo: n.titulo, etapa: n.etapa, pendencias: ["Assinatura do comprador"] }));
       return { items, truncated: false };
