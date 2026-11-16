@@ -2,7 +2,14 @@ import type { LlmToolCall } from "@/lib/llm";
 import type { Candidate } from "@/lib/identity";
 import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
 import { lerPreferencias } from "@/lib/cm";
-import { PERIODOS_DE_METRICA, QUEBRAS_DE_METRICA } from "./scope-contract";
+import {
+  lerDealDetalhado,
+  PERIODOS_DE_METRICA,
+  QUEBRAS_DE_METRICA,
+  type DealDetalhadoBroker,
+  type DealDetalhadoUser,
+} from "./scope-contract";
+import { linkSeguro, texto } from "./notificacao-projecao";
 import type { ToolLogEntry } from "@/lib/turnlog";
 import type { Capability } from "./policy";
 import {
@@ -406,6 +413,35 @@ export async function despacharLeituras(params: {
     if (entrada.verb === "notification.list") r.items = r.items.map(projetarNotificacao);
     if (entrada.verb === "activity.list" || entrada.verb === "activity.get") r.items = r.items.map(atividadeEmHoraLocal);
 
+    // `deal.detail` (PR-O4a): o item é LIDO como o contrato manda (chave obrigatória ausente ou de
+    // tipo errado descarta; chave extra é removida) e vira um resumo pronto em PT-BR. O modelo nunca vê o JSON do servidor, só o
+    // texto que este módulo montou — e o que o render não escreve, ele não pode repetir.
+    if (entrada.verb === "deal.detail") {
+      const sujeito = params.identity.kind;
+      const idPedido = args.negocio_id;
+      const lidos = r.items.map((it) => lerDealDetalhado(it, sujeito));
+      const validos = lidos.filter((d): d is NonNullable<typeof d> => d !== null && d.id === idPedido);
+      // Item que não confere com o contrato (ou com o id pedido) NÃO vira "sem acesso": é falha, e alta.
+      // O que `descartarSeVazou` já removeu (broker com campo proibido) também é falha: sem isso o
+      // item sumia e a resposta virava "Não encontrei... ou sem acesso", escondendo a regressão do servidor.
+      const barrados = r.descartados ?? 0;
+      if (barrados > 0 || validos.length !== r.items.length) {
+        console.error(`[despachante] deal.detail fora do contrato na org ${params.identity.orgId}: ${barrados + r.items.length - validos.length} item(ns) descartado(s)`);
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+      const resumo = validos.length > 0 ? renderDealDetalhado(validos[0], sujeito) : NEGOCIO_NAO_ENCONTRADO;
+      resultados.push({
+        tool: chamada.name,
+        // `_untrusted`: o resumo carrega título, nome de cliente e de parte, digitados por terceiros.
+        items: [validos.length > 0 ? { n: numeroDoDetalhe, _untrusted: true, resumo } : { n: numeroDoDetalhe, resumo }],
+        truncated: false,
+      });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+      continue;
+    }
+
     // Negado no servidor volta `{items:[]}` SEM `naoMedidos`; vazio de verdade sempre o traz.
     // Sem ele, o modelo diria "não há pendência" a quem só não tem acesso.
     if (entrada.verb === "template.decisions" && r.naoMedidos === undefined) {
@@ -467,6 +503,150 @@ export async function despacharLeituras(params: {
   return { resultados, trilha, referencias };
 }
 
+/**
+ * Vazio de `deal.detail`: o servidor responde `{items:[]}` igual para "sem a capability", "fora do
+ * escopo", "outra org" e "não existe" (de propósito: não distingue). O Max também não distingue,
+ * e não inventa negócio.
+ */
+export const NEGOCIO_NAO_ENCONTRADO = "Não encontrei esse negócio, ou você não tem acesso a ele.";
+
+const FUSO_DO_NEGOCIO = "America/Sao_Paulo";
+
+/** "2026-10-20T12:00:00.000Z" -> "20/10/2026" (horário de Brasília); inválida -> null. */
+function dataLocal(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("pt-BR", { timeZone: FUSO_DO_NEGOCIO, day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+/**
+ * Texto de terceiro dentro de uma linha de WhatsApp: sem controle/bidi/quebra (`texto`) e sem `*`,
+ * que fecharia ou forjaria um negrito. Vazio vira `null` (a linha some).
+ */
+function limpo(v: string | null): string | null {
+  const t = texto(v);
+  const sem = t ? t.replace(/\*+/g, "").replace(/\s+/g, " ").trim() : "";
+  return sem || null;
+}
+
+const ESTADO_DO_CONTRATO: Record<string, string> = {
+  rascunho: "em rascunho",
+  aprovado: "aprovado",
+  assinado: "assinado",
+  revogado: "revogado",
+};
+const ESTADO_DO_ENVELOPE: Record<string, string> = {
+  running: "em andamento",
+  closed: "concluída",
+  canceled: "cancelada",
+  failed: "com falha",
+};
+/** Estado conhecido vira PT-BR; desconhecido sai como veio (limpo), nunca inventado. */
+function rotulo(mapa: Record<string, string>, estado: string): string | null {
+  return mapa[estado] ?? limpo(estado.replace(/_/g, " ").toLowerCase());
+}
+
+const plural = (n: number, um: string, varios: string) => `${n} ${n === 1 ? um : varios}`;
+
+/** "1 de 3 assinadas, 1 recusada, 1 pendente": zero some, singular/plural certo. */
+function contagemDeAssinaturas(a: { total: number; assinadas: number; recusadas: number; pendentes: number }): string {
+  const partes = [`${a.assinadas} de ${a.total} assinadas`];
+  if (a.recusadas > 0) partes.push(plural(a.recusadas, "recusada", "recusadas"));
+  if (a.pendentes > 0) partes.push(plural(a.pendentes, "pendente", "pendentes"));
+  return partes.join(", ");
+}
+
+const MAX_PENDENCIAS_NO_RESUMO = 10;
+
+/**
+ * O resumo de UM negócio, pronto para a conversa: PT-BR, formato WhatsApp (`*negrito*`, nunca
+ * `**`), sem id interno e sem `n=`.
+ *
+ * **Só escreve o que veio.** Campo `null` (ou lista vazia) não vira frase: a linha some. O que o
+ * corretor comissionado não recebe do servidor este render não tem de onde tirar (a forma dele é
+ * outra), e o teste afirma a AUSÊNCIA de título, cliente, valor, nome, link e proposta no texto.
+ * Recebe o item já LIDO por `lerDealDetalhado`, nunca o JSON cru.
+ */
+export function renderDealDetalhado(item: DealDetalhadoUser, sujeito: "user"): string;
+export function renderDealDetalhado(item: DealDetalhadoBroker, sujeito: "broker"): string;
+export function renderDealDetalhado(item: DealDetalhadoUser | DealDetalhadoBroker, sujeito: "user" | "broker"): string;
+export function renderDealDetalhado(item: DealDetalhadoUser | DealDetalhadoBroker, sujeito: "user" | "broker"): string {
+  const linhas: string[] = [];
+  const user = sujeito === "user" ? (item as DealDetalhadoUser) : null;
+  const broker = sujeito === "broker" ? (item as DealDetalhadoBroker) : null;
+
+  const titulo = limpo(user ? user.titulo : (broker as DealDetalhadoBroker).referencia);
+  if (titulo) linhas.push(user ? `*${titulo}* (${user.tipo === "locacao" ? "locação" : "venda"})` : `*${titulo}*`);
+
+  const etapa = limpo(item.etapa);
+  if (etapa) linhas.push(`Etapa: ${etapa}`);
+
+  if (user) {
+    const cliente = limpo(user.cliente);
+    if (cliente) linhas.push(`Cliente: ${cliente}`);
+    if (user.valor !== null) {
+      linhas.push(`Valor: ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(user.valor).replace(/ /g, " ")}`);
+    }
+    const partes = user.partes.map((p) => [limpo(p.papel), limpo(p.nome)].filter(Boolean).join(" ")).filter(Boolean);
+    if (partes.length > 0) linhas.push(`Partes: ${partes.join("; ")}`);
+
+    if (user.contrato) {
+      const estado = rotulo(ESTADO_DO_CONTRATO, user.contrato.estado);
+      const em = dataLocal(user.contrato.atualizadoEm);
+      if (estado) linhas.push(`Contrato: ${estado}, versão ${user.contrato.versao}${em ? ` (atualizado em ${em})` : ""}`);
+    }
+    if (user.proposta) {
+      const estado = rotulo({}, user.proposta.estado);
+      const codigo = limpo(user.proposta.codigo);
+      if (codigo) linhas.push(`Proposta: ${codigo}${estado ? ` (${estado})` : ""}`);
+      else if (estado) linhas.push(`Proposta: ${estado}`);
+    }
+  } else {
+    const b = broker as DealDetalhadoBroker;
+    const papeis = b.partes.map((p) => limpo(p.papel)).filter(Boolean);
+    if (papeis.length > 0) linhas.push(`Partes: ${papeis.join(", ")}`);
+    if (b.contrato) {
+      const estado = rotulo(ESTADO_DO_CONTRATO, b.contrato.estado);
+      if (estado) linhas.push(`Contrato: ${estado}`);
+    }
+  }
+
+  const assinatura = item.assinatura;
+  if (assinatura) {
+    // total 0 = nenhum signatário: "0 de 0 assinadas" seria uma frase sem fato por trás.
+    if (assinatura.total > 0) linhas.push(`Assinaturas: ${contagemDeAssinaturas(assinatura)}`);
+    const situacao = rotulo(ESTADO_DO_ENVELOPE, assinatura.estado);
+    if (situacao) {
+      let fim = "";
+      if (user?.assinatura) {
+        const concluida = assinatura.estado === "closed" ? dataLocal(user.assinatura.concluidoEm) : null;
+        const enviada = dataLocal(user.assinatura.enviadoEm);
+        fim = concluida ? ` em ${concluida}` : enviada ? ` (enviada em ${enviada})` : "";
+      }
+      linhas.push(`Situação da assinatura: ${situacao}${fim}`);
+    }
+  }
+
+  const pendencias = item.pendencias.map((p) => limpo(p)).filter((p): p is string => !!p);
+  if (pendencias.length === 0) {
+    linhas.push("Pendências: nenhuma");
+  } else {
+    const mostradas = pendencias.slice(0, MAX_PENDENCIAS_NO_RESUMO);
+    const resto = pendencias.length - mostradas.length;
+    linhas.push(`Pendências: ${mostradas.join("; ")}${resto > 0 ? `; e mais ${resto}` : ""}`);
+  }
+
+  const atualizado = dataLocal(item.atualizadoEm);
+  if (atualizado) linhas.push(`Atualizado em ${atualizado}`);
+
+  if (user) {
+    const link = linkSeguro(user.link);
+    if (link) linhas.push(`Link: ${link}`);
+  }
+  return linhas.join("\n");
+}
+
 /** Os blocos que o servidor devolve em `pending.summary` quando nenhum é pedido (sem `avisos`). */
 export const BLOCOS_DE_PENDENCIA_SEM_FILTRO = ["formularios", "propostas", "atividades"] as const;
 
@@ -502,7 +682,7 @@ async function executarLeitura(params: {
   identity: Candidate;
   subject: ReturnType<typeof subjectDe>;
   fromPhone: string;
-}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification; naoMedidos?: number } | null> {
+}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification; naoMedidos?: number; descartados?: number } | null> {
   // Preferências de aviso (M3): rota própria, sempre da PRÓPRIA pessoa (telefone do turn). Só usuário
   // da plataforma tem preferência; qualquer outra identidade volta como "sem permissão", nunca como lista vazia.
   if (params.entrada.verb === "prefs.get") {
@@ -519,7 +699,9 @@ async function executarLeitura(params: {
   });
   if (!r) return null;
   // Rede de segurança da regra 5 — a projeção que VALE é a do servidor.
-  return { items: descartarSeVazou(r.items, params.identity.kind), truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}), ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) };
+  const seguros = descartarSeVazou(r.items, params.identity.kind);
+  // `descartados`: quantos itens a rede removeu. Só o `deal.detail` lê (vazio por vazamento é FALHA, não "sem acesso").
+  return { items: seguros, descartados: r.items.length - seguros.length, truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}), ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) };
 }
 
 // ─── Executor de ESCRITA (proposta, nunca execução) ───────────────────────
