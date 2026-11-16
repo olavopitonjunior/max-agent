@@ -547,8 +547,21 @@ export function registrarLidos(
     const { semPapel: _vindo, ...limpo } = c;
     porPath.set(c.path, { ...limpo, ...(leitura.semPapel ? { semPapel: true } : {}), ref: leitura.ref });
   }
-  // F4: o mesmo CPF dito para duas posições do mesmo lado é uma pessoa só (antes do cartão e do SIM).
-  return comLidos(fluxo, unificarDocumentoRepetido([...porPath.values()]), thread);
+  // F4: a unificação do mesmo CPF NÃO acontece aqui: guardar é cego ao que o servidor já tem. Quem LÊ
+  // (`lidosUnificados`) e quem grava (`gravarLidos`) unificam com as partes gravadas à vista (I4).
+  return comLidos(fluxo, [...porPath.values()], thread);
+}
+
+/**
+ * Os lidos pendentes, já com o mesmo CPF dito para duas posições do mesmo lado fundido numa pessoa só
+ * (F4) e sempre à luz do que o servidor já tem (`partes`, I4): pessoa já gravada nunca é fundida em outra.
+ */
+export function lidosUnificados(
+  fluxo: FluxoFormularioV2,
+  thread: string,
+  partes?: PartesGravadas
+): CampoLido[] {
+  return unificarDocumentoRepetido(lidosDoCofre(fluxo, thread), partes);
 }
 
 const BAIXA_CONFIANCA = 0.5;
@@ -774,10 +787,18 @@ function nomeDaParte(campos: CampoLido[], grupo: GrupoDaParte, posicao: number):
   return undefined;
 }
 
-/** Nomes que se contradizem (os dois presentes e diferentes) = duas pessoas com o mesmo documento. */
-function nomesContraditorios(campos: CampoLido[], a: DocumentoRepetido["a"], b: DocumentoRepetido["b"]): boolean {
-  const na = nomeDaParte(campos, a.grupo, a.posicao);
-  const nb = nomeDaParte(campos, b.grupo, b.posicao);
+/**
+ * Nomes que se contradizem (os dois presentes e diferentes) = duas pessoas com o mesmo documento.
+ * O nome vem do lote; sem ele, da parte que o servidor já tem naquela posição (`partes`).
+ */
+function nomesContraditorios(
+  campos: CampoLido[],
+  a: DocumentoRepetido["a"],
+  b: DocumentoRepetido["b"],
+  partes?: PartesGravadas
+): boolean {
+  const na = nomeDaParte(campos, a.grupo, a.posicao) ?? partes?.[a.grupo][a.posicao];
+  const nb = nomeDaParte(campos, b.grupo, b.posicao) ?? partes?.[b.grupo][b.posicao];
   return !!na && !!nb && !mesmoNome(na, nb);
 }
 
@@ -799,8 +820,13 @@ function documentosPorChave(campos: CampoLido[]): Map<string, Array<{ grupo: Gru
  * seguintes sobem). Nada disso toca o servidor: é a arrumação do que ainda é só leitura pendente.
  * Documento igual em lados diferentes, ou em nomes diferentes, NÃO é unificado: é ambíguo
  * (`documentoRepetido`) e quem decide é o corretor.
+ *
+ * `partes` é o que o servidor JÁ tem. Posição lida é posição do servidor, então: (a) o nome da parte
+ * gravada conta para o "nomes diferentes"; (b) uma posição que já é de uma pessoa gravada NUNCA é
+ * dobrada em outra (apagaria o documento de quem já está no rascunho e reindexaria dados de uma
+ * pessoa para a posição de outra): pergunta-se. Só posições novas (`>= partes[grupo].length`) se juntam.
  */
-export function unificarDocumentoRepetido<T extends CampoLido>(campos: T[]): T[] {
+export function unificarDocumentoRepetido<T extends CampoLido>(campos: T[], partes?: PartesGravadas): T[] {
   let atual = campos;
   for (const posicoes of documentosPorChave(campos).values()) {
     if (posicoes.length < 2) continue;
@@ -808,7 +834,9 @@ export function unificarDocumentoRepetido<T extends CampoLido>(campos: T[]): T[]
     if (posicoes.some((p) => p.grupo !== grupo)) continue;
     const ordenadas = posicoes.map((p) => p.posicao).sort((x, y) => x - y);
     const alvo = ordenadas[0]!;
-    if (ordenadas.slice(1).some((q) => nomesContraditorios(atual, { grupo, posicao: alvo }, { grupo, posicao: q }))) continue;
+    const gravadas = partes?.[grupo].length ?? 0;
+    if (ordenadas.slice(1).some((q) => q < gravadas)) continue; // dobraria uma pessoa que já está no rascunho
+    if (ordenadas.slice(1).some((q) => nomesContraditorios(atual, { grupo, posicao: alvo }, { grupo, posicao: q }, partes))) continue;
     const sobram = ordenadas.slice(1);
     const resultado: T[] = [];
     const ocupados = new Set<string>();
@@ -839,8 +867,8 @@ export function unificarDocumentoRepetido<T extends CampoLido>(campos: T[]): T[]
 }
 
 /** O primeiro documento que ainda está em duas partes que NÃO dá para tratar como a mesma pessoa. */
-export function documentoRepetido(campos: CampoLido[]): DocumentoRepetido | null {
-  for (const posicoes of documentosPorChave(unificarDocumentoRepetido(campos)).values()) {
+export function documentoRepetido(campos: CampoLido[], partes?: PartesGravadas): DocumentoRepetido | null {
+  for (const posicoes of documentosPorChave(unificarDocumentoRepetido(campos, partes)).values()) {
     if (posicoes.length >= 2) return { a: posicoes[0]!, b: posicoes[1]! };
   }
   return null;
@@ -1037,7 +1065,7 @@ export async function gravarLidos(
   if (typeof opts.messageIdDoSim !== "string" || opts.messageIdDoSim.trim().length === 0) {
     return { ok: false, erro: "sem_confirmacao", fluxo, descartados: [] };
   }
-  const pendentes = unificarDocumentoRepetido(pendentesComValor(fluxo, thread));
+  const pendentes = unificarDocumentoRepetido(pendentesComValor(fluxo, thread), opts.partes);
   if (pendentes.length === 0) {
     // Havia pendência mas o cofre não abriu (chave rotacionada, thread trocada): o valor
     // se perdeu. Limpa o ponteiro sem valor e diz a verdade, em vez de reter lixo.
@@ -1047,7 +1075,7 @@ export async function gravarLidos(
   }
 
   // F4: o mesmo CPF/CNPJ em duas pessoas diferentes nunca vai ao servidor (ele recusaria com 409 depois do "sim").
-  const repetido = documentoRepetido(pendentes);
+  const repetido = documentoRepetido(pendentes, opts.partes);
   if (repetido) return { ok: false, erro: "documento_repetido", fluxo, descartados: [], repetido };
 
   const { patch, gravados, descartados, conflito } = montarPatchDosLidos(pendentes, opts);

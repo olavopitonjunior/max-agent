@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CPF_SINTETICO, ModeloFalso, PESSOAS, Sessao, formatarCpf, roteirosDe, verificarTransversais } from "./harness";
+import { CPF_SINTETICO, ModeloFalso, PESSOAS, Sessao, formatarCpf, roteirosDe, telefoneFicticio, verificarTransversais } from "./harness";
 
 /**
  * Dado repetido. O mesmo CPF dito de novo para a MESMA parte não cria parte nova, e para outra
@@ -105,6 +105,60 @@ describe("eval fv2: dado repetido", () => {
     const t2 = await s.fala("sim");
     expect(t2.escritas).toEqual([]);
     expect(s.servidor.rascunho).toBeNull();
+  });
+
+  // I4: posição lida é posição do servidor. Com Ana e Beto JÁ no rascunho, o mesmo CPF nas duas posições (sem
+  // nome no lote) não pode ser fundido em silêncio: o CPF do Beto sumiria e o cartão sairia "limpo".
+  it("com os dois compradores já no rascunho, o mesmo CPF nas duas posições é perguntado, não fundido (I4)", async () => {
+    const modelo = new ModeloFalso().roteiro(
+      ...roteirosDe([
+        { compradores: [{ nome: PESSOAS.comprador }, { nome: PESSOAS.compradora2 }] },
+        { compradores: [{ cpf: "{{CPF:1}}" }, { cpf: "{{CPF:1}}" }] },
+      ])
+    );
+    s = new Sessao({ modelo, nomes: [PESSOAS.comprador, PESSOAS.compradora2], cpfs: [CPF_SINTETICO] });
+    await s.preparar();
+    await s.semear();
+
+    await s.fala(`compradores ${PESSOAS.comprador} e ${PESSOAS.compradora2}, ficha`);
+    await s.fala("sim"); // mostra a ficha (a conferência vem antes de gravar)
+    const criou = await s.fala("sim");
+    expect(criou.escritas.map((w) => [w.verb, w.status])).toEqual([["proposal.create", 201]]);
+    expect(s.servidor.rascunho?.compradores).toHaveLength(2);
+
+    const t = await s.fala(`CPF do ${PESSOAS.comprador} ${formatarCpf(CPF_SINTETICO)} e da ${PESSOAS.compradora2} ${formatarCpf(CPF_SINTETICO)}, ficha`);
+    expect(t.reply).toContain("O mesmo CPF/CNPJ apareceu para duas pessoas");
+    expect(t.reply).toContain(PESSOAS.comprador);
+    expect(t.reply).toContain(PESSOAS.compradora2);
+
+    const sim = await s.fala("sim");
+    expect(sim.escritas).toEqual([]);
+    expect(s.servidor.rascunho?.compradores[0]?.cpf).toBeUndefined();
+    expect(s.servidor.rascunho?.compradores[1]?.cpf).toBeUndefined();
+  });
+
+  it("o 3º comprador do lote nunca sobe para a posição de quem já está gravado (I4)", async () => {
+    const modelo = new ModeloFalso().roteiro(
+      ...roteirosDe([
+        { compradores: [{ nome: PESSOAS.comprador }, { nome: PESSOAS.compradora2 }] },
+        { compradores: [{ cpf: "{{CPF:1}}" }, { cpf: "{{CPF:1}}" }, { telefone: "{{TEL:1}}" }] },
+      ])
+    );
+    s = new Sessao({ modelo, nomes: [PESSOAS.comprador, PESSOAS.compradora2], cpfs: [CPF_SINTETICO] });
+    await s.preparar();
+    await s.semear();
+
+    await s.fala(`compradores ${PESSOAS.comprador} e ${PESSOAS.compradora2}, ficha`);
+    await s.fala("sim"); // mostra a ficha
+    await s.fala("sim"); // grava
+    expect(s.servidor.rascunho?.compradores).toHaveLength(2);
+    const t = await s.fala(
+      `CPF dos dois ${formatarCpf(CPF_SINTETICO)}, e o terceiro comprador tem o telefone ${telefoneFicticio(7)}, ficha`
+    );
+    expect(t.reply).toContain("O mesmo CPF/CNPJ apareceu para duas pessoas");
+    await s.fala("sim");
+    expect(s.servidor.escritas().filter((w) => w.verb === "proposal.update")).toEqual([]);
+    expect(s.servidor.rascunho?.compradores[1]?.telefone).toBeUndefined();
   });
 
   it("o servidor ainda recusa com 409 (causa não dita): nada é dado como gravado e o texto não inventa a causa (F4b)", async () => {

@@ -89,6 +89,60 @@ describe("unificarDocumentoRepetido: uma pessoa só", () => {
   });
 });
 
+/**
+ * I4: posição lida é posição do SERVIDOR. Quem já está no rascunho nunca é fundido em outra pessoa
+ * nem perde o documento em silêncio: pergunta-se (`documentoRepetido`), sem reindexar.
+ */
+describe("unificarDocumentoRepetido: com partes já gravadas no servidor", () => {
+  const gravadas = { compradores: ["Ana Souza", "Beto Lima"], vendedores: [] as string[] };
+
+  it("NEGADO: Ana e Beto já gravados + o mesmo CPF nas duas posições, sem nome no lote, NÃO funde", () => {
+    const campos = [lido("compradores[0].cpf", CPF), lido("compradores[1].cpf", CPF_FORMATADO)];
+    expect(unificarDocumentoRepetido(campos, gravadas)).toEqual(campos);
+    expect(documentoRepetido(campos, gravadas)).toEqual({
+      a: { grupo: "compradores", posicao: 0 },
+      b: { grupo: "compradores", posicao: 1 },
+    });
+  });
+
+  it("NEGADO: nada sobe para a posição de quem já está gravado (o 3º comprador não vira o Beto)", () => {
+    const campos = [
+      lido("compradores[0].cpf", CPF),
+      lido("compradores[1].cpf", CPF),
+      lido("compradores[2].telefone", "11900000033"),
+      lido("compradores[2].email", "terceiro@exemplo.invalid"),
+    ];
+    const r = unificarDocumentoRepetido(campos, gravadas);
+    expect(r).toEqual(campos);
+    expect(r.find((c) => c.path === "compradores[1].telefone")).toBeUndefined();
+    expect(documentoRepetido(campos, gravadas)).not.toBeNull();
+  });
+
+  it("o nome da parte gravada conta como contradição mesmo sem nome no lote (posição nova x gravada)", () => {
+    // [0] = Ana (gravada), [2] = outra pessoa (nome no lote): mesmo CPF, nomes diferentes: pergunta.
+    const campos = [
+      lido("compradores[0].cpf", CPF),
+      lido("compradores[2].nome", "Carla Dias"),
+      lido("compradores[2].cpf", CPF),
+    ];
+    expect(unificarDocumentoRepetido(campos, gravadas)).toEqual(campos);
+    expect(documentoRepetido(campos, gravadas)).not.toBeNull();
+  });
+
+  it("posição NOVA (além das gravadas) com o mesmo CPF e sem nome contraditório ainda funde na gravada", () => {
+    const campos = [lido("compradores[0].cpf", CPF), lido("compradores[2].cpf", CPF_FORMATADO), lido("compradores[2].telefone", "11900000044")];
+    const r = unificarDocumentoRepetido(campos, gravadas);
+    expect(caminhos(r)).toEqual(["compradores[0].cpf", "compradores[0].telefone"]);
+    expect(documentoRepetido(r, gravadas)).toBeNull();
+  });
+
+  it("sem rascunho (partes vazias) o comportamento antigo se mantém", () => {
+    const vazio = { compradores: [], vendedores: [] };
+    const r = unificarDocumentoRepetido([lido("compradores[0].cpf", CPF), lido("compradores[1].cpf", CPF)], vazio);
+    expect(caminhos(r)).toEqual(["compradores[0].cpf"]);
+  });
+});
+
 describe("409 signatarios_duplicados: texto sempre neutro", () => {
   const f = { ...novoFluxoV2({ esteira: "venda", agora: 1, schemaType: "compra_venda_v1" }), proposalId: "prop-1" };
   const dep = (resposta: RespostaDoServidor) => ({ acao: vi.fn(async () => resposta) });
