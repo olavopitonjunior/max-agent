@@ -363,9 +363,13 @@ export async function despacharLeituras(params: {
     // a frase única. O resumo é montado aqui, sem link, sem id e sem ação: a pessoa age na tela, logada.
     if (entrada.verb === "charge.status") {
       const lidos = r.items.map(lerCobranca);
-      if (lidos.some((it) => it === null)) {
-        // Sem o conteúdo do item no log: é dinheiro de terceiros (valor, vencimento).
-        console.error(`[despachante] charge.status fora do contrato na org ${params.identity.orgId} (${lidos.filter((it) => it === null).length}/${lidos.length} itens)`);
+      // Todo item tem de ser do negócio PEDIDO (o `negocio_id` que saiu daqui). Item de outro negócio,
+      // ainda que bem formado, é resposta fora do contrato: derruba tudo, sem repassar nada.
+      const negocioPedido = args.negocio_id;
+      const alheios = lidos.filter((it) => it !== null && it.negocioId !== negocioPedido).length;
+      if (lidos.some((it) => it === null) || alheios > 0) {
+        // Sem o conteúdo do item no log (nem o id do outro negócio): é dinheiro de terceiros (valor, vencimento).
+        console.error(`[despachante] charge.status fora do contrato na org ${params.identity.orgId} (${lidos.filter((it) => it === null).length + alheios}/${lidos.length} itens)`);
         resultados.push({ tool: chamada.name, items: null, truncated: false });
         trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
         continue;

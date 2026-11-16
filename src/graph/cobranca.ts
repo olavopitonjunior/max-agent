@@ -153,8 +153,8 @@ const PROVEDOR_LEGIVEL: Record<ProvedorDeCobranca, string> = {
  * o separador de milhar e a vírgula são montados à mão, iguais em qualquer ICU.
  */
 export function formatarReais(centavos: number): string {
-  const reais = Math.trunc(centavos / 100);
   const resto = centavos % 100;
+  const reais = (centavos - resto) / 100;
   const milhar = String(reais).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
   return `R$ ${milhar},${String(resto).padStart(2, "0")}`;
 }
@@ -180,7 +180,8 @@ function linhaDaCobranca(c: CobrancaItem): string {
     c.valor === null ? "valor não informado" : formatarReais(c.valor),
     `vence em ${diaDoVencimento(c.vencimento)}`,
   ];
-  if (c.pagoEm) partes.push(`paga em ${diaDoPagamento(c.pagoEm)}`);
+  // Estorno nunca diz "paga em": o dinheiro voltou (ou está voltando), e a linha já traz o estado.
+  if (c.pagoEm && c.estado !== "estornada" && c.estado !== "estorno_em_andamento") partes.push(`paga em ${diaDoPagamento(c.pagoEm)}`);
   partes.push(PROVEDOR_LEGIVEL[c.provedor]);
   return `- ${limpo(partes.join(" — "))}`;
 }

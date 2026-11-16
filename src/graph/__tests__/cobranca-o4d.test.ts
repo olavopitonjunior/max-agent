@@ -53,6 +53,12 @@ const neg = { ...base, oferecidas: ["status_cobranca"], policy: ["charge.status"
 const vetor = JSON.parse(VETOR_CHARGE_STATUS_USER) as { items: Array<Record<string, unknown>>; truncated: boolean };
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
+/** O negócio pedido nos testes do despachante (o "n" 1 do `mapa("negocio")`). */
+const NEGOCIO_PEDIDO = "negocio-id-1";
+/** Os itens do vetor do CM são do `deal-1`; nos testes do despachante o servidor responde sobre o negócio PEDIDO. */
+const doNegocioPedido = (items: unknown[]): unknown[] =>
+  items.map((it) => (it !== null && typeof it === "object" && (it as { negocioId?: unknown }).negocioId === "deal-1" ? { ...(it as object), negocioId: NEGOCIO_PEDIDO } : it));
+
 /** O texto que o modelo recebe (o `resumo` único do resultado). */
 function resumoDe(r: Awaited<ReturnType<typeof despacharLeituras>>): string {
   const item = r.resultados[0].items?.[0] as { resumo?: string } | undefined;
@@ -223,7 +229,7 @@ describe("status_cobranca — o despachante (negado primeiro)", () => {
 
 describe("status_cobranca — parse estrito (R54): forma errada vira falha_na_consulta", () => {
   const falha = async (items: unknown[], truncated = false): Promise<Awaited<ReturnType<typeof despacharLeituras>>> => {
-    escopo.mockResolvedValue({ items, truncated });
+    escopo.mockResolvedValue({ items: doNegocioPedido(items), truncated });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     return despacharLeituras({ ...neg, chamadas: [{ name: "status_cobranca", args: { numero: 1 } }] });
   };
@@ -331,9 +337,61 @@ describe("status_cobranca — parse estrito (R54): forma errada vira falha_na_co
   });
 });
 
+describe("status_cobranca — o negocioId do item tem de ser o do negócio PEDIDO (Rodada 1)", () => {
+  const consulta = async (items: unknown[]): Promise<Awaited<ReturnType<typeof despacharLeituras>>> => {
+    escopo.mockResolvedValue({ items: doNegocioPedido(items), truncated: false });
+    return despacharLeituras({ ...neg, chamadas: [{ name: "status_cobranca", args: { numero: 1 } }] });
+  };
+
+  it("NEGADO: item de OUTRO negócio vira falha_na_consulta, sem resumo", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const alheio = clone(vetor.items[0]);
+    alheio.negocioId = "negocio-de-outro";
+    const r = await consulta([alheio]);
+    expect(r.resultados[0].items).toBeNull();
+    expect(r.trilha[0].outcome).toBe("falha_na_consulta");
+  });
+
+  it("NEGADO: UM item de outro negócio entre itens do negócio pedido derruba a resposta inteira", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const alheio = clone(vetor.items[1]);
+    alheio.negocioId = "negocio-de-outro";
+    const r = await consulta([vetor.items[0], alheio]);
+    expect(r.resultados[0].items).toBeNull();
+    expect(r.trilha[0].outcome).toBe("falha_na_consulta");
+  });
+
+  it("NEGADO: negocioId com caixa ou espaço diferente não passa (igualdade exata)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    for (const id of ["NEGOCIO-ID-1", " negocio-id-1", "negocio-id-1 ", ""]) {
+      const it = clone(vetor.items[0]);
+      it.negocioId = id;
+      const r = await consulta([it]);
+      expect(r.resultados[0].items, JSON.stringify(id)).toBeNull();
+    }
+  });
+
+  it("o erro logado não carrega o id do outro negócio nem o conteúdo do item", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const alheio = clone(vetor.items[0]);
+    alheio.negocioId = "negocio-secreto-alheio";
+    await consulta([alheio]);
+    const saida = JSON.stringify(log.mock.calls);
+    expect(saida).not.toContain("negocio-secreto-alheio");
+    expect(saida).not.toContain("12000");
+  });
+
+  it("permitido: todos os itens do negócio pedido passam; lista vazia segue a frase única", async () => {
+    const r = await consulta(vetor.items);
+    expect(r.trilha[0].outcome).toBe("ok");
+    const vazio = await consulta([]);
+    expect(vazio.trilha[0].outcome).toBe("ok");
+  });
+});
+
 describe("status_cobranca — o texto (WhatsApp)", () => {
   const rodar = async (items: unknown[] = vetor.items, truncated = false): Promise<Awaited<ReturnType<typeof despacharLeituras>>> => {
-    escopo.mockResolvedValue({ items, truncated });
+    escopo.mockResolvedValue({ items: doNegocioPedido(items), truncated });
     return despacharLeituras({ ...neg, chamadas: [{ name: "status_cobranca", args: { numero: 1 } }] });
   };
 
@@ -359,6 +417,26 @@ describe("status_cobranca — o texto (WhatsApp)", () => {
     const v = clone(vetor.items[0]);
     v.pagoEm = "2026-11-24T02:00:00.000Z";
     expect(resumoDe(await rodar([v]))).toContain("paga em 23/11/2026");
+  });
+
+  it("estorno nunca diz 'paga em', mesmo com pagoEm preenchido (Rodada 1)", async () => {
+    for (const estado of ["estornada", "estorno_em_andamento"]) {
+      const v = clone(vetor.items[0]);
+      v.estado = estado;
+      v.estornadoEm = "2026-11-26T10:00:00.000Z";
+      const linha = resumoDe(await rodar([v])).split("\n").find((l) => l.startsWith("- ")) ?? "";
+      expect(linha, estado).not.toContain("paga em");
+      expect(linha, estado).toMatch(/estornada|estorno em andamento/);
+    }
+  });
+
+  it("os demais estados com pagoEm seguem mostrando 'paga em' (só o estorno some)", async () => {
+    for (const estado of ["paga", "confirmada", "paga_em_dinheiro", "contestada"]) {
+      const v = clone(vetor.items[0]);
+      v.estado = estado;
+      const linha = resumoDe(await rodar([v])).split("\n").find((l) => l.startsWith("- ")) ?? "";
+      expect(linha, estado).toContain("paga em 24/11/2026");
+    }
   });
 
   it("'paga em' só aparece quando há pagoEm", async () => {
