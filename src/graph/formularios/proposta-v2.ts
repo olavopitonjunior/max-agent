@@ -116,8 +116,6 @@ export type ResultadoParcial =
       link?: string;
       /** Campos recusados (`dados_invalidos`). */
       campos?: string[];
-      /** `signatarios_duplicados`: o que o corpo do 409 diz ter repetido. Ausente = o servidor não disse. */
-      causa?: "documento" | "email" | "telefone";
       /** Frase do servidor (422), nunca o código. */
       mensagem?: string;
       /** O próximo estado: `null` encerra; v1 quando o servidor desligou o v2. */
@@ -130,21 +128,12 @@ function frase(body: Record<string, unknown>): string | undefined {
 }
 
 /**
- * O 409 `signatarios_duplicados` (índice único) pode vir por documento ou por contato; o contrato não
- * traz um campo de causa. Só afirma o que o corpo diz (`campo`, `campos`, `motivo`, `message`); sem
- * isso o texto é neutro, para não mandar o corretor trocar telefone quando o repetido é o CPF.
+ * 409 `signatarios_duplicados` (índice único). O contrato (CM `docs/max.md`) só declara o código, sem
+ * campo de causa: o texto é sempre neutro, nunca afirma CPF, e-mail ou telefone, e não manda trocar
+ * nada às cegas.
  */
-function causaDoDuplicado(body: Record<string, unknown>): "documento" | "email" | "telefone" | undefined {
-  const dito = [body.campo, body.campos, body.motivo, body.message]
-    .flatMap((x) => (Array.isArray(x) ? x : [x]))
-    .filter((x): x is string => typeof x === "string")
-    .join(" ")
-    .toLowerCase();
-  if (/\b(cpf|cnpj|documento)\b/.test(dito)) return "documento";
-  if (/e-?mail/.test(dito)) return "email";
-  if (/telefone|celular|whatsapp/.test(dito)) return "telefone";
-  return undefined;
-}
+const TEXTO_DUPLICADO =
+  "Não gravei: há assinantes repetidos na proposta. Confira os dados de cada parte e me diga o que corrigir.";
 
 function textoOuUndefined(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
@@ -223,7 +212,7 @@ export async function salvarParcial(
       case "envio_em_andamento":
         return { ok: false, erro: "envio_em_andamento", mensagem: frase(r.body), fluxo: semChave };
       case "signatarios_duplicados":
-        return { ok: false, erro: "signatarios_duplicados", ...(causaDoDuplicado(r.body) ? { causa: causaDoDuplicado(r.body) } : {}), fluxo: semChave };
+        return { ok: false, erro: "signatarios_duplicados", fluxo: semChave };
       case "nao_editavel":
         return { ok: false, erro: "nao_editavel", fluxo: null };
       default:
@@ -265,20 +254,6 @@ export async function salvarParcial(
   };
 }
 
-/** Nunca afirma uma causa que o servidor não disse; em nenhum caso manda trocar telefone ou e-mail às cegas. */
-function textoDoDuplicado(causa: "documento" | "email" | "telefone" | undefined): string {
-  switch (causa) {
-    case "documento":
-      return "Não gravei: o mesmo CPF/CNPJ aparece em mais de um assinante da proposta. Confira os documentos e me mande o certo.";
-    case "email":
-      return "Não gravei: o mesmo e-mail aparece em mais de um assinante da proposta. Me mande um e-mail diferente para um deles.";
-    case "telefone":
-      return "Não gravei: o mesmo telefone aparece em mais de um assinante da proposta. Me mande um telefone diferente para um deles.";
-    default:
-      return "Não gravei: há assinantes repetidos na proposta. Confira os dados de cada parte e me diga o que corrigir.";
-  }
-}
-
 /**
  * O que o Max diz depois de `salvarParcial`. "Anotei" só no `ok`. Vazio no
  * `fluxo_desligado`: o v1 assume no mesmo turno e fala por si, sem erro ao corretor.
@@ -317,7 +292,7 @@ export function textoDoParcial(r: ResultadoParcial, ctx: { codigo?: string }): s
     case "envio_em_andamento":
       return "Tem um envio para assinatura em andamento nessa proposta. Espere terminar para ajustar.";
     case "signatarios_duplicados":
-      return textoDoDuplicado(r.causa);
+      return TEXTO_DUPLICADO;
     case "indisponivel":
       return "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
   }

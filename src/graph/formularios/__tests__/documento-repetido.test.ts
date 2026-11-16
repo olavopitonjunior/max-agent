@@ -89,7 +89,7 @@ describe("unificarDocumentoRepetido: uma pessoa só", () => {
   });
 });
 
-describe("409 signatarios_duplicados: a causa dita é a causa real", () => {
+describe("409 signatarios_duplicados: texto sempre neutro", () => {
   const f = { ...novoFluxoV2({ esteira: "venda", agora: 1, schemaType: "compra_venda_v1" }), proposalId: "prop-1" };
   const dep = (resposta: RespostaDoServidor) => ({ acao: vi.fn(async () => resposta) });
 
@@ -106,21 +106,19 @@ describe("409 signatarios_duplicados: a causa dita é a causa real", () => {
     expect(t).not.toMatch(/anotei|salvei/i);
   });
 
-  it("o corpo cita o CPF: a mensagem fala de CPF", async () => {
+  it("NEGADO: campos fora do contrato (max.md só define o código) não viram afirmação de causa", async () => {
+    // O CM só declara `409 signatarios_duplicados`; `campo`/`campos`/`message` não existem no contrato.
+    // Mesmo que um corpo traga isso, o texto continua neutro: nunca afirma CPF, e-mail nem telefone.
     for (const body of [
       { error: "signatarios_duplicados", campo: "cpf" },
       { error: "signatarios_duplicados", campos: ["compradores[1].cpf"] },
       { error: "signatarios_duplicados", message: "Há dois assinantes com o mesmo CPF." },
+      { error: "signatarios_duplicados", campo: "email" },
     ]) {
       const t = await textoDo409(body);
-      expect(t, JSON.stringify(body)).toMatch(/CPF/);
-      expect(t, JSON.stringify(body)).not.toMatch(/telefone|e-mail|email/i);
+      expect(t, JSON.stringify(body)).toMatch(/assinantes repetidos/i);
+      expect(t, JSON.stringify(body)).not.toMatch(/CPF|CNPJ|telefone|e-mail|email/i);
+      expect(t, JSON.stringify(body)).not.toMatch(/anotei|salvei/i);
     }
-  });
-
-  it("o corpo cita o e-mail: a mensagem fala de e-mail, não de CPF", async () => {
-    const t = await textoDo409({ error: "signatarios_duplicados", campo: "email" });
-    expect(t).toMatch(/e-mail/i);
-    expect(t).not.toMatch(/CPF/);
   });
 });

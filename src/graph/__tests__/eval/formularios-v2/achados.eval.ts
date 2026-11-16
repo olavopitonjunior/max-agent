@@ -75,7 +75,7 @@ describe("eval fv2: achados", () => {
     expect(t.reply).toContain("O mesmo CPF/CNPJ apareceu para duas pessoas");
     expect((await s.fala("sim")).escritas).toEqual([]);
   });
-  it("F4b: o 409 signatarios_duplicados com CPF no corpo fala de CPF, não de 'telefone ou e-mail'", async () => {
+  it("F4b: o 409 signatarios_duplicados (só o código, como no contrato) tem texto neutro, sem afirmar a causa", async () => {
     const modelo = new ModeloFalso().roteiro(({ tokens }) => ({
       compradores: [{ nome: PESSOAS.comprador, cpf: tokens.CPF[0] }],
       negociacao: { valor: 500000 },
@@ -83,11 +83,11 @@ describe("eval fv2: achados", () => {
     const s = new Sessao({ modelo, nomes: [PESSOAS.comprador], cpfs: [CPF_SINTETICO] });
     await s.preparar();
     await s.semear();
-    s.servidor.programar("proposal.create", { status: 409, body: { error: "signatarios_duplicados", campo: "cpf" } });
+    s.servidor.programar("proposal.create", { status: 409, body: { error: "signatarios_duplicados" } });
     await s.fala(`comprador ${PESSOAS.comprador} CPF ${formatarCpf(CPF_SINTETICO)} valor R$ 500.000, ficha`);
     const t = await s.fala("sim");
-    expect(t.reply).toMatch(/CPF/);
-    expect(t.reply).not.toMatch(/telefone|e-mail|email/i);
+    expect(t.reply).toMatch(/assinantes repetidos/i);
+    expect(t.reply).not.toMatch(/CPF|CNPJ|telefone|e-mail|email/i);
   });
 
   // F2: a conferência de uma foto sem legenda mostra o CPF lido em claro (a resposta é `sensivel`), enquanto
