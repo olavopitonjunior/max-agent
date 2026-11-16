@@ -72,8 +72,10 @@ import {
   TEXTO_CANCELADO,
   textoFalhou,
   MUDAR_MINHAS_NOTIFICACOES,
+  MINHAS_PENDENCIAS,
   type PendingAction,
 } from "./tools";
+import { respostaDePendencias } from "./resumo-pendencias";
 import { downloadMedia, sendReaction, interativoDisponivel } from "@/lib/transport";
 import {
   loadFacts,
@@ -1603,6 +1605,19 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
           : `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`)
         : renderizarNegociosSelecionados(singleDeal.items, state.referencias, singleDeal.truncated);
     return { selectedDealQuery: null, queryOptions: null, restoDaResposta: null, draft };
+  }
+  // "Minhas pendências": o texto é do sistema, não do modelo. Em produção (16/11/2026) o modelo chamou
+  // 4 negócios com formulário de "4 pendências", omitiu a atividade atrasada e falou em 1ª pessoa.
+  // Só quando é a ÚNICA leitura do turno; com outra tool ao lado, o modelo segue compondo.
+  const soPendencias = state.toolResults.length === 1 && state.toolResults[0].tool === MINHAS_PENDENCIAS.nome ? state.toolResults[0] : null;
+  if (state.toolRounds > 0 && soPendencias) {
+    const pedida = [...state.toolLog].reverse().find((e) => e.name === MINHAS_PENDENCIAS.nome);
+    const draft = respostaDePendencias(
+      soPendencias,
+      { filtro: pedida?.args.filtro, comNegocio: typeof pedida?.args.negocio_id === "string" && pedida.args.negocio_id.trim() !== "" },
+      Date.now()
+    );
+    if (draft !== null) return { draft };
   }
   if (state.toolRounds === 0 && state.queryOptions) {
     const pending = state.queryOptions;
