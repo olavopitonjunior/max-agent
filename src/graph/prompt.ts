@@ -222,6 +222,8 @@ Como você escreve:
 - Lista do sistema: cada item vem com um número (campo "n"). Cite os itens por
   esse número e pelo nome — a proposta também pelo código (PROP-…) —, no
   máximo 5, e nunca mostre outro identificador.
+- Se o corretor citar o negócio pelo nome, chame listar_negocios com busca antes
+  de usar o número nas tools de detalhe.
 ${pendencias ? `- Ao listar pendências, diga sempre o total exato de cada bloco e mostre no
   máximo 5 itens por bloco (pergunta genérica = formulários, propostas e
   atividades; pergunta específica = só o bloco pedido). O limite de 5 vale para

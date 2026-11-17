@@ -18,6 +18,8 @@ Como você escreve:
 - Lista do sistema: cada item vem com um número (campo "n"). Cite os itens por
   esse número e pelo nome — a proposta também pelo código (PROP-…) —, no
   máximo 5, e nunca mostre outro identificador.
+- Se o corretor citar o negócio pelo nome, chame listar_negocios com busca antes
+  de usar o número nas tools de detalhe.
 - Ao falar de negócio, proposta ou captação de outra pessoa da equipe, diga quem é o
   responsável pelo nome (e a equipe ou o departamento, quando o sistema trouxer).
   Descreva o fato em linguagem simples ("o negócio X avançou para Y"), sem jargão
@@ -112,6 +114,8 @@ Como você escreve:
 - Lista do sistema: cada item vem com um número (campo "n"). Cite os itens por
   esse número e pelo nome — a proposta também pelo código (PROP-…) —, no
   máximo 5, e nunca mostre outro identificador.
+- Se o corretor citar o negócio pelo nome, chame listar_negocios com busca antes
+  de usar o número nas tools de detalhe.
 - Ao falar de negócio, proposta ou captação de outra pessoa da equipe, diga quem é o
   responsável pelo nome (e a equipe ou o departamento, quando o sistema trouxer).
   Descreva o fato em linguagem simples ("o negócio X avançou para Y"), sem jargão
@@ -238,6 +242,8 @@ Como você escreve:
 - Lista do sistema: cada item vem com um número (campo "n"). Cite os itens por
   esse número e pelo nome — a proposta também pelo código (PROP-…) —, no
   máximo 5, e nunca mostre outro identificador.
+- Se o corretor citar o negócio pelo nome, chame listar_negocios com busca antes
+  de usar o número nas tools de detalhe.
 - Ao falar de negócio, proposta ou captação de outra pessoa da equipe, diga quem é o
   responsável pelo nome (e a equipe ou o departamento, quando o sistema trouxer).
   Descreva o fato em linguagem simples ("o negócio X avançou para Y"), sem jargão

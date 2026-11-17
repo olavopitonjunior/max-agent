@@ -18,6 +18,7 @@ import { payloadDoNumero } from "@/lib/aviso/numero";
 import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
 import { iniciarPreferencias, preferenciasPermitidas, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
 import { resolverReferencia } from "./referencias";
+import { lerBusca } from "./busca";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
 import { iniciarAssinatura, pedeAssinatura } from "./assinatura";
@@ -71,8 +72,10 @@ import {
   TEXTO_CANCELADO,
   textoFalhou,
   MUDAR_MINHAS_NOTIFICACOES,
+  MINHAS_PENDENCIAS,
   type PendingAction,
 } from "./tools";
+import { respostaDePendencias } from "./resumo-pendencias";
 import { downloadMedia, sendReaction, interativoDisponivel } from "@/lib/transport";
 import {
   loadFacts,
@@ -1587,12 +1590,34 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   if (state.toolRounds > 0 && singleDeal && !singleDeal.clarification && (selectedDeal || singleDeal.items?.length === 0)) {
     const completed = [...state.toolLog].reverse().find(entry => entry.name === "listar_negocios" && entry.outcome === "ok");
     const stage = typeof completed?.args.estado === "string" ? completed.args.estado.trim() : "";
-    const draft = singleDeal.items === null || !completed
+    // Busca por nome vale só para o usuário (o corretor nunca manda o termo): vazio com busca = nome não achado.
+    const buscou = state.identity.kind === "user" && lerBusca(completed?.args.busca) !== null;
+    const draft = singleDeal.buscaIndisponivel
+      ? "A busca por nome não está disponível para o seu perfil. Peça seus negócios e escolha pelo número."
+      : singleDeal.items === null || !completed
       ? "Não consegui consultar seus negócios agora. Tente novamente mais tarde."
       : singleDeal.items.length === 0
-        ? `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`
+        ? (buscou
+          // Lista cortada pelo CM: o nome pode estar além do corte, então não se afirma que não existe.
+          ? (singleDeal.truncated
+            ? "Não encontrei esse nome entre os negócios que consegui consultar. Pode haver outros."
+            : "Não encontrei negócio com esse nome visível para você.")
+          : `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`)
         : renderizarNegociosSelecionados(singleDeal.items, state.referencias, singleDeal.truncated);
     return { selectedDealQuery: null, queryOptions: null, restoDaResposta: null, draft };
+  }
+  // "Minhas pendências": o texto é do sistema, não do modelo. Em produção (16/11/2026) o modelo chamou
+  // 4 negócios com formulário de "4 pendências", omitiu a atividade atrasada e falou em 1ª pessoa.
+  // Só quando é a ÚNICA leitura do turno; com outra tool ao lado, o modelo segue compondo.
+  const soPendencias = state.toolResults.length === 1 && state.toolResults[0].tool === MINHAS_PENDENCIAS.nome ? state.toolResults[0] : null;
+  if (state.toolRounds > 0 && soPendencias) {
+    const pedida = [...state.toolLog].reverse().find((e) => e.name === MINHAS_PENDENCIAS.nome);
+    const draft = respostaDePendencias(
+      soPendencias,
+      { filtro: pedida?.args.filtro, comNegocio: typeof pedida?.args.negocio_id === "string" && pedida.args.negocio_id.trim() !== "" },
+      Date.now()
+    );
+    if (draft !== null) return { draft };
   }
   if (state.toolRounds === 0 && state.queryOptions) {
     const pending = state.queryOptions;

@@ -8,7 +8,17 @@ import { CATALOG_VERSION, WORKFLOW_VERSION } from './contracts';
 import { deployProfile } from '../deploy-profile';
 export const READ_ACTIONS = new Set<string>(['google.availability','google.activities','proposal.list','proposal.status','proposal.options','proposal.preflight','form.options','credit.preflight','credit.status','captacao.options','captacao.preflight','captacao.list','captacao.autorizacao.listar','marketing.options','marketing.library','marketing.status']);
 export function isWriteVerb(verb:string):boolean {return !READ_ACTIONS.has(verb);}
-export const NEW_QUERIES=['notification.list','activity.list','activity.get','metrics.get','property.list','property.detail','contract.status','template.decisions'];
+/**
+ * PR-O4cat (16/11/2026): capabilities do catálogo SEM tool e SEM verbo — "reservada, verbo
+ * não implementado". `catalog()` deriva as tools dos verbos, então nenhuma delas aparece
+ * aqui; esta lista só declara o fato para o teste trancar (`capabilities-reservadas.test.ts`).
+ * Ao implementar o verbo, a capability sai desta lista no mesmo PR (`certidao.status` saiu no
+ * PR-O4b: verbo de leitura + tool `situacao_certidoes`, atrás de `MAX_EXTENDED_QUERIES`; `document.list`
+ * saiu no PR-O4c: verbo de leitura + tool `listar_documentos`, no mesmo molde; `charge.status` saiu no
+ * PR-O4d: verbo de leitura + tool `status_cobranca`, só leitura. Hoje não resta nenhuma reservada).
+ */
+export const CAPABILITIES_RESERVADAS: readonly Capability[] = [];
+export const NEW_QUERIES=['notification.list','activity.list','activity.get','metrics.get','property.list','property.detail','contract.status','template.decisions','certidao.status','document.list','charge.status'];
 export interface CatalogTool {
  id:string;version:string;status:'current'|'disabled'|'planned';installed:boolean;enabled:boolean;executor:'scope-action'|'scope-query'|'graph'|null;effect:'read'|'write'|'paid';flag?:string;recoveryOnly?:boolean;
  schema:Record<string,unknown>;permission:Capability|null;policyCapability:Capability|null;domainScope:string;projection:string;dataClass:string;timeoutMs:number;retry:string;reconciliation:string;confirmation:boolean;evaluationCases:string[];provenance:string;

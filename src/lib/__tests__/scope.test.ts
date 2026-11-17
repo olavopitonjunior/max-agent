@@ -163,6 +163,38 @@ describe("subjectDe", () => {
   });
 });
 
+describe("`busca` de negócio (deal.list)", () => {
+  it("limparArgs: aparada, cortada em 80 e omitida quando vazia", () => {
+    expect(limparArgs({ busca: "  TESTE1 " }, "deal.list")).toEqual({ busca: "TESTE1" });
+    expect(limparArgs({ busca: "x".repeat(200) }, "deal.list")).toEqual({ busca: "x".repeat(80) });
+    expect(limparArgs({ busca: "   " }, "deal.list")).toEqual({});
+    expect(limparArgs({ busca: 42 }, "deal.list")).toEqual({});
+  });
+
+  it("limparArgs: só o deal.list aceita `busca` (proposta e demais verbos a descartam)", () => {
+    expect(limparArgs({ busca: "x" }, "proposal.list")).toEqual({});
+    expect(limparArgs({ busca: "x" }, "property.list")).toEqual({});
+  });
+
+  it("USUÁRIO: o termo vai no corpo do request ao CM", async () => {
+    responde({ ok: true, status: 200, body: { items: [] } });
+    await consultarEscopo({ orgId: "org1", rawPhone: PHONE, subject: SUJEITO, verb: "deal.list", args: { busca: "TESTE1" } });
+    const corpo = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as { body: string }).body);
+    expect(corpo.args).toEqual({ busca: "TESTE1" });
+  });
+
+  it("BROKER: o termo nunca vai no corpo do request, mesmo que o chamador o passe", async () => {
+    responde({ ok: true, status: 200, body: { items: [] } });
+    await consultarEscopo({
+      orgId: "org1", rawPhone: PHONE, subject: { kind: "broker", splitRecipientId: "sr1" }, verb: "deal.list",
+      args: { busca: "TESTE1", estado: "Formulário" },
+    });
+    const bruto = (vi.mocked(fetch).mock.calls[0][1] as { body: string }).body;
+    expect(bruto).not.toContain("TESTE1");
+    expect(JSON.parse(bruto).args).toEqual({ estado: "Formulário" });
+  });
+});
+
 describe("limparArgs — filtro vazio do modelo não derruba a leitura", () => {
   it("estado vazio some — era o 400 de 2026-10-06 (\"status das minhas propostas\")", () => {
     expect(limparArgs({ estado: "", limite: 10 })).toEqual({ limite: 10 });

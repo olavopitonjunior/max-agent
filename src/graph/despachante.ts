@@ -2,7 +2,14 @@ import type { LlmToolCall } from "@/lib/llm";
 import type { Candidate } from "@/lib/identity";
 import { consultarEscopo, descartarSeVazou, subjectDe } from "@/lib/scope";
 import { lerPreferencias } from "@/lib/cm";
-import { PERIODOS_DE_METRICA, QUEBRAS_DE_METRICA } from "./scope-contract";
+import {
+  lerDealDetalhado,
+  PERIODOS_DE_METRICA,
+  QUEBRAS_DE_METRICA,
+  type DealDetalhadoBroker,
+  type DealDetalhadoUser,
+} from "./scope-contract";
+import { linkSeguro, texto } from "./notificacao-projecao";
 import type { ToolLogEntry } from "@/lib/turnlog";
 import type { Capability } from "./policy";
 import {
@@ -22,6 +29,10 @@ import { projetarParaOModelo } from "./preferencias";
 import { projetarNotificacao } from "./notificacao-projecao";
 import { projetarResumoDePendencias } from "./avisos-projecao";
 import { atividadeEmHoraLocal } from "./atividade-hora-local";
+import { lerCertidaoStatus, renderCertidoes, type CertidaoStatusItem } from "./certidao-status";
+import { lerDocumento, renderDocumentos, type DocumentoItem } from "./documentos";
+import { lerCobranca, renderCobrancas, type CobrancaItem } from "./cobranca";
+import { filtrarPorBusca, lerBusca } from "./busca";
 
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
@@ -48,6 +59,8 @@ export type Recusa =
   | "nao_oferecida"
   | "capability_negada"
   | "identidade_nao_escreve"
+  /** Leitura só de usuário da plataforma (`certidao.status`, `document.list`, `charge.status`): o corretor comissionado nunca a recebe. */
+  | "identidade_nao_le"
   /** Nome histórico na trilha: argumento fora do enum da `propor_criacao`. */
   | "tipo_invalido";
 
@@ -70,6 +83,12 @@ export function autorizarChamada(params: {
 
   if (!params.oferecidas.includes(entrada.nome)) {
     return { ok: false, motivo: "nao_oferecida", entrada };
+  }
+
+  // Leitura restrita a usuário (`certidao.status`, `document.list`, `charge.status`): vale mesmo com a capability na política. Antes de
+  // (c) pelo mesmo motivo de (d): é a recusa estável, não depende de política nem de argumento.
+  if (entrada.tipo === "leitura" && entrada.soUsuario && params.identity.kind !== "user") {
+    return { ok: false, motivo: "identidade_nao_le", entrada };
   }
 
   // (d) antes de (c) na escrita: "quem não pode escrever" é a recusa mais
@@ -108,6 +127,8 @@ export interface ResultadoDeTool {
   clarification?: StageClarification;
   /** `template.decisions`: modelos não medidos (o modelo nunca diz "sem pendência" com isso > 0). */
   naoMedidos?: number;
+  /** `deal.list` com `busca` de corretor comissionado: o CM não foi chamado; `items` vazio NÃO é "não achei". */
+  buscaIndisponivel?: boolean;
 }
 
 /**
@@ -196,6 +217,43 @@ export async function despacharLeituras(params: {
     }
     // Sem argumento nenhum: o servidor responde pela org da sessão, o modelo não escolhe nada.
     if (entrada.verb === "template.decisions") args = {};
+    // Certidões: o modelo aponta pelo número da lista (e, se for de proposta, diz `de: "proposta"`); o
+    // servidor recebe EXATAMENTE um id (`negocio_id` ou `proposta_id`) e mais nada do que o modelo mandou.
+    let certidaoDe: "negocio" | "proposta" | null = null;
+    if (entrada.verb === "certidao.status") {
+      certidaoDe = args.de === "proposta" ? "proposta" : "negocio";
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: certidaoDe });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      args = { [certidaoDe === "proposta" ? "proposta_id" : "negocio_id"]: selected.item.id };
+    }
+    // Documentos: o mesmo molde das certidões. Número da lista (e `de: "proposta"`); o servidor recebe
+    // EXATAMENTE um id e mais nada (nem `limite`, nem `cursor`: o padrão do servidor basta).
+    let documentosDe: "negocio" | "proposta" | null = null;
+    if (entrada.verb === "document.list") {
+      documentosDe = args.de === "proposta" ? "proposta" : "negocio";
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: documentosDe });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      args = { [documentosDe === "proposta" ? "proposta_id" : "negocio_id"]: selected.item.id };
+    }
+    // Cobranças: SÓ de negócio, pelo número da lista (nunca `de: "proposta"`, nunca id cru). O servidor
+    // recebe EXATAMENTE `negocio_id` e mais nada (sem `limite`, sem filtro de provedor: o teto é dele).
+    if (entrada.verb === "charge.status") {
+      const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "negocio" });
+      if (!selected.ok) {
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "referencia_invalida" });
+        continue;
+      }
+      args = { negocio_id: selected.item.id };
+    }
     if (entrada.verb === "activity.get") {
       // O modelo aponta pelo número da lista; o id interno nunca passa por ele.
       const selected = resolverReferencia(referencias, args.numero, { agora, tipo: "atividade" });
@@ -232,6 +290,22 @@ export async function despacharLeituras(params: {
     if (entrada.verb === "metrics.get") {
       // Só `periodo` e `quebra`, ambos dentro do enum: `estado`, `numero`, `mais` e o resto do modelo somem.
       args = lerArgsDeMetrica(args);
+    }
+    // Busca de negócio por nome: só o USUÁRIO manda o termo (o corretor comissionado nunca; a projeção dele
+    // não tem título nem cliente). Aparado e cortado em 80; vazio some. O mesmo termo refiltra a resposta abaixo.
+    let buscaLocal: string | null = null;
+    if (entrada.verb === "deal.list") {
+      const termo = lerBusca(args.busca);
+      // Corretor comissionado com termo: busca indisponível. NENHUMA chamada ao CM (o termo não sai daqui) e
+      // lista vazia marcada, para a resposta fixa dizer isso em vez de "não encontrei" ou da lista dele sem filtro.
+      if (termo && params.identity.kind !== "user") {
+        resultados.push({ tool: chamada.name, items: [], truncated: false, buscaIndisponivel: true });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "busca_indisponivel" });
+        continue;
+      }
+      buscaLocal = termo;
+      if (buscaLocal) args.busca = buscaLocal;
+      else delete args.busca;
     }
     if (paginada) {
       const continuation = referencias?.continuacao;
@@ -272,12 +346,101 @@ export async function despacharLeituras(params: {
       continue;
     }
 
+    // Certidões: parse ESTRITO (R54). Chave a mais, a menos ou de tipo errado em QUALQUER item derruba a
+    // resposta inteira: nunca se repassa item que o contrato não descreve, nem se mostra parte dele. Vazio
+    // (e negado, e sem módulo, que chegam iguais) vira a frase única, sem distinguir. O resultado é UM
+    // resumo já formatado e marcado como dado de terceiros; o id do servidor não chega ao prompt.
+    if (entrada.verb === "certidao.status" && certidaoDe) {
+      const lidos = r.items.map(lerCertidaoStatus);
+      if (lidos.some((it) => it === null)) {
+        // Sem o conteúdo do item no log: é dado de terceiros (parte, documento).
+        console.error(`[despachante] certidao.status fora do contrato na org ${params.identity.orgId} (${lidos.filter((it) => it === null).length}/${lidos.length} itens)`);
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+      const resumo = renderCertidoes(lidos as CertidaoStatusItem[], certidaoDe, r.truncated);
+      resultados.push({ tool: chamada.name, items: [{ resumo, _untrusted: true }], truncated: r.truncated });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+      continue;
+    }
+
+    // Documentos: parse ESTRITO por item (R54), como as certidões. Item com campo a mais (um `url`), forma
+    // errada ou `link` que não seja caminho relativo derruba a resposta inteira. Vazio (e negado, sem
+    // módulo, inexistente) vira a frase única. O Max só diz onde abrir na tela (URL da própria plataforma): nunca link de arquivo.
+    if (entrada.verb === "document.list" && documentosDe) {
+      const lidos = r.items.map(lerDocumento);
+      if (lidos.some((it) => it === null)) {
+        // Sem o conteúdo do item no log: é dado de terceiros (nome de arquivo, parte).
+        console.error(`[despachante] document.list fora do contrato na org ${params.identity.orgId} (${lidos.filter((it) => it === null).length}/${lidos.length} itens)`);
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+      const resumo = renderDocumentos(lidos as DocumentoItem[], documentosDe, r.truncated);
+      resultados.push({ tool: chamada.name, items: [{ resumo, _untrusted: true }], truncated: r.truncated });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+      continue;
+    }
+
+    // Cobranças: parse ESTRITO por item (R54), como as certidões e os documentos. Item com campo a mais (um
+    // `invoiceUrl`), `valor` que não seja centavo inteiro, enum fora do mapa fechado ou data que não seja ISO
+    // derruba a resposta inteira. Vazio (e negado, sem permissão, sem módulo, negócio alheio: chegam iguais) vira
+    // a frase única. O resumo é montado aqui, sem link, sem id e sem ação: a pessoa age na tela, logada.
+    if (entrada.verb === "charge.status") {
+      const lidos = r.items.map(lerCobranca);
+      // Todo item tem de ser do negócio PEDIDO (o `negocio_id` que saiu daqui). Item de outro negócio,
+      // ainda que bem formado, é resposta fora do contrato: derruba tudo, sem repassar nada.
+      const negocioPedido = args.negocio_id;
+      const alheios = lidos.filter((it) => it !== null && it.negocioId !== negocioPedido).length;
+      if (lidos.some((it) => it === null) || alheios > 0) {
+        // Sem o conteúdo do item no log (nem o id do outro negócio): é dinheiro de terceiros (valor, vencimento).
+        console.error(`[despachante] charge.status fora do contrato na org ${params.identity.orgId} (${lidos.filter((it) => it === null).length + alheios}/${lidos.length} itens)`);
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+      const resumo = renderCobrancas(lidos as CobrancaItem[], r.truncated);
+      resultados.push({ tool: chamada.name, items: [{ resumo, _untrusted: true }], truncated: r.truncated });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+      continue;
+    }
+
     // Avisos da fila: whitelist de campos, dado de terceiro marcado; sem a capability o bloco sai do resumo.
     if (entrada.verb === "pending.summary" && !semPermissao) r.items = r.items.map((it) => projetarResumoDePendencias(it, avisosLiberados));
 
     // Notificação: só os campos que o Max conhece; título/corpo (CM do Passo 5) entram marcados como dado de terceiros.
     if (entrada.verb === "notification.list") r.items = r.items.map(projetarNotificacao);
     if (entrada.verb === "activity.list" || entrada.verb === "activity.get") r.items = r.items.map(atividadeEmHoraLocal);
+
+    // `deal.detail` (PR-O4a): o item é LIDO como o contrato manda (chave obrigatória ausente ou de
+    // tipo errado descarta; chave extra é removida) e vira um resumo pronto em PT-BR. O modelo nunca vê o JSON do servidor, só o
+    // texto que este módulo montou — e o que o render não escreve, ele não pode repetir.
+    if (entrada.verb === "deal.detail") {
+      const sujeito = params.identity.kind;
+      const idPedido = args.negocio_id;
+      const lidos = r.items.map((it) => lerDealDetalhado(it, sujeito));
+      const validos = lidos.filter((d): d is NonNullable<typeof d> => d !== null && d.id === idPedido);
+      // Item que não confere com o contrato (ou com o id pedido) NÃO vira "sem acesso": é falha, e alta.
+      // O que `descartarSeVazou` já removeu (broker com campo proibido) também é falha: sem isso o
+      // item sumia e a resposta virava "Não encontrei... ou sem acesso", escondendo a regressão do servidor.
+      const barrados = r.descartados ?? 0;
+      if (barrados > 0 || validos.length !== r.items.length) {
+        console.error(`[despachante] deal.detail fora do contrato na org ${params.identity.orgId}: ${barrados + r.items.length - validos.length} item(ns) descartado(s)`);
+        resultados.push({ tool: chamada.name, items: null, truncated: false });
+        trilha.push({ name: chamada.name, args: chamada.args, outcome: "falha_na_consulta" });
+        continue;
+      }
+      const resumo = validos.length > 0 ? renderDealDetalhado(validos[0], sujeito) : NEGOCIO_NAO_ENCONTRADO;
+      resultados.push({
+        tool: chamada.name,
+        // `_untrusted`: o resumo carrega título, nome de cliente e de parte, digitados por terceiros.
+        items: [validos.length > 0 ? { n: numeroDoDetalhe, _untrusted: true, resumo } : { n: numeroDoDetalhe, resumo }],
+        truncated: false,
+      });
+      trilha.push({ name: chamada.name, args: chamada.args, outcome: "ok" });
+      continue;
+    }
 
     // Negado no servidor volta `{items:[]}` SEM `naoMedidos`; vazio de verdade sempre o traz.
     // Sem ele, o modelo diria "não há pendência" a quem só não tem acesso.
@@ -292,6 +455,10 @@ export async function despacharLeituras(params: {
       trilha.push({ name: chamada.name, args: chamada.args, outcome: chamada.args.opcoes_etapas === true ? "opcoes_consulta" : "filtro_invalido" });
       continue;
     }
+
+    // Fail-closed contra CM antigo: ele descarta `busca` em silêncio e devolve a lista inteira. Só o que casa
+    // por título ou cliente segue; o resto sai ANTES de numerar e nunca ganha número.
+    if (buscaLocal) r.items = filtrarPorBusca(r.items, buscaLocal);
 
     // G2: o código numera, o modelo vê só número + rótulo. Leitura que não
     // declara o que produz passa como veio (nenhuma hoje).
@@ -336,6 +503,150 @@ export async function despacharLeituras(params: {
   return { resultados, trilha, referencias };
 }
 
+/**
+ * Vazio de `deal.detail`: o servidor responde `{items:[]}` igual para "sem a capability", "fora do
+ * escopo", "outra org" e "não existe" (de propósito: não distingue). O Max também não distingue,
+ * e não inventa negócio.
+ */
+export const NEGOCIO_NAO_ENCONTRADO = "Não encontrei esse negócio, ou você não tem acesso a ele.";
+
+const FUSO_DO_NEGOCIO = "America/Sao_Paulo";
+
+/** "2026-10-20T12:00:00.000Z" -> "20/10/2026" (horário de Brasília); inválida -> null. */
+function dataLocal(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("pt-BR", { timeZone: FUSO_DO_NEGOCIO, day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+/**
+ * Texto de terceiro dentro de uma linha de WhatsApp: sem controle/bidi/quebra (`texto`) e sem `*`,
+ * que fecharia ou forjaria um negrito. Vazio vira `null` (a linha some).
+ */
+function limpo(v: string | null): string | null {
+  const t = texto(v);
+  const sem = t ? t.replace(/\*+/g, "").replace(/\s+/g, " ").trim() : "";
+  return sem || null;
+}
+
+const ESTADO_DO_CONTRATO: Record<string, string> = {
+  rascunho: "em rascunho",
+  aprovado: "aprovado",
+  assinado: "assinado",
+  revogado: "revogado",
+};
+const ESTADO_DO_ENVELOPE: Record<string, string> = {
+  running: "em andamento",
+  closed: "concluída",
+  canceled: "cancelada",
+  failed: "com falha",
+};
+/** Estado conhecido vira PT-BR; desconhecido sai como veio (limpo), nunca inventado. */
+function rotulo(mapa: Record<string, string>, estado: string): string | null {
+  return mapa[estado] ?? limpo(estado.replace(/_/g, " ").toLowerCase());
+}
+
+const plural = (n: number, um: string, varios: string) => `${n} ${n === 1 ? um : varios}`;
+
+/** "1 de 3 assinadas, 1 recusada, 1 pendente": zero some, singular/plural certo. */
+function contagemDeAssinaturas(a: { total: number; assinadas: number; recusadas: number; pendentes: number }): string {
+  const partes = [`${a.assinadas} de ${a.total} assinadas`];
+  if (a.recusadas > 0) partes.push(plural(a.recusadas, "recusada", "recusadas"));
+  if (a.pendentes > 0) partes.push(plural(a.pendentes, "pendente", "pendentes"));
+  return partes.join(", ");
+}
+
+const MAX_PENDENCIAS_NO_RESUMO = 10;
+
+/**
+ * O resumo de UM negócio, pronto para a conversa: PT-BR, formato WhatsApp (`*negrito*`, nunca
+ * `**`), sem id interno e sem `n=`.
+ *
+ * **Só escreve o que veio.** Campo `null` (ou lista vazia) não vira frase: a linha some. O que o
+ * corretor comissionado não recebe do servidor este render não tem de onde tirar (a forma dele é
+ * outra), e o teste afirma a AUSÊNCIA de título, cliente, valor, nome, link e proposta no texto.
+ * Recebe o item já LIDO por `lerDealDetalhado`, nunca o JSON cru.
+ */
+export function renderDealDetalhado(item: DealDetalhadoUser, sujeito: "user"): string;
+export function renderDealDetalhado(item: DealDetalhadoBroker, sujeito: "broker"): string;
+export function renderDealDetalhado(item: DealDetalhadoUser | DealDetalhadoBroker, sujeito: "user" | "broker"): string;
+export function renderDealDetalhado(item: DealDetalhadoUser | DealDetalhadoBroker, sujeito: "user" | "broker"): string {
+  const linhas: string[] = [];
+  const user = sujeito === "user" ? (item as DealDetalhadoUser) : null;
+  const broker = sujeito === "broker" ? (item as DealDetalhadoBroker) : null;
+
+  const titulo = limpo(user ? user.titulo : (broker as DealDetalhadoBroker).referencia);
+  if (titulo) linhas.push(user ? `*${titulo}* (${user.tipo === "locacao" ? "locação" : "venda"})` : `*${titulo}*`);
+
+  const etapa = limpo(item.etapa);
+  if (etapa) linhas.push(`Etapa: ${etapa}`);
+
+  if (user) {
+    const cliente = limpo(user.cliente);
+    if (cliente) linhas.push(`Cliente: ${cliente}`);
+    if (user.valor !== null) {
+      linhas.push(`Valor: ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(user.valor).replace(/ /g, " ")}`);
+    }
+    const partes = user.partes.map((p) => [limpo(p.papel), limpo(p.nome)].filter(Boolean).join(" ")).filter(Boolean);
+    if (partes.length > 0) linhas.push(`Partes: ${partes.join("; ")}`);
+
+    if (user.contrato) {
+      const estado = rotulo(ESTADO_DO_CONTRATO, user.contrato.estado);
+      const em = dataLocal(user.contrato.atualizadoEm);
+      if (estado) linhas.push(`Contrato: ${estado}, versão ${user.contrato.versao}${em ? ` (atualizado em ${em})` : ""}`);
+    }
+    if (user.proposta) {
+      const estado = rotulo({}, user.proposta.estado);
+      const codigo = limpo(user.proposta.codigo);
+      if (codigo) linhas.push(`Proposta: ${codigo}${estado ? ` (${estado})` : ""}`);
+      else if (estado) linhas.push(`Proposta: ${estado}`);
+    }
+  } else {
+    const b = broker as DealDetalhadoBroker;
+    const papeis = b.partes.map((p) => limpo(p.papel)).filter(Boolean);
+    if (papeis.length > 0) linhas.push(`Partes: ${papeis.join(", ")}`);
+    if (b.contrato) {
+      const estado = rotulo(ESTADO_DO_CONTRATO, b.contrato.estado);
+      if (estado) linhas.push(`Contrato: ${estado}`);
+    }
+  }
+
+  const assinatura = item.assinatura;
+  if (assinatura) {
+    // total 0 = nenhum signatário: "0 de 0 assinadas" seria uma frase sem fato por trás.
+    if (assinatura.total > 0) linhas.push(`Assinaturas: ${contagemDeAssinaturas(assinatura)}`);
+    const situacao = rotulo(ESTADO_DO_ENVELOPE, assinatura.estado);
+    if (situacao) {
+      let fim = "";
+      if (user?.assinatura) {
+        const concluida = assinatura.estado === "closed" ? dataLocal(user.assinatura.concluidoEm) : null;
+        const enviada = dataLocal(user.assinatura.enviadoEm);
+        fim = concluida ? ` em ${concluida}` : enviada ? ` (enviada em ${enviada})` : "";
+      }
+      linhas.push(`Situação da assinatura: ${situacao}${fim}`);
+    }
+  }
+
+  const pendencias = item.pendencias.map((p) => limpo(p)).filter((p): p is string => !!p);
+  if (pendencias.length === 0) {
+    linhas.push("Pendências: nenhuma");
+  } else {
+    const mostradas = pendencias.slice(0, MAX_PENDENCIAS_NO_RESUMO);
+    const resto = pendencias.length - mostradas.length;
+    linhas.push(`Pendências: ${mostradas.join("; ")}${resto > 0 ? `; e mais ${resto}` : ""}`);
+  }
+
+  const atualizado = dataLocal(item.atualizadoEm);
+  if (atualizado) linhas.push(`Atualizado em ${atualizado}`);
+
+  if (user) {
+    const link = linkSeguro(user.link);
+    if (link) linhas.push(`Link: ${link}`);
+  }
+  return linhas.join("\n");
+}
+
 /** Os blocos que o servidor devolve em `pending.summary` quando nenhum é pedido (sem `avisos`). */
 export const BLOCOS_DE_PENDENCIA_SEM_FILTRO = ["formularios", "propostas", "atividades"] as const;
 
@@ -371,7 +682,7 @@ async function executarLeitura(params: {
   identity: Candidate;
   subject: ReturnType<typeof subjectDe>;
   fromPhone: string;
-}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification; naoMedidos?: number } | null> {
+}): Promise<{ items: unknown[]; truncated: boolean; nextCursor?: string; clarification?: StageClarification; naoMedidos?: number; descartados?: number } | null> {
   // Preferências de aviso (M3): rota própria, sempre da PRÓPRIA pessoa (telefone do turn). Só usuário
   // da plataforma tem preferência; qualquer outra identidade volta como "sem permissão", nunca como lista vazia.
   if (params.entrada.verb === "prefs.get") {
@@ -388,7 +699,9 @@ async function executarLeitura(params: {
   });
   if (!r) return null;
   // Rede de segurança da regra 5 — a projeção que VALE é a do servidor.
-  return { items: descartarSeVazou(r.items, params.identity.kind), truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}), ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) };
+  const seguros = descartarSeVazou(r.items, params.identity.kind);
+  // `descartados`: quantos itens a rede removeu. Só o `deal.detail` lê (vazio por vazamento é FALHA, não "sem acesso").
+  return { items: seguros, descartados: r.items.length - seguros.length, truncated: r.truncated, nextCursor: r.nextCursor, ...(r.clarification ? { clarification: r.clarification } : {}), ...(r.naoMedidos !== undefined ? { naoMedidos: r.naoMedidos } : {}) };
 }
 
 // ─── Executor de ESCRITA (proposta, nunca execução) ───────────────────────
