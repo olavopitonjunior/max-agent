@@ -5,7 +5,7 @@ import { brl, cpfValido, nomeValido, valoresNoTexto } from "./credito";
 import { captacaoAutorizacaoLigada, captacaoEnvioLigado, captacaoLigada } from "./captacao-flags";
 import { imobproBase } from "@/lib/http";
 import { RE_CNPJ, RE_CPF, redigir } from "@/lib/pii";
-import { normalizeBrPhone } from "@/lib/phone";
+import { juntarTelefone, normalizeBrPhone, TELEFONE_DITADO, telefoneDuvidoso } from "@/lib/phone";
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 
 /**
@@ -823,11 +823,14 @@ export function cnpjValido(raw: string): boolean {
 }
 
 const RE_EMAIL_LOCAL = /[^\s@:;,<>()]+@[^\s@:;,<>()]+\.[a-z]{2,}/gi;
-const RE_TEL_LOCAL = /(?<!\d)(?:\+?55[\s.-]*)?\(?\d{2}\)?[\s.-]*9?\d{4}[\s.-]?\d{4}(?!\d)/g;
 const ROTULO_TEL = /(tel|cel|whats|fone|zap|contato)\w*\W*$/;
 const global = (re: RegExp) => new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
 
-export interface NumerosLidos { cpfs: string[]; cnpjs: string[]; telefones: string[]; invalido?: "cpf" | "cnpj"; restante: string }
+export interface NumerosLidos {
+  cpfs: string[]; cnpjs: string[]; telefones: string[]; invalido?: "cpf" | "cnpj"; restante: string;
+  /** Telefone dito que não fecha (DDD + 8/9 dígitos): o trecho lido, para perguntar em vez de gravar. */
+  telefoneDuvida?: string;
+}
 
 /** CPF, CNPJ e telefone do texto. `restante` é o texto sem eles (para achar o nome). */
 export function lerNumeros(texto: string): NumerosLidos {
@@ -850,13 +853,13 @@ export function lerNumeros(texto: string): NumerosLidos {
     else invalido = "cpf";
     restante = restante.replace(m[0], " ".repeat(m[0].length));
   }
-  for (const m of restante.matchAll(global(RE_TEL_LOCAL))) {
-    let d = so(m[0]);
-    if (d.length > 11 && d.startsWith("55")) d = d.slice(2);
-    if ((d.length === 10 || d.length === 11) && !telefones.includes(d)) telefones.push(d);
-    restante = restante.replace(m[0], " ".repeat(m[0].length));
+  const telefoneDuvida = telefoneDuvidoso(restante);
+  for (const m of restante.matchAll(global(TELEFONE_DITADO))) {
+    const d = juntarTelefone(m[0]);
+    if (d && !telefones.includes(d)) telefones.push(d);
+    if (d) restante = restante.replace(m[0], " ".repeat(m[0].length));
   }
-  return { cpfs, cnpjs, telefones, ...(invalido ? { invalido } : {}), restante };
+  return { cpfs, cnpjs, telefones, ...(invalido ? { invalido } : {}), ...(telefoneDuvida ? { telefoneDuvida } : {}), restante };
 }
 
 export function lerEmails(texto: string): string[] {
@@ -900,6 +903,11 @@ function percentualNoTexto(texto: string): number | undefined {
   return v >= 0 && v <= 100 ? v : undefined;
 }
 
+/** Pergunta em vez de gravar: o número ditado não fecha DDD + 8 ou 9 dígitos. */
+export function textoTelefoneDuvidoso(trecho: string): string {
+  return `Não consegui ler o telefone com segurança (entendi "${trecho}"). Me mande de novo, com DDD e o número completo, por exemplo (11) 90000-0000.`;
+}
+
 /**
  * Uma pessoa (proprietário, testemunha, assinante) numa mensagem: documentos,
  * contatos e estado civil em código; o nome em código quando é óbvio e pelo
@@ -913,6 +921,7 @@ export async function lerPessoa(texto: string, extrair: ExtratorDeSecao): Promis
   if (n.cpfs.length > 1 || n.cnpjs.length > 1 || (n.cpfs.length && n.cnpjs.length)) {
     return { erro: "Vi mais de um documento aqui. Mande uma pessoa por vez." };
   }
+  if (n.telefoneDuvida) return { erro: textoTelefoneDuvidoso(n.telefoneDuvida) };
   if (n.cpfs[0]) out.cpf = n.cpfs[0];
   if (n.cnpjs[0]) { out.cnpj = n.cnpjs[0]; out.pj = true; }
   if (n.telefones[0]) out.telefone = n.telefones[0];
@@ -947,6 +956,11 @@ export interface ImovelLido { dados: Record<string, unknown>; erro?: string }
 
 /** "apto 42", "bloco B", "fundos", "casa 2"… — um complemento de verdade tem número ou uma destas palavras. */
 const PALAVRA_DE_COMPLEMENTO = /\b(ap(?:to|artamento)?|bloco|bl|casa|fundos|sala|loja|cobertura|andar|quadra|lote|torre|conjunto|conj|sobrado|km)\b/i;
+/** Unidade escrita no texto: "apto 41", "bloco B", "sala 12" — com número ("apartamento na Rua" e "apartamento 2 quartos" não são). */
+// O número da unidade não pode ser seguido de cômodo ou medida ("cobertura 2 suítes", "sala 2 ambientes", "loja 200m"). Bloco/torre
+// só com identificador: número aqui, letra maiúscula isolada em BLOCO_COM_LETRA (a flag i deixaria "torre e o parque" passar).
+const UNIDADE_NO_TEXTO = /\b(?:(?:bloco|bl|torre)\.?\s*[\p{L}\d-]{1,4}[\s,]+)?(?:ap(?:to|artamento)?|sala|conj(?:unto)?|cobertura|loja)\.?\s*\d+(?!\d)(?!\s*(?:m2|m²|m(?![\p{L}\d])|metros?|quartos?|dormit|su[ií]tes?|ambientes?|banheiros?|vagas?))(?:-?[\p{L}\d]+)?(?![\p{L}\d-])|\b(?:bloco|bl|torre)\.?\s*\d[\p{L}\d-]*/iu;
+const BLOCO_COM_LETRA = /\b(?:[Bb]loco|[Bb]l|[Tt]orre)\.?\s*[A-Z](?![\p{L}\d])/u;
 const pareceComplemento = (c: string) => /\d/.test(c) || PALAVRA_DE_COMPLEMENTO.test(c);
 
 /** Endereço pelo extrator (conferido contra o texto); matrícula, área, vagas e tipo em código. */
@@ -978,6 +992,12 @@ export async function lerImovel(texto: string, extrair: ExtratorDeSecao): Promis
       dados.rua = juntos;
       delete dados.complemento;
     }
+  }
+  // Prod 17/11: "…, 300, apto 41, Cerqueira César…" perdeu o "apto 41" — o extrator deixou o complemento de
+  // fora e nada o recuperava. A unidade escrita no texto (apto/bloco/sala… + número ou letra) vale.
+  if (!dados.complemento) {
+    const unidade = (UNIDADE_NO_TEXTO.exec(texto) ?? BLOCO_COM_LETRA.exec(texto))?.[0]?.trim();
+    if (unidade) dados.complemento = unidade;
   }
   const uf = str(r?.uf)?.toUpperCase();
   if (uf && /^[A-Z]{2}$/.test(uf) && new RegExp(String.raw`(?<![\p{L}])${uf}(?![\p{L}])`, "iu").test(texto)) dados.uf = uf;
@@ -1129,10 +1149,10 @@ function ecoDasCondicoes(c: CondicoesLidas): string {
 const vazioDeCondicoes = (c: CondicoesLidas) => !Object.keys(c.condicoes).length && !Object.keys(c.locacao).length;
 
 /** Eco de "Rua X, 100, Bairro, Cidade/UF (casa, CEP 01310-100)" a partir do `dados.imovel` já lido. */
-function ecoDoImovel(imovel: Record<string, unknown> | undefined): string {
+export function ecoDoImovel(imovel: Record<string, unknown> | undefined): string {
   if (!imovel) return "";
   const cidadeUf = [imovel.cidade, imovel.uf].filter(Boolean).join("/");
-  const endereco = [imovel.rua, imovel.numero, imovel.bairro, cidadeUf].filter(Boolean).join(", ");
+  const endereco = [imovel.rua, imovel.numero, imovel.complemento, imovel.bairro, cidadeUf].filter(Boolean).join(", ");
   const extra = [typeof imovel.kind === "string" ? imovel.kind : "", typeof imovel.cep === "string" ? `CEP ${imovel.cep}` : ""].filter(Boolean).join(", ");
   if (!endereco) return extra;
   return extra ? `${endereco} (${extra})` : endereco;
@@ -1319,7 +1339,9 @@ async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: stri
     }
     case "telefone": {
       const n = lerNumeros(texto);
-      const tel = n.telefones[0] ?? (so(texto).length === 10 || so(texto).length === 11 ? so(texto) : undefined);
+      if (n.telefoneDuvida) return { erro: textoTelefoneDuvidoso(n.telefoneDuvida) };
+      const tel = n.telefones[0] ?? (/^[\d\s,.()+-]+$/.test(texto) ? juntarTelefone(texto) ?? undefined : undefined);
+      if (!tel && /^[\d\s,.()+-]+$/.test(texto) && so(texto).length >= 6) return { erro: textoTelefoneDuvidoso(texto.trim()) };
       // Achado 27: grava em E.164 (+55…), não os dígitos crus.
       return tel ? { dados: colocar(normalizeBrPhone(tel) ?? tel), eco: "telefone anotado" } : { erro: "Mande o telefone com DDD." };
     }
