@@ -24,13 +24,13 @@ import { imobproBase } from "@/lib/http";
 export const LIMITE_TEXTO_NOTIFICACAO = 280;
 const LIMITE_LINK = 300;
 
-function texto(v: unknown): string | null {
+export function texto(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const limpo = v.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ").replace(/\s+/g, " ").trim();
   return limpo ? limpo.slice(0, LIMITE_TEXTO_NOTIFICACAO) : null;
 }
 
-function linkSeguro(v: unknown): string | null {
+export function linkSeguro(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const bruto = v.trim();
   if (!bruto || bruto.length > LIMITE_LINK || /\s/.test(bruto)) return null;

@@ -60,7 +60,13 @@ export async function loadFacts(orgId: string, phone: string): Promise<Facts> {
       [context?.orgId ?? orgId, conversationKey(phone), MAX_FACTS_PER_PERSON, context ? contentDigest(context.subject) : null]
     );
     const prefix = context ? `subject:${contentDigest(context.subject)}:` : "";
-    return Object.fromEntries(rows.filter((r) => !prefix || r.key.startsWith(prefix)).map((r) => [prefix ? r.key.slice(prefix.length) : r.key, r.value]));
+    return Object.fromEntries(
+      rows
+        .filter((r) => !prefix || r.key.startsWith(prefix))
+        .map((r): [string, string] => [prefix ? r.key.slice(prefix.length) : r.key, r.value])
+        // Linhas antigas de nome/tratamento ficam no banco e deixam de ser servidas.
+        .filter(([k, v]) => !ehFatoDeNome(k, v)),
+    );
   } catch (err) {
     // Memória é enriquecimento: sem ela o Max responde igual, só menos
     // pessoal. Derrubar o turn por causa disso seria trocar uma conversa por
@@ -73,12 +79,29 @@ export async function loadFacts(orgId: string, phone: string): Promise<Facts> {
   }
 }
 
+/**
+ * Nome e tratamento NÃO são memória (prod 16/11: o Max chamou o Olavo de "João").
+ * O nome de quem fala vem só do cadastro (`displayName(identity)` → `userName` do prompt). Um fato de nome
+ * vindo de conversa passa por cima disso e erra de pessoa. Vale na escrita (`limpar`) e na leitura
+ * (`loadFacts`/`renderFacts`), para que linhas antigas do banco também deixem de ser servidas sem apagá-las.
+ */
+const CHAVE_DE_NOME = /(^|[\s_.:-])(nome|apelido|chamad[oa]|chamar|chame|chamo|trat(a|ar|amento)|vocativo|sauda[çc][ãa]o|forma_de_tratamento)([\s_.:-]|$)/i;
+const VALOR_DE_TRATAMENTO = /\b(prefere|gosta|quer|pede|pediu)\b[^.]{0,40}\b(ser )?(chamad[oa]|tratad[oa])\b|\bchama(r|do|da)? (de|por)\b/i;
+export function ehFatoDeNome(key: string, value: string): boolean {
+  return CHAVE_DE_NOME.test(key) || VALOR_DE_TRATAMENTO.test(value);
+}
+
 /** Normaliza e recusa o que não deve virar fato. `null` = descartar. */
+export function limparFato(key: unknown, value: unknown): [string, string] | null {
+  return limpar(key, value);
+}
+
 function limpar(key: unknown, value: unknown): [string, string] | null {
   if (typeof key !== "string" || typeof value !== "string") return null;
   const k = key.trim().toLowerCase().slice(0, MAX_KEY_CHARS);
   const v = value.trim().slice(0, MAX_VALUE_CHARS);
   if (!k || !v) return null;
+  if (ehFatoDeNome(k, v)) return null;
 
   /**
    * Segunda cerca, independente do prompt.
@@ -196,12 +219,11 @@ export async function saveFacts(
   }
 }
 
-const EXTRACT_SYSTEM = `Você extrai FATOS DURÁVEIS sobre uma pessoa, a partir de uma conversa de WhatsApp com um assistente imobiliário.
+const EXTRACT_SYSTEM = `Você extrai FATOS DURÁVEIS sobre uma pessoa, a partir do que ELA escreveu numa conversa de WhatsApp com um assistente imobiliário. Só o texto da pessoa vale como fonte; nada do que o assistente disse é fato sobre ela.
 
 Devolva um objeto JSON plano, com no máximo 5 pares "chave": "valor".
 
 O que extrair — só o que continuará verdade daqui a semanas:
-- como a pessoa prefere ser chamada
 - função ou área em que atua (locação, vendas, administrativo)
 - preferências de trabalho recorrentes
 - assunto que ela acompanha de forma continuada
@@ -209,6 +231,7 @@ O que extrair — só o que continuará verdade daqui a semanas:
 O que NUNCA extrair:
 - CPF, CNPJ, RG, documento, dado bancário, PIX, cartão, senha
 - valores de negócio, endereços de imóvel, nomes de clientes dela
+- nome, apelido ou forma de tratamento (o nome de quem fala vem do cadastro, não da conversa)
 - qualquer coisa sobre TERCEIROS
 - o assunto pontual desta conversa ("perguntou do contrato X") — isso é contexto, não fato
 
@@ -228,7 +251,6 @@ export async function extractFacts(params: {
   orgId: string;
   phone: string;
   userText: string;
-  replyText: string;
   known: Facts;
 }): Promise<Facts> {
   const conhecidos = Object.keys(params.known);
@@ -243,8 +265,8 @@ export async function extractFacts(params: {
             (conhecidos.length
               ? `Já sabemos (não repita estes, a menos que tenham MUDADO): ${conhecidos.join(", ")}\n\n`
               : "") +
-            `Pessoa: ${params.userText.slice(0, 2000)}\n` +
-            `Assistente: ${params.replyText.slice(0, 2000)}`,
+            // Só a fala da PESSOA. A resposta do bot ("Oi João!") não é fonte de fato sobre ela.
+            `Pessoa: ${params.userText.slice(0, 2000)}`,
         },
       ],
       maxTokens: 300,
@@ -270,7 +292,7 @@ export async function extractFacts(params: {
 
 /** Bloco pro prompt. String vazia quando não há nada — sem cabeçalho órfão. */
 export function renderFacts(facts: Facts): string {
-  const entries = Object.entries(facts);
+  const entries = Object.entries(facts).filter(([k, v]) => !ehFatoDeNome(k, v));
   if (entries.length === 0) return "";
   return (
     "\n\nO que você já sabe sobre esta pessoa (de conversas anteriores):\n" +

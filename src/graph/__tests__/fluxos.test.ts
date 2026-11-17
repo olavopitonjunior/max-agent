@@ -42,10 +42,48 @@ describe("entrada", () => {
     "Faz uma proposta do João",
     "Cria uma proposta da Letícia",
     "Monta a proposta do Carlos pro apto 52",
-    "Crie uma proposta de compra do Pedro",
     "Max, crie proposta da Ana",
-  ])("não bloqueia criação de proposta para uma pessoa: %s", async (pedido) => {
+    "Pode gerar uma proposta pra mim?",
+    "Crie uma proposta e um formulário para o Pedro",
+  ])("pedido ambíguo de proposta pergunta proposta × negócio: %s", async (pedido) => {
     const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps());
+    expect(p.fluxo?.kind).toBe("escolha");
+  });
+  // Prod 17/11: o pedido já dizia "proposta de compra" e trazia comprador e valor, e o Max ainda perguntou 1 ou 2.
+  it.each([
+    ["Crie uma proposta de compra do Pedro", "venda"],
+    ["proposta de venda para o João", "venda"],
+    ["Faz uma proposta de locação para a Ana", "locacao"],
+    ["proposta de aluguel do apto 52", "locacao"],
+    ["proposta de compra para o negócio TESTE: compradores TESTE Comprador Um e TESTE Comprador Dois, casados entre si, valor R$ 800.000, à vista, sinal de R$ 80.000", "venda"],
+    ["Quero fazer uma proposta, comprador Maria Silva, valor R$ 500.000", "venda"],
+  ] as const)("pedido claro de proposta vai direto para a proposta rápida: %s", async (pedido, natureza) => {
+    const d = deps();
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, d);
+    expect(p.fluxo?.kind).toBe("proposta");
+    expect((p.fluxo as { natureza?: string }).natureza).toBe(natureza);
+    expect(p.reply).not.toBe(F.TEXTO_ESCOLHA);
+    expect(d.acao).not.toHaveBeenCalledWith("form.create", expect.anything());
+  });
+  // Review R2 (B4): consulta/referência a proposta que já existe nunca vira proposta rápida.
+  it.each([
+    "qual o valor da proposta do comprador João?",
+    "qual o valor da proposta do comprador João",
+    "ver a proposta de compra do Pedro, valor R$ 800.000",
+    "status da proposta de venda PROP-2026-0042",
+    "consultar proposta de compra do comprador Ana",
+    "enviar a proposta de compra do comprador Ana",
+    "assinar a proposta de compra do comprador Ana, valor R$ 500.000",
+    "o comprador aceitou a proposta de compra, valor R$ 800.000?",
+  ])("consulta não vira proposta rápida: %s", async (pedido) => {
+    expect(F.pedidoClaroDeProposta(pedido)).toBe(false);
+    const d = deps();
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, d);
+    expect(p.fluxo?.kind).not.toBe("proposta");
+    expect(d.acao).not.toHaveBeenCalledWith("form.create", expect.anything());
+  });
+  it("proposta de compra, mas com 'formulário' explícito, continua perguntando", async () => {
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido: "proposta de compra e o formulário do Pedro", policy: [...TUDO], agora }, deps());
     expect(p.fluxo?.kind).toBe("escolha");
   });
   it.each([
@@ -943,5 +981,53 @@ describe("sem modelo de proposta ativo (prod 07/10: FINCasa com modelos arquivad
     expect(p.reply).toContain("não tem um modelo");
     expect(p.reply).not.toContain("http");
     expect(p.fluxo).toBeNull();
+  });
+});
+
+describe("erro de digitação em 'proposta' (B9, 17/11)", () => {
+  const ERROS = ["propsta", "porposta", "propota", "prposta", "proposa", "propostta"];
+
+  it.each(ERROS)("'max preciso de uma %s' é pedido de criação (fluxo determinístico, sem leitura ao lado)", async (e) => {
+    const { ehPedidoDeCriacao } = await import("../tools");
+    expect(ehPedidoDeCriacao(`max preciso de uma ${e}`)).toBe(true);
+    expect(ehPedidoDeCriacao(`cria uma ${e} pro Carlos`)).toBe(true);
+    expect(ehPedidoDeCriacao(`${e} nova pro João`)).toBe(true);
+  });
+
+  it("a grafia certa segue igual e consulta com a palavra errada não vira criação", async () => {
+    const { ehPedidoDeCriacao } = await import("../tools");
+    expect(ehPedidoDeCriacao("max preciso de uma proposta")).toBe(true);
+    expect(ehPedidoDeCriacao("como está a propsta do Carlos?")).toBe(false);
+    expect(ehPedidoDeCriacao("tem propsta nova?")).toBe(false);
+  });
+
+  it.each(ERROS)("no turno real, 'max preciso de uma %s' oferece propor_criacao (shouldOfferTools tolera o erro)", async (e) => {
+    const { ferramentasDoTurno, shouldOfferTools } = await import("../tools");
+    expect(shouldOfferTools(`max preciso de uma ${e}`)).toBe(true);
+    const r = ferramentasDoTurno({
+      policy: ["deal.list", "deal.pending", "proposal.list", "form.create", "proposal.create"],
+      texto: `max preciso de uma ${e}`,
+      identity: { orgId: "org1", orgName: "FINCasa", kind: "user", userId: "u1", userName: "Olavo" },
+    });
+    expect(r.entradas.map((x) => x.nome)).toContain("propor_criacao");
+  });
+
+  it.each(ERROS)("'%s' na escolha 1/2 vale como proposta", (e) => {
+    expect(F.lerEscolha(`${e} rápida`)).toBe("proposta");
+  });
+
+  it.each(ERROS)("'%s' de compra com comprador vai direto à proposta rápida", async (e) => {
+    expect(F.pedidoClaroDeProposta(`${e} de compra para o negócio TESTE`)).toBe(true);
+    const p = await F.iniciarFluxo(
+      { tipo: "proposta", pedido: `${e} de compra, comprador Ana, valor R$ 800.000`, policy: [...TUDO], agora },
+      deps()
+    );
+    expect(p.fluxo?.kind).toBe("proposta");
+  });
+
+  it("'envie a propsta' é envio; 'uma propsta nova' continua sendo criação (E_CRIACAO)", () => {
+    expect(F.pedeEnvio("envie a propsta da Letícia")).toBe(true);
+    expect(F.pedeEnvio("manda uma propsta nova")).toBe(false);
+    expect(F.pedeEnvio("manda uma proposta nova")).toBe(false);
   });
 });

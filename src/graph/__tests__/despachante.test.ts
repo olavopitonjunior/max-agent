@@ -76,8 +76,8 @@ describe("registro de tools", () => {
   });
 
   it("toda leitura que lista declara o que produz (G2)", () => {
-    for (const e of REGISTRO_DE_TOOLS.filter((x) => x.tipo === "leitura" && x.verb !== "metrics.get" && x.verb !== "template.decisions" && x.verb !== "pending.summary" && x.verb !== "prefs.get" && x.verb !== "proposal.detail" && x.verb !== "deal.detail")) {
-      // detalhar_*: CONSOMEM o número da lista (não produzem lista nova), por isso fora da regra
+    for (const e of REGISTRO_DE_TOOLS.filter((x) => x.tipo === "leitura" && x.verb !== "metrics.get" && x.verb !== "template.decisions" && x.verb !== "pending.summary" && x.verb !== "prefs.get" && x.verb !== "proposal.detail" && x.verb !== "deal.detail" && x.verb !== "certidao.status" && x.verb !== "document.list" && x.verb !== "charge.status")) {
+      // detalhar_*, situacao_certidoes (certidao.status), listar_documentos (document.list) e status_cobranca (charge.status): CONSOMEM o número da lista (não produzem lista nova), por isso fora da regra
       expect(e.refs?.produz, e.nome).toBeDefined();
     }
   });

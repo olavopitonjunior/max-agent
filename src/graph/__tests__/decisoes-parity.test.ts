@@ -23,6 +23,12 @@ const VERBOS_DE_LEITURA_DO_CM = [
   "deal.list", "deal.detail", "deal.pending", "proposal.list", "proposal.detail",
   "notification.list", "activity.list", "activity.get", "metrics.get",
   "property.list", "property.detail", "contract.status", "template.decisions", "pending.summary",
+  // PR-O4b: situação das certidões (par do contractmaker `feat/max-o4b-certidao-status`).
+  "certidao.status",
+  // PR-O4c: documentos do negócio/proposta (par do contractmaker `feat/max-o4c-document-list`).
+  "document.list",
+  // PR-O4d: cobranças do negócio (par do contractmaker `feat/max-o4d-charge-status`).
+  "charge.status",
 ];
 
 const CHAVES_PROIBIDAS = [
@@ -89,7 +95,7 @@ describe("template.decisions — negado (fail-closed)", () => {
 
 describe("template.decisions — permitido", () => {
   it("a lista de capabilities tem template.decisions no índice 27 (antes de pending.summary e prefs.self)", () => {
-    expect(CAPABILITIES).toHaveLength(33);
+    expect(CAPABILITIES).toHaveLength(37);
     expect(CAPABILITIES.indexOf("template.decisions")).toBe(27);
   });
 

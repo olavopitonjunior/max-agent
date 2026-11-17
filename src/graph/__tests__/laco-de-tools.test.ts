@@ -156,7 +156,9 @@ describe("teto de voltas", () => {
     const r = await run("como estão meus negócios?");
 
     expect(r.toolRounds).toBe(3);
-    expect(escopo).toHaveBeenCalledTimes(3);
+    // Só a volta 0 ofereceu `listar_negocios`: nas voltas 1 e 2 a chamada teimosa é recusada pela trava b
+    // por volta (review #192) — o modelo não via a tool, logo ela não executa.
+    expect(escopo).toHaveBeenCalledTimes(1);
     // Não lançou, não travou: o turn terminou.
     expect(r.toolRounds).toBeLessThanOrEqual(3);
   });

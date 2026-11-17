@@ -508,6 +508,20 @@ describe("caminhos da coleta", () => {
     expect(ultimo("lead.upsert")!.args.campos).toEqual({ v: 1, tipo: "residencial", pretendente: { rendaMensal: 8500 } });
   });
 
+  it("o 'Continuando a ficha' vem uma vez por pausa: a 2ª pergunta fora do assunto não o repete; ao responder a ficha, volta", async () => {
+    const turno = await ateRenda();
+    const a = await turno("qual o horário da imobiliária?");
+    expect(a.reply).toContain("Continuando a ficha");
+    const b = await turno("e aos sábados?");
+    expect(b.reply).toBe("O horário é das 9h às 18h.");
+    expect(b.fluxo).toMatchObject({ kind: "credito", campoAtual: "renda" });
+    await turno("8500"); // a ficha andou
+    const c = await turno("qual o horário da imobiliária?");
+    expect(c.reply).toContain("Continuando a ficha");
+    const d = await turno("e aos sábados?");
+    expect(d.reply).not.toContain("Continuando a ficha");
+  });
+
   it("corrigir, resumo e cancelar", async () => {
     const turno = await ateRenda();
     await turno("8 mil");
