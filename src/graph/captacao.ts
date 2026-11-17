@@ -1729,7 +1729,7 @@ async function listarFilaDeAutorizacao(ctx: ContextoDoTurno, deps: DepsDoFluxo):
 
 const CANCELA = /^(cancela|cancelar|desisto|desistir|para|parar|pare)$/;
 /** Frase de parada inteira ("para por aqui, não envia nada"): ancorada, nunca o "para" solto de "venda para João". */
-const CANCELA_FRASE_DE_PARADA = /^(?:(?:pode )?(?:para|parar|pare)(?: (?:por aqui|tudo|agora|com isso|de perguntar))?|(?:nao (?:envia|manda|enviar|mandar) nada)|deixa pra la|deixa isso pra la|esquece(?: isso)?)(?:[,;.!]? (?:nao (?:envia|manda|enviar|mandar) nada|nao precisa de mais nada|por favor))?$/;
+const CANCELA_FRASE_DE_PARADA = /^(?:(?:pode )?(?:para|parar|pare)(?: (?:por aqui|tudo|agora|com isso|de perguntar))?|(?:nao (?:envia|manda|enviar|mandar) nada)|deixa (?:isso )?(?:pra|para) la|esquece(?: isso)?)(?:[,;.!]? (?:nao (?:envia|manda|enviar|mandar) nada|nao precisa de mais nada|por favor))?$/;
 /**
  * Achado de review 19/10 (item 5): dentro de `autorizacao_motivo` o texto
  * INTEIRO é o motivo da negativa — só "cancelar"/"cancela" EXATOS cancelam;

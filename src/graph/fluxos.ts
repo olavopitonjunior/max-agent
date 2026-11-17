@@ -826,9 +826,25 @@ function telefoneDuvidosoNoExtraido(d: DadosDaProposta): string | null {
   return null;
 }
 
-function perguntaDoTelefoneDuvidoso(trecho: string): string {
+/** Tira o telefone que não fecha, dizendo de quem era (default: o comprador, que é quem o texto livre costuma citar). */
+function semTelefoneDuvidoso(d: DadosDaProposta): { dados: DadosDaProposta; pessoa: "proponente" | "vendedor" } {
+  const dados: DadosDaProposta = { ...d };
+  let pessoa: "proponente" | "vendedor" = "proponente";
+  for (const k of ["proponente", "vendedor"] as const) {
+    const p = dados[k];
+    if (!p || !telefoneDoModeloDuvidoso(p.telefone)) continue;
+    const { telefone: _t, ...resto } = p;
+    if (Object.keys(resto).length) dados[k] = resto;
+    else delete dados[k];
+    pessoa = k;
+    break;
+  }
+  return { dados, pessoa };
+}
+
+function perguntaDoTelefoneDuvidoso(trecho: string, anotado = false): string {
   return (
-    `Não consegui ler o telefone com segurança (entendi "${trecho}"), então não anotei esta mensagem. ` +
+    `Não consegui ler o telefone com segurança (entendi "${trecho}"), então ${anotado ? "deixei só o telefone de fora" : "não anotei esta mensagem"}. ` +
     "Me mande de novo, com o telefone completo (DDD + número), por exemplo (11) 90000-0000."
   );
 }
@@ -1395,15 +1411,20 @@ export async function iniciarProposta(
   if (pedido) {
     // Mesma regra do turno dentro do fluxo: telefone que não fecha DDD + 8/9 dígitos se pergunta, não vira card.
     const extraido = await deps.extrairProposta(pedido, natureza);
-    const duvida = telefoneDuvidoso(pedido) ?? (extraido ? telefoneDuvidosoNoExtraido(sanearDados(extraido)) : null);
+    // O valor do modelo concilia com o texto antes de qualquer dúvida (mesma ordem do turno dentro do fluxo).
+    const lido = extraido ? conferirDitado(sanearDados(extraido), pedido) : {};
+    const duvida = telefoneDuvidoso(pedido) ?? telefoneDuvidosoNoExtraido(lido);
     if (duvida) {
+      // Guarda o resto do pedido e espera só o telefone: a resposta curta completa o card.
+      const { dados: semTel, pessoa } = semTelefoneDuvidoso(lido);
+      const guardado = prefill ? mesclarDados(mesclarDados({}, semTel), sanearDados(prefill)) : mesclarDados({}, semTel);
       return {
-        reply: perguntaDoTelefoneDuvidoso(duvida),
-        fluxo: { kind: "proposta", etapa: "coleta", natureza, dados: prefill ? mesclarDados({}, sanearDados(prefill)) : {}, leaseClientId, atualizadoEm: agora },
+        reply: perguntaDoTelefoneDuvidoso(duvida, true),
+        fluxo: { kind: "proposta", etapa: "coleta", natureza, dados: guardado, aguardaCampo: { pessoa, campo: "telefone" }, leaseClientId, atualizadoEm: agora },
         evento: "telefone_duvidoso",
       };
     }
-    if (extraido) dados = mesclarDados({}, sanearDados(extraido));
+    if (extraido) dados = mesclarDados({}, lido);
   }
   if (prefill) dados = mesclarDados(dados, sanearDados(prefill));
   const f: Fluxo = { kind: "proposta", etapa: "coleta", natureza, dados, leaseClientId, atualizadoEm: agora };
@@ -1871,17 +1892,19 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     ? ({ [f.aguardaCampo.pessoa]: { [f.aguardaCampo.campo]: avulso } } as DadosDaProposta)
     : await deps.extrairProposta(ctx.texto, f.natureza ?? "venda");
   if (extraido === null) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: "falha_extracao" };
-  // O modelo pode devolver a sequência ditada sem o rótulo que a regex do texto reconhece: o valor dele passa pela mesma checagem.
-  const duvidaNoExtraido = avulso ? null : telefoneDuvidosoNoExtraido(sanearDados(extraido));
-  if (duvidaNoExtraido) {
-    return { reply: perguntaDoTelefoneDuvidoso(duvidaNoExtraido), fluxo: { ...f, atualizadoEm: agora }, evento: "telefone_duvidoso" };
-  }
   const parcial = !!f.propostaId && !f.natureza;
   // O valor avulso já é do campo pedido: conferir de novo o reclassificaria
   // (um telefone que passa no DV de CPF sumiria; review 26/10).
   const novos = avulso
     ? semReferencia(sanearDados(extraido), f.referencia)
     : conferirDitado(semReferencia(sanearDados(extraido), f.referencia), ctx.texto);
+  // O modelo pode devolver a sequência ditada sem o rótulo que a regex do texto reconhece. A dúvida
+  // vem DEPOIS de conciliar com o texto: o que a pessoa escreveu vale ("119888-7777" do modelo para
+  // "11 98888-7777" escrito não vira pergunta) e o telefone que o texto não traz já saiu.
+  const duvidaNoExtraido = avulso ? null : telefoneDuvidosoNoExtraido(novos);
+  if (duvidaNoExtraido) {
+    return { reply: perguntaDoTelefoneDuvidoso(duvidaNoExtraido), fluxo: { ...f, atualizadoEm: agora }, evento: "telefone_duvidoso" };
+  }
   // No ajuste parcial, o canal só muda quando a pessoa fala dele: o extrator
   // devolvia "WhatsApp" para "remove o fiador da proposta da X" (eval 09/10),
   // e o PATCH trocaria o canal sem ninguém pedir.

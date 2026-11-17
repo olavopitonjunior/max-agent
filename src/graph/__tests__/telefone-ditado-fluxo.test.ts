@@ -42,13 +42,6 @@ describe("A — primeira mensagem (iniciarFluxo)", () => {
     expect(p.evento).toBe("telefone_duvidoso");
   });
 
-  it("o valor do extrator que não fecha também pergunta, mesmo com o texto limpo", async () => {
-    const d = deps(completo("11, 9000-0002"));
-    const p = await iniciarFluxo(
-      { tipo: "proposta", pedido: pedido.replace("telefone 11, 9000-0002, ", ""), policy: [...TUDO], agora }, d);
-    expect(p.evento).toBe("telefone_duvidoso");
-  });
-
   it("telefone ditado que fecha sai juntado e formatado no card", async () => {
     const d = deps(completo("11, 90000-0002"));
     const p = await iniciarFluxo({ tipo: "proposta", pedido: pedido.replace("9000-0002", "90000-0002"), policy: [...TUDO], agora }, d);
@@ -83,13 +76,58 @@ describe("B — correção com o card aberto (conduzirFluxo)", () => {
     if (!r.fluxo || r.fluxo.kind !== "proposta") throw new Error("fluxo");
     expect(r.fluxo.dados.proponente?.telefone).toBe("(11) 90000-0003");
   });
+});
 
-  it("valor do extrator que não fecha, com o texto sem rótulo: pergunta e não troca", async () => {
-    const r = await conduzirFluxo(
-      aberto(), ctx("corrige: ela é a TESTE Comprador Corrigida"),
-      deps({ proponente: { nome: "TESTE Comprador Corrigida", telefone: "11, 9000-0004" } }),
-    );
-    expect(r.evento).toBe("telefone_duvidoso");
+describe("R3.1 — o valor do extrator concilia com o texto ANTES da dúvida", () => {
+  const aberto = (): Fluxo => ({
+    kind: "proposta", etapa: "revisao", natureza: "venda",
+    dados: sanearDados(completo("(11) 90000-0003")), atualizadoEm: 1,
+  });
+  const ctx = (texto: string): ContextoDoTurno => ({ texto, messageId: "m-r31", agora: 2, policy: ["proposal.create"] });
+
+  it("modelo come um dígito, a pessoa escreveu certo: vale o escrito, sem pergunta", async () => {
+    const r = await conduzirFluxo(aberto(), ctx("o telefone é 11 98888-7777"), deps({ proponente: { telefone: "119888-7777" } }));
+    expect(r.evento).not.toBe("telefone_duvidoso");
+    expect(r.reply).toContain("11 98888-7777");
+  });
+
+  it("primeira mensagem: o mesmo, sem pergunta", async () => {
+    const pedido = "proposta de compra: comprador TESTE Newton Ditado, telefone 11 98888-7777, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista";
+    const p = await iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps(completo("119888-7777")));
+    expect(p.evento).not.toBe("telefone_duvidoso");
+    expect(p.reply).toContain("Comprador: TESTE Newton Ditado · 11 98888-7777");
+  });
+
+  it("telefone do modelo que não aparece no texto: descartado, sem pergunta", async () => {
+    const r = await conduzirFluxo(aberto(), ctx("o sobrenome dele é Silva"),
+      deps({ proponente: { nome: "TESTE Newton Ditado Silva", telefone: "11, 9000-0004" } }));
+    expect(r.evento).not.toBe("telefone_duvidoso");
+    if (!r.fluxo || r.fluxo.kind !== "proposta") throw new Error("fluxo");
+    expect(r.fluxo.dados.proponente?.telefone).toBe("(11) 90000-0003");
+  });
+});
+
+describe("R3.2 — caso A em duas mensagens: guarda o resto e espera só o telefone", () => {
+  const pedido =
+    "proposta de compra: comprador TESTE Newton Ditado, telefone 11, 9000-0002, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista";
+
+  it("1ª pergunta o telefone com os dados guardados; 2ª completa o card", async () => {
+    const d = deps(completo("11, 9000-0002"));
+    const p = await iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, d);
+    expect(p.evento).toBe("telefone_duvidoso");
+    expect(p.reply).not.toContain("Comprador:");
+    if (!p.fluxo || p.fluxo.kind !== "proposta") throw new Error("fluxo");
+    expect(p.fluxo.aguardaCampo).toEqual({ pessoa: "proponente", campo: "telefone" });
+    expect(p.fluxo.dados.proponente?.nome).toBe("TESTE Newton Ditado");
+    expect(p.fluxo.dados.proponente?.telefone).toBeUndefined();
+    expect(p.fluxo.dados.valor).toBe(600000);
+    expect(p.fluxo.dados.imovel?.endereco).toContain("Rua Augusta");
+
+    const ctx2: ContextoDoTurno = { texto: "(11) 90000-0002", messageId: "m-2", agora: 3, policy: [...TUDO] };
+    const r = await conduzirFluxo(p.fluxo, ctx2, d);
+    expect(r.reply).toContain("Comprador: TESTE Newton Ditado · (11) 90000-0002");
+    expect(r.reply).toContain("Rua Augusta");
+    expect(r.reply).toContain("600.000");
   });
 });
 
@@ -115,8 +153,13 @@ describe("C — captação, etapa de proprietários: frases de parada", () => {
       expect(r.evento).toBe("captacao_cancelado");
     });
 
-  it("'para' dentro de outra frase não cancela", async () => {
-    const r = await conduzirCaptacao(fluxo(), ctx("venda para João da Silva"), d, true);
+  it.each(["pare.", "Para por aqui!", "deixa para lá", "Deixa pra lá.", "não envia nada!"])("pontuação final e variantes: %s", async (texto) => {
+    const r = await conduzirCaptacao(fluxo(), ctx(texto), d, true);
+    expect(r.evento).toBe("captacao_cancelado");
+  });
+
+  it.each(["venda para João da Silva", "Rua Deixa Pra Lá, 10", "Maria Para Silva"])("'para'/'deixa' dentro de outra frase não cancela: %s", async (texto) => {
+    const r = await conduzirCaptacao(fluxo(), ctx(texto), d, true);
     expect(r.evento).not.toBe("captacao_cancelado");
   });
 });
