@@ -47,7 +47,15 @@ import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-con
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
-import { juntarTelefone, TELEFONE_DITADO, telefoneDoModelo, telefoneDoModeloDuvidoso, telefoneDuvidoso } from "@/lib/phone";
+import {
+  ESTRANGEIRO,
+  juntarTelefone,
+  TELEFONE_DITADO,
+  telefoneDoModelo,
+  telefoneDoModeloDuvidoso,
+  telefoneDuvidoso,
+  telefoneEstrangeiroValido,
+} from "@/lib/phone";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -527,12 +535,20 @@ export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaPropos
   // `(?<!\d)`: sem fronteira à esquerda o regex casava DENTRO do CPF ("52998224725"
   // → telefone "2998224725"; smoke 26/10).
   // Sequência ditada em áudio ("11, 90000-0002", "11 9 0000 0002") entra como os dígitos juntos; a escrita normal fica como veio.
-  const telefones = (texto.match(new RegExp(TELEFONE_DITADO.source, "g")) ?? [])
+  const telefonesBrutos = (texto.match(new RegExp(TELEFONE_DITADO.source, "g")) ?? [])
     .map((t) => t.trim())
     .map(telefoneDoModelo);
   // Número com código de país que não é o 55 ("+351 912 345 678"): o regex brasileiro não o casa, mas o que a
   // pessoa escreveu vale como candidato — sem isso o telefone do modelo era descartado em silêncio.
-  for (const m of texto.matchAll(/(?<![\d+])\+(?!55(?!\d))\d{1,3}(?:[\s.-]?\(?\d{1,5}\)?){2,5}(?!\d)/g)) telefones.push(m[0].trim());
+  // Mesma regra do `telefoneDuvidoso` (`^\+(?!55)`): "+5511 90000" é +55 truncado, não estrangeiro. Valor em reais
+  // ("sinal de +50 000 000") não é telefone.
+  for (const m of texto.matchAll(/(?<![\d+])\+(?!55)\d{1,3}(?:[\s.-]?\(?\d{1,5}\)?){2,5}(?!\d)/g)) {
+    const antes = texto.slice(Math.max(0, (m.index ?? 0) - 24), m.index ?? 0);
+    if (/(?:r\$|valor|sinal|entrada|parcelas?|reais|pre[cç]o)\W*(?:de\s+|em\s+)?$/iu.test(antes)) continue;
+    telefonesBrutos.push(m[0].trim());
+  }
+  // Sem repetição ("+5511999999999" e a forma formatada são o mesmo número): senão dois candidatos iguais viram ambiguidade.
+  const telefones = telefonesBrutos.filter((t, i) => telefonesBrutos.findIndex((u) => so(u) === so(t)) === i);
   // Onze dígitos sem máscara também cabem no regex de CPF. O rótulo escrito
   // pela pessoa resolve a ambiguidade; o extrator sozinho não pode resolvê-la.
   const telefonesRotulados = new Set([...texto.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)(?:\s+(?:do|da)\s+(?:comprador|compradora|cliente|proponente|vendedor|vendedora|inquilino|inquilina|locatário|locatária))?\s*(?::|=|é|para)?\s*((?<!\d)(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4})(?!\d)/giu)].map(m=>semDdi(so(m[1]))));
@@ -664,8 +680,9 @@ function semReferencia(d: DadosDaProposta, referencia: string | undefined): Dado
 const nomeCompleto = (s?: string) => (s ?? "").trim().split(/\s+/).filter(Boolean).length >= 2;
 const telefoneUtil = (s?: string) => {
   const d = (s ?? "").replace(/\D/g, "");
-  // Estrangeiro (+ e código de país que não é o 55): o CM aceita como está (mesma regra do `telefoneDuvidoso`).
-  if (/^\s*\+(?!55(?!\d))\d/.test(s ?? "")) return d.length >= 8 && d.length <= 15;
+  // Estrangeiro (+ e código que não é 55): sem libphonenumber aqui, só as regras mínimas de `telefoneEstrangeiroValido`;
+  // o resto não chega ao SIM para o CM recusar lá.
+  if (ESTRANGEIRO.test(s ?? "")) return telefoneEstrangeiroValido(s ?? "");
   return d.length === 10 || d.length === 11 || ((d.length === 12 || d.length === 13) && d.startsWith("55"));
 };
 const emailUtil = (s?: string) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test((s ?? "").trim());
@@ -839,7 +856,9 @@ function pessoaDoRotulo(texto: string, trecho: string): "proponente" | "vendedor
   const i = texto.indexOf(trecho);
   if (i < 0) return null;
   const antes = normalizar(texto.slice(Math.max(0, i - 50), i));
-  const papeis = [...antes.matchAll(/\b(vendedor\w*|proprietari\w*|locador\w*|comprador\w*|proponente|inquilin\w*|locatari\w*)/g)];
+  // Só vale o papel COLADO ao termo de telefone ("telefone do vendedor", "celular da proprietária"); papel solto na
+  // frase ("vendedor Maria (proprietária), ... telefone 11, 9000-0002 do comprador") não diz de quem é o número.
+  const papeis = [...antes.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)\s+(?:do|da)\s+(vendedor\w*|proprietari\w*|locador\w*|comprador\w*|proponente|inquilin\w*|locatari\w*|cliente)\W*$/g)];
   const ultimo = papeis.at(-1)?.[1];
   if (!ultimo) return null;
   return /^(vendedor|proprietari|locador)/.test(ultimo) ? "vendedor" : "proponente";

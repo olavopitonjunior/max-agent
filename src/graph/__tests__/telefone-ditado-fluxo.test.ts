@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { conduzirFluxo, iniciarFluxo, sanearDados, type ContextoDoTurno, type DadosDaProposta, type DepsDoFluxo, type Fluxo } from "../fluxos";
+import { conduzirFluxo, conferirDitado, iniciarFluxo, sanearDados, type ContextoDoTurno, type DadosDaProposta, type DepsDoFluxo, type Fluxo } from "../fluxos";
 import { conduzirCaptacao, type FluxoCaptacao } from "../captacao";
 
 /**
@@ -159,6 +159,50 @@ describe("R3.3 — telefone com código de país aparece no texto: fica, sem per
   });
 });
 
+describe("R3.5 — estrangeiro só com regra mínima (sem libphonenumber no max-agent)", () => {
+  const pedido = (tel: string) =>
+    `proposta de compra: comprador TESTE Estrangeiro, telefone ${tel}, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista`;
+  const dadosCom = (tel: string): DadosDaProposta => ({ ...completo(tel), proponente: { nome: "TESTE Estrangeiro", telefone: tel } });
+  const aberto = (): Fluxo => ({
+    kind: "proposta", etapa: "revisao", natureza: "venda",
+    dados: sanearDados(completo("(11) 90000-0003")), atualizadoEm: 1,
+  });
+
+  it.each(["+5 1234 5678", "+351 123 4567", "+351 912 345 6789", "+44 7911 123456"])("1ª mensagem pergunta: %s", async (tel) => {
+    const p = await iniciarFluxo({ tipo: "proposta", pedido: pedido(tel), policy: [...TUDO], agora }, deps(dadosCom(tel)));
+    expect(p.evento).toBe("telefone_duvidoso");
+    expect(p.reply).not.toContain("Comprador:");
+  });
+
+  it.each(["+5 1234 5678", "+351 123 4567"])("correção com o card aberto pergunta e não troca: %s", async (tel) => {
+    const r = await conduzirFluxo(aberto(), { texto: `o telefone é ${tel}`, messageId: "m-r35", agora: 2, policy: ["proposal.create"] },
+      deps({ proponente: { telefone: tel } }));
+    expect(r.evento).toBe("telefone_duvidoso");
+  });
+
+  it("+1 com 10 dígitos e +351 com 9 passam", async () => {
+    for (const tel of ["+1 415 555 2671", "+351 912 345 678"]) {
+      const p = await iniciarFluxo({ tipo: "proposta", pedido: pedido(tel), policy: [...TUDO], agora }, deps(dadosCom(tel)));
+      expect(p.reply).toContain(`Comprador: TESTE Estrangeiro · ${tel}`);
+    }
+  });
+
+  it("'+5511 90000' não é estrangeiro (é +55 truncado): pergunta", async () => {
+    const p = await iniciarFluxo({ tipo: "proposta", pedido: pedido("+5511 90000"), policy: [...TUDO], agora }, deps(dadosCom("+5511 90000")));
+    expect(p.evento).toBe("telefone_duvidoso");
+  });
+
+  it("candidatos sem duplicata: +55 colado e o valor do modelo formatado", () => {
+    const d = conferirDitado({ proponente: { nome: "A B", telefone: "(11) 99999-9999" } }, "telefone +5511999999999");
+    expect(d.proponente?.telefone).toBe("(11) 99999-9999");
+  });
+
+  it("valor monetário com + não vira telefone candidato", () => {
+    const d = conferirDitado({ proponente: { nome: "A B", telefone: "+50 000 000" } }, "valor R$ 600.000, sinal de +50 000 000");
+    expect(d.proponente?.telefone).toBeUndefined();
+  });
+});
+
 describe("R3.4 — de quem é o telefone que não fecha (só o texto o trouxe)", () => {
   const base = (tail: string) => `proposta de compra: comprador TESTE Novo, valor R$ 600.000 à vista, imóvel Rua Augusta, 500, São Paulo/SP, ${tail}`;
   const semTel = (): DadosDaProposta => ({ proponente: { nome: "TESTE Novo" }, imovel, valor: 600000, pagamento: { forma: "à vista" } });
@@ -168,6 +212,14 @@ describe("R3.4 — de quem é o telefone que não fecha (só o texto o trouxe)",
     expect(p.evento).toBe("telefone_duvidoso");
     if (!p.fluxo || p.fluxo.kind !== "proposta") throw new Error("fluxo");
     expect(p.fluxo.aguardaCampo).toEqual({ pessoa: "vendedor", campo: "telefone" });
+  });
+
+  it("papel dito DEPOIS do número ou longe do rótulo não vira vendedor: mantém a atribuição do modelo (nenhuma)", async () => {
+    const pedido = "proposta de compra: imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000, vendedor Maria (proprietária), telefone 11, 9000-0002 do comprador";
+    const p = await iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps(semTel()));
+    expect(p.evento).toBe("telefone_duvidoso");
+    if (!p.fluxo || p.fluxo.kind !== "proposta") throw new Error("fluxo");
+    expect(p.fluxo.aguardaCampo?.pessoa).not.toBe("vendedor");
   });
 
   it("sem rótulo identificável: não assume o comprador (sem aguardaCampo)", async () => {
