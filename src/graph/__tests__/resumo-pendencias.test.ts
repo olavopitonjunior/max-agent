@@ -157,6 +157,20 @@ describe("renderizarResumoDePendencias", () => {
     expect(diasDeAtraso("dom, 15/11", tarde)).toBe(1);
   });
 
+  it("título de terceiro não injeta negrito nem inverte a linha (sem `*` e sem bidi)", () => {
+    // Título de negócio/atividade é dado de terceiro: `*` abriria negrito no WhatsApp e um
+    // RLO (U+202E) inverteria o resto da linha. Mesma regra do `limpo()` do despachante.
+    const r = resumoDaProducao();
+    r.formularios.itens = [form("*URGENTE* Apto‮etsil", 3)];
+    r.atividades.itens = [{ ...r.atividades.itens[0], title: "Ligar ‏pro **cliente**" }];
+    const t = renderizarResumoDePendencias(r, { agora });
+    expect(t).toContain("URGENTE Apto etsil");
+    expect(t).toContain("Ligar pro cliente");
+    expect(t).not.toMatch(/[‎‏‪-‮⁦-⁩]/);
+    expect(t).not.toContain("*URGENTE*");
+    expect(t).not.toContain("**cliente**");
+  });
+
   it("nada pendente diz isso, em segunda pessoa", () => {
     const t = renderizarResumoDePendencias(vazio, { agora });
     expect(t).toMatch(/Você não tem/);

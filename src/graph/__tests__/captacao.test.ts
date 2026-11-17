@@ -2262,3 +2262,60 @@ describe("revisão opus (26/10, rodada de correções)", () => {
     expect(ok.reply).toContain("Criei o rascunho");
   });
 });
+
+describe("pedido de envio com uma captação aberta em coleta (prod 17/11/2026)", () => {
+  // Em produção a CAP-2026-0008 estava parada em "proprietários" e "quero mandar o contrato da
+  // captação CAP-2026-0008 pra assinatura. o que falta?" caiu no "pergunta fora da ficha" (o "?"
+  // no fim): o modelo buscou um NEGÓCIO com esse nome e respondeu "Não encontrei negócio".
+  it("mesma captação: o sistema diz que ainda falta completar e segue a etapa, sem modelo", async () => {
+    extracao = IMOVEL_EXTRAIDO;
+    const fala = conversa();
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    llm.mockClear();
+    const r = await fala("quero mandar o contrato da captação CAP-2026-0001 pra assinatura. o que falta?");
+    expect(llm).not.toHaveBeenCalled();
+    expect(verbos("captacao.send")).toHaveLength(0);
+    expect(r.reply).toContain("CAP-2026-0001");
+    expect(r.reply).toContain("ainda não está pronta para assinatura");
+    expect(r.reply).toContain("mande o próximo proprietário, ou FIM");
+    expect(r.reply).not.toContain("Não encontrei negócio");
+  });
+
+  it("outra captação citada pelo código: abre o envio dela (rascunho achado pelo código), sem modelo", async () => {
+    extracao = IMOVEL_EXTRAIDO;
+    const fala = conversa();
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    captacoes.push({ id: "cap-9", codigo: "CAP-2026-0009", nome: "Casa do João", tipo: "venda", modeloId: "t1", version: 2, status: "rascunho",
+      dados: { imovel: { rua: "Rua X", numero: "1", matricula: "1" }, proprietarios: [{ id: "p9", nome: "João Souza", cpf: CPF_D }], condicoes: { valor: 1, comissao_percent: 6, prazo_dias: 90 } } });
+    llm.mockClear();
+    const r = await fala("manda a captação CAP-2026-0009 pra assinatura?");
+    expect(llm).not.toHaveBeenCalled();
+    expect(ultimo("captacao.list")!.args).toMatchObject({ busca: "CAP-2026-0009", situacao: "rascunho" });
+    expect(r.reply).toContain("Envio: João Souza");
+    expect(verbos("captacao.send")).toHaveLength(0);
+  });
+
+  it("outra captação antes de o rascunho existir: não troca de fluxo (perderia o que foi dito), pede terminar ou cancelar", async () => {
+    extracao = IMOVEL_EXTRAIDO;
+    const fala = conversa();
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    llm.mockClear();
+    const r = await fala("manda a captação CAP-2026-0009 pra assinatura?");
+    expect(llm).not.toHaveBeenCalled();
+    expect(verbos("captacao.list")).toHaveLength(0);
+    expect(r.reply).toContain("primeiro termine ou cancele");
+    expect(r.fluxo).toMatchObject({ kind: "captacao" });
+  });
+
+  it("no resumo final (etapa do envio) o pedido de envio NÃO vira 'ainda não está pronta'", async () => {
+    const fala = conversa();
+    const resumo = await ateOResumo(fala);
+    expect(resumo.reply).toContain("Pronta a captação");
+    const r = await fala("manda a captação pra assinatura");
+    expect(r.reply).not.toContain("ainda não está pronta");
+  });
+});

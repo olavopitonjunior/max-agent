@@ -1713,6 +1713,8 @@ function capacidadeDaEtapa(etapa: FluxoCaptacao["etapa"]): CapacidadeDoFluxo {
   return "captacao.create";
 }
 
+const ETAPAS_DE_COLETA = new Set(["natureza", "nome", "modelo", "imovel", "condicoes", "exclusividade", "proprietarios", "estado_civil", "extras"]);
+
 export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, podeEscrever: boolean): Promise<PassoDoFluxo> {
   const t = normalizar(ctx.texto);
   // `autorizacao_motivo` (achado de review 19/10, item 5): o texto inteiro É o motivo da
@@ -1725,6 +1727,25 @@ export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, d
   }
 
   const ETAPAS_DA_FILA = new Set(["autorizacao_fila", "autorizacao_motivo", "autorizacao_confirmar"]);
+  // Pedido de ENVIO no meio da coleta (prod 17/11/2026): sem isto, "quero mandar a captação
+  // CAP-X pra assinatura. o que falta?" virava "pergunta fora da ficha" (o "?") e o modelo
+  // buscava um negócio com esse nome. Da mesma captação: o sistema diz que falta completar e
+  // segue a etapa. De outra: abre o envio dela (o rascunho em coleta fica salvo na tela).
+  // Só nas etapas de COLETA: verificar/faltantes/canal/brancos/revisão/seleção/envio e a fila
+  // já são o caminho do envio, e ali "pronta?" é decidido pela própria etapa (review do gate).
+  if (ETAPAS_DE_COLETA.has(f.etapa) && pedeCaptacao(ctx.texto) === "enviar") {
+    const codigo = /\bCAP-\d{4}-\d+\b/i.exec(ctx.texto)?.[0]?.toUpperCase();
+    const gg = g(f, ctx);
+    if (!codigo || (f.codigo && codigo === f.codigo.toUpperCase())) {
+      const qual = f.codigo ? `A captação ${f.codigo}` : "Esta captação";
+      return resposta(gg, `${qual} ainda não está pronta para assinatura: falta completar o cadastro.\n\n${continuacaoCaptacao(gg)}`, "captacao_envio_no_fluxo");
+    }
+    // Sem rascunho criado, trocar de fluxo apagaria o que foi dito até aqui: pede para decidir.
+    if (!f.captacaoId) {
+      return resposta(gg, `Para enviar a ${codigo}, primeiro termine ou cancele a captação que estamos montando (diga CANCELAR).\n\n${continuacaoCaptacao(gg)}`, "captacao_envio_outra_sem_rascunho");
+    }
+    return iniciarEnvioDeCaptacao(ctx, deps, podeEscrever);
+  }
   const capNecessaria = capacidadeDaEtapa(f.etapa);
   // Achado 21: quem só tem `captacao.send` consegue terminar o ENVIO de um rascunho
   // já existente; completar dado que falta exige `captacao.create` — e, faltando

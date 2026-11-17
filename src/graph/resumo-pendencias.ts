@@ -75,7 +75,10 @@ interface Aviso { titulo: string }
 interface Avisos { disponivel: boolean; total: number; totalExato: boolean; itens: Aviso[] }
 
 const obj = (v: unknown): Record<string, unknown> | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
-const str = (v: unknown): string => (typeof v === "string" ? v.replace(/[\r\n]+/g, " ").trim() : "");
+// Dado de terceiro numa linha de WhatsApp: sem controle/bidi/quebra (mesma classe do `texto()` de
+// notificacao-projecao) e sem `*`, que abriria negrito no meio do título — como o `limpo()` do despachante.
+const str = (v: unknown): string =>
+  typeof v === "string" ? v.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ").replace(/\*+/g, "").replace(/\s+/g, " ").trim() : "";
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
 const lista = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
