@@ -2417,3 +2417,72 @@ describe("coleta (17/11, prod): nome, dado perdido e resposta com vários campos
     expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { cep: "01310-100" } });
   });
 });
+
+describe("abertura (17/11, prod): valor, proprietária e nome vindos da 1ª mensagem", () => {
+  const ABERTURA =
+    "Max, bom dia! Quero cadastrar uma captação nova. A proprietária é a TESTE Proprietária Longa, ela é viúva, telefone 11 90000-0004 e e-mail teste.longa@example.com. " +
+    "O imóvel é uma casa na Rua Oscar Freire, 1500, Pinheiros, São Paulo/SP, CEP 05409-010. Ela quer vender por R$ 1.350.000, combinamos comissão de 5% e exclusividade de 120 dias. " +
+    "Ela ainda vai me passar o CPF depois.";
+  const IMOVEL_OSCAR = { rua: "Rua Oscar Freire", numero: "1500", bairro: "Pinheiros", cidade: "São Paulo", uf: "SP" };
+  const donoDaAbertura = () =>
+    verbos("captacao.create").map((c) => (c.args.dados as { proprietarios?: Record<string, unknown>[] } | undefined)?.proprietarios?.[0]).find(Boolean);
+
+  it("B6: 'vender por R$ 1.350.000' (sem a palavra valor) é lido como valor da venda", () => {
+    expect(cap.lerCondicoes("ela quer vender por R$ 1.350.000, comissão de 5%", "venda").condicoes).toEqual({ valor: 1350000, comissao_percent: 5 });
+    expect(cap.lerCondicoes("casa na Rua X, 1500, CEP 05409-010, vender por R$ 1.350.000, comissão 5%, 120 dias", "venda").condicoes.valor).toBe(1350000);
+  });
+
+  it("B6: um R$ que pertence a outro rótulo (condomínio) não vira o valor principal", () => {
+    expect(cap.lerCondicoes("condomínio R$ 500", "locacao").locacao).toEqual({ condominio: 500 });
+  });
+
+  it("B6: o valor da abertura é gravado no rascunho, junto de comissão, prazo e exclusividade", async () => {
+    extracao = IMOVEL_OSCAR;
+    await conversa()(ABERTURA);
+    const criacao = verbos("captacao.create")[0]!;
+    expect((criacao.args.dados as { condicoes: unknown }).condicoes).toEqual({ valor: 1350000, comissao_percent: 5, prazo_dias: 120, exclusiva: true });
+  });
+
+  it("B7: a proprietária da abertura entra como proprietário parcial (falta só o CPF) e o estado civil não é perguntado de novo", async () => {
+    extracao = IMOVEL_OSCAR;
+    const r = await conversa()(ABERTURA);
+    expect(donoDaAbertura()).toMatchObject({
+      id: "p1", nome: "TESTE Proprietária Longa", email: "teste.longa@example.com", telefone1: "+5511900000004", estado_civil: "viuva",
+    });
+    expect(donoDaAbertura()!.cpf).toBeUndefined();
+    expect(r.reply).toContain("Anotei TESTE Proprietária Longa");
+    expect(r.reply).not.toContain("Qual o estado civil");
+    expect(r.reply).toContain("próximo proprietário");
+    // a escrita do dono tem chave própria: não colide com a do create (senão o servidor trata como repetição)
+    const chaves = verbos("captacao.create").map((c) => c.key);
+    expect(new Set(chaves).size).toBe(chaves.length);
+    expect(((r.fluxo as { proprietarios?: { id: string; nome: string }[] }).proprietarios ?? []).map((p) => p.nome)).toEqual(["TESTE Proprietária Longa"]);
+  });
+
+  it("B7: telefone e e-mail da abertura não ficam no checkpoint (só id e nome)", async () => {
+    extracao = IMOVEL_OSCAR;
+    const s = await conversa()(ABERTURA);
+    const estado = JSON.stringify(Object.entries(s).filter(([k]) => k !== "inbound"));
+    expect(estado).not.toContain("teste.longa@example.com");
+    expect(estado).not.toContain("90000-0004");
+    expect(estado).not.toContain("900000004");
+  });
+
+  it("B8: sem nome dado, a captação leva o nome da proprietária e o endereço, em vez de perguntar", async () => {
+    extracao = IMOVEL_OSCAR;
+    const r = await conversa()(ABERTURA);
+    expect(r.reply).not.toContain("Que nome dou");
+    expect(verbos("captacao.create")[0]!.args.nome).toBe("TESTE Proprietária Longa — Rua Oscar Freire, 1500");
+  });
+
+  it("B8: sem proprietária nem endereço no pedido, continua perguntando o nome", async () => {
+    const r = await conversa()("quero uma captação de venda");
+    expect(r.reply).toContain("Que nome dou");
+  });
+
+  it("B8: nome dito no pedido ('captação do Apto da Dona Maria') tem prioridade sobre o derivado", async () => {
+    extracao = IMOVEL_OSCAR;
+    await conversa()("cria uma captação de venda do Apto da Dona Maria. A proprietária é a Maria Souza Lima, tel 11 90000-0004. Rua Oscar Freire, 1500, Pinheiros, São Paulo/SP, comissão 5%");
+    expect(verbos("captacao.create")[0]!.args.nome).toBe("Apto da Dona Maria");
+  });
+});

@@ -1081,6 +1081,12 @@ export function lerCondicoes(texto: string, tipo: TipoDeCaptacao): CondicoesLida
       if (todos.length === 1) setMoeda("valor", todos[0]);
     }
   }
+  // "Ela quer vender por R$ 1.350.000" (prod 17/11): sem a palavra "valor" e no meio de CEP, número e telefone, o solto
+  // não é único. Um único "R$" no texto, sem nenhum rótulo de dinheiro (condomínio, IPTU…) para reivindicá-lo, é o valor.
+  if ((tipo === "venda" ? condicoes.valor : locacao.aluguel) === undefined && !usadas.size) {
+    const emReais = [...t.matchAll(/r\$\s*(\d[\d.,]*(?:\s*(?:mil|milhao|milhoes|k)\b)?)/g)];
+    if (emReais.length === 1) setMoeda("valor", valoresNoTexto(emReais[0]![1]!)[0]);
+  }
   // Sem rótulo: "180 dias" é o prazo; um único "%" solto é a comissão.
   if (condicoes.prazo_dias === undefined) {
     const d = prazoEmDias(t);
@@ -1480,8 +1486,51 @@ async function depoisDaNatureza(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: De
   return seguirParaNomeOuImovel(g(f, ctx, { modeloId: modelos[0]!.id, modelos: undefined, ...exclusivaDoModelo(modelos[0]) }), ctx, deps, `${prefixo}${aviso}`);
 }
 
+// ─── Proprietária e nome vindos da mensagem de abertura (17/11, prod) ────
+
+export interface DonoDaAbertura { nome: string; cpf?: string; email?: string; telefone?: string; estadoCivil?: string }
+
+const DONO_NA_ABERTURA = /\bpropriet[aá]ri[oa]\s*(?:é|eh|:|-|–|se chama)\s*(?:(?:o|a)\s+)?([^,;.\n]{3,80})/iu;
+const FIM_DO_NOME_NA_FRASE = /\s+(?:que|ela|ele|e\s+(?:ela|ele)|mora|tem|quer|est[aá]|vai|pretende)\b.*$/i;
+const RUA_NA_ABERTURA = /\b(?:rua|avenida|av\.?|alameda|travessa|rodovia|estrada|pra[cç]a)\s+[^,\n]+?,\s*\d+[a-z]?\b/iu;
+
+/**
+ * "A proprietária é a Maria Silva, ela é viúva, telefone …, e-mail …": o dono que a pessoa já deu na 1ª
+ * mensagem. Só com o rótulo "proprietário é/:" e nome de verdade; contato e documento só valem quando
+ * aparece UM de cada (com dois, não dá para saber de quem é — fica para o fluxo perguntar).
+ */
+export function lerDonoDaAbertura(texto: string): DonoDaAbertura | null {
+  const m = DONO_NA_ABERTURA.exec(texto);
+  if (!m) return null;
+  const nome = m[1]!.replace(FIM_DO_NOME_NA_FRASE, "").trim();
+  if (!nomeValido(nome) || !noTexto(nome, texto)) return null;
+  const n = lerNumeros(texto);
+  const emails = lerEmails(texto);
+  const civil = ESTADO_CIVIL.exec(normalizar(texto.slice(m.index, m.index + 300)))?.[1];
+  return {
+    nome,
+    ...(n.cpfs.length === 1 && !n.cnpjs.length ? { cpf: n.cpfs[0]! } : {}),
+    ...(n.telefones.length === 1 ? { telefone: n.telefones[0]! } : {}),
+    ...(emails.length === 1 ? { email: emails[0]! } : {}),
+    ...(civil ? { estadoCivil: civil } : {}),
+  };
+}
+
+/** Sem nome dito, a captação se chama "Proprietária — Rua X, 123" (o que a mensagem trouxe); nada a derivar → null (pergunta). */
+export function nomeDaAberturaDerivado(texto: string | undefined): string | null {
+  if (!texto) return null;
+  const dono = lerDonoDaAbertura(texto)?.nome;
+  const rua = RUA_NA_ABERTURA.exec(texto)?.[0]?.replace(/\s+/g, " ").trim();
+  const nome = [dono, rua].filter(Boolean).join(" — ").slice(0, 120);
+  return nome || null;
+}
+
 async function seguirParaNomeOuImovel(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, prefixo: string): Promise<Resposta> {
-  if (!f.nome) return resposta(g(f, ctx, { etapa: "nome" }), `${prefixo}${TEXTO_NOME}`, "captacao_nome");
+  if (!f.nome) {
+    const derivado = nomeDaAberturaDerivado(f.pedidoOriginal);
+    if (!derivado) return resposta(g(f, ctx, { etapa: "nome" }), `${prefixo}${TEXTO_NOME}`, "captacao_nome");
+    return aproveitarPedidoOriginal(g(f, ctx, { nome: derivado }), ctx, deps, prefixo);
+  }
   return aproveitarPedidoOriginal(f, ctx, deps, prefixo);
 }
 
@@ -1515,7 +1564,9 @@ async function aproveitarPedidoOriginal(fOriginal: FluxoCaptacao, ctx: ContextoD
   if (imovel && temCondicoesEm(dados)) {
     const eco = `Já anotei do seu pedido: imóvel ${ecoDoImovel(imovel)}; ${ecoDasCondicoes(lidas)}.\n`;
     // Confirmação única (26/10): com imóvel e condições, cria direto — o único "sim" do fluxo é o do resumo final.
-    return criar(g(f, ctx, { criacao: { chave: "", dados } }), ctx, deps, dados, `${prefixo}${eco}`);
+    // O dono só é lido do texto desta mesma mensagem: contato e documento nunca ficam no estado (achado 1).
+    const dono = pedido && redigir(ctx.texto, ["CPF", "CNPJ", "EMAIL", "TEL"]) === pedido ? lerDonoDaAbertura(ctx.texto) : null;
+    return criar(g(f, ctx, { criacao: { chave: "", dados } }), ctx, deps, dados, `${prefixo}${eco}`, dono ?? undefined);
   }
   if (imovel) {
     const eco = `Já anotei o imóvel do seu pedido: ${ecoDoImovel(imovel)}.\n`;
@@ -1938,7 +1989,36 @@ function exclusivaDoServidor(body: Record<string, unknown>): boolean | undefined
 const comOuSem = (b: boolean) => (b ? "com" : "sem");
 
 /** `captacao.create` (rascunho novo). A chave é a `messageId` desta mensagem e fica guardada até a resposta. */
-async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, dados: DadosDeCaptacao, prefixo: string): Promise<Resposta> {
+/**
+ * A proprietária dita na abertura é gravada logo depois do rascunho nascer (mesma `captacao.create` com
+ * `captacaoId`+`version` que o fluxo já usa por proprietário, chave própria `:dono`). Falhou → o fluxo
+ * pergunta pelos proprietários como sempre; nada se perde além do que já se perderia.
+ */
+async function gravarDonoDaAbertura(
+  f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, d: DonoDaAbertura,
+): Promise<{ f: FluxoCaptacao; anotei: string; seguinte: string } | null> {
+  const id = "p1";
+  const item: Record<string, unknown> = {
+    id, papel: "proprietario", tipo_pessoa: "fisica", nome: d.nome,
+    ...(d.cpf ? { cpf: d.cpf } : {}), ...(d.email ? { email: d.email } : {}),
+    ...(d.telefone ? { telefone1: normalizeBrPhone(d.telefone) ?? d.telefone } : {}),
+    ...(d.estadoCivil ? { estado_civil: d.estadoCivil } : {}), ...(f.canalDito ? { canal: f.canalDito } : {}),
+  };
+  const r = await complementar(f, ctx, deps, { proprietarios: [item] }, `${ctx.messageId}:dono`);
+  if (!r.ok) return null;
+  const guardou = [d.cpf ? "CPF" : "", d.telefone ? "telefone" : "", d.email ? "e-mail" : "", d.estadoCivil ? "estado civil" : ""].filter(Boolean);
+  const anotei = `${r.prefixo}Anotei ${d.nome}${guardou.length ? ` (${guardou.join(", ")})` : ""}.`;
+  const novo = g(r.f, ctx, {
+    proprietarios: [{ id, nome: d.nome }], tentativas: 0,
+    ...(f.canalDito ? { canalDito: f.canalDito, canalAplicado: f.canalDito } : {}),
+  });
+  if (!d.estadoCivil) {
+    return { f: g(novo, ctx, { etapa: "estado_civil", estadoCivilDe: id }), anotei, seguinte: perguntaDoEstadoCivil(d.nome) };
+  }
+  return { f: g(novo, ctx, { etapa: "proprietarios" }), anotei, seguinte: TEXTO_PROXIMO_PROPRIETARIO };
+}
+
+async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, dados: DadosDeCaptacao, prefixo: string, donoInicial?: DonoDaAbertura): Promise<Resposta> {
   const chave = f.criacao?.chave || ctx.messageId;
   const guardado: FluxoCaptacao = g(f, ctx, { etapa: "condicoes", criacao: { chave, dados } });
   const args: Record<string, unknown> = {
@@ -1958,18 +2038,20 @@ async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, 
       versaoGravada: typeof c.version === "number" ? c.version : 0,
       criacao: undefined, proprietarios: [], tentativas: 0, ...comResumo(f, dados),
     });
-    const texto = `${prefixo}Criei o rascunho${lembrete(criado)} ("${f.nome}", ${nomeDaEsteira(f)}).`;
+    const dono = donoInicial ? await gravarDonoDaAbertura(criado, ctx, deps, donoInicial) : null;
+    const aberto = dono?.f ?? criado;
+    const texto = `${prefixo}Criei o rascunho${lembrete(criado)} ("${f.nome}", ${nomeDaEsteira(f)}).${dono ? ` ${dono.anotei}` : ""}`;
     // Item 6: o modelo diz uma exclusividade e a pessoa disse outra — avisa UMA vez e pergunta qual vale.
     const doModelo = exclusivaDoServidor(r.body) ?? f.modeloExclusiva;
     const disse = dados.condicoes?.exclusiva;
     if (typeof doModelo === "boolean" && typeof disse === "boolean" && doModelo !== disse && !f.exclusividadeAvisada) {
       return resposta(
-        g(criado, ctx, { etapa: "exclusividade", modeloExclusiva: doModelo, exclusividadeAvisada: true }),
+        g(aberto, ctx, { etapa: "exclusividade", modeloExclusiva: doModelo, exclusividadeAvisada: true }),
         `${texto}\nAtenção: o modelo escolhido é ${comOuSem(doModelo)} exclusividade, mas você disse ${comOuSem(disse)}. Qual vale? Responda *COM* ou *SEM* exclusividade.`,
         "captacao_exclusividade_conflito"
       );
     }
-    return resposta(criado, `${texto} ${TEXTO_PROPRIETARIOS}`, "captacao_criada");
+    return resposta(aberto, `${texto} ${dono?.seguinte ?? TEXTO_PROPRIETARIOS}`, "captacao_criada");
   }
   const erro = str(r.body.error);
   if (r.status === 409 && erro === "escolher_modelo") {
