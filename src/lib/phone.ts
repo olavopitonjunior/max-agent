@@ -154,3 +154,49 @@ export function phoneTag(raw: string): string {
  * a função existir.
  */
 const SEM_SEGREDO = "sem-segredo-fora-de-producao";
+
+// ─── Telefone digitado ou ditado em áudio ────────────────────────────────────
+
+/**
+ * Sequência telefônica como a pessoa escreve ou a transcrição entrega:
+ * "(11) 90000-0002", "11, 90000-0002", "11 9 0000 0002", "+55 11 90000-0002".
+ * Vírgula só vale entre o DDD e o número (nunca no meio dele).
+ */
+export const TELEFONE_DITADO =
+  /(?<!\d)(?:\+?55[\s,.-]*)?\(?\d{2}\)?[\s,.-]{0,3}(?:9[\s.-]?)?\d{4}[\s.-]?\d{4}(?!\d)/g;
+
+/**
+ * Junta os dígitos de uma sequência telefônica: DDD + 8 ou 9 dígitos (o 55 sai).
+ * `null` quando o total não fecha. Dez dígitos com 9 logo depois do DDD é celular
+ * com um dígito perdido (a transcrição de áudio come zeros): não vale como número.
+ */
+export function juntarTelefone(raw: string): string | null {
+  let d = onlyDigits(raw);
+  if ((d.length === 12 || d.length === 13) && d.startsWith("55")) d = d.slice(2);
+  if (d.length === 10 && d[2] === "9") return null;
+  return d.length === 10 || d.length === 11 ? d : null;
+}
+
+const ROTULO_DE_TELEFONE = /\b(?:telefone|celular|whats\w*|zap|fone|tel|cel)\b[^\d\n]{0,30}?(?=\+?\(?\d)/gi;
+const COMECA_COM_TELEFONE = new RegExp(`^${TELEFONE_DITADO.source}`);
+const SEQUENCIA_APOS_ROTULO = /^\+?\(?\d{2}\)?[\s,.-]{0,3}\d{1,5}(?:[\s.-]\d{1,5}){0,3}/;
+
+/**
+ * Telefone que a pessoa disse mas que não fecha (DDD + 8/9 dígitos): devolve o
+ * trecho lido para perguntar de novo, em vez de gravar um número errado. Só olha
+ * sequência rotulada ("telefone…", "celular…") ou formatada como telefone.
+ */
+export function telefoneDuvidoso(texto: string): string | null {
+  for (const m of texto.matchAll(new RegExp(TELEFONE_DITADO.source, "g"))) {
+    if (/^\d+$/.test(m[0])) continue;
+    if (!juntarTelefone(m[0])) return m[0].trim();
+  }
+  for (const r of texto.matchAll(ROTULO_DE_TELEFONE)) {
+    const resto = texto.slice((r.index ?? 0) + r[0].length);
+    const ok = COMECA_COM_TELEFONE.exec(resto);
+    if (ok && juntarTelefone(ok[0])) continue;
+    const seq = SEQUENCIA_APOS_ROTULO.exec(resto)?.[0];
+    if (seq && onlyDigits(seq).length >= 6) return seq.trim();
+  }
+  return null;
+}

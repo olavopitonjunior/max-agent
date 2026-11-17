@@ -622,7 +622,7 @@ describe("fluxo feliz: da conversa ao envio", () => {
     expect(gravado.key).toBe(resumo.messageId);
     expect(verbos("captacao.preflight")).toHaveLength(2);
     expect(resumo.reply).toContain("Pronta a captação CAP-2026-0001 — Apto da Dona Maria.");
-    expect(resumo.reply).toContain("Imóvel: Rua Augusta, 1250, Bela Vista, São Paulo/SP.");
+    expect(resumo.reply).toContain("Imóvel: Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP.");
     expect(resumo.reply).toContain("Condições:");
     expect(resumo.reply).toContain("Proprietário: Maria Silva.");
     expect(resumo.reply).toContain("Envio: Maria Silva por e-mail.");
@@ -1784,7 +1784,7 @@ describe("confirmação única (26/10): faltantes gravados no turno em que chega
     expect(r.reply).not.toContain("do imóvel do imóvel");
     const fim = await fala("casa");
     expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { kind: "casa" } });
-    expect(fim.reply).toContain("Imóvel: Rua Augusta, 1250, Bela Vista, São Paulo/SP (casa, CEP 01310-100).");
+    expect(fim.reply).toContain("Imóvel: Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP (casa, CEP 01310-100).");
   });
 
   it("'01310-100, Casa' preenche CEP e tipo numa resposta só (uma escrita)", async () => {
@@ -1860,7 +1860,7 @@ describe("confirmação única (26/10): o resumo final e o único 'sim'", () => 
     await fala(`testemunha Carlos Pereira, ${EMAIL.replace("maria", "carlos")}`);
     await fala("não");
     const resumo = await fala("01310-100, casa");
-    expect(resumo.reply).toContain("Imóvel: Rua Augusta, 1250, Bela Vista, São Paulo/SP (casa, CEP 01310-100).");
+    expect(resumo.reply).toContain("Imóvel: Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP (casa, CEP 01310-100).");
     expect(resumo.reply).toContain("Condições:");
     expect(resumo.reply).toContain("Proprietário: Maria Silva.");
     expect(resumo.reply).toContain("Testemunha: Carlos Pereira.");

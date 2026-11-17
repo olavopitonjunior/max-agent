@@ -47,6 +47,7 @@ import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-con
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
+import { juntarTelefone, TELEFONE_DITADO, telefoneDuvidoso } from "@/lib/phone";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -351,9 +352,38 @@ function imovelParaPayload(im: DadosDaProposta["imovel"]): DadosDaProposta["imov
   return { ...base, endereco: base.endereco && complemento ? `${base.endereco}, ${complemento}` : base.endereco };
 }
 
+const ESTADOS_POR_UF: Record<string, string> = {
+  AC: "acre", AL: "alagoas", AP: "amapa", AM: "amazonas", BA: "bahia", CE: "ceara", DF: "distrito federal", ES: "espirito santo",
+  GO: "goias", MA: "maranhao", MT: "mato grosso", MS: "mato grosso do sul", MG: "minas gerais", PA: "para", PB: "paraiba",
+  PR: "parana", PE: "pernambuco", PI: "piaui", RJ: "rio de janeiro", RN: "rio grande do norte", RS: "rio grande do sul",
+  RO: "rondonia", RR: "roraima", SC: "santa catarina", SP: "sao paulo", SE: "sergipe", TO: "tocantins",
+};
+
+/**
+ * Endereço do card: "rua, número, complemento, bairro, Cidade/UF". A cidade (e o estado por
+ * extenso, ou a sigla) já escritos no texto livre não se repetem (prod 17/11: "São Paulo, São Paulo, SP").
+ */
 function enderecoNoResumo(im?: DadosDaProposta["imovel"]): string {
   const base = im ? imovelSemNumeroDuplicado(im) : {};
-  return [base.endereco, base.numero, base.complemento, base.bairro, base.cidade, base.uf].filter(Boolean).join(", ");
+  const cidade = base.cidade?.trim();
+  const uf = base.uf?.trim();
+  const repetidos = new Set(
+    [cidade, uf, uf ? ESTADOS_POR_UF[uf.toUpperCase()] : undefined].filter((x): x is string => !!x).map((x) => normalizar(x)),
+  );
+  const segmentos = [base.endereco, base.numero, base.complemento, base.bairro]
+    .flatMap((parte) => (parte ?? "").split(","))
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((x) => !repetidos.has(normalizar(x)))
+    .filter((x, i, todos) => i === 0 || normalizar(x) !== normalizar(todos[i - 1]));
+  const local = cidade && uf ? `${cidade}/${uf}` : cidade || uf;
+  return [...segmentos, local].filter(Boolean).join(", ");
+}
+
+/** "financiado, restante" → "restante financiado": a forma lida como frase, não como lista de rótulos. */
+function formaLegivel(forma: string): string {
+  const m = /^(.+?),?\s+(?:o\s+)?restante$/i.exec(forma.trim());
+  return m ? `restante ${m[1].replace(/,\s*$/, "")}` : forma.trim();
 }
 
 /** O corpo do resumo — montado do estado, nunca pelo modelo. */
@@ -375,9 +405,9 @@ function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProp
   if (d.vendedor?.nome) linhas.push(`Vendedor: ${linhaPessoa(d.vendedor)}`);
   if (d.pagamento?.sinal || d.pagamento?.forma) {
     linhas.push(
-      `Pagamento: ${[d.pagamento.sinal ? `sinal ${real(d.pagamento.sinal)}` : "", d.pagamento.forma ?? ""]
+      `Pagamento: ${[d.pagamento.sinal ? `sinal ${real(d.pagamento.sinal)}` : "", d.pagamento.forma ? formaLegivel(d.pagamento.forma) : ""]
         .filter(Boolean)
-        .join(", ")}`
+        .join("; ")}`
     );
   }
   if (d.comissao?.percentual || d.comissao?.valor) {
@@ -411,7 +441,7 @@ function linhasDoAjuste(d: DadosDaProposta): string[] {
   if (d.valor) linhas.push(`Valor: ${real(d.valor)}`);
   if (d.vendedor && Object.values(d.vendedor).some(Boolean)) linhas.push(`Vendedor/proprietário: ${linhaPessoa(d.vendedor)}`);
   if (d.pagamento?.sinal) linhas.push(`Sinal: ${real(d.pagamento.sinal)}`);
-  if (d.pagamento?.forma) linhas.push(`Forma de pagamento: ${d.pagamento.forma}`);
+  if (d.pagamento?.forma) linhas.push(`Forma de pagamento: ${formaLegivel(d.pagamento.forma)}`);
   if (d.comissao?.percentual) linhas.push(`Comissão: ${d.comissao.percentual}%`);
   else if (d.comissao?.valor) linhas.push(`Comissão: ${real(d.comissao.valor)}`);
   if (d.canal) linhas.push(`Assinatura chega por: ${d.canal === "email" ? "e-mail" : "WhatsApp"}`);
@@ -493,7 +523,10 @@ function conferirCampo(
 export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaProposta {
   // `(?<!\d)`: sem fronteira à esquerda o regex casava DENTRO do CPF ("52998224725"
   // → telefone "2998224725"; smoke 26/10).
-  const telefones = (texto.match(/(?<!\d)(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}(?!\d)/g) ?? []).map((t) => t.trim());
+  // Sequência ditada em áudio ("11, 90000-0002", "11 9 0000 0002") entra como os dígitos juntos; a escrita normal fica como veio.
+  const telefones = (texto.match(new RegExp(TELEFONE_DITADO.source, "g")) ?? [])
+    .map((t) => t.trim())
+    .map((t) => (/,|(?:^|\D)9\s+\d{4}/.test(t) ? juntarTelefone(t) ?? t : t));
   // Onze dígitos sem máscara também cabem no regex de CPF. O rótulo escrito
   // pela pessoa resolve a ambiguidade; o extrator sozinho não pode resolvê-la.
   const telefonesRotulados = new Set([...texto.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)(?:\s+(?:do|da)\s+(?:comprador|compradora|cliente|proponente|vendedor|vendedora|inquilino|inquilina|locatário|locatária))?\s*(?::|=|é|para)?\s*((?<!\d)(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4})(?!\d)/giu)].map(m=>semDdi(so(m[1]))));
@@ -550,11 +583,30 @@ function pedirValorDoCampo(a: NonNullable<FluxoProposta["aguardaCampo"]>): strin
   const de = a.pessoa === "vendedor" ? "do vendedor ou proprietário" : "do comprador";
   return `Me mande o ${NOME_DO_CAMPO[a.campo]} ${de} correto, que eu ajusto o rascunho.`;
 }
+/**
+ * "o nome é X", "nome do comprador é X", "corrige o nome para X": a correção de nome do
+ * comprador, na palavra da pessoa. O extrator deixava passar quando vinha junto de outra
+ * correção (prod 17/11) e o nome pedido sumia em silêncio. Nome de vendedor/proprietário fica fora.
+ */
+function nomeCorrigido(texto: string): string | undefined {
+  const m = /(?:^|[\s,;.])(?:o\s+)?nome(\s+(?:do|da)\s+[\p{L}]+)?(?:\s+(?:correto|certo))?(?:\s*[:=]|\s+(?:é|e|para|pra)(?![\p{L}\d]))\s+(.+)$/iu.exec(texto.trim());
+  if (!m) return undefined;
+  if (m[1] && !/\b(?:comprador\w*|proponente|inquilin\w*|locatari\w*)\b/i.test(normalizar(m[1]))) return undefined;
+  const nome = m[2]
+    .split(/\s+(?:com\s+mai[uú]scul\w*|e\s+(?:é|e|o|a|os|as|ele|ela|vai|ser[aá]|tem|quero)\b|mas\b|tamb[eé]m\b)|[,;.\n]/iu)[0]
+    .replace(/[*_~`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const palavras = nome.split(" ").filter(Boolean);
+  if (palavras.length === 0 || palavras.length > 7 || /\d|@/.test(nome)) return undefined;
+  return nome;
+}
+
 /** A mensagem é SÓ o valor esperado (telefone, CPF ou e-mail)? Devolve como foi escrito. */
 function valorAvulso(texto: string, campo: "telefone" | "cpf" | "email"): string | null {
   const t = texto.trim();
   const re = {
-    telefone: /^(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}$/,
+    telefone: new RegExp(`^${TELEFONE_DITADO.source}$`),
     cpf: /^\d{3}\.?\d{3}\.?\d{3}-?\d{2}$/,
     email: /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i,
   }[campo];
@@ -1758,6 +1810,17 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // Coleta, correção no resumo, ou ajuste depois do rascunho: extrai e mescla.
   // Campo pendente + só o valor na mensagem: vale o que foi escrito, sem depender do extrator.
   const avulso = f.aguardaCampo ? valorAvulso(ctx.texto, f.aguardaCampo.campo) : null;
+  // Telefone ditado que não fecha DDD + 8/9 dígitos (a transcrição de áudio come dígitos): pergunta, não grava.
+  const duvidaDeTelefone = avulso ? null : telefoneDuvidoso(ctx.texto);
+  if (duvidaDeTelefone) {
+    return {
+      reply:
+        `Não consegui ler o telefone com segurança (entendi "${duvidaDeTelefone}"), então não anotei esta mensagem. ` +
+        "Me mande de novo, com o telefone completo (DDD + número), por exemplo (11) 90000-0000.",
+      fluxo: { ...f, atualizadoEm: agora },
+      evento: "telefone_duvidoso",
+    };
+  }
   const extraido = f.aguardaCampo && avulso
     ? ({ [f.aguardaCampo.pessoa]: { [f.aguardaCampo.campo]: avulso } } as DadosDaProposta)
     : await deps.extrairProposta(ctx.texto, f.natureza ?? "venda");
@@ -1772,7 +1835,16 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // devolvia "WhatsApp" para "remove o fiador da proposta da X" (eval 09/10),
   // e o PATCH trocaria o canal sem ninguém pedir.
   if (parcial && novos.canal && !/\b(whats\w*|zap|e-?mail|canal|sms)\b/.test(normalizar(ctx.texto))) delete novos.canal;
-  const dados = mesclarDados(f.dados, novos);
+  // Correção de nome dita com todas as letras vale mesmo que o extrator só devolva a outra correção da
+  // mensagem. Entra DEPOIS da mescla: é a mesma pessoa corrigida, não "outra pessoa" (que perderia telefone/CPF).
+  const nomePedido = avulso ? undefined : nomeCorrigido(ctx.texto);
+  if (nomePedido && novos.proponente) {
+    const { nome: _nome, ...semNome } = novos.proponente;
+    if (Object.keys(semNome).length) novos.proponente = semNome;
+    else delete novos.proponente;
+  }
+  let dados = mesclarDados(f.dados, novos);
+  if (nomePedido) dados = { ...dados, proponente: { ...(dados.proponente ?? {}), nome: nomePedido } };
   if (novos.imovel?.complemento && !dados.imovel?.endereco) {
     return {
       reply: "Me informe o endereço completo do imóvel, incluindo o novo complemento, para eu atualizar sem perder a rua e o número.",
@@ -2261,7 +2333,7 @@ export const TOOL_EXTRAIR_PROPOSTA = {
         type: "object",
         properties: {
           sinal: VALOR_DA_PROPOSTA_SCHEMA,
-          forma: { type: "string", description: "Ex.: 'R$ 200 mil financiado, restante à vista'." },
+          forma: { type: "string", description: "Como o pagamento será feito, em frase curta (o sinal vai em sinal). Ex.: 'R$ 200 mil financiado, restante à vista'; 'restante financiado'." },
         },
         additionalProperties: false,
       },
