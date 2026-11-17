@@ -37,7 +37,7 @@
 
 import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { Capability } from "./policy";
-import { lerConfirmacao, normalizar } from "./tools";
+import { corrigirProposta, lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
 import { conduzirAssinatura, type FluxoAssinatura } from "./assinatura";
@@ -799,7 +799,7 @@ export function querCancelar(texto: string): boolean {
 
 /** 1/proposta/assinar → proposta; 2/negócio/formulário/contrato → negócio. */
 export function lerEscolha(texto: string): "proposta" | "negocio" | null {
-  const t = normalizar(texto);
+  const t = corrigirProposta(normalizar(texto));
   const proposta = /^1$|\bproposta\b|\brapida\b|\bassina/.test(t);
   const negocio = /^2$|\bnegocio\b|\bformulario\b|\bcontrato\b|\bficha\b/.test(t);
   if (proposta === negocio) return null;
@@ -955,7 +955,7 @@ const NEGACAO = /\bnao\s+(re)?(envi|mand|dispar|encaminh)/;
  */
 export function pedeEnvio(texto: string): boolean {
   if (texto.includes("?")) return false;
-  const t = normalizar(texto);
+  const t = corrigirProposta(normalizar(texto));
   if (NEGACAO.test(t) || PERGUNTA_DE_PROCESSO.test(t) || E_CRIACAO.test(t)) return false;
   if (PEDE_ENVIO.test(t) || SO_ENVIO.test(t)) return true;
   return !RELATO.test(t) && PEDE_ENVIO_DA_PROPOSTA.test(t);
@@ -1173,7 +1173,7 @@ function tituloDeclarado(texto: string | undefined): string | undefined {
  * comprador/proponente/inquilino, valor ou sinal. "Formulário"/"ficha" explícito NUNCA vai direto (é a escolha).
  */
 export function pedidoClaroDeProposta(pedido: string): boolean {
-  const t = normalizar(pedido);
+  const t = corrigirProposta(normalizar(pedido));
   if (/\b(formulario|ficha)\b/.test(t) || !/\bproposta\b/.test(t)) return false;
   return (
     /\bproposta\s+(?:rapida\s+)?(?:de|do|da|para)\s+(?:compra|venda|locacao|aluguel)\b/.test(t) ||

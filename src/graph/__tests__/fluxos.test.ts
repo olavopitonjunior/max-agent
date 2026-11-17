@@ -966,3 +966,40 @@ describe("sem modelo de proposta ativo (prod 07/10: FINCasa com modelos arquivad
     expect(p.fluxo).toBeNull();
   });
 });
+
+describe("erro de digitação em 'proposta' (B9, 17/11)", () => {
+  const ERROS = ["propsta", "porposta", "propota", "prposta", "proposa", "propostta"];
+
+  it.each(ERROS)("'max preciso de uma %s' é pedido de criação (fluxo determinístico, sem leitura ao lado)", async (e) => {
+    const { ehPedidoDeCriacao } = await import("../tools");
+    expect(ehPedidoDeCriacao(`max preciso de uma ${e}`)).toBe(true);
+    expect(ehPedidoDeCriacao(`cria uma ${e} pro Carlos`)).toBe(true);
+    expect(ehPedidoDeCriacao(`${e} nova pro João`)).toBe(true);
+  });
+
+  it("a grafia certa segue igual e consulta com a palavra errada não vira criação", async () => {
+    const { ehPedidoDeCriacao } = await import("../tools");
+    expect(ehPedidoDeCriacao("max preciso de uma proposta")).toBe(true);
+    expect(ehPedidoDeCriacao("como está a propsta do Carlos?")).toBe(false);
+    expect(ehPedidoDeCriacao("tem propsta nova?")).toBe(false);
+  });
+
+  it.each(ERROS)("'%s' na escolha 1/2 vale como proposta", (e) => {
+    expect(F.lerEscolha(`${e} rápida`)).toBe("proposta");
+  });
+
+  it.each(ERROS)("'%s' de compra com comprador vai direto à proposta rápida", async (e) => {
+    expect(F.pedidoClaroDeProposta(`${e} de compra para o negócio TESTE`)).toBe(true);
+    const p = await F.iniciarFluxo(
+      { tipo: "proposta", pedido: `${e} de compra, comprador Ana, valor R$ 800.000`, policy: [...TUDO], agora },
+      deps()
+    );
+    expect(p.fluxo?.kind).toBe("proposta");
+  });
+
+  it("'envie a propsta' é envio; 'uma propsta nova' continua sendo criação (E_CRIACAO)", () => {
+    expect(F.pedeEnvio("envie a propsta da Letícia")).toBe(true);
+    expect(F.pedeEnvio("manda uma propsta nova")).toBe(false);
+    expect(F.pedeEnvio("manda uma proposta nova")).toBe(false);
+  });
+});

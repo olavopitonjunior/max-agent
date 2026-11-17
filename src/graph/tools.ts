@@ -208,6 +208,17 @@ export function shouldOfferTools(text: string): boolean {
 }
 
 /**
+ * Erros comuns de digitação de "proposta" (prod 17/11: "max preciso de uma propsta" caiu na conversa livre).
+ * Lista fechada, de propósito: só trocas de letra/omissão que não formam outra palavra do português.
+ */
+const PROPOSTA_MAL_DIGITADA = /\b(?:propsta|porposta|propota|prposta|proposa|propostta|propposta|propsota|proposata|propoasta)(s?)\b/g;
+
+/** Texto JÁ normalizado → com "proposta" corrigida. Só para as regex de INTENÇÃO da proposta. */
+export function corrigirProposta(textoNormalizado: string): string {
+  return textoNormalizado.replace(PROPOSTA_MAL_DIGITADA, "proposta$1");
+}
+
+/**
  * Normaliza para comparação: minúsculas, sem acento, sem pontuação de sobra.
  *
  * Emoji sobrevive de propósito — "👍" é uma confirmação legítima no WhatsApp.
@@ -719,7 +730,7 @@ const PEDE_CRIACAO_SEM_VERBO =
 
 /** O texto é um pedido de criação de documento? (Normalizado: sem acento.) */
 export function ehPedidoDeCriacao(texto: string): boolean {
-  const n = normalizar(texto);
+  const n = corrigirProposta(normalizar(texto));
   return PEDE_CRIACAO.test(n) || PEDE_CRIACAO_SEM_VERBO.test(n);
 }
 
