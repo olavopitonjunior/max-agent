@@ -175,6 +175,27 @@ export const CAPABILITIES = [
   "google.calendar.write",
   "google.tasks.write",
   /**
+   * Avisos da fila do copiloto no `pending.summary` (copiloto 2.8b, 15/11/2026, par do
+   * contractmaker#3130): o bloco `avisos` só sai para o papel que a tem. Posição 33
+   * (0-based), FIXA, ao FIM, depois de `google.tasks.write`. FORA do `POLITICA_PADRAO`
+   * do ImobPro (fail-closed): a org liga em `/admin/max`, e papel com entrada própria
+   * não herda o curinga. Sem ela o Max nem pede o bloco.
+   */
+  "pending.avisos",
+  /**
+   * PR-O4cat (16/11/2026, par do contractmaker `feat/max-o4cat`): três leituras
+   * nascidas reservadas (INERTES, nasce OFF). `certidao.status` (status de certidões,
+   * tool `situacao_certidoes`, PR-O4b), `document.list` (documentos do negócio, tool
+   * `listar_documentos`, PR-O4c) e `charge.status` (cobranças do negócio, tool
+   * `status_cobranca`, PR-O4d, só leitura) já ganharam verbo e tool: hoje nenhuma resta
+   * inerte. Seguem fora do padrão e do `brokerDefault` (fail-closed): a org liga em
+   * `/admin/max`. Posições 34, 35 e 36 FIXAS (0-based, ao FIM, nesta ordem): mesma
+   * posição da lista do ImobPro (teste de paridade).
+   */
+  "certidao.status",
+  "document.list",
+  "charge.status",
+  /**
    * Leitura de documento pelo Max (15/11/2026, par do contractmaker PR5, max.md
    * §18.13.13): foto/PDF recebido no WhatsApp vai ao servidor, que devolve os
    * campos lidos SUGERIDOS para conferir (verbo `document.read`, nunca grava).
@@ -182,7 +203,10 @@ export const CAPABILITIES = [
    * editor da política. Só para `kind: "user"`: o servidor recusa o corretor
    * comissionado (403 `verbo_requer_sujeito_usuario`) e este módulo nunca a
    * resolve para ele (`SO_USUARIO`), nem por `brokerDefault` nem por
-   * `byRecipient.allow`. Posição 33 (0-based), FIXA.
+   * `byRecipient.allow`. Posição 37 (0-based), FIXA
+   * (renumerada em 17/11/2026: 33 a 36 são da produção: `pending.avisos`,
+   * `certidao.status`, `document.list`, `charge.status`); `document.text.edit`
+   * é a 38, logo depois.
    */
   "document.read",
   /**
@@ -192,7 +216,8 @@ export const CAPABILITIES = [
    * `captacao.text.suggest|apply`, TODOS de escrita). Nasce DESLIGADA e FORA do
    * `POLITICA_PADRAO` do ImobPro, e só para `kind: "user"` (`SO_USUARIO`): o corretor
    * comissionado nunca a recebe, nem por `brokerDefault` nem por `byRecipient.allow`.
-   * Posição 34 (0-based), FIXA, a última deste lado.
+   * Posição 38 (0-based), FIXA, a última deste lado (renumerada em 17/11/2026, depois de
+   * `document.read` na 37).
    */
   "document.text.edit",
 ] as const;

@@ -26,6 +26,8 @@ const MAX_CAPABILITIES_DO_CM = [
   "pending.summary",
   "prefs.self",
   "google.calendar.read", "google.calendar.write", "google.tasks.write",
+  "pending.avisos",
+  "certidao.status", "document.list", "charge.status",
   "document.read",
   "document.text.edit",
 ];
@@ -35,11 +37,17 @@ const gerente = { orgId: "org1", orgName: "Imob", kind: "user" as const, userId:
 describe("paridade de atividades com o contractmaker", () => {
   it("a lista de capabilities é a do CM, literal a literal: activity.write no 26, template.decisions no 27, pending.summary no 28 e prefs.self no 29", () => {
     expect([...CAPABILITIES]).toEqual(MAX_CAPABILITIES_DO_CM);
-    expect(CAPABILITIES).toHaveLength(35);
+    expect(CAPABILITIES).toHaveLength(39);
     expect(CAPABILITIES.indexOf("activity.write")).toBe(26);
     expect(CAPABILITIES.indexOf("template.decisions")).toBe(27);
     expect(CAPABILITIES.indexOf("pending.summary")).toBe(28);
     expect(CAPABILITIES.indexOf("prefs.self")).toBe(29);
+    expect(CAPABILITIES.indexOf("pending.avisos")).toBe(33);
+    expect(CAPABILITIES.indexOf("certidao.status")).toBe(34);
+    expect(CAPABILITIES.indexOf("document.list")).toBe(35);
+    expect(CAPABILITIES.indexOf("charge.status")).toBe(36);
+    expect(CAPABILITIES.indexOf("document.read")).toBe(37);
+    expect(CAPABILITIES.indexOf("document.text.edit")).toBe(38);
   });
 
   it("os verbos de escrita existem como ação e activity.get como leitura", () => {

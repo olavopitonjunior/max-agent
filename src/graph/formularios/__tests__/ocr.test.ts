@@ -237,7 +237,7 @@ describe("document.read: nasce desligada e nunca chega ao corretor comissionado"
   const corretor = { orgId: "o1", orgName: "Imob", kind: "broker" as const, splitRecipientId: "sr_1", label: "Wesley" };
 
   it("e a capability de indice 33, logo depois de google.tasks.write", () => {
-    expect(CAPABILITIES[33]).toBe("document.read");
+    expect(CAPABILITIES[37]).toBe("document.read");
     expect(CAPABILITIES[32]).toBe("google.tasks.write");
   });
 

@@ -318,11 +318,18 @@ const CATALOGO_DO_IMOBPRO = [
   "google.calendar.read",
   "google.calendar.write",
   "google.tasks.write",
-  // Leitura de documento (15/11/2026, par do contractmaker §18.13.13): posição 33, FIXA.
-  // Nasce desligada e NUNCA vai ao comissionado.
+  // Avisos da fila no pending.summary (2.8b, 15/11/2026): posição 33 (0-based), ao FIM, fora do padrão.
+  "pending.avisos",
+  // PR-O4cat (16/11/2026): três leituras futuras INERTES (sem verbo, fora do padrão e do
+  // brokerDefault). Posições 34, 35 e 36 (0-based), ao FIM, nesta ordem.
+  "certidao.status",
+  "document.list",
+  "charge.status",
+  // Leitura de documento (15/11/2026, par do contractmaker §18.13.13): posição 37, FIXA
+  // (renumerada em 17/11/2026 depois das 33 a 36 da produção). Nasce desligada e NUNCA vai ao comissionado.
   "document.read",
   // Correção de texto do documento por IA (15/11/2026, par do contractmaker #3140, max.md
-  // §18.13.14): posição 34, FIXA. Nasce desligada e NUNCA vai ao comissionado.
+  // §18.13.14): posição 38, FIXA (renumerada em 17/11/2026, depois de document.read na 37). Nasce desligada e NUNCA vai ao comissionado.
   "document.text.edit",
 ];
 
@@ -380,10 +387,10 @@ describe("paridade do catálogo de capabilities", () => {
     expect(resolverPolitica({ politica: ligada, sujeito: gerente, role: "sales" })).toEqual(["proposal.list", "document.text.edit"]);
   });
 
-  it("document.text.edit é a posição 34 do catálogo, logo depois de document.read (33)", () => {
-    expect(CAPABILITIES[34]).toBe("document.text.edit");
-    expect(CAPABILITIES[33]).toBe("document.read");
-    expect(CAPABILITIES).toHaveLength(35);
+  it("document.text.edit é a posição 38 do catálogo, logo depois de document.read (37)", () => {
+    expect(CAPABILITIES[38]).toBe("document.text.edit");
+    expect(CAPABILITIES[37]).toBe("document.read");
+    expect(CAPABILITIES).toHaveLength(39);
     expect([...CAPABILITIES]).toEqual(CATALOGO_DO_IMOBPRO);
   });
 

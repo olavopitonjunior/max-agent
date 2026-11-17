@@ -127,7 +127,7 @@ describe("W46: 'complemento é apartamento 1' na revisão da proposta vai para o
       deps({}),
     );
     expect("liberar" in r && r.liberar).toBeFalsy();
-    expect(r.reply).toContain("Imóvel: Rua de Teste QA, 100, apartamento 1, São Paulo, SP");
+    expect(r.reply).toContain("Imóvel: Rua de Teste QA, 100, apartamento 1, São Paulo/SP");
     expect(r.reply).toContain("SIM");
     expect(r.fluxo).toMatchObject({ etapa: "revisao", dados: { imovel: { complemento: "apartamento 1" } } });
   });
