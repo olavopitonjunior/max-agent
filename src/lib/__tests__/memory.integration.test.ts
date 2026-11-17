@@ -46,12 +46,18 @@ d("memory_facts (Postgres real)", () => {
   });
 
   it("grava e lê", async () => {
-    await saveFacts(ORG, PHONE, { area: "locação", regiao: "zona sul" });
+    await saveFacts(ORG, PHONE, { area: "locação", foco: "zona sul" });
 
     expect(await loadFacts(ORG, PHONE)).toEqual({
       area: "locação",
-      regiao: "zona sul",
+      foco: "zona sul",
     });
+  });
+
+  /** Nome/tratamento nunca viram memória: o vocativo vem do cadastro (prod 16/11, "João"). */
+  it("recusa nome e tratamento", async () => {
+    await saveFacts(ORG, PHONE, { chamar_de: "Neto", nome: "João", area: "locação" });
+    expect(await loadFacts(ORG, PHONE)).toEqual({ area: "locação" });
   });
 
   /** Fato que muda sobrescreve — acumular criaria contradição na memória. */
@@ -115,12 +121,12 @@ d("memory_facts (Postgres real)", () => {
         perfil: "desconhecido",
         obs: "n/a",
         outro: "-",
-        real: "prefere ser chamado de Neto",
+        real: "acompanha a zona sul",
       });
 
       // Só o fato de verdade sobrevive.
       expect(await loadFacts(ORG, PHONE)).toEqual({
-        real: "prefere ser chamado de Neto",
+        real: "acompanha a zona sul",
       });
     });
 
@@ -197,7 +203,6 @@ describe("extração (sem banco)", () => {
     orgId: "o1",
     phone: "p1",
     userText: "oi, sou o Neto, cuido da parte de locação aqui",
-    replyText: "Oi Neto! Posso ajudar com o processo de locação.",
     known: {},
   };
 
@@ -266,8 +271,8 @@ describe("renderFacts", () => {
   });
 
   it("lista o que sabe", () => {
-    const out = renderFacts({ regiao: "zona sul", area: "locação" });
-    expect(out).toContain("regiao: zona sul");
+    const out = renderFacts({ foco: "zona sul", area: "locação" });
+    expect(out).toContain("foco: zona sul");
     expect(out).toContain("area: locação");
   });
 });

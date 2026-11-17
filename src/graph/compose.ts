@@ -1,4 +1,5 @@
 import { NOMES_DE_TOOL } from "./tools";
+import { NEGRITO_MARKDOWN } from "@/lib/whatsapp-formato";
 
 /**
  * Sanitizador de saída — a última coisa entre o modelo e o WhatsApp.
@@ -356,6 +357,28 @@ export function corrigirVocativo(texto: string, ctx: { nomeDaPessoa: string | nu
     }
   }
   return texto;
+}
+
+// ─── Markdown do modelo → formatação do WhatsApp ────────────────────────────
+
+/**
+ * O modelo escreve markdown (`**negrito**`, `__x__`, `## título`) e o WhatsApp
+ * mostra os caracteres crus (prod 16/11: "**1**", "**certidões pendentes**").
+ * No WhatsApp o negrito é `*x*` e o itálico `_x_`; título não existe.
+ *
+ * Determinístico, no único ponto por onde o texto do MODELO sai (`compose`).
+ * Texto de template já nasce em sintaxe de WhatsApp e não passa por aqui.
+ * Nunca toca em `*` simples: é o negrito certo.
+ */
+export function paraWhatsApp(texto: string): string {
+  return texto
+    // `**x**`: a mesma regra do ponto de saída (`paraFormatoWhatsapp`, #169), que não
+    // corrompe máscara de documento (`***.456.789-**`), `2**3` nem URL.
+    .replace(NEGRITO_MARKDOWN, "*$1*")
+    // `__x__` só quando os sublinhados não estão colados em palavra (snake__case__nome, URL).
+    .replace(/(?<![\p{L}\p{N}_])__(?=[^\s_])([^_\n]*?[^\s_])__(?![\p{L}\p{N}_])/gu, "_$1_")
+    // Marcador de título no começo da linha.
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, "");
 }
 
 // ─── G6 — teto de tamanho, imposto no código ────────────────────────────────
