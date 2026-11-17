@@ -2319,3 +2319,101 @@ describe("pedido de envio com uma captação aberta em coleta (prod 17/11/2026)"
     expect(r.reply).not.toContain("ainda não está pronta");
   });
 });
+
+describe("coleta (17/11, prod): nome, dado perdido e resposta com vários campos", () => {
+  async function ateOsProprietarios(fala: ReturnType<typeof conversa>) {
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do TESTE");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("pular");
+  }
+  const donoGravado = () => (ultimo("captacao.create")!.args.dados as { proprietarios: Record<string, unknown>[] }).proprietarios[0]!;
+
+  it("B1: 'proprietário: TESTE Proprietário Silva' guarda o nome inteiro (rótulo só some como prefixo)", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    const r = await fala("proprietário: TESTE Proprietário Silva");
+    expect(donoGravado().nome).toBe("TESTE Proprietário Silva");
+    expect(r.reply).toContain("Anotei TESTE Proprietário Silva");
+    expect(r.reply).not.toContain("TESTE Silva");
+  });
+
+  it("B1: com CPF e a palavra no meio do nome ('TESTE Proprietário Silva, CPF …') o nome também fica inteiro", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala(`TESTE Proprietário Silva, CPF ${CPF}`);
+    expect(donoGravado().nome).toBe("TESTE Proprietário Silva");
+  });
+
+  it("B1: o rótulo continua saindo no começo ('Proprietária Maria Silva, CPF …' e 'nome: Maria Silva')", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala(`Proprietária Maria Silva, CPF ${CPF}`);
+    expect(donoGravado().nome).toBe("Maria Silva");
+    await fala("nome: João Souza, CPF 529.982.247-25");
+    expect(donoGravado().nome).toBe("João Souza");
+  });
+
+  it("B2: nome + telefone + e-mail + estado civil sem CPF viram proprietário parcial (nada se perde, sem repetir o estado civil)", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    const r = await fala("TESTE Proprietário Silva, telefone 11 90000-0000, teste.proprietario@example.com, solteiro");
+    expect(donoGravado()).toMatchObject({
+      nome: "TESTE Proprietário Silva", email: "teste.proprietario@example.com", telefone1: "+5511900000000", estado_civil: "solteiro",
+    });
+    expect(donoGravado().cpf).toBeUndefined();
+    expect(r.reply).toContain("Anotei TESTE Proprietário Silva");
+    expect(r.reply).toContain("próximo proprietário");
+    expect(r.reply).not.toContain("estado civil de");
+    expect(r.reply).not.toContain("Preciso do CPF");
+  });
+
+  it("B2: contato sem nome de pessoa ('11 90000-0000, a@b.com') continua recusado", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    const r = await fala("11 90000-0000, a@b.com");
+    expect((r.fluxo as { proprietarios?: unknown[] } | null)?.proprietarios ?? []).toEqual([]);
+    expect(verbos("captacao.create").filter((c) => (c.args.dados as { proprietarios?: unknown })?.proprietarios)).toHaveLength(0);
+  });
+
+  it("B3: 'apartamento, valor de venda R$ 850.000, comissão 6%' grava tipo, valor e comissão e pergunta o próximo faltante (CPF)", async () => {
+    exigeMatricula = false; exigeTipo = true;
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala("proprietário: TESTE Proprietário Silva");
+    await fala("pular"); // estado civil
+    await fala("FIM");
+    await fala("NÃO"); // testemunha
+    const antes = verbos("captacao.create").length;
+    const r = await fala("apartamento, valor de venda R$ 850.000, comissão 6%");
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    expect(ultimo("captacao.create")!.args.dados).toEqual({
+      imovel: { kind: "apartamento" }, condicoes: { valor: 850000, comissao_percent: 6 },
+    });
+    expect(r.reply).toContain("tipo: apartamento");
+    expect(r.reply).toContain("CPF de TESTE Proprietário Silva");
+  });
+
+  it("B3: o faltante atual é o valor e a resposta traz também a comissão: grava os dois", async () => {
+    exigeMatricula = false;
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala(`TESTE Proprietário Silva, CPF ${CPF}, solteiro`);
+    await fala("FIM");
+    await fala("NÃO");
+    const r = await fala("valor 850 mil, comissão 6%");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ condicoes: { valor: 850000, comissao_percent: 6 } });
+    expect(r.reply).toContain("Prazo da autorização");
+  });
+
+  it("B3: resposta de CEP não vira valor nem comissão por engano", async () => {
+    exigeMatricula = false; exigeCep = true;
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala(`TESTE Proprietário Silva, CPF ${CPF}, solteiro`);
+    await fala("FIM");
+    await fala("NÃO");
+    await fala("01310-100");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { cep: "01310-100" } });
+  });
+});

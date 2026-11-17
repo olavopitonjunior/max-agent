@@ -865,7 +865,10 @@ export function lerEmails(texto: string): string[] {
 
 const ESTADO_CIVIL = /\b(solteir[oa]|casad[oa]|divorciad[oa]|viuv[oa]|separad[oa]|uniao estavel)\b/;
 // Achado 18: "propriet[aá]ri[oa]s?"/"don[oa]s?" com acento (a pessoa escreve "proprietário:") também contam como rótulo.
-const ROTULOS_SOLTOS = /\b(cpf|cnpj|rg|tel\w*|cel\w*|whats\w*|fone|zap|e-?mail|email|nome|propriet[aá]ri[oa]s?|don[oa]s?|pj|pessoa juridica|pessoa fisica|percentual|casad[oa]|solteir[oa]|divorciad[oa]|viuv[oa]|separad[oa]|uniao estavel|razao social|empresa)\b/gi;
+const ROTULOS_SOLTOS = /\b(cpf|cnpj|rg|tel\w*|cel\w*|whats\w*|fone|zap|e-?mail|email|pj|pessoa juridica|pessoa fisica|percentual|casad[oa]|solteir[oa]|divorciad[oa]|viuv[oa]|separad[oa]|uniao estavel|razao social|empresa)\b/gi;
+// "proprietário"/"dono"/"nome" só são rótulo no COMEÇO do trecho ("proprietário: Maria", "a proprietária Maria", "nome - Maria"):
+// no meio do nome ("TESTE Proprietário Silva") fazem parte dele.
+const ROTULO_NO_INICIO = /^(?:(?:o|a|do|da)\s+)?(?:propriet[aá]ri[oa]s?|don[oa]s?|nome)\b\s*[:\-–]?\s*/i;
 
 /** O texto citado está de fato na mensagem? (mesmo teste do `credito`) */
 function noTexto(trecho: string, texto: string): boolean {
@@ -921,7 +924,7 @@ export async function lerPessoa(texto: string, extrair: ExtratorDeSecao): Promis
   if (pct !== undefined) out.percentual = pct;
 
   const semContatos = n.restante.replace(global(RE_EMAIL_LOCAL), " ").replace(/\d+(?:[.,]\d+)?\s*(?:%|por cento)/gi, " ");
-  const segmentos = semContatos.replace(ROTULOS_SOLTOS, " ").split(/[,;\n]/).map((s) => s.replace(/^[\s:–-]+|[\s:–-]+$/g, "").replace(/\s+/g, " ")).filter(Boolean);
+  const segmentos = semContatos.replace(ROTULOS_SOLTOS, " ").split(/[,;\n]/).map((s) => s.replace(/^[\s:–-]+|[\s:–-]+$/g, "").replace(ROTULO_NO_INICIO, "").replace(/^[\s:–-]+|[\s:–-]+$/g, "").replace(/\s+/g, " ")).filter(Boolean);
   if (out.pj) {
     const razao = segmentos.find((s) => s.length >= 3 && s.length <= 120 && !/\d/.test(s));
     if (razao) out.nome = razao;
@@ -1346,6 +1349,35 @@ async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: stri
       const r = await lerEnderecoDePessoa(texto, extrair);
       return r.erro ? { erro: r.erro } : { dados: patchP(r.dados), eco: "endereço anotado" };
     }
+  }
+}
+
+/**
+ * Valor, comissão e aluguel ditos COM o rótulo ("valor de venda R$ 850.000, comissão 6%") dentro de uma
+ * resposta a OUTRO faltante (ou ao próprio, quando a frase traz mais de um número). Sem a palavra do
+ * campo na frase não lê nada: um CEP ou um CPF não pode virar valor. `"vazio"` = não veio.
+ */
+function lerCondicaoRotulada(fa: FaltanteDeCaptacao, texto: string): Leitura {
+  const t = normalizar(texto);
+  const num = (n: number | undefined) => (typeof n === "number" && n >= 0 ? n : undefined);
+  switch (fa.path) {
+    case "condicoes.valor": {
+      if (!/\b(valor|preco|pretend\w*|pedind\w*)\b/.test(t)) return "vazio";
+      const v = num(lerCondicoes(texto, "venda").condicoes.valor as number | undefined);
+      return v === undefined ? "vazio" : { dados: { condicoes: { valor: v } }, eco: `${fa.rotulo}: ${brValor(v)}` };
+    }
+    case "condicoes.comissao_percent": {
+      if (!/\bcomiss\w*/.test(t)) return "vazio";
+      const p = num(lerCondicoes(texto, "venda").condicoes.comissao_percent as number | undefined);
+      return p === undefined || p > 100 ? "vazio" : { dados: { condicoes: { comissao_percent: p } }, eco: `${fa.rotulo}: ${p}%` };
+    }
+    case "locacao.aluguel": {
+      if (!/\b(alugue[lu]|valor|preco|pretend\w*|pedind\w*)\b/.test(t)) return "vazio";
+      const v = num(lerCondicoes(texto, "locacao").locacao.aluguel as number | undefined);
+      return v === undefined ? "vazio" : { dados: { locacao: { aluguel: v } }, eco: `${fa.rotulo}: ${brValor(v)}` };
+    }
+    default:
+      return "vazio";
   }
 }
 
@@ -2093,10 +2125,15 @@ async function complementar(
   return { ok: false, r: resposta(g(f, ctx), "Não consegui gravar agora. Mande de novo em instantes.", "captacao_complemento_falhou") };
 }
 
-/** "nome:"/"proprietário:" explícito, ou documento — senão não é declaração de pessoa (achado 18). */
+/**
+ * "nome:"/"proprietário:" explícito, ou documento — senão não é declaração de pessoa (achado 18).
+ * Nome acompanhado de e-mail ou telefone também é (17/11): quem manda contato com o nome está
+ * declarando a pessoa, e recusar por falta de CPF jogava fora tudo o que veio junto. A conversa
+ * solta ("Bom dia Roberto") segue recusada: sem documento, rótulo nem contato.
+ */
 const ROTULO_DE_PESSOA = /\b(propriet[aá]ri[oa]s?|don[oa]s?|nome)\s*[:\-–]/i;
 function pareceProprietario(texto: string, p: PessoaLida): boolean {
-  return !!(p.cpf || p.cnpj || ROTULO_DE_PESSOA.test(texto));
+  return !!(p.cpf || p.cnpj || ROTULO_DE_PESSOA.test(texto) || (p.nome && (p.email || p.telefone)));
 }
 
 // ─── Cofre LEGADO (checkpoint de antes da confirmação única) ─────────────
@@ -2474,11 +2511,15 @@ async function conduzirFaltantes(f: FluxoCaptacao, t: string, ctx: ContextoDoTur
   }
   if (PERGUNTA_FORA.test(t)) return pausar(f);
   const extrair: ExtratorDeSecao = async (texto, secao) => (deps.extrairCaptacao ? deps.extrairCaptacao(texto, secao) : null);
-  const lido = await lerFaltante(f, fa, ctx.texto, extrair);
+  let lido = await lerFaltante(f, fa, ctx.texto, extrair);
+  // Texto livre (matrícula, nome, endereço…) não é lido por rótulo de condição: "valor" numa descrição não é o valor.
+  const tipoAtual = tipoDoFaltante(fa);
+  const textoLivre = tipoAtual === "texto" || tipoAtual === "texto_longo" || tipoAtual === "nome" || tipoAtual === "endereco_imovel" || tipoAtual === "endereco_pessoa";
+  // "valor 850 mil, comissão 6%" respondendo ao valor: dois números, o leitor de campo único recusa; o rotulado separa.
+  if (!leu(lido) && !textoLivre) { const alt = lerCondicaoRotulada(fa, ctx.texto); if (leu(alt)) lido = alt; }
   // Item 5: quando a pergunta é de um campo curto, a mesma resposta preenche os
   // OUTROS campos curtos que trouxer — do imóvel, ou do MESMO proprietário.
   const juntos: { fa: FaltanteDeCaptacao; dados: DadosDeCaptacao; eco: string }[] = [];
-  const tipoAtual = tipoDoFaltante(fa);
   if (tipoAtual && COMBINAVEIS.has(tipoAtual)) {
     for (const outro of (f.faltantes ?? []).slice(1)) {
       const tipo = tipoDoFaltante(outro);
@@ -2486,6 +2527,14 @@ async function conduzirFaltantes(f: FluxoCaptacao, t: string, ctx: ContextoDoTur
       if (outro.path.startsWith("proprietarios[]") !== fa.path.startsWith("proprietarios[]")) continue;
       if (outro.path.startsWith("proprietarios[]") && outro.proprietarioId !== fa.proprietarioId) continue;
       const l = await lerFaltante(f, outro, ctx.texto, extrair);
+      if (leu(l)) juntos.push({ fa: outro, ...l });
+    }
+  }
+  // A resposta é lida contra TODOS os faltantes de condição (valor, comissão, aluguel), só com o rótulo na frase.
+  if (!textoLivre) {
+    for (const outro of (f.faltantes ?? []).slice(1)) {
+      if (juntos.some((j) => j.fa === outro)) continue;
+      const l = lerCondicaoRotulada(outro, ctx.texto);
       if (leu(l)) juntos.push({ fa: outro, ...l });
     }
   }
