@@ -166,11 +166,13 @@ describe("tolerância a erro de digitação (P1) só com feature E servidor v2",
     );
   }
 
-  it("NEGADO: servidor com fluxoV2 false, o 'propsta' não é pedido de criação (o modelo segue o caminho de hoje)", async () => {
+  it("NEGADO: servidor com fluxoV2 false, o 'propossta' (fora da lista fechada da produção) não é pedido de criação (o modelo segue o caminho de hoje)", async () => {
+    // A produção (17/11) já aceita "propsta"/"porposta"… sem a feature (`corrigirProposta`); a tolerância por
+    // distância de edição é a que só o v2 liga.
     featureV2(true);
     acao.mockResolvedValue({ status: 200, body: { ...OPTIONS, fluxoV2: false } });
     llm.mockResolvedValue({ text: "Como posso ajudar?", toolCalls: [], usage: { model: "x", promptTokens: 1, completionTokens: 1, latencyMs: 1, success: true } } as never);
-    await semFluxo("quero criar uma propsta de venda");
+    await semFluxo("quero criar uma propossta de venda");
     expect(llm).toHaveBeenCalled();
   });
 

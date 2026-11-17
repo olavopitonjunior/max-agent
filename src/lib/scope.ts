@@ -10,6 +10,7 @@ import {
   type ScopeQueryVerb,
   type ScopeSubject,
 } from "@/graph/scope-contract";
+import { lerBusca } from "@/graph/busca";
 import type { Candidate } from "./identity";
 import { readStageClarification, type StageClarification } from "@/graph/query-options";
 
@@ -81,7 +82,7 @@ export async function consultarEscopo(params: {
           verb: params.verb,
           subject: params.subject,
           phone: e164,
-          args: limparArgs(params.args, params.verb),
+          args: argsParaOServidor(params.args, params.verb, params.subject),
         }),
       },
       IMOBPRO_TIMEOUT_MS
@@ -159,6 +160,12 @@ export function limparArgs(
       if (Number.isInteger(valor) && (valor as number) > 0) limpos[chave] = valor;
       continue;
     }
+    // Só o `deal.list` conhece `busca`; o termo vai aparado e cortado em 80 (vazio some).
+    if (chave === "busca") {
+      const termo = lerBusca(valor);
+      if (termo && (!verb || verb === "deal.list")) limpos[chave] = termo;
+      continue;
+    }
     if (typeof valor === "string") {
       const t = valor.trim();
       if (t) limpos[chave] = t;
@@ -171,6 +178,21 @@ export function limparArgs(
     if ((ESTADOS_DE_PROPOSTA as readonly string[]).includes(estado)) limpos.estado = estado;
     else delete limpos.estado;
   }
+  return limpos;
+}
+
+/**
+ * `limparArgs` + a regra do sujeito: o corretor comissionado NUNCA manda `busca` ao CM (a projeção dele não
+ * tem título nem cliente, e o termo é dado da conversa). Este é o único funil de saída do `scope-query`, então
+ * a trava mora aqui e vale mesmo para um chamador que a esqueça.
+ */
+function argsParaOServidor(
+  args: Record<string, unknown> | undefined,
+  verb: ScopeQueryVerb,
+  subject: ScopeSubject
+): Record<string, unknown> {
+  const limpos = limparArgs(args, verb);
+  if (subject.kind === "broker") delete limpos.busca;
   return limpos;
 }
 

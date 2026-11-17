@@ -73,3 +73,8 @@ nos dois repositórios e habilitar piloto somente após deploy do receptor.
 ## Lista no WhatsApp
 
 O receptor devolve até 50 atividades; o Max mostra 5 por vez. `google_atividades_mais`, oferecida só com lista vigente, reconsulta o período guardado, pula por id o que já foi mostrado e continua a numeração. Descartar ou deixar expirar uma proposta mantém os números; um SIM que tenta executar invalida a lista Google, porque as versões podem ter mudado.
+
+
+## Capability `pending.avisos` (copiloto 2.8b, par do contractmaker#3130)
+
+A 34a capability, na posicao 33 (0-based), **ao fim, depois de `google.tasks.write`**: mesma posicao da lista do ImobPro (teste de paridade). Fora do `POLITICA_PADRAO` (fail-closed): a org liga em `/admin/max`. Com ela, e so para usuario da plataforma, o Max pede o bloco `avisos` do `pending.summary` **pelo nome** (`blocos`: `formularios, propostas, atividades, avisos`; com filtro `avisos`, so `["avisos"]`; nunca com `dealId`). Sem ela o bloco nao e pedido, e se vier assim mesmo e removido. A projecao (`src/graph/avisos-projecao.ts`) e whitelist: titulo, corpo, prioridade, criadoEm, entidade.tipo e link do mesmo host; `titulo`/`corpo` sao dado de terceiro (`_untrusted`); `disponivel:false` nunca vira "sem avisos"; `totalExato:false` vira "mais de N".

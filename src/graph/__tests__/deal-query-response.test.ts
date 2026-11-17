@@ -71,6 +71,32 @@ describe("respostas factuais de negócios",()=>{
   const state=await buildGraph().compile().invoke(turn("Liste meus negócios"));
   expect(state.reply).toBe("Não encontrei negócios para esta consulta.");expect(llm).toHaveBeenCalledTimes(1);
  });
+ it("busca por nome sem resultado: diz que não achou o nome, sem afirmar que a carteira está vazia",async()=>{
+  llm.mockResolvedValueOnce({text:"",toolCalls:[{name:"listar_negocios",args:{busca:"TESTE9"}}],usage});scope.mockResolvedValue({items:[{id:"D1",titulo:"Outro",cliente:"Ana"}],truncated:false});
+  const state=await buildGraph().compile().invoke(turn("Detalhe do negócio TESTE9"));
+  expect(llm).toHaveBeenCalledTimes(1);expect(state.reply).toBe("Não encontrei negócio com esse nome visível para você.");
+  expect(state.reply).not.toContain("**");expect(state.referencias?.itens ?? []).toEqual([]);
+ });
+ it("busca por nome sem resultado com lista cortada pelo CM: não afirma que o nome não existe",async()=>{
+  llm.mockResolvedValueOnce({text:"",toolCalls:[{name:"listar_negocios",args:{busca:"TESTE9"}}],usage});scope.mockResolvedValue({items:[{id:"D1",titulo:"Outro",cliente:"Ana"}],truncated:true});
+  const state=await buildGraph().compile().invoke(turn("Detalhe do negócio TESTE9"));
+  expect(llm).toHaveBeenCalledTimes(1);expect(state.reply).toBe("Não encontrei esse nome entre os negócios que consegui consultar. Pode haver outros.");
+  expect(state.reply).not.toContain("**");expect(state.referencias?.itens ?? []).toEqual([]);
+ });
+ it("corretor comissionado com busca: nada vai ao CM e a resposta é a fixa, sem lista",async()=>{
+  const broker={kind:"broker" as const,orgId:"qa-org",orgName:"QA",splitRecipientId:"sr1",label:"Rui"};
+  profile.mockResolvedValue({enabled:true,maxPolicy:{byRole:{},byRecipient:{},brokerDefault:["deal.list"]}} as never);
+  llm.mockResolvedValueOnce({text:"",toolCalls:[{name:"listar_negocios",args:{busca:"TESTE1"}}],usage});scope.mockResolvedValue({items:[{id:"D1",etapa:"Formulário",referencia:"Negócio #AAAAAA"}],truncated:false});
+  const state=await buildGraph().compile().invoke({...turn("Detalhe do negócio TESTE1") as object,identity:broker} as never);
+  expect(scope).not.toHaveBeenCalled();expect(llm).toHaveBeenCalledTimes(1);
+  expect(state.reply).toBe("A busca por nome não está disponível para o seu perfil. Peça seus negócios e escolha pelo número.");
+  expect(state.reply).not.toContain("**");expect(state.referencias?.itens ?? []).toEqual([]);
+ });
+ it("busca por nome com um resultado segue para o modelo com o item numerado",async()=>{
+  llm.mockResolvedValueOnce({text:"",toolCalls:[{name:"listar_negocios",args:{busca:"qa"}}],usage});scope.mockResolvedValue({items:[{id:"D1",titulo:"Negócio QA",cliente:"Ana"},{id:"D2",titulo:"Outro",cliente:"Bia"}],truncated:false});
+  const state=await buildGraph().compile().invoke(turn("Detalhe do negócio QA"));
+  expect(llm).toHaveBeenCalledTimes(2);expect(state.referencias?.itens).toEqual([expect.objectContaining({n:1,id:"D1"})]);
+ });
  it("vazio em consulta mista mantém resultados irmãos e resposta do modelo",async()=>{
   llm.mockResolvedValueOnce({text:"",toolCalls:[{name:"listar_negocios",args:{}},{name:"pendencias_do_negocio",args:{}}],usage});
   scope.mockResolvedValueOnce({items:[],truncated:false}).mockResolvedValueOnce({items:[{id:"D2",titulo:"Pendência QA"}],truncated:false});

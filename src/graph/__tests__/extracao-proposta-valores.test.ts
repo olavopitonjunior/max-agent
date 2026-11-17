@@ -38,7 +38,7 @@ describe("proposta — complemento do imóvel", () => {
       extrairProposta: async () => ({ imovel: { complemento: "apartamento 2" } }),
       extrairCampos: async () => null,
     });
-    expect(resultado.reply).toContain("Imóvel: Rua de Teste QA, 100, apartamento 2, São Paulo, SP");
+    expect(resultado.reply).toContain("Imóvel: Rua de Teste QA, 100, apartamento 2, São Paulo/SP");
     const corrigido = mesclarDados(dados, sanearDados({ imovel: { complemento: "apartamento 2" } }));
     expect(argsDaProposta({ dados: corrigido }).imovel).toMatchObject({ endereco: "Rua de Teste QA, apartamento 2", numero: "100" });
     expect(argsDoAjuste(corrigido).imovel).toMatchObject({ endereco: "Rua de Teste QA, apartamento 2", numero: "100" });

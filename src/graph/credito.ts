@@ -52,6 +52,8 @@ export interface FluxoCredito {
   solidariosEncerrados?: boolean;
   /** Pergunta fora do assunto: a resposta do modelo ganha o "Continuando…". */
   pausado?: boolean;
+  /** O "Continuando a ficha…" já foi mostrado nesta pausa (uma vez por pausa; limpa quando a ficha anda). */
+  lembradoEm?: number;
   /** Cifrado — ver o cabeçalho. */
   cofre?: string;
   /**
