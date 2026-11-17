@@ -1169,6 +1169,27 @@ function tituloDeclarado(texto: string | undefined): string | undefined {
 }
 
 /**
+ * O pedido já é de proposta rápida sem ambiguidade: diz "proposta de compra/venda/locação/aluguel" ou traz
+ * comprador/proponente/inquilino, valor ou sinal. "Formulário"/"ficha" explícito NUNCA vai direto (é a escolha).
+ */
+export function pedidoClaroDeProposta(pedido: string): boolean {
+  const t = normalizar(pedido);
+  if (/\b(formulario|ficha)\b/.test(t) || !/\bproposta\b/.test(t)) return false;
+  return (
+    /\bproposta\s+(?:rapida\s+)?(?:de|do|da|para)\s+(?:compra|venda|locacao|aluguel)\b/.test(t) ||
+    /\b(?:compradore?s?|proponentes?|inquilin\w*|locatari\w*|sinal)\b|\bvalor\b|r\$/.test(t)
+  );
+}
+
+function naturezaDoPedido(pedido: string): "venda" | "locacao" | undefined {
+  const t = normalizar(pedido);
+  const porPalavra = lerNatureza(pedido);
+  if (porPalavra) return porPalavra;
+  if (/\bcompradore?s?\b/.test(t)) return "venda";
+  return undefined;
+}
+
+/**
  * Pedido de criação reconhecido (a `propor_criacao` do turn). Pedido explícito
  * de formulário/ficha (`tipo` venda/locação) já é o fluxo de negócio; pedido de
  * "proposta" — a palavra ambígua da conversa de 06/10 — começa pela escolha.
@@ -1205,6 +1226,11 @@ export async function iniciarFluxo(
     return carregarCamposDoNegocio(params.tipo, params.agora, deps, tituloDoPedido);
   }
   if (podeProposta && podeNegocio) {
+    // Prod 17/11: "proposta de compra … compradores …, valor R$ 800.000" ainda recebia o "1 ou 2". Só o
+    // pedido ambíguo ("gera uma proposta pra mim") pergunta; o que já diz o tipo ou traz os dados vai direto.
+    if (params.tipo === "proposta" && params.pedido && pedidoClaroDeProposta(params.pedido)) {
+      return iniciarProposta(params.natureza ?? naturezaDoPedido(params.pedido), params.pedido, params.agora, deps);
+    }
     return {
       reply: TEXTO_ESCOLHA,
       fluxo: { kind: "escolha", natureza: params.natureza, pedido: params.pedido, nomeCliente: tituloDoPedido, atualizadoEm: params.agora },

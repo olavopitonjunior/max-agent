@@ -42,10 +42,31 @@ describe("entrada", () => {
     "Faz uma proposta do João",
     "Cria uma proposta da Letícia",
     "Monta a proposta do Carlos pro apto 52",
-    "Crie uma proposta de compra do Pedro",
     "Max, crie proposta da Ana",
-  ])("não bloqueia criação de proposta para uma pessoa: %s", async (pedido) => {
+    "Pode gerar uma proposta pra mim?",
+    "Crie uma proposta e um formulário para o Pedro",
+  ])("pedido ambíguo de proposta pergunta proposta × negócio: %s", async (pedido) => {
     const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps());
+    expect(p.fluxo?.kind).toBe("escolha");
+  });
+  // Prod 17/11: o pedido já dizia "proposta de compra" e trazia comprador e valor, e o Max ainda perguntou 1 ou 2.
+  it.each([
+    ["Crie uma proposta de compra do Pedro", "venda"],
+    ["proposta de venda para o João", "venda"],
+    ["Faz uma proposta de locação para a Ana", "locacao"],
+    ["proposta de aluguel do apto 52", "locacao"],
+    ["proposta de compra para o negócio TESTE: compradores TESTE Comprador Um e TESTE Comprador Dois, casados entre si, valor R$ 800.000, à vista, sinal de R$ 80.000", "venda"],
+    ["Quero fazer uma proposta, comprador Maria Silva, valor R$ 500.000", "venda"],
+  ] as const)("pedido claro de proposta vai direto para a proposta rápida: %s", async (pedido, natureza) => {
+    const d = deps();
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, d);
+    expect(p.fluxo?.kind).toBe("proposta");
+    expect((p.fluxo as { natureza?: string }).natureza).toBe(natureza);
+    expect(p.reply).not.toBe(F.TEXTO_ESCOLHA);
+    expect(d.acao).not.toHaveBeenCalledWith("form.create", expect.anything());
+  });
+  it("proposta de compra, mas com 'formulário' explícito, continua perguntando", async () => {
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido: "proposta de compra e o formulário do Pedro", policy: [...TUDO], agora }, deps());
     expect(p.fluxo?.kind).toBe("escolha");
   });
   it.each([
