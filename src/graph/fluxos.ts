@@ -1168,6 +1168,9 @@ function tituloDeclarado(texto: string | undefined): string | undefined {
   return valor.replace(/\s+/g,' ').trim().slice(0,200)||undefined;
 }
 
+const REFERE_PROPOSTA_EXISTENTE =
+  /\b(?:a|da|na|esta|essa|dessa|daquela)\s+proposta\b|\bprop-\d|\b(?:status|ver|consultar|consulta|assinar|enviar|reenviar)\b/;
+
 /**
  * O pedido já é de proposta rápida sem ambiguidade: diz "proposta de compra/venda/locação/aluguel" ou traz
  * comprador/proponente/inquilino, valor ou sinal. "Formulário"/"ficha" explícito NUNCA vai direto (é a escolha).
@@ -1175,6 +1178,8 @@ function tituloDeclarado(texto: string | undefined): string | undefined {
 export function pedidoClaroDeProposta(pedido: string): boolean {
   const t = corrigirProposta(normalizar(pedido));
   if (/\b(formulario|ficha)\b/.test(t) || !/\bproposta\b/.test(t)) return false;
+  // Consulta ou referência a uma proposta que JÁ existe ("qual o valor da proposta do comprador João?") não é criação.
+  if (pedido.includes("?") || REFERE_PROPOSTA_EXISTENTE.test(t)) return false;
   return (
     /\bproposta\s+(?:rapida\s+)?(?:de|do|da|para)\s+(?:compra|venda|locacao|aluguel)\b/.test(t) ||
     /\b(?:compradore?s?|proponentes?|inquilin\w*|locatari\w*|sinal)\b|\bvalor\b|r\$/.test(t)

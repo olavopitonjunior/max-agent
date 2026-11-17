@@ -1015,6 +1015,14 @@ const MARCAS: [RegExp, string][] = [
   [/\b(?:taxa(?: de)? admin\w*|administracao|taxa)\b/g, "taxa"],
 ];
 
+/**
+ * Dinheiro que NÃO é o valor do imóvel: o número logo depois de um rótulo de comissão, taxa, financiamento, saldo, sinal,
+ * entrada, condomínio ou IPTU ("comissão de R$ 40 mil", "financiamento de R$ 200 mil"). Só conectivos entre rótulo e número.
+ */
+const RE_DINHEIRO_DE_OUTRO_ROTULO =
+  /\b(?:comiss\w*|taxa|financ\w*|saldo|sinal|entrada|condom\w*|iptu)(?:\s+(?:de|do|da|no|valor|total|em|por|a|e|admin\w*))*\s*[:=–-]?\s*(?:r\$\s*)?\d[\d.,]*(?:\s*(?:mil|milhao|milhoes|k)\b)?/g;
+const semDinheiroDeOutroRotulo = (s: string) => s.replace(RE_DINHEIRO_DE_OUTRO_ROTULO, " ");
+
 const semPercentualEPrazo = (s: string) =>
   s.replace(/\d+(?:[.,]\d+)?\s*(?:%|por cento)/g, " ").replace(/\d+\s*(?:dias?|meses|mes)\b/g, " ");
 
@@ -1074,17 +1082,18 @@ export function lerCondicoes(texto: string, tipo: TipoDeCaptacao): CondicoesLida
   const principal = tipo === "venda" ? condicoes.valor : locacao.aluguel;
   if (principal === undefined) {
     const primeiraMarca = achadas[0]?.ini ?? t.length;
-    const solto = valoresNoTexto(semPercentualEPrazo(t.slice(0, primeiraMarca)));
+    const solto = valoresNoTexto(semDinheiroDeOutroRotulo(semPercentualEPrazo(t.slice(0, primeiraMarca))));
     if (solto.length === 1) setMoeda("valor", solto[0]);
     else if (!achadas.length) {
-      const todos = valoresNoTexto(semPercentualEPrazo(t));
+      const todos = valoresNoTexto(semDinheiroDeOutroRotulo(semPercentualEPrazo(t)));
       if (todos.length === 1) setMoeda("valor", todos[0]);
     }
   }
   // "Ela quer vender por R$ 1.350.000" (prod 17/11): sem a palavra "valor" e no meio de CEP, número e telefone, o solto
   // não é único. Um único "R$" no texto, sem nenhum rótulo de dinheiro (condomínio, IPTU…) para reivindicá-lo, é o valor.
   if ((tipo === "venda" ? condicoes.valor : locacao.aluguel) === undefined && !usadas.size) {
-    const emReais = [...t.matchAll(/r\$\s*(\d[\d.,]*(?:\s*(?:mil|milhao|milhoes|k)\b)?)/g)];
+    // Um R$ de outro rótulo ("comissão de R$ 40 mil", "financiamento de R$ 200 mil") não conta nem como candidato.
+    const emReais = [...semDinheiroDeOutroRotulo(t).matchAll(/r\$\s*(\d[\d.,]*(?:\s*(?:mil|milhao|milhoes|k)\b)?)/g)];
     if (emReais.length === 1) setMoeda("valor", valoresNoTexto(emReais[0]![1]!)[0]);
   }
   // Sem rótulo: "180 dias" é o prazo; um único "%" solto é a comissão.
@@ -1358,28 +1367,35 @@ async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: stri
   }
 }
 
+/** Palavras que podem ficar entre o rótulo e o número ("valor DE VENDA R$ 850.000", "valor É 850 mil"). */
+const LIGACAO_DO_ROTULO = "de|da|do|venda|locacao|aluguel|total|por|em|e|eh|sera|fica|minimo|pretendido|pedido";
+
 /**
  * Valor, comissão e aluguel ditos COM o rótulo ("valor de venda R$ 850.000, comissão 6%") dentro de uma
  * resposta a OUTRO faltante (ou ao próprio, quando a frase traz mais de um número). Sem a palavra do
  * campo na frase não lê nada: um CEP ou um CPF não pode virar valor. `"vazio"` = não veio.
  */
-function lerCondicaoRotulada(fa: FaltanteDeCaptacao, texto: string): Leitura {
-  const t = normalizar(texto);
+export function lerCondicaoRotulada(fa: FaltanteDeCaptacao, texto: string): Leitura {
+  // Sem CPF/CNPJ/telefone (senão "CPF 123.456.789-09" vira o número 123456789) e com o número LOGO depois do rótulo
+  // ("valor a combinar, CEP 01310-100" não tem número do valor: o CEP não pode ocupar o lugar).
+  const limpo = lerNumeros(texto).restante;
+  const t = normalizar(limpo);
   const num = (n: number | undefined) => (typeof n === "number" && n >= 0 ? n : undefined);
+  const logoApos = (rotulo: string) => new RegExp(`\\b(?:${rotulo})(?:\\s+(?:${LIGACAO_DO_ROTULO})\\b)*[\\s:=–-]*(?:r\\$\\s*)?\\d`).test(t);
   switch (fa.path) {
     case "condicoes.valor": {
-      if (!/\b(valor|preco|pretend\w*|pedind\w*)\b/.test(t)) return "vazio";
-      const v = num(lerCondicoes(texto, "venda").condicoes.valor as number | undefined);
+      if (!logoApos("valor|preco|pretend\\w*|pedind\\w*")) return "vazio";
+      const v = num(lerCondicoes(limpo, "venda").condicoes.valor as number | undefined);
       return v === undefined ? "vazio" : { dados: { condicoes: { valor: v } }, eco: `${fa.rotulo}: ${brValor(v)}` };
     }
     case "condicoes.comissao_percent": {
-      if (!/\bcomiss\w*/.test(t)) return "vazio";
-      const p = num(lerCondicoes(texto, "venda").condicoes.comissao_percent as number | undefined);
+      if (!logoApos("comiss\\w*") && !/\d\s*(?:%|por cento)\s*(?:de\s+)?comiss/.test(t)) return "vazio";
+      const p = num(lerCondicoes(limpo, "venda").condicoes.comissao_percent as number | undefined);
       return p === undefined || p > 100 ? "vazio" : { dados: { condicoes: { comissao_percent: p } }, eco: `${fa.rotulo}: ${p}%` };
     }
     case "locacao.aluguel": {
-      if (!/\b(alugue[lu]|valor|preco|pretend\w*|pedind\w*)\b/.test(t)) return "vazio";
-      const v = num(lerCondicoes(texto, "locacao").locacao.aluguel as number | undefined);
+      if (!logoApos("alugue[lu]|valor|preco|pretend\\w*|pedind\\w*")) return "vazio";
+      const v = num(lerCondicoes(limpo, "locacao").locacao.aluguel as number | undefined);
       return v === undefined ? "vazio" : { dados: { locacao: { aluguel: v } }, eco: `${fa.rotulo}: ${brValor(v)}` };
     }
     default:
@@ -1494,6 +1510,11 @@ const DONO_NA_ABERTURA = /\bpropriet[aá]ri[oa]\s*(?:é|eh|:|-|–|se chama)\s*(
 const FIM_DO_NOME_NA_FRASE = /\s+(?:que|ela|ele|e\s+(?:ela|ele)|mora|tem|quer|est[aá]|vai|pretende)\b.*$/i;
 const RUA_NA_ABERTURA = /\b(?:rua|avenida|av\.?|alameda|travessa|rodovia|estrada|pra[cç]a)\s+[^,\n]+?,\s*\d+[a-z]?\b/iu;
 
+/** Onde a janela do dono termina: " com " (casada com João), "dele", cônjuge, outro proprietário, ou o fim da frase. */
+const FIM_DA_JANELA_DO_DONO = /\s+com\s+|\bdele\b|\b(?:marido|esposa|esposo|c[oô]njuge)\b|\bpropriet[aá]ri[oa]s?\b|\n|\.\s+(?=\p{L})/iu;
+/** Um CPF seguido de "dele"/"do marido"/"da esposa"/"do cônjuge" é de outra pessoa. */
+const CPF_DE_OUTRA_PESSOA = new RegExp(`${RE_CPF.source}(?=\\s*,?\\s*(?:dele|do\\s+(?:marido|esposo|c[oô]njuge)|da\\s+esposa))`, "giu");
+
 /**
  * "A proprietária é a Maria Silva, ela é viúva, telefone …, e-mail …": o dono que a pessoa já deu na 1ª
  * mensagem. Só com o rótulo "proprietário é/:" e nome de verdade; contato e documento só valem quando
@@ -1502,11 +1523,18 @@ const RUA_NA_ABERTURA = /\b(?:rua|avenida|av\.?|alameda|travessa|rodovia|estrada
 export function lerDonoDaAbertura(texto: string): DonoDaAbertura | null {
   const m = DONO_NA_ABERTURA.exec(texto);
   if (!m) return null;
-  const nome = m[1]!.replace(FIM_DO_NOME_NA_FRASE, "").trim();
+  const semFim = m[1]!.replace(FIM_DO_NOME_NA_FRASE, "");
+  const nome = semFim.trim();
   if (!nomeValido(nome) || !noTexto(nome, texto)) return null;
-  const n = lerNumeros(texto);
-  const emails = lerEmails(texto);
-  const civil = ESTADO_CIVIL.exec(normalizar(texto.slice(m.index, m.index + 300)))?.[1];
+  // Contato, documento e estado civil só valem na janela logo depois do nome: até a próxima pessoa citada
+  // ("casada com João", "dele", "do marido"), o fim da frase ou ~100 caracteres. Fora dela é de outro (ou do imóvel).
+  const fimDoNome = m.index + m[0].indexOf(m[1]!) + semFim.length;
+  const bruta = texto.slice(fimDoNome, fimDoNome + 100).replace(CPF_DE_OUTRA_PESSOA, " ");
+  const corte = FIM_DA_JANELA_DO_DONO.exec(bruta)?.index;
+  const janela = corte === undefined ? bruta : bruta.slice(0, corte);
+  const n = lerNumeros(janela);
+  const emails = lerEmails(janela);
+  const civil = ESTADO_CIVIL.exec(normalizar(janela))?.[1];
   return {
     nome,
     ...(n.cpfs.length === 1 && !n.cnpjs.length ? { cpf: n.cpfs[0]! } : {}),

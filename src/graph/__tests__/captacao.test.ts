@@ -2486,3 +2486,80 @@ describe("abertura (17/11, prod): valor, proprietária e nome vindos da 1ª mens
     expect(verbos("captacao.create")[0]!.args.nome).toBe("Apto da Dona Maria");
   });
 });
+
+describe("review R2 (17/11): condição rotulada e R$ único não gravam valor errado", () => {
+  const FV = { path: "condicoes.valor", rotulo: "Valor" };
+  const FC = { path: "condicoes.comissao_percent", rotulo: "Comissão" };
+  const FA = { path: "locacao.aluguel", rotulo: "Aluguel" };
+
+  it("B3: 'valor a combinar, CPF …' não vira valor (CPF lido como número)", () => {
+    expect(cap.lerCondicaoRotulada(FV, "valor a combinar, CPF 123.456.789-09")).toBe("vazio");
+    expect(cap.lerCondicaoRotulada(FV, "o valor a combinar. CPF 529.982.247-25")).toBe("vazio");
+  });
+
+  it("B3: 'valor a definir, CEP …' não vira valor (CEP lido como número)", () => {
+    expect(cap.lerCondicaoRotulada(FV, "valor a definir, CEP 01310-100")).toBe("vazio");
+    expect(cap.lerCondicaoRotulada(FA, "aluguel a combinar, CEP 01310-100")).toBe("vazio");
+  });
+
+  it("B3: 'valor a combinar, telefone …' e comissão a combinar também não leem nada", () => {
+    expect(cap.lerCondicaoRotulada(FV, "valor a combinar, telefone 11 90000-0004")).toBe("vazio");
+    expect(cap.lerCondicaoRotulada(FC, "comissão a combinar, CEP 01310-100")).toBe("vazio");
+  });
+
+  it("B3: o rótulo logo antes do número continua lendo", () => {
+    expect(cap.lerCondicaoRotulada(FV, "valor de venda R$ 850.000, comissão 6%")).toMatchObject({ dados: { condicoes: { valor: 850000 } } });
+    expect(cap.lerCondicaoRotulada(FV, "valor 850 mil")).toMatchObject({ dados: { condicoes: { valor: 850000 } } });
+    expect(cap.lerCondicaoRotulada(FV, "valor: R$ 850.000, CPF 529.982.247-25")).toMatchObject({ dados: { condicoes: { valor: 850000 } } });
+    expect(cap.lerCondicaoRotulada(FC, "valor 850 mil, comissão 6%")).toMatchObject({ dados: { condicoes: { comissao_percent: 6 } } });
+    expect(cap.lerCondicaoRotulada(FA, "aluguel R$ 3.000")).toMatchObject({ dados: { locacao: { aluguel: 3000 } } });
+  });
+
+  it("B6: R$ de comissão, taxa, financiamento, sinal, entrada ou saldo não é o valor do imóvel", () => {
+    expect(cap.lerCondicoes("comissão de R$ 40 mil", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("financiamento de R$ 200 mil, valor a definir", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("sinal de R$ 80 mil", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("entrada de R$ 100.000", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("saldo R$ 300.000", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("taxa de administração R$ 300", "locacao").locacao.aluguel).toBeUndefined();
+    expect(cap.lerCondicoes("IPTU R$ 300", "locacao").locacao.aluguel).toBeUndefined();
+  });
+
+  it("B6: o R$ sem rótulo continua sendo o valor, mesmo com comissão em % na frase", () => {
+    expect(cap.lerCondicoes("ela quer vender por R$ 1.350.000, comissão de 5%", "venda").condicoes).toEqual({ valor: 1350000, comissao_percent: 5 });
+    expect(cap.lerCondicoes("casa grande, quer vender por R$ 900.000", "venda").condicoes.valor).toBe(900000);
+  });
+});
+
+describe("review R2 (17/11): dono da abertura só recebe o que vem logo depois do nome (B7)", () => {
+  const CPF_DELE = "529.982.247-25";
+
+  it("CPF 'dele' (do cônjuge) não vai para a proprietária; o estado civil dela fica", () => {
+    const d = cap.lerDonoDaAbertura(`A proprietária é a Maria Silva, casada com João, CPF dele ${CPF_DELE}`);
+    expect(d).toMatchObject({ nome: "Maria Silva", estadoCivil: "casada" });
+    expect(d!.cpf).toBeUndefined();
+  });
+
+  it("CPF seguido de 'dele' / 'do marido' não é atribuído", () => {
+    expect(cap.lerDonoDaAbertura(`A proprietária é a Maria Silva, CPF ${CPF_DELE} dele, casada com João`)!.cpf).toBeUndefined();
+    expect(cap.lerDonoDaAbertura(`A proprietária é a Maria Silva, tem CPF ${CPF_DELE} do marido`)!.cpf).toBeUndefined();
+  });
+
+  it("telefone e e-mail do cônjuge não vão para a proprietária", () => {
+    const d = cap.lerDonoDaAbertura("A proprietária é a Maria Silva, casada com João, telefone dele 11 90000-0004, e-mail dele joao@example.com");
+    expect(d!.telefone).toBeUndefined();
+    expect(d!.email).toBeUndefined();
+  });
+
+  it("estado civil só vale logo depois do nome, não na descrição do imóvel", () => {
+    const d = cap.lerDonoDaAbertura("A proprietária é a Maria Silva, tel 11 90000-0004. O imóvel é uma casa com a garagem separada da sala, Rua X, 10");
+    expect(d).toMatchObject({ nome: "Maria Silva", telefone: "11900000004" });
+    expect(d!.estadoCivil).toBeUndefined();
+  });
+
+  it("CPF, telefone, e-mail e estado civil logo depois do nome continuam valendo", () => {
+    expect(cap.lerDonoDaAbertura(`A proprietária é a Maria Silva, CPF ${CPF_DELE}, solteira, tel 11 90000-0004, e-mail maria@example.com`)).toEqual({
+      nome: "Maria Silva", cpf: "52998224725", telefone: "11900000004", email: "maria@example.com", estadoCivil: "solteira",
+    });
+  });
+});

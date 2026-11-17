@@ -204,7 +204,8 @@ const PEDE_ESCRITA =
   /(formul[aá]ri|ficha|cadastr|link|proposta|abrir?|cri(a|ar|e)|nov[oa] (neg[oó]cio|venda|loca[cç][aã]o|cliente)|manda?r? o link)/i;
 
 export function shouldOfferTools(text: string): boolean {
-  return PEDE_ESCRITA.test(text);
+  // "propsta"/"porposta"…: a mesma tolerância de `ehPedidoDeCriacao` (que tira as leituras e deixa o modelo sem tool).
+  return PEDE_ESCRITA.test(text) || /\bproposta/.test(corrigirProposta(normalizar(text)));
 }
 
 /**

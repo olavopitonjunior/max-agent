@@ -65,6 +65,23 @@ describe("entrada", () => {
     expect(p.reply).not.toBe(F.TEXTO_ESCOLHA);
     expect(d.acao).not.toHaveBeenCalledWith("form.create", expect.anything());
   });
+  // Review R2 (B4): consulta/referência a proposta que já existe nunca vira proposta rápida.
+  it.each([
+    "qual o valor da proposta do comprador João?",
+    "qual o valor da proposta do comprador João",
+    "ver a proposta de compra do Pedro, valor R$ 800.000",
+    "status da proposta de venda PROP-2026-0042",
+    "consultar proposta de compra do comprador Ana",
+    "enviar a proposta de compra do comprador Ana",
+    "assinar a proposta de compra do comprador Ana, valor R$ 500.000",
+    "o comprador aceitou a proposta de compra, valor R$ 800.000?",
+  ])("consulta não vira proposta rápida: %s", async (pedido) => {
+    expect(F.pedidoClaroDeProposta(pedido)).toBe(false);
+    const d = deps();
+    const p = await F.iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, d);
+    expect(p.fluxo?.kind).not.toBe("proposta");
+    expect(d.acao).not.toHaveBeenCalledWith("form.create", expect.anything());
+  });
   it("proposta de compra, mas com 'formulário' explícito, continua perguntando", async () => {
     const p = await F.iniciarFluxo({ tipo: "proposta", pedido: "proposta de compra e o formulário do Pedro", policy: [...TUDO], agora }, deps());
     expect(p.fluxo?.kind).toBe("escolha");
@@ -982,6 +999,17 @@ describe("erro de digitação em 'proposta' (B9, 17/11)", () => {
     expect(ehPedidoDeCriacao("max preciso de uma proposta")).toBe(true);
     expect(ehPedidoDeCriacao("como está a propsta do Carlos?")).toBe(false);
     expect(ehPedidoDeCriacao("tem propsta nova?")).toBe(false);
+  });
+
+  it.each(ERROS)("no turno real, 'max preciso de uma %s' oferece propor_criacao (shouldOfferTools tolera o erro)", async (e) => {
+    const { ferramentasDoTurno, shouldOfferTools } = await import("../tools");
+    expect(shouldOfferTools(`max preciso de uma ${e}`)).toBe(true);
+    const r = ferramentasDoTurno({
+      policy: ["deal.list", "deal.pending", "proposal.list", "form.create", "proposal.create"],
+      texto: `max preciso de uma ${e}`,
+      identity: { orgId: "org1", orgName: "FINCasa", kind: "user", userId: "u1", userName: "Olavo" },
+    });
+    expect(r.entradas.map((x) => x.nome)).toContain("propor_criacao");
   });
 
   it.each(ERROS)("'%s' na escolha 1/2 vale como proposta", (e) => {
