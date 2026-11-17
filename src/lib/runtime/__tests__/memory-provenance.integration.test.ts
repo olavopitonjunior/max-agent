@@ -14,7 +14,7 @@ d('runtime preference provenance',()=>{
   await withExecution(base,async()=>{expect(await loadFacts(org,phone)).toEqual({});await saveFacts(org,phone,{foco:'Locação'});expect(await loadFacts(org,phone)).toEqual({foco:'Locação'});});
   const [row]=await query('SELECT source_task_id,workflow_version,subject_digest FROM memory_facts WHERE org_id=$1 AND subject_digest=$2',[org,contentDigest(base.subject)]);
   expect(row).toEqual({source_task_id:base.taskId,workflow_version:'max-v1',subject_digest:contentDigest(base.subject)});
-  await withExecution({...base,subject:{kind:'user',userId:'subject-b'}},async()=>{expect(await loadFacts(org,phone)).toEqual({});await saveFacts(org,phone,{tratamento:'Doutor'});expect(await loadFacts(org,phone)).toEqual({tratamento:'Doutor'});});
+  await withExecution({...base,subject:{kind:'user',userId:'subject-b'}},async()=>{expect(await loadFacts(org,phone)).toEqual({});await saveFacts(org,phone,{canal:'Áudio'});expect(await loadFacts(org,phone)).toEqual({canal:'Áudio'});});
   await withExecution(base,async()=>expect(await loadFacts(org,phone)).toEqual({foco:'Locação'}));
   expect(await loadFacts(org,phone)).toEqual({legacy:'Preferência antiga'});
  });

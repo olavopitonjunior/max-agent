@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   CAMPOS_PROIBIDOS_AO_BROKER,
+  lerDealDetalhado,
+  type DealDetalhadoBroker,
+  type DealDetalhadoUser,
   type DealProjetadoBroker,
   type DealProjetadoUser,
   type ScopeQueryRequest,
@@ -8,6 +11,13 @@ import {
   VERBOS_DE_LEITURA,
 } from "../scope-contract";
 import { catalog, executableTool } from "@/lib/runtime/catalog";
+import { VETOR_CERTIDAO_STATUS_USER } from "./certidao-status-vectors";
+import { lerCertidaoStatus, CHAVES_DE_CERTIDAO_STATUS } from "../certidao-status";
+import { VETOR_DOCUMENT_LIST_USER } from "./documentos-vectors";
+import { lerDocumento, CHAVES_DE_DOCUMENTO } from "../documentos";
+import { VETOR_CHARGE_STATUS_USER } from "./cobranca-vectors";
+import { lerCobranca, CHAVES_DE_COBRANCA } from "../cobranca";
+import { VETOR_DEAL_DETAIL_BROKER, VETOR_DEAL_DETAIL_USER } from "./deal-detail-vectors";
 
 /**
  * Vetor fixo do contrato de `POST /api/agents/scope-query` — a metade daqui.
@@ -112,7 +122,7 @@ describe("paridade do contrato de scope-query", () => {
  * (`contractmaker/apps/web/src/lib/max/`). Literal de propósito: derivar da
  * constante deste lado acompanharia uma divergência em silêncio. Verbo que o
  * ImobPro aceita e este lado não conhece nunca é chamado; o contrário volta 400.
- * `pending.summary` (24/10/2026) é o último.
+ * `certidao.status` (PR-O4b, 16/11/2026) vem depois de `pending.summary`; `document.list` (PR-O4c) vem depois; `charge.status` (PR-O4d) é o último.
  */
 const VERBOS_DE_LEITURA_DO_IMOBPRO = [
   "deal.list",
@@ -129,6 +139,9 @@ const VERBOS_DE_LEITURA_DO_IMOBPRO = [
   "contract.status",
   "template.decisions",
   "pending.summary",
+  "certidao.status",
+  "document.list",
+  "charge.status",
 ];
 
 describe("paridade dos verbos de leitura", () => {
@@ -162,5 +175,274 @@ describe("paridade dos verbos de leitura", () => {
   it("os outros verbos de consulta nova continuam atrás de MAX_EXTENDED_QUERIES", () => {
     const t = catalog("org1").tools.find((x) => x.id === "activity.list");
     expect(t).toMatchObject({ flag: "MAX_EXTENDED_QUERIES" });
+  });
+});
+
+/**
+ * `certidao.status` (PR-O4b): vetor fixo copiado byte a byte do CM
+ * (`apps/web/src/lib/max/__tests__/query-vectors.ts`, chave `certidao.status.user`, com `modelo`).
+ * Só a forma do usuário: o corretor comissionado nunca recebe o verbo (o servidor responde
+ * `{"items":[]}`), então não há vetor de corretor.
+ */
+describe("paridade do vetor certidao.status", () => {
+  const corpo = JSON.parse(VETOR_CERTIDAO_STATUS_USER) as { items: Array<Record<string, unknown>>; truncated: unknown };
+
+  it("certidao.status é leitura, atrás de MAX_EXTENDED_QUERIES (nasce desligada), com a capability de mesmo nome", () => {
+    const t = catalog("org1").tools.find((x) => x.id === "certidao.status");
+    expect(t).toMatchObject({
+      executor: "scope-query",
+      effect: "read",
+      flag: "MAX_EXTENDED_QUERIES",
+      permission: "certidao.status",
+      policyCapability: "certidao.status",
+    });
+    vi.stubEnv("MAX_EXTENDED_QUERIES", "false");
+    try {
+      expect(executableTool("certidao.status", "scope-query", "org1")).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("a ordem das chaves do item é a do CM (o corpo HTTP a preserva)", () => {
+    for (const it of corpo.items) expect(Object.keys(it)).toEqual([...CHAVES_DE_CERTIDAO_STATUS]);
+    expect(Object.keys(corpo)).toEqual(["items", "truncated"]);
+    expect(corpo.truncated).toBe(false);
+  });
+
+  it("parse ESTRITO: cada item do vetor é aceito e reserializa idêntico", () => {
+    const lidos = corpo.items.map((it) => lerCertidaoStatus(it));
+    expect(lidos.every((x) => x !== null)).toBe(true);
+    expect(JSON.stringify({ items: lidos, truncated: corpo.truncated })).toBe(VETOR_CERTIDAO_STATUS_USER);
+  });
+
+  it("parse ESTRITO: qualquer chave a mais, a menos ou de tipo errado é recusada, nunca repassada", () => {
+    for (const it of corpo.items) {
+      expect(lerCertidaoStatus({ ...it, novoCampo: 1 })).toBeNull();
+      for (const k of Object.keys(it)) {
+        const sem = { ...it };
+        delete sem[k];
+        expect(lerCertidaoStatus(sem), `sem ${k}`).toBeNull();
+      }
+    }
+    expect(lerCertidaoStatus(null)).toBeNull();
+    expect(lerCertidaoStatus("texto")).toBeNull();
+    expect(lerCertidaoStatus([])).toBeNull();
+  });
+});
+
+/**
+ * `document.list` (PR-O4c): vetor fixo copiado byte a byte do CM
+ * (`apps/web/src/lib/max/__tests__/query-vectors.ts`, chave `document.list.user`).
+ * Só a forma do usuário: o corretor comissionado nunca recebe o verbo (o servidor responde
+ * `{"items":[]}`), então não há vetor de corretor.
+ */
+describe("paridade do vetor document.list", () => {
+  const corpo = JSON.parse(VETOR_DOCUMENT_LIST_USER) as { items: Array<Record<string, unknown>>; truncated: unknown };
+
+  it("document.list é leitura, atrás de MAX_EXTENDED_QUERIES (nasce desligada), com a capability de mesmo nome", () => {
+    const t = catalog("org1").tools.find((x) => x.id === "document.list");
+    expect(t).toMatchObject({
+      executor: "scope-query",
+      effect: "read",
+      flag: "MAX_EXTENDED_QUERIES",
+      permission: "document.list",
+      policyCapability: "document.list",
+    });
+    vi.stubEnv("MAX_EXTENDED_QUERIES", "false");
+    try {
+      expect(executableTool("document.list", "scope-query", "org1")).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("a ordem das chaves do item é a do CM (o corpo HTTP a preserva)", () => {
+    for (const it of corpo.items) expect(Object.keys(it)).toEqual([...CHAVES_DE_DOCUMENTO]);
+    expect(Object.keys(corpo)).toEqual(["items", "truncated"]);
+    expect(corpo.truncated).toBe(false);
+  });
+
+  it("parse ESTRITO: cada item do vetor é aceito e reserializa idêntico", () => {
+    const lidos = corpo.items.map((it) => lerDocumento(it));
+    expect(lidos.every((x) => x !== null)).toBe(true);
+    expect(JSON.stringify({ items: lidos, truncated: corpo.truncated })).toBe(VETOR_DOCUMENT_LIST_USER);
+  });
+
+  it("parse ESTRITO: qualquer chave a mais ou a menos é recusada, nunca repassada", () => {
+    for (const it of corpo.items) {
+      expect(lerDocumento({ ...it, url: "https://x/y.pdf" })).toBeNull();
+      for (const k of Object.keys(it)) {
+        const sem = { ...it };
+        delete sem[k];
+        expect(lerDocumento(sem), `sem ${k}`).toBeNull();
+      }
+    }
+    expect(lerDocumento(null)).toBeNull();
+    expect(lerDocumento("texto")).toBeNull();
+    expect(lerDocumento([])).toBeNull();
+  });
+});
+
+/**
+ * `charge.status` (PR-O4d): vetor fixo copiado byte a byte do CM
+ * (`apps/web/src/lib/max/__tests__/query-vectors.ts`, chave `charge.status.user`).
+ * Só a forma do usuário: o corretor comissionado nunca recebe o verbo (o servidor responde `{"items":[]}`).
+ */
+describe("paridade do vetor charge.status", () => {
+  const corpo = JSON.parse(VETOR_CHARGE_STATUS_USER) as { items: Array<Record<string, unknown>>; truncated: unknown };
+
+  it("charge.status é leitura, atrás de MAX_EXTENDED_QUERIES (nasce desligada), com a capability de mesmo nome", () => {
+    const t = catalog("org1").tools.find((x) => x.id === "charge.status");
+    expect(t).toMatchObject({
+      executor: "scope-query",
+      effect: "read",
+      flag: "MAX_EXTENDED_QUERIES",
+      permission: "charge.status",
+      policyCapability: "charge.status",
+    });
+    vi.stubEnv("MAX_EXTENDED_QUERIES", "false");
+    try {
+      expect(executableTool("charge.status", "scope-query", "org1")).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("a ordem das chaves do item é a do CM (o corpo HTTP a preserva)", () => {
+    expect(corpo.items.length).toBeGreaterThan(0);
+    for (const it of corpo.items) expect(Object.keys(it)).toEqual([...CHAVES_DE_COBRANCA]);
+    expect(Object.keys(corpo)).toEqual(["items", "truncated"]);
+    expect(corpo.truncated).toBe(false);
+  });
+
+  it("parse ESTRITO: cada item do vetor é aceito e reserializa idêntico", () => {
+    const lidos = corpo.items.map((it) => lerCobranca(it));
+    expect(lidos.every((x) => x !== null)).toBe(true);
+    expect(JSON.stringify({ items: lidos, truncated: corpo.truncated })).toBe(VETOR_CHARGE_STATUS_USER);
+  });
+
+  it("parse ESTRITO: qualquer chave a mais ou a menos é recusada, nunca repassada", () => {
+    for (const it of corpo.items) {
+      expect(lerCobranca({ ...it, invoiceUrl: "https://x/y" })).toBeNull();
+      for (const k of Object.keys(it)) {
+        const sem = { ...it };
+        delete sem[k];
+        expect(lerCobranca(sem), `sem ${k}`).toBeNull();
+      }
+    }
+    expect(lerCobranca(null)).toBeNull();
+    expect(lerCobranca("texto")).toBeNull();
+    expect(lerCobranca([])).toBeNull();
+  });
+});
+
+/**
+ * `deal.detail` enriquecido (PR-O4a): os literais vivem em `deal-detail-vectors.ts`,
+ * copiados byte a byte do `query-vectors.ts` do contractmaker (#3167).
+ */
+describe("paridade de deal.detail (vetores do CM #3167)", () => {
+  const user = JSON.parse(VETOR_DEAL_DETAIL_USER) as ScopeQueryResponse<DealDetalhadoUser>;
+  const broker = JSON.parse(VETOR_DEAL_DETAIL_BROKER) as ScopeQueryResponse<DealDetalhadoBroker>;
+
+  it("o vetor do usuário re-serializa idêntico (ordem de chave do contrato)", () => {
+    expect(JSON.stringify(user)).toBe(VETOR_DEAL_DETAIL_USER);
+  });
+
+  it("o vetor do broker re-serializa idêntico (ordem de chave do contrato)", () => {
+    expect(JSON.stringify(broker)).toBe(VETOR_DEAL_DETAIL_BROKER);
+  });
+
+  it("o detalhe do usuário começa pelas 7 chaves de deal.list, na mesma ordem", () => {
+    expect(Object.keys(user.items[0]).slice(0, 7)).toEqual(Object.keys(ITEM_USER));
+    expect(Object.keys(user.items[0]).slice(7)).toEqual(["tipo", "partes", "contrato", "proposta", "assinatura", "link"]);
+  });
+
+  it("o vetor do broker NÃO contém nenhum campo proibido (ausência, em qualquer profundidade)", () => {
+    for (const proibido of [...CAMPOS_PROIBIDOS_AO_BROKER, "nome", "link", "proposta", "url"]) {
+      expect(VETOR_DEAL_DETAIL_BROKER).not.toContain(`"${proibido}"`);
+    }
+    expect(VETOR_DEAL_DETAIL_BROKER).not.toMatch(/Maria|João|Apto Centro|850000/);
+  });
+
+  it("o parser aceita os dois vetores, do jeito que vieram", () => {
+    expect(lerDealDetalhado(user.items[0], "user")).toEqual(user.items[0]);
+    expect(lerDealDetalhado(broker.items[0], "broker")).toEqual(broker.items[0]);
+  });
+
+  it("a mesma resposta em outro sujeito NÃO é aceita (user lê com forma de broker e vice-versa)", () => {
+    expect(lerDealDetalhado(user.items[0], "broker")).toBeNull();
+    expect(lerDealDetalhado(broker.items[0], "user")).toBeNull();
+  });
+});
+
+describe("lerDealDetalhado — parse defensivo (chave extra é removida; obrigatória ausente derruba)", () => {
+  const user = JSON.parse(VETOR_DEAL_DETAIL_USER).items[0] as Record<string, unknown>;
+  const broker = JSON.parse(VETOR_DEAL_DETAIL_BROKER).items[0] as Record<string, unknown>;
+
+  // O CM pode ganhar campo ADITIVO: isso não pode derrubar o Max em produção. O parse monta o objeto
+  // campo a campo a partir da allowlist, então a chave extra nunca é copiada nem renderizada.
+  it.each([
+    ["cpf no topo (user)", { ...user, cpf: "52998224725" }, "user", user],
+    ["cpf no topo (broker)", { ...broker, cpf: "52998224725" }, "broker", broker],
+    ["email, url e dataJson no topo (user)", { ...user, email: "a@b.c", url: "https://x", dataJson: { a: 1 } }, "user", user],
+    [
+      "email aninhado em partes (user)",
+      { ...user, partes: [{ papel: "vendedor", nome: "João Souza", email: "a@b.c" }, { papel: "comprador", nome: "Maria Silva", cpf: "52998224725" }] },
+      "user",
+      user,
+    ],
+    [
+      "nome aninhado em partes (broker)",
+      { ...broker, partes: [{ papel: "vendedor", nome: "João Souza" }, { papel: "comprador", cpf: "52998224725" }] },
+      "broker",
+      broker,
+    ],
+    ["campo extra em contrato", { ...user, contrato: { ...(user.contrato as object), url: "https://x" } }, "user", user],
+    ["campo extra em proposta", { ...user, proposta: { ...(user.proposta as object), cpf: "52998224725" } }, "user", user],
+    ["campo extra em assinatura (user)", { ...user, assinatura: { ...(user.assinatura as object), signatarios: ["a"] } }, "user", user],
+    ["campo extra em assinatura (broker)", { ...broker, assinatura: { ...(broker.assinatura as object), signatarios: ["a"] } }, "broker", broker],
+    ["link e titulo no broker", { ...broker, link: "/deals/deal-1", titulo: "Apto" }, "broker", broker],
+  ] as const)("%s -> item mantido, chave extra ausente do objeto parseado", (_t, item, kind, esperado) => {
+    const lido = lerDealDetalhado(item, kind);
+    expect(lido).toEqual(esperado);
+    expect(JSON.stringify(lido)).not.toMatch(/52998224725|a@b\.c|https:\/\/x|dataJson|signatarios/);
+    if (kind === "broker") expect(JSON.stringify(lido)).not.toMatch(/João|titulo|"link"|Apto/);
+  });
+
+  it("chave obrigatória ausente derruba o item (fail-closed), em qualquer nível", () => {
+    const sem = (o: Record<string, unknown>, k: string) => Object.fromEntries(Object.entries(o).filter(([c]) => c !== k));
+    const casos: [string, unknown, "user" | "broker"][] = [
+      ["id", sem(user, "id"), "user"],
+      ["link (user)", sem(user, "link"), "user"],
+      ["referencia (broker)", sem(broker, "referencia"), "broker"],
+      ["partes[].nome (user)", { ...user, partes: [{ papel: "vendedor" }] }, "user"],
+      ["partes[].papel (broker)", { ...broker, partes: [{}] }, "broker"],
+      ["contrato.versao", { ...user, contrato: sem(user.contrato as Record<string, unknown>, "versao") }, "user"],
+      ["assinatura.total", { ...user, assinatura: sem(user.assinatura as Record<string, unknown>, "total") }, "user"],
+      ["assinatura.pendentes (broker)", { ...broker, assinatura: sem(broker.assinatura as Record<string, unknown>, "pendentes") }, "broker"],
+    ];
+    for (const [, item, kind] of casos) expect(lerDealDetalhado(item, kind)).toBeNull();
+  });
+
+  it.each([
+    ["sem etapa", (({ etapa: _e, ...r }) => r)(user)],
+    ["pendencias não é lista", { ...user, pendencias: "x" }],
+    ["tipo desconhecido", { ...user, tipo: "permuta" }],
+    ["contagem negativa", { ...user, assinatura: { ...(user.assinatura as object), pendentes: -1 } }],
+    ["contagem decimal", { ...user, assinatura: { ...(user.assinatura as object), total: 1.5 } }],
+    ["versão não numérica", { ...user, contrato: { ...(user.contrato as object), versao: "2" } }],
+  ])("forma inválida (%s) -> null", (_t, item) => {
+    expect(lerDealDetalhado(item, "user")).toBeNull();
+  });
+
+  it.each([null, undefined, "x", 3, [], [{}]])("não-objeto %j -> null", (v) => {
+    expect(lerDealDetalhado(v, "user")).toBeNull();
+    expect(lerDealDetalhado(v, "broker")).toBeNull();
+  });
+
+  it("null em contrato, proposta e assinatura é válido (a chave existe, o valor é null)", () => {
+    expect(lerDealDetalhado({ ...user, contrato: null, proposta: null, assinatura: null }, "user")).not.toBeNull();
+    expect(lerDealDetalhado({ ...broker, contrato: null, assinatura: null }, "broker")).not.toBeNull();
   });
 });
