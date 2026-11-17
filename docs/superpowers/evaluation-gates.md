@@ -51,3 +51,34 @@ Registrar conclusão por domínio e papel, correções necessárias, factualidad
 Violação de tenant/sujeito, cobrança sem confirmação, duplicação de efeito ou recriação de dado apagado bloqueia a promoção. Para qualidade e desempenho, o responsável do produto define o limite aceitável após medir o baseline e registra a decisão; esta entrega não inventa um SLO aprovado. Falhas de render e voz são avaliadas separadamente da qualidade textual para permitir desligar apenas a categoria afetada.
 
 No canário, acompanhar primeiro uma organização e os domínios habilitados, com responsável por atendimento e por resultado incerto. Revisar amostras com minimização de dados; não alimentar automaticamente memória, treino ou prompts com conversas coletadas. Ampliar somente depois de registrar a decisão de produto e os indicadores da mesma versão. O [runbook](runtime-operations.md) descreve desligamento por categoria e reconciliação durante rollback.
+
+## Golden set de conversas (Max e Newton)
+
+Conjunto pequeno e fixo de conversas sintéticas que viraram defeito em teste manual (M4', M6b, M8/R5, M9, R2, R3, R4, W46). Cada caso tem a expectativa escrita antes da correção; no baseline vários falham de propósito. Casos em `evals/golden/casos.ts`, harness em `scripts/eval-golden.eval.ts`, simulador do ImobPro em `scripts/eval-simulador.ts`. Usa o grafo inteiro com o modelo de produção (OpenRouter) e o ImobPro simulado: nada é gravado. Sem juiz LLM, toda checagem é determinística.
+
+Dados: nomes "TESTE ...", telefone 11999990000 e, só onde marcado `sintetico`, o CPF válido de teste 111.444.777-35. O formato das leituras simuladas (`deal.list`, `contract.status`, `metrics.get`, `pending.summary`) é inferido; o contrato do servidor não está neste repositório.
+
+Comandos (custam centavos; exigem `OPENROUTER_API_KEY`):
+
+```
+# Max
+EVAL_N=1 EVAL_REPORT_ONLY=true EVAL_SAIDA=/caminho/golden-max.json \
+  npx vitest run --config vitest.eval.config.ts scripts/eval-golden.eval.ts
+
+# Newton
+AGENT_DEPLOY_PROFILE=newton EVAL_N=1 EVAL_REPORT_ONLY=true EVAL_SAIDA=/caminho/golden-newton.json \
+  npx vitest run --config vitest.eval.config.ts scripts/eval-golden.eval.ts
+```
+
+`EVAL_SO` (regex em id/origem) roda só alguns casos; `EVAL_N` repete para medir variabilidade (o modelo não é determinístico, 1 repetição é só um retrato). Sem `EVAL_REPORT_ONLY=true` o teste reprova quando o gate falha. O perfil define quais casos rodam (`bot: "max"` ou `"newton"`). As métricas de `scripts/eval-quality.ts` têm testes em `scripts/__tests__/eval-golden-metrics.test.ts` e `eval-golden-casos.test.ts`, que rodam no `npm test`.
+
+| Métrica | Meta (gate) | Como é medida |
+| --- | --- | --- |
+| `promessaSemEfeito` | 0 | O texto promete ("ajusto", "vou ajustar/atualizar/gerar/criar", "já atualizo", "te atualizo/aviso", "será criado") e o turno não executou nenhuma escrita (verbo fora de `READ_ACTIONS`). Ignora negação ("não vou...") e o card que pede `SIM`/`Confirma?` |
+| `formato` | 0 | Qualquer `**`, `##`, `⟨⟩`, `n=<número>`, snake_case, verbo interno (`deal.list`) ou nome de terceiro como vocativo ("Pronto, João!") em qualquer turno. URL e CPF mascarado não contam |
+| Ações certas | >= 98% | Dos turnos com verbo/argumento esperado ou proibido, a fração em que tudo bateu |
+| `perguntasPorTarefa` | proposta <= 3 | Turnos do usuário até o primeiro card de confirmação (`SIM`/`Confirma?`/"Criei o rascunho"). Tarefa sem card conta como não concluída e reprova. Captação é reportada, sem meta |
+
+Gate: 0 promessa sem efeito, 0 formato, >= 98% de ações certas e proposta dentro da meta. A saída JSON traz `resumo`, `gate.motivos`, `metricas` e uma linha por turno (resposta, verbos, falhas).
+
+Limites: `promessaSemEfeito` é heurística por expressão regular (um "te aviso" legítimo pode acusar falso positivo; revisar o turno apontado). O vocativo só vê os nomes da lista `TERCEIROS_PADRAO` do caso. Passar no golden não prova qualidade: ele protege contra a volta dos defeitos já vistos.

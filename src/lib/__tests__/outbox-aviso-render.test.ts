@@ -64,6 +64,48 @@ describe("renderMessage com aviso", () => {
     expect(out).toContain("👉 Abrir negócio:");
   });
 
+  describe("decisão da proposta (proposal_awaiting_decision)", () => {
+    const DECISAO = {
+      ...LINHA,
+      kind: "proposal_awaiting_decision",
+      title: "Proponente assinou",
+      body: "O proponente assinou. Decida: enviar a 2ª via ao proprietário ou concluir sem enviar. https://x.test/p/cmx1",
+      link_url: "https://x.test/p/cmx1",
+      aviso: null,
+    };
+    const PERGUNTA = "Proposta PROP-2026-0031: Responda ENVIAR para mandar ao proprietário ou ENCERRAR para concluir.";
+
+    it("sem o fato decisao (CM antigo): texto idêntico ao de antes", () => {
+      const out = renderMessage({ ...DECISAO, params: { proposta: "PROP-2026-0031 Rua X" } });
+      expect(out).not.toContain("Responda ENVIAR");
+      expect(out).toBe(`Oi, Ana! *Proponente assinou*\n\n${DECISAO.body}\n\n_RE/MAX Trio_`);
+    });
+
+    it("liberar_etapa ou encerrar: não pergunta", () => {
+      for (const decisao of ["liberar_etapa", "encerrar"]) {
+        const out = renderMessage({ ...DECISAO, params: { codigo: "PROP-2026-0031", decisao } });
+        expect(out).not.toContain("Responda ENVIAR");
+      }
+    });
+
+    it("outro kind com decisao: não pergunta", () => {
+      const out = renderMessage({
+        ...DECISAO,
+        kind: "proposal_signed_all",
+        params: { codigo: "PROP-2026-0031", decisao: "enviar_proprietario_ou_encerrar" },
+      });
+      expect(out).not.toContain("Responda ENVIAR");
+    });
+
+    it("com codigo + decisao: a pergunta fixa vem depois do corpo e antes da assinatura da org", () => {
+      const out = renderMessage({
+        ...DECISAO,
+        params: { proposta: "PROP-2026-0031 Rua X", codigo: "PROP-2026-0031", decisao: "enviar_proprietario_ou_encerrar" },
+      });
+      expect(out).toBe(`Oi, Ana! *Proponente assinou*\n\n${DECISAO.body}\n\n${PERGUNTA}\n\n_RE/MAX Trio_`);
+    });
+  });
+
   it("aviso nulo: formato de hoje, com a assinatura em itálico escapado", () => {
     expect(renderMessage({ ...LINHA, aviso: null })).toBe(
       "Oi, Ana! *Formulário aguardando*\n\ncorpo antigo\n\nhttps://x.test/d\n\n_RE/MAX Trio_"

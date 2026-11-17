@@ -10,6 +10,7 @@ import { log } from "./log";
 import { resolveIdentity } from "./identity";
 import { deployProfile } from "./deploy-profile";
 import { escaparMarkdownWa } from "./aviso/escapar";
+import { perguntaDaDecisao } from "./aviso/decisao-proposta";
 import { renderAvisoTexto } from "./aviso/render";
 import { interativoDoAviso, PREFIXO_AVISO } from "./aviso/interativo";
 import { avisoParaAudiencia, groupKeyDoAviso, type Aviso } from "./aviso/schema";
@@ -307,6 +308,10 @@ export function renderMessage(row: {
   const parts = [`${hello}*${row.title}*`, row.body];
   // Avisos de proposta já chegam com a URL no corpo; repetir duplicava o link.
   if (row.link_url && !row.body.includes(row.link_url)) parts.push(row.link_url);
+  // Decisão do corretor após a assinatura do proponente: pergunta fixa com o código da proposta
+  // (fatos do emissor; sem modelo). É também o que fica semeado no thread quando sai por template.
+  const pergunta = perguntaDaDecisao(row.kind, row.params);
+  if (pergunta) parts.push(pergunta);
   if (row.org_name) parts.push(`_${escaparMarkdownWa(row.org_name)}_`);
   return parts.filter(Boolean).join("\n\n");
 }

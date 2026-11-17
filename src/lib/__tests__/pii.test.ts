@@ -6,6 +6,7 @@ import {
   destokenizarResposta,
   destokenizarArgs,
   redigir,
+  redigirProfundo,
 } from "@/lib/pii";
 
 // CPF de teste conhecido, DV válido (111.444.777-35 ≡ 11144477735).
@@ -247,5 +248,19 @@ describe("redigir (sem mapa, token fixo)", () => {
   it("não toca nos negativos (mesmos do tokenizar)", () => {
     const texto = "PROP-2026-0001, CRECI 123456-F, 10/10/2026, apto 302";
     expect(redigir(texto)).toBe(texto);
+  });
+});
+
+describe("redigirProfundo — `busca` (nome de negócio ou de cliente)", () => {
+  it("o valor de `busca` nunca passa, nem um nome que nenhuma regex pega", () => {
+    const out = redigirProfundo({ busca: "João Silva", limite: 5 });
+    expect(JSON.stringify(out)).not.toContain("João Silva");
+    expect(out.limite).toBe(5);
+  });
+
+  it("vale também aninhado, como no `tools_json` e no log", () => {
+    const out = redigirProfundo([{ name: "listar_negocios", args: { busca: "Casa Vila Nova", estado: "Assinado" } }]);
+    expect(JSON.stringify(out)).not.toContain("Casa Vila Nova");
+    expect(JSON.stringify(out)).toContain("Assinado");
   });
 });
