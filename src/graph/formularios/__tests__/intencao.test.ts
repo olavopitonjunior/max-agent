@@ -136,9 +136,13 @@ describe("lerIntencaoDeFormulario: corrigir", () => {
 });
 
 describe("v1 mantém o regex de hoje (feature desligada)", () => {
-  it("ehPedidoDeCriacao padrão não tolera erro de digitação", () => {
-    expect(ehPedidoDeCriacao("cria uma propsta pro João")).toBe(false);
-    expect(ehPedidoDeCriacao("cria uma porposta")).toBe(false);
+  it("ehPedidoDeCriacao padrão não tolera erro de digitação fora da lista fechada", () => {
+    // A base (master, 17/11) já aceita a lista fechada de `corrigirProposta` ("propsta",
+    // "porposta"…) sem a feature: isso é o v1 de hoje (fluxos.test.ts). A correção
+    // por distância de edição continua só no v2.
+    expect(ehPedidoDeCriacao("cria uma propsta pro João")).toBe(true);
+    expect(ehPedidoDeCriacao("cria uma propossta")).toBe(false);
+    expect(ehPedidoDeCriacao("preciso de um formulaio")).toBe(false);
     expect(ehPedidoDeCriacao("cria uma proposta pro João")).toBe(true);
     expect(ehPedidoDeCriacao("tem proposta nova?")).toBe(false);
   });
