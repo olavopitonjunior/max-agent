@@ -1531,6 +1531,67 @@ describe("achado 6 (revisão opus): resposta com CPF que termina em '?' não esc
     expect((s.fluxo as { pausado?: boolean } | null)?.pausado).toBe(false);
   });
 
+  /**
+   * Bug 4 (prod 16/11): toda resposta, de qualquer assunto, terminava em "Continuando a captação CAP-…: …".
+   * O lembrete vale UMA vez por pausa: a 2ª pergunta fora do assunto não o repete; ele só volta depois que
+   * a captação andou de verdade. O fluxo continua vivo (nada é apagado) e retomável.
+   */
+  describe("o 'Continuando a captação' aparece uma vez por pausa", () => {
+    async function ateAPausa() {
+      const fala = conversa();
+      extracao = IMOVEL_EXTRAIDO;
+      await fala("cria uma captação de venda do Apto da Dona Maria");
+      await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+      await fala("valor 850 mil");
+      return fala;
+    }
+
+    it("1ª resposta depois da pausa traz o lembrete; a 2ª, fora do assunto, não", async () => {
+      const fala = await ateAPausa();
+      const primeira = await fala("qual o horário de vocês?");
+      expect(primeira.reply).toContain("Continuando a captação");
+      const segunda = await fala("e aos sábados, abre?");
+      expect(segunda.reply).toContain("O horário é das 9h às 18h.");
+      expect(segunda.reply).not.toContain("Continuando a captação");
+      const terceira = await fala("e no domingo?");
+      expect(terceira.reply).not.toContain("Continuando a captação");
+    });
+
+    it("o fluxo não é apagado: segue retomável e o lembrete volta numa NOVA pausa", async () => {
+      const fala = await ateAPausa();
+      await fala("qual o horário de vocês?");
+      const sem = await fala("e aos sábados, abre?");
+      expect(sem.fluxo).toMatchObject({ kind: "captacao", etapa: "proprietarios" });
+      // Retoma: a pessoa responde o que a captação perguntava (o próximo passo é do fluxo, não do modelo).
+      const retomou = await fala(`Maria Silva, CPF ${CPF}`);
+      expect(retomou.reply).toContain("Anotei Maria Silva");
+      expect((retomou.fluxo as { lembradoEm?: number } | null)?.lembradoEm).toBeUndefined();
+      // Pausa de novo: o lembrete reaparece (uma vez).
+      const nova = await fala("qual o horário de vocês?");
+      expect(nova.reply).toContain("Continuando a captação");
+      const depois = await fala("e aos sábados, abre?");
+      expect(depois.reply).not.toContain("Continuando a captação");
+    });
+
+    it("pausa antiga (mais de 24h) não ganha o lembrete", async () => {
+      const fala = await ateAPausa();
+      const real = Date.now();
+      // Fluxo que sobrevive ao vencimento (envio com chave) é o caso em que a pausa dura dias.
+      const estado = await fala.app.getState({ configurable: { thread_id: fala.thread } });
+      const f = (estado.values as { fluxo: Record<string, unknown> }).fluxo;
+      await fala.app.updateState({ configurable: { thread_id: fala.thread } }, { fluxo: { ...f, atualizadoEm: real - 25 * 60 * 60 * 1000, chave: "k1" } });
+      const s = await fala("qual o horário de vocês?");
+      expect(s.reply).toContain("O horário é das 9h às 18h.");
+      expect(s.reply).not.toContain("Continuando a captação");
+      // Controle do teste: com a pausa recente, o mesmo estado ganha o lembrete.
+      const estado2 = await fala.app.getState({ configurable: { thread_id: fala.thread } });
+      const f2 = (estado2.values as { fluxo: Record<string, unknown> }).fluxo;
+      await fala.app.updateState({ configurable: { thread_id: fala.thread } }, { fluxo: { ...f2, atualizadoEm: Date.now(), lembradoEm: undefined } });
+      const recente = await fala("qual o horário de vocês?");
+      expect(recente.reply).toContain("Continuando a captação");
+    });
+  });
+
   it("o mesmo vale pra extras (testemunha/avulso) com e-mail/telefone", async () => {
     const fala = conversa();
     extracao = IMOVEL_EXTRAIDO;

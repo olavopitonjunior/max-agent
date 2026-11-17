@@ -73,6 +73,7 @@ import {
   textoFalhou,
   MUDAR_MINHAS_NOTIFICACOES,
   MINHAS_PENDENCIAS,
+  leiturasDeSegundaVolta,
   type PendingAction,
 } from "./tools";
 import { respostaDePendencias } from "./resumo-pendencias";
@@ -114,7 +115,7 @@ import {
   textoSemLeituraDeMidia,
   TEXTO_ASSUNTO_BLOQUEADO,
 } from "./prompt";
-import { limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
+import { limitarTamanho, paraWhatsApp, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
 import {
   argsDaCriacao,
@@ -125,7 +126,9 @@ import {
 } from "./despachante";
 import { renderizarNegociosSelecionados, type MapaDeReferencias } from "./referencias";
 import {
+  aposRetomada,
   conduzirFluxo,
+  deveLembrarDaPausa,
   fluxoExpirou,
   iniciarFluxo,
   lerEscolha,
@@ -1348,7 +1351,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
   const daFicha = atual.kind === "credito" || atual.kind === "captacao";
   return {
-    fluxo: passo.fluxo,
+    // O fluxo andou: a próxima pausa ganha o lembrete "Continuando…" de novo.
+    fluxo: aposRetomada(passo.fluxo),
     messages: [
       { role: "user", content: daFicha ? `(resposta da ficha de ${atual.kind === "captacao" ? "captação" : "crédito"})` : userText },
       { role: "assistant", content: passo.reply },
@@ -1743,7 +1747,13 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   const daOferta = state.toolRounds === 0 ? { toolsOferecidas: oferecidas, queryOptions: null }
     : clarification?.options.length ? { queryOptions: { subjectKey: stageSubject, createdAt: Date.now(),
         options: clarification.options, offset: 0, numbered: false } } : {};
-  const defs = [...oferta.entradas.map((e) => e.def), ...googleDefs];
+  // Volta > 0: só a leitura que consome o número da lista que a volta anterior acabou de montar (ver
+  // `leiturasDeSegundaVolta`). A oferta do turn não cresce: é subconjunto do que a volta 0 ofereceu.
+  const daSegundaVolta = state.toolRounds === 0 ? [] : leiturasDeSegundaVolta({
+    oferecidas: state.toolsOferecidas, referencias: state.referencias, turno: state.inbound.messageId,
+    policy: state.policy, identity: state.identity,
+  });
+  const defs = [...oferta.entradas.map((e) => e.def), ...googleDefs, ...daSegundaVolta.map((e) => e.def)];
   const tools = defs.length > 0 ? defs : undefined;
 
   /**
@@ -2246,7 +2256,8 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
 
   // Antes do teto: afirmação de criação no texto livre é falsa por construção
   // (escrita real sai por template) — ver `travarCriacaoFalsa`.
-  const trava = travarCriacaoFalsa(texto, {
+  // Markdown do modelo (`**x**`, `## título`) vira a sintaxe do WhatsApp; só aqui, no texto do modelo.
+  const trava = travarCriacaoFalsa(paraWhatsApp(texto), {
     houveLeitura: state.toolResults.some((r) => r.items !== null),
     podeCriar: modoDeCriacao(state.identity, state.policy) === "disponivel",
     podeEnviar: podeEscrever(state.identity) && state.policy.includes("proposal.send"),
@@ -2260,12 +2271,16 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   const final = limitarTamanho(trava.texto);
   // Ficha de crédito pausada por uma pergunta: volta ao campo em aberto.
   const pausada = (state.fluxo?.kind === "credito" || state.fluxo?.kind === "captacao") && state.fluxo.pausado ? state.fluxo : null;
-  const saida = pausada
+  // O lembrete vale UMA vez por pausa (`lembradoEm`) e só se a pausa é recente (24h): sem isso ele ia
+  // colado em toda resposta fora do assunto enquanto o fluxo ficasse aberto (prod 16/11).
+  const agoraCompose = Date.now();
+  const lembrar = pausada !== null && deveLembrarDaPausa(pausada, agoraCompose);
+  const saida = pausada && lembrar
     ? `${final.texto}\n\n${pausada.kind === "captacao" ? continuacaoCaptacao(pausada) : continuacaoCredito(pausada)}`
     : final.texto;
 
   return {
-    ...(pausada ? { fluxo: { ...pausada, pausado: false } } : {}),
+    ...(pausada ? { fluxo: { ...pausada, pausado: false, ...(lembrar ? { lembradoEm: agoraCompose } : {}) } } : {}),
     reply: saida,
     restoDaResposta: final.resto ? { texto: final.resto, criadoEm: Date.now() } : null,
     // Consumido: se sobrasse no checkpoint, o turno seguinte que respondesse
@@ -2995,12 +3010,10 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
             // mapa nenhum; `limpar` (memory.ts) descarta por garantia qualquer
             // fato que ainda carregue `⟨`.
             const textoRed = redigir(turnText);
-            const replyRed = redigir(reply);
             const novos = await extractFacts({
               orgId,
               phone,
               userText: textoRed,
-              replyText: replyRed,
               known: facts,
             });
             const gravados = await saveFacts(orgId, phone, novos);

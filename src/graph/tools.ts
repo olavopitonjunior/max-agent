@@ -1342,6 +1342,48 @@ export function ferramentasDoTurno(params: {
 }
 
 /**
+ * Verbos de leitura que CONSOMEM o número de uma lista de NEGÓCIOS/PROPOSTAS. Lista fechada (fail-closed):
+ * leitura de pack ou verbo novo só entra aqui por decisão explícita. `activity.get` e `property.detail`
+ * ficam de fora: consomem lista de atividades/imóveis, não a de negócios.
+ */
+const CONSOME_LISTA_DE_NEGOCIOS: ReadonlySet<string> = new Set([
+  "certidao.status", "document.list", "charge.status", "contract.status", "deal.detail", "proposal.detail",
+]);
+
+/**
+ * Depois de uma volta que montou uma lista de negócios/propostas NESTE turno (ex.: `listar_negocios` com
+ * `busca` para achar o negócio pelo nome), a volta seguinte precisa da leitura que consome o número, senão o
+ * modelo responde a partir da lista sem consultar o que foi pedido (prod 16/11: certidões e documentos).
+ *
+ * Reoferece SÓ o que: (1) já foi oferecido na volta 0 (`oferecidas`: a oferta continua sendo do turn);
+ * (2) é leitura e consome o número da lista de negócios/propostas; (3) a política e a identidade ainda
+ * permitem. Escrita e as tools que produzem lista nunca voltam. A lista do turn é a que o `numerarLista`
+ * gravou com o `messageId` deste turno.
+ */
+export function leiturasDeSegundaVolta(params: {
+  oferecidas: readonly string[];
+  referencias: { turno: string; itens: readonly { tipo: string }[] } | null;
+  turno: string;
+  policy: readonly Capability[];
+  identity: Candidate;
+  packs?: readonly ToolPack[];
+}): EntradaDeLeitura[] {
+  const listouNegocios =
+    params.referencias?.turno === params.turno &&
+    params.referencias.itens.some((i) => i.tipo === "negocio" || i.tipo === "proposta");
+  if (!listouNegocios) return [];
+  return entradasDoDeploy(params.packs).filter(
+    (e): e is EntradaDeLeitura =>
+      e.tipo === "leitura" &&
+      params.oferecidas.includes(e.nome) &&
+      CONSOME_LISTA_DE_NEGOCIOS.has(e.verb) &&
+      (e.def.parameters as { required?: string[] }).required?.includes("numero") === true &&
+      params.policy.includes(e.capability) &&
+      !(e.soUsuario && params.identity.kind !== "user")
+  );
+}
+
+/**
  * O pedido da pessoa que o Max deixou EM ABERTO com uma pergunta.
  *
  * Só vale quando a última mensagem do fio é do Max e pergunta algo ("venda ou
