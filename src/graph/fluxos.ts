@@ -47,7 +47,17 @@ import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-con
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
-import { juntarTelefone, TELEFONE_DITADO, telefoneDuvidoso } from "@/lib/phone";
+import {
+  ESTRANGEIRO,
+  juntarTelefone,
+  TELEFONE_DITADO,
+  telefoneDoModelo,
+  telefoneDoModeloDuvidoso,
+  telefoneDuvidoso,
+  telefoneEstrangeiroValido,
+  telefoneEstrangeiroNoFormato,
+  telefoneEstrangeiroNoTexto,
+} from "@/lib/phone";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -181,6 +191,11 @@ export type Fluxo =
        * dado em vez de entregar a frase ao modelo, que dizia "vou ajustar" sem gravar.
        */
       aguardaCampo?: { pessoa: "proponente" | "vendedor"; campo: "telefone" | "cpf" | "email" };
+      /**
+       * O turno anterior perguntou um telefone duvidoso (de quem, quando se sabe). Se a resposta repete um número
+       * em formato estrangeiro que a regra mínima não aceita, ele vale como veio: o CM valida no SIM.
+       */
+      duvidaTelefone?: { pessoa?: "proponente" | "vendedor" };
       /**
        * Edição pedida pelo nome ("muda o valor da proposta da Letícia…"): o
        * termo que ACHOU a proposta. Um nome extraído que é só esse termo é a
@@ -527,9 +542,20 @@ export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaPropos
   // `(?<!\d)`: sem fronteira à esquerda o regex casava DENTRO do CPF ("52998224725"
   // → telefone "2998224725"; smoke 26/10).
   // Sequência ditada em áudio ("11, 90000-0002", "11 9 0000 0002") entra como os dígitos juntos; a escrita normal fica como veio.
-  const telefones = (texto.match(new RegExp(TELEFONE_DITADO.source, "g")) ?? [])
+  const telefonesBrutos = (texto.match(new RegExp(TELEFONE_DITADO.source, "g")) ?? [])
     .map((t) => t.trim())
-    .map((t) => (/,|(?:^|\D)9\s+\d{4}/.test(t) ? juntarTelefone(t) ?? t : t));
+    .map(telefoneDoModelo);
+  // Número com código de país que não é o 55 ("+351 912 345 678"): o regex brasileiro não o casa, mas o que a
+  // pessoa escreveu vale como candidato — sem isso o telefone do modelo era descartado em silêncio.
+  // Mesma regra do `telefoneDuvidoso` (`^\+(?!55)`): "+5511 90000" é +55 truncado, não estrangeiro. Valor em reais
+  // ("sinal de +50 000 000") não é telefone.
+  for (const m of texto.matchAll(/(?<![\d+])\+(?!55)\d{1,3}(?:[\s.-]?\(?\d{1,5}\)?){2,5}(?!\d)/g)) {
+    const antes = texto.slice(Math.max(0, (m.index ?? 0) - 24), m.index ?? 0);
+    if (/(?:r\$|valor|sinal|entrada|parcelas?|reais|pre[cç]o)\W*(?:de\s+|em\s+)?$/iu.test(antes)) continue;
+    telefonesBrutos.push(m[0].trim());
+  }
+  // Sem repetição ("+5511999999999" e a forma formatada são o mesmo número): senão dois candidatos iguais viram ambiguidade.
+  const telefones = telefonesBrutos.filter((t, i) => telefonesBrutos.findIndex((u) => so(u) === so(t)) === i);
   // Onze dígitos sem máscara também cabem no regex de CPF. O rótulo escrito
   // pela pessoa resolve a ambiguidade; o extrator sozinho não pode resolvê-la.
   const telefonesRotulados = new Set([...texto.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)(?:\s+(?:do|da)\s+(?:comprador|compradora|cliente|proponente|vendedor|vendedora|inquilino|inquilina|locatário|locatária))?\s*(?::|=|é|para)?\s*((?<!\d)(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4})(?!\d)/giu)].map(m=>semDdi(so(m[1]))));
@@ -661,6 +687,10 @@ function semReferencia(d: DadosDaProposta, referencia: string | undefined): Dado
 const nomeCompleto = (s?: string) => (s ?? "").trim().split(/\s+/).filter(Boolean).length >= 2;
 const telefoneUtil = (s?: string) => {
   const d = (s ?? "").replace(/\D/g, "");
+  // Estrangeiro (+ e código que não é 55): sem libphonenumber aqui, só as regras mínimas de `telefoneEstrangeiroValido`;
+  // o resto não chega ao SIM para o CM recusar lá.
+  // Formato estrangeiro fora da regra mínima só chega aos dados pela repetição depois da pergunta (`duvidaTelefone`).
+  if (ESTRANGEIRO.test(s ?? "")) return telefoneEstrangeiroValido(s ?? "") || telefoneEstrangeiroNoFormato(s ?? "");
   return d.length === 10 || d.length === 11 || ((d.length === 12 || d.length === 13) && d.startsWith("55"));
 };
 const emailUtil = (s?: string) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test((s ?? "").trim());
@@ -787,7 +817,10 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
   const pessoa = (v: unknown): Pessoa | undefined => {
     if (!v || typeof v !== "object") return undefined;
     const p = v as Record<string, unknown>;
-    const out = { nome: s(p.nome), cpf: s(p.cpf), telefone: s(p.telefone), email: s(p.email) };
+    // Ponto único por onde o telefone do MODELO entra no rascunho (extração inicial e correção):
+    // sequência ditada em pedaços sai juntada; o que não fecha é tratado por `telefoneDuvidosoNoExtraido`.
+    const tel = s(p.telefone);
+    const out = { nome: s(p.nome), cpf: s(p.cpf), telefone: tel ? telefoneDoModelo(tel) : undefined, email: s(p.email) };
     return Object.values(out).some(Boolean) ? out : undefined;
   };
   const im = (o.imovel && typeof o.imovel === "object" ? o.imovel : {}) as Record<string, unknown>;
@@ -812,6 +845,56 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
     canal: o.canal === "email" || o.canal === "whatsapp" ? o.canal : undefined,
     finalidade: o.finalidade === "comercial" || o.finalidade === "residencial" ? o.finalidade : undefined,
   };
+}
+
+/** Telefone que o extrator devolveu e que não fecha DDD + 8/9 dígitos: o trecho, para perguntar de novo. */
+function telefoneDuvidosoNoExtraido(d: DadosDaProposta): string | null {
+  for (const k of ["proponente", "vendedor"] as const) {
+    const duvida = telefoneDoModeloDuvidoso(d[k]?.telefone);
+    if (duvida) return duvida;
+  }
+  return null;
+}
+
+/**
+ * De quem é o trecho de telefone, pelo papel dito logo antes dele ("telefone do vendedor 11, 9000-0002").
+ * `null` quando o texto não diz: quem pergunta não pode assumir o comprador.
+ */
+function pessoaDoRotulo(texto: string, trecho: string): "proponente" | "vendedor" | null {
+  const i = texto.indexOf(trecho);
+  if (i < 0) return null;
+  const antes = normalizar(texto.slice(Math.max(0, i - 50), i));
+  // Só vale o papel COLADO ao termo de telefone ("telefone do vendedor", "celular da proprietária"); papel solto na
+  // frase ("vendedor Maria (proprietária), ... telefone 11, 9000-0002 do comprador") não diz de quem é o número.
+  // "é" opcional entre o papel e o número ("telefone do vendedor é 11, …"; depois do `normalizar` vira "e").
+  const papeis = [...antes.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)\s+(?:do|da)\s+(vendedor\w*|proprietari\w*|locador\w*|comprador\w*|proponente|inquilin\w*|locatari\w*|cliente)(?:\s+e)?\W*$/g)];
+  const ultimo = papeis.at(-1)?.[1];
+  if (!ultimo) return null;
+  return /^(vendedor|proprietari|locador)/.test(ultimo) ? "vendedor" : "proponente";
+}
+
+/** Tira o telefone que não fecha, dizendo de quem era (só o que o modelo atribuiu; sem atribuição, `null`). */
+function semTelefoneDuvidoso(d: DadosDaProposta): { dados: DadosDaProposta; pessoa: "proponente" | "vendedor" | null } {
+  const dados: DadosDaProposta = { ...d };
+  let pessoa: "proponente" | "vendedor" | null = null;
+  for (const k of ["proponente", "vendedor"] as const) {
+    const p = dados[k];
+    if (!p || !telefoneDoModeloDuvidoso(p.telefone)) continue;
+    const { telefone: _t, ...resto } = p;
+    if (Object.keys(resto).length) dados[k] = resto;
+    else delete dados[k];
+    pessoa = k;
+    break;
+  }
+  return { dados, pessoa };
+}
+
+function perguntaDoTelefoneDuvidoso(trecho: string, anotado = false, semDono = false): string {
+  return (
+    `Não consegui ler o telefone com segurança (entendi "${trecho}"), então ${anotado ? "deixei só o telefone de fora" : "não anotei esta mensagem"}. ` +
+    "Me mande de novo, com o telefone completo (DDD + número), por exemplo (11) 90000-0000, ou com +código do país, ex. +351 912 345 678." +
+    (semDono ? " E me diga de quem é esse telefone (comprador ou vendedor)." : "")
+  );
 }
 
 /**
@@ -1374,8 +1457,29 @@ export async function iniciarProposta(
   // extraídos agora, para a lista de campos não pedir o que já foi dito.
   let dados: DadosDaProposta = {};
   if (pedido) {
+    // Mesma regra do turno dentro do fluxo: telefone que não fecha DDD + 8/9 dígitos se pergunta, não vira card.
     const extraido = await deps.extrairProposta(pedido, natureza);
-    if (extraido) dados = mesclarDados({}, sanearDados(extraido));
+    // O valor do modelo concilia com o texto antes de qualquer dúvida (mesma ordem do turno dentro do fluxo).
+    const lido = extraido ? conferirDitado(sanearDados(extraido), pedido) : {};
+    const duvida = telefoneDuvidoso(pedido) ?? telefoneDuvidosoNoExtraido(lido);
+    if (duvida) {
+      // Guarda o resto do pedido e espera só o telefone: a resposta curta completa o card.
+      const { dados: semTel, pessoa: doModelo } = semTelefoneDuvidoso(lido);
+      // O rótulo escrito vale mais que a atribuição do modelo; sem nenhum dos dois, não assume o comprador (fail-closed).
+      const pessoa = pessoaDoRotulo(pedido, duvida) ?? doModelo;
+      const guardado = prefill ? mesclarDados(mesclarDados({}, semTel), sanearDados(prefill)) : mesclarDados({}, semTel);
+      return {
+        reply: perguntaDoTelefoneDuvidoso(duvida, true, !pessoa),
+        fluxo: {
+          kind: "proposta", etapa: "coleta", natureza, dados: guardado,
+          ...(pessoa ? { aguardaCampo: { pessoa, campo: "telefone" as const } } : {}),
+          duvidaTelefone: pessoa ? { pessoa } : {},
+          leaseClientId, atualizadoEm: agora,
+        },
+        evento: "telefone_duvidoso",
+      };
+    }
+    if (extraido) dados = mesclarDados({}, lido);
   }
   if (prefill) dados = mesclarDados(dados, sanearDados(prefill));
   const f: Fluxo = { kind: "proposta", etapa: "coleta", natureza, dados, leaseClientId, atualizadoEm: agora };
@@ -1831,21 +1935,25 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   // Coleta, correção no resumo, ou ajuste depois do rascunho: extrai e mescla.
   // Campo pendente + só o valor na mensagem: vale o que foi escrito, sem depender do extrator.
-  const avulso = f.aguardaCampo ? valorAvulso(ctx.texto, f.aguardaCampo.campo) : null;
+  // Resposta à pergunta de telefone duvidoso com número em formato estrangeiro: vale como veio (o CM valida no SIM).
+  // Só o formato com "+" e código que não é 55; o número brasileiro que não fecha continua sendo perguntado.
+  const respondeDuvida = f.aguardaCampo?.campo === "telefone" || !!f.duvidaTelefone;
+  const estrangeiroAceito = respondeDuvida ? telefoneEstrangeiroNoTexto(ctx.texto) : null;
+  const doEstrangeiro = f.aguardaCampo?.campo === "telefone" ? f.aguardaCampo.pessoa : f.duvidaTelefone?.pessoa;
+  const estrangeiroAvulso = estrangeiroAceito && doEstrangeiro && ctx.texto.trim() === estrangeiroAceito ? estrangeiroAceito : null;
+  const eOAceito = (t: string) => !!estrangeiroAceito && so(t) === so(estrangeiroAceito);
+  const avulso = estrangeiroAvulso ?? (f.aguardaCampo ? valorAvulso(ctx.texto, f.aguardaCampo.campo) : null);
   // Telefone ditado que não fecha DDD + 8/9 dígitos (a transcrição de áudio come dígitos): pergunta, não grava.
   const duvidaDeTelefone = avulso
     ? null
     : (f.aguardaCampo?.campo === "telefone" ? telefoneAvulsoQueNaoFecha(ctx.texto) : null) ?? telefoneDuvidoso(ctx.texto);
-  if (duvidaDeTelefone) {
-    return {
-      reply:
-        `Não consegui ler o telefone com segurança (entendi "${duvidaDeTelefone}"), então não anotei esta mensagem. ` +
-        "Me mande de novo, com o telefone completo (DDD + número), por exemplo (11) 90000-0000.",
-      fluxo: { ...f, atualizadoEm: agora },
-      evento: "telefone_duvidoso",
-    };
+  if (duvidaDeTelefone && !eOAceito(duvidaDeTelefone)) {
+    const pessoa = (f.aguardaCampo?.campo === "telefone" ? f.aguardaCampo.pessoa : null) ?? pessoaDoRotulo(ctx.texto, duvidaDeTelefone) ?? f.duvidaTelefone?.pessoa;
+    return { reply: perguntaDoTelefoneDuvidoso(duvidaDeTelefone), fluxo: { ...f, duvidaTelefone: pessoa ? { pessoa } : {}, atualizadoEm: agora }, evento: "telefone_duvidoso" };
   }
-  const extraido = f.aguardaCampo && avulso
+  const extraido = estrangeiroAvulso && doEstrangeiro
+    ? ({ [doEstrangeiro]: { telefone: estrangeiroAvulso } } as DadosDaProposta)
+    : f.aguardaCampo && avulso
     ? ({ [f.aguardaCampo.pessoa]: { [f.aguardaCampo.campo]: avulso } } as DadosDaProposta)
     : await deps.extrairProposta(ctx.texto, f.natureza ?? "venda");
   if (extraido === null) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: "falha_extracao" };
@@ -1855,6 +1963,14 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   const novos = avulso
     ? semReferencia(sanearDados(extraido), f.referencia)
     : conferirDitado(semReferencia(sanearDados(extraido), f.referencia), ctx.texto);
+  // O modelo pode devolver a sequência ditada sem o rótulo que a regex do texto reconhece. A dúvida
+  // vem DEPOIS de conciliar com o texto: o que a pessoa escreveu vale ("119888-7777" do modelo para
+  // "11 98888-7777" escrito não vira pergunta) e o telefone que o texto não traz já saiu.
+  const duvidaNoExtraido = avulso ? null : telefoneDuvidosoNoExtraido(novos);
+  if (duvidaNoExtraido && !eOAceito(duvidaNoExtraido)) {
+    const pessoa = semTelefoneDuvidoso(novos).pessoa ?? f.duvidaTelefone?.pessoa;
+    return { reply: perguntaDoTelefoneDuvidoso(duvidaNoExtraido), fluxo: { ...f, duvidaTelefone: pessoa ? { pessoa } : {}, atualizadoEm: agora }, evento: "telefone_duvidoso" };
+  }
   // No ajuste parcial, o canal só muda quando a pessoa fala dele: o extrator
   // devolvia "WhatsApp" para "remove o fiador da proposta da X" (eval 09/10),
   // e o PATCH trocaria o canal sem ninguém pedir.
@@ -1916,7 +2032,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   }
 
   // Dado mudou: o "sim" anterior (e a chave dele) não vale para o resumo novo.
-  const g: FluxoProposta = { ...f, dados, chave: undefined, aguardaCampo: undefined, atualizadoEm: agora };
+  const g: FluxoProposta = { ...f, dados, chave: undefined, aguardaCampo: undefined, duvidaTelefone: undefined, atualizadoEm: agora };
   const falta = parcial ? invalidosNoAjuste(dados) : faltandoNaProposta(dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
   const depoisDoRascunho = !!f.propostaId && (f.etapa === "ajustes" || f.etapa === "revisao_ajuste");
   if (falta.length > 0) {
