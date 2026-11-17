@@ -351,6 +351,9 @@ export const CAMPOS_PROIBIDOS_AO_BROKER = [
   "cpf",
   "cpfCnpj",
   "dataJson",
+  // `nome` NÃO entra aqui de propósito: no `deal.detail` do broker o parser monta `partes` só com
+  // `papel` e o item segue (detalhar-negocio.test.ts, "regressão do servidor"). Na lista, a mesma
+  // resposta viraria falha para o corretor sem proteger nada a mais.
 ] as const;
 
 export interface ScopeQueryResponse<T> {
