@@ -148,6 +148,59 @@ describe("consulta por nome: a volta seguinte à lista ainda tem a leitura que c
     expect(nomesDasTools(1)).not.toContain("status_cobranca");
     expect(escopo.mock.calls.map((c) => (c[0] as { verb: string }).verb)).toEqual(["deal.list"]);
   });
+
+  it("volta 2 não reoferece nada: o turno termina com resposta em texto, nunca sem resposta (review #192)", async () => {
+    llm
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "listar_negocios", args: { busca: "TESTE assinatura 3" } }], usage: uso } as never)
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "situacao_certidoes", args: { numero: 1 } }], usage: uso } as never)
+      .mockResolvedValueOnce({ text: "1 certidão pendente.", toolCalls: [], usage: uso } as never);
+
+    const r = await run("como estão as certidões do negócio TESTE assinatura 3?");
+
+    // certidao.status não monta lista nova: sem o teto na volta 1, a leitura seguia oferecida até o
+    // TOOL_MAX_ROUNDS e o turno acabava com reply null.
+    expect(nomesDasTools(2)).toEqual([]);
+    expect(r.reply).toContain("1 certidão pendente");
+  });
+
+  it("chamada repetida na volta 2 (sem oferta) não executa: certidao.status roda uma vez só", async () => {
+    llm
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "listar_negocios", args: { busca: "TESTE assinatura 3" } }], usage: uso } as never)
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "situacao_certidoes", args: { numero: 1 } }], usage: uso } as never)
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "situacao_certidoes", args: { numero: 1 } }], usage: uso } as never)
+      .mockResolvedValue({ text: "1 certidão pendente.", toolCalls: [], usage: uso } as never);
+
+    await run("como estão as certidões do negócio TESTE assinatura 3?");
+
+    expect(escopo.mock.calls.map((c) => (c[0] as { verb: string }).verb)).toEqual(["deal.list", "certidao.status"]);
+  });
+
+  it("trava (b) por volta: na volta 1, listar_negocios (oferecida só na volta 0) não executa (review #192)", async () => {
+    llm
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "listar_negocios", args: { busca: "TESTE assinatura 3" } }], usage: uso } as never)
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "listar_negocios", args: { busca: "outro" } }], usage: uso } as never)
+      .mockResolvedValue({ text: "Certo.", toolCalls: [], usage: uso } as never);
+
+    await run("como estão as certidões do negócio TESTE assinatura 3?");
+
+    expect(escopo.mock.calls.map((c) => (c[0] as { verb: string }).verb)).toEqual(["deal.list"]);
+  });
+
+  it("trava (b) por volta: escrita oferecida na volta 0 não abre cartão na volta 1", async () => {
+    llm
+      .mockResolvedValueOnce({ text: "", toolCalls: [{ name: "listar_negocios", args: { busca: "TESTE assinatura 3" } }], usage: uso } as never)
+      .mockResolvedValueOnce({ text: "", toolCalls: [
+        { name: "listar_negocios", args: { busca: "outro" } },
+        { name: "propor_criacao", args: { tipo: "proposta" } },
+      ], usage: uso } as never)
+      .mockResolvedValue({ text: "Certo.", toolCalls: [], usage: uso } as never);
+
+    const r = await run("a proposta e as certidões do negócio TESTE assinatura 3 estão ok?");
+
+    expect(nomesDasTools(0)).toContain("propor_criacao"); // estava oferecida na volta 0 (senão não prova nada)
+    expect(escopo.mock.calls.map((c) => (c[0] as { verb: string }).verb)).toEqual(["deal.list"]);
+    expect(r.pendingAction ?? null).toBeNull();
+  });
 });
 
 describe("busca por nome ambígua: no máximo 3 opções", () => {
