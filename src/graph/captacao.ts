@@ -1728,6 +1728,8 @@ async function listarFilaDeAutorizacao(ctx: ContextoDoTurno, deps: DepsDoFluxo):
 // ─── Condução ────────────────────────────────────────────────────────────
 
 const CANCELA = /^(cancela|cancelar|desisto|desistir|para|parar|pare)$/;
+/** Frase de parada inteira ("para por aqui, não envia nada"): ancorada, nunca o "para" solto de "venda para João". */
+const CANCELA_FRASE_DE_PARADA = /^(?:(?:pode )?(?:para|parar|pare)(?: (?:por aqui|tudo|agora|com isso|de perguntar))?|(?:nao (?:envia|manda|enviar|mandar) nada)|deixa pra la|deixa isso pra la|esquece(?: isso)?)(?:[,;.!]? (?:nao (?:envia|manda|enviar|mandar) nada|nao precisa de mais nada|por favor))?$/;
 /**
  * Achado de review 19/10 (item 5): dentro de `autorizacao_motivo` o texto
  * INTEIRO é o motivo da negativa — só "cancelar"/"cancela" EXATOS cancelam;
@@ -1855,7 +1857,7 @@ export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, d
   // frase legítima ("o cliente desistiu, não quero mais correr esse risco"). Nem este
   // intercepto global de cancelamento nem o de `pedeCaptacao` (abaixo) podem roubar essa
   // mensagem — só o `CANCELA_MOTIVO` exato, dentro de `conduzirAutorizacaoMotivo`, cancela ali.
-  if (f.etapa !== "autorizacao_motivo" && (CANCELA.test(t) || /\b(cancela a captacao|desisto|nao quero mais)\b/.test(t))) {
+  if (f.etapa !== "autorizacao_motivo" && (CANCELA.test(t) || CANCELA_FRASE_DE_PARADA.test(t) || /\b(cancela a captacao|desisto|nao quero mais)\b/.test(t))) {
     return cancelar(f);
   }
 

@@ -177,6 +177,29 @@ export function juntarTelefone(raw: string): string | null {
   return d.length === 10 || d.length === 11 ? d : null;
 }
 
+const TELEFONE_DITADO_INTEIRO = new RegExp(`^${TELEFONE_DITADO.source}$`);
+/** Sequência que a transcrição de áudio entrega aos pedaços: tem vírgula ou o 9 solto ("11 9 0000 0002"). */
+const PEDACOS_DITADOS = /,|(?:^|\D)9\s+\d{4}/;
+
+/**
+ * Telefone que o MODELO devolveu, no ponto único em que ele entra no rascunho. Sequência ditada em
+ * pedaços que fecha DDD + 8/9 dígitos sai juntada e formatada ("11, 90000-0004" → "(11) 90000-0004");
+ * a escrita normal ("(11) 90000-0003", "+55 11 90000-0003", "+351 912 345 678") fica como veio.
+ */
+export function telefoneDoModelo(valor: string): string {
+  const t = valor.trim();
+  if (!TELEFONE_DITADO_INTEIRO.test(t) || !PEDACOS_DITADOS.test(t)) return t;
+  const d = juntarTelefone(t);
+  if (!d) return t;
+  return d.length === 11 ? `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}` : `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+}
+
+/** O valor de telefone que o modelo devolveu parece telefone brasileiro mas não fecha DDD + 8/9 dígitos? */
+export function telefoneDoModeloDuvidoso(valor: string | undefined): string | null {
+  const t = valor?.trim();
+  return t && TELEFONE_DITADO_INTEIRO.test(t) && !juntarTelefone(t) ? t : null;
+}
+
 /** Rótulo com o número COLADO: só espaço, ":", "=", "é" ou "do/da <pessoa>" entre os dois ("telefone não tem, CPF 529…" não vale). */
 const ROTULO_DE_TELEFONE = /\b(?:telefone|celular|whats\w*|zap|fone|tel|cel)\b\.?(?:\s+(?:do|da|de)\s+\p{L}+)?\s*(?::|=|é)?\s*(?=\+?\(?\d)/giu;
 const COMECA_COM_TELEFONE = new RegExp(`^${TELEFONE_DITADO.source}`);
