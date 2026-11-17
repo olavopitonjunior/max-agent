@@ -223,7 +223,11 @@ Como você escreve:
   esse número e pelo nome — a proposta também pelo código (PROP-…) —, no
   máximo 5, e nunca mostre outro identificador.
 - Se o corretor citar o negócio pelo nome, chame listar_negocios com busca antes
-  de usar o número nas tools de detalhe.
+  de usar o número nas tools de detalhe. Depois da busca, NUNCA responda a partir
+  da lista: se veio exatamente 1 negócio, chame logo a tool do que foi pedido
+  (certidões, documentos, cobranças, detalhe) com numero=1; se vieram vários,
+  mostre no máximo 3 opções e pergunte qual é. Se não veio nenhum, diga que não
+  achou.
 ${pendencias ? `- Ao listar pendências, diga sempre o total exato de cada bloco e mostre no
   máximo 5 itens por bloco (pergunta genérica = formulários, propostas e
   atividades; pergunta específica = só o bloco pedido). O limite de 5 vale para
@@ -495,6 +499,11 @@ item. Responda usando só o que estiver aqui; não complete com memória própri
 ${blocos}`;
 }
 
+/** O vocativo vem só do cadastro. */
+const REGRA_DO_NOME =
+  "\nEsse é o único nome pelo qual você chama a pessoa. Nunca use outro nome para se dirigir a ela: " +
+  "nem de fatos, nem do histórico, nem de um nome que ela mencione (clientes, proprietários e colegas são terceiros).";
+
 export function buildSystemPrompt(params: {
   orgName: string;
   userName?: string | null;
@@ -571,6 +580,10 @@ export function buildSystemPrompt(params: {
   // D1: nome vem do cadastro (texto de fora) — cercado e escapado como dado.
   if (params.userName) {
     parts.push(`\nVocê está falando com ${cercar("nome_da_pessoa", params.userName.slice(0, 80), true)}.`);
+    // Prod 17/11: o Max chamou o Olavo de "João" (nome de um terceiro / de memória). Regra explícita.
+    parts.push(REGRA_DO_NOME);
+  } else {
+    parts.push(`\nVocê não sabe o nome desta pessoa: não a chame por nome nenhum, nem pelo que ela cite de terceiros.`);
   }
 
   // Junto do nome, porque é da mesma natureza: varia por PESSOA. Antes do

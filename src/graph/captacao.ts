@@ -190,6 +190,11 @@ export interface FluxoCaptacao {
   };
   tentativas: number;
   pausado?: boolean;
+  /**
+   * Quando o "Continuando a captação…" já foi mostrado nesta pausa. Vale UMA vez por pausa: sem a marca, o
+   * lembrete ia colado em toda resposta fora do assunto (prod 16/11). Limpa quando a captação volta a andar.
+   */
+  lembradoEm?: number;
   atualizadoEm: number;
 }
 

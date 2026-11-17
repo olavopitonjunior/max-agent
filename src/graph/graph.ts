@@ -73,6 +73,7 @@ import {
   textoFalhou,
   MUDAR_MINHAS_NOTIFICACOES,
   MINHAS_PENDENCIAS,
+  leiturasDeSegundaVolta,
   type PendingAction,
 } from "./tools";
 import { respostaDePendencias } from "./resumo-pendencias";
@@ -114,7 +115,7 @@ import {
   textoSemLeituraDeMidia,
   TEXTO_ASSUNTO_BLOQUEADO,
 } from "./prompt";
-import { limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
+import { limitarTamanho, paraWhatsApp, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
 import {
   argsDaCriacao,
@@ -125,7 +126,9 @@ import {
 } from "./despachante";
 import { renderizarNegociosSelecionados, type MapaDeReferencias } from "./referencias";
 import {
+  aposRetomada,
   conduzirFluxo,
+  deveLembrarDaPausa,
   fluxoExpirou,
   iniciarFluxo,
   lerEscolha,
@@ -1348,7 +1351,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
   const daFicha = atual.kind === "credito" || atual.kind === "captacao";
   return {
-    fluxo: passo.fluxo,
+    // O fluxo andou: a próxima pausa ganha o lembrete "Continuando…" de novo.
+    fluxo: aposRetomada(passo.fluxo),
     messages: [
       { role: "user", content: daFicha ? `(resposta da ficha de ${atual.kind === "captacao" ? "captação" : "crédito"})` : userText },
       { role: "assistant", content: passo.reply },
@@ -1575,6 +1579,30 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    ? {...result, googleRefs: null} : result;
 }
 
+/**
+ * Volta 1, e SÓ ela: a leitura que consome o número da lista que a volta 0 acabou de montar (ver
+ * `leiturasDeSegundaVolta`). Na volta 2 em diante nada é oferecido: o modelo tem de responder em texto —
+ * sem esse teto, `situacao_certidoes` (que não monta lista nova) seguia oferecida até `TOOL_MAX_ROUNDS` e o
+ * turno acabava sem resposta (review #192).
+ */
+function leiturasDaVolta(state: MaxStateType) {
+  if (state.toolRounds !== 1) return [];
+  return leiturasDeSegundaVolta({
+    oferecidas: state.toolsOferecidas, referencias: state.referencias, turno: state.inbound.messageId,
+    policy: state.policy, identity: state.identity,
+  });
+}
+
+/**
+ * Trava b por volta: o que o despachante e o `autorizarChamada` aceitam é o que ESTA volta mostrou ao
+ * modelo. `toolsOferecidas` continua sendo a oferta do turn (volta 0); herdá-la nas voltas seguintes
+ * deixava escrita e `listar_negocios` executáveis numa volta em que o modelo nem as via (review #192).
+ * `toolRounds` só avança no retorno do nó `tools`, então answer e tools calculam o mesmo conjunto.
+ */
+function oferecidasDaVolta(state: MaxStateType): string[] {
+  return state.toolRounds === 0 ? state.toolsOferecidas : leiturasDaVolta(state).map((e) => e.nome);
+}
+
 async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   const stageSubject = JSON.stringify([state.identity.orgId, subjectDe(state.identity)]);
   const text = textoDoTurno(state).trim();
@@ -1737,13 +1765,16 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   }
 
   const googleDefs = state.toolRounds === 0 ? googleToolsForTurn(googleContext(state), userText, state.googleRefs, state.referencias) : [];
+  const daSegundaVolta = state.toolRounds === 0 ? [] : leiturasDaVolta(state);
+  // Trava b por volta: depois da volta 0, `autorizarChamada` (aqui) e o despachante (`tools`) só aceitam o
+  // que ESTA volta mostrou ao modelo — ver `leiturasDaVolta`. `toolsOferecidas` segue sendo a oferta do turn.
   const oferecidas =
-    state.toolRounds === 0 ? [...oferta.entradas.map((e) => e.nome), ...googleDefs.map(e => e.name)] : state.toolsOferecidas;
+    state.toolRounds === 0 ? [...oferta.entradas.map((e) => e.nome), ...googleDefs.map(e => e.name)] : daSegundaVolta.map((e) => e.nome);
   // Só a volta 0 grava: as seguintes herdam a oferta do turn.
   const daOferta = state.toolRounds === 0 ? { toolsOferecidas: oferecidas, queryOptions: null }
     : clarification?.options.length ? { queryOptions: { subjectKey: stageSubject, createdAt: Date.now(),
         options: clarification.options, offset: 0, numbered: false } } : {};
-  const defs = [...oferta.entradas.map((e) => e.def), ...googleDefs];
+  const defs = [...oferta.entradas.map((e) => e.def), ...googleDefs, ...daSegundaVolta.map((e) => e.def)];
   const tools = defs.length > 0 ? defs : undefined;
 
   /**
@@ -2141,7 +2172,7 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
    */
   const dispatch = (calls: typeof chamadas) => despacharLeituras({
     chamadas: calls,
-    oferecidas: state.toolsOferecidas,
+    oferecidas: oferecidasDaVolta(state),
     policy: state.policy,
     identity: state.identity,
     fromPhone: state.inbound.fromPhone,
@@ -2175,7 +2206,7 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
   if (!missing.length && state.toolRounds === 0 && chamadas.length === 1 && chamadas[0].name === "listar_negocios" &&
       namedStage && namedStage !== chamadas[0].args.estado) {
     const corrected = await despacharLeituras({ chamadas: [{ ...chamadas[0], args: { ...chamadas[0].args, estado: namedStage } }],
-      oferecidas: state.toolsOferecidas, policy: state.policy, identity: state.identity,
+      oferecidas: oferecidasDaVolta(state), policy: state.policy, identity: state.identity,
       fromPhone: state.inbound.fromPhone, referencias, turno: state.inbound.messageId });
     resultados = corrected.resultados;
     trilha = [...trilha, ...corrected.trilha];
@@ -2246,7 +2277,8 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
 
   // Antes do teto: afirmação de criação no texto livre é falsa por construção
   // (escrita real sai por template) — ver `travarCriacaoFalsa`.
-  const trava = travarCriacaoFalsa(texto, {
+  // Markdown do modelo (`**x**`, `## título`) vira a sintaxe do WhatsApp; só aqui, no texto do modelo.
+  const trava = travarCriacaoFalsa(paraWhatsApp(texto), {
     houveLeitura: state.toolResults.some((r) => r.items !== null),
     podeCriar: modoDeCriacao(state.identity, state.policy) === "disponivel",
     podeEnviar: podeEscrever(state.identity) && state.policy.includes("proposal.send"),
@@ -2260,12 +2292,16 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   const final = limitarTamanho(trava.texto);
   // Ficha de crédito pausada por uma pergunta: volta ao campo em aberto.
   const pausada = (state.fluxo?.kind === "credito" || state.fluxo?.kind === "captacao") && state.fluxo.pausado ? state.fluxo : null;
-  const saida = pausada
+  // O lembrete vale UMA vez por pausa (`lembradoEm`) e só se a pausa é recente (24h): sem isso ele ia
+  // colado em toda resposta fora do assunto enquanto o fluxo ficasse aberto (prod 16/11).
+  const agoraCompose = Date.now();
+  const lembrar = pausada !== null && deveLembrarDaPausa(pausada, agoraCompose);
+  const saida = pausada && lembrar
     ? `${final.texto}\n\n${pausada.kind === "captacao" ? continuacaoCaptacao(pausada) : continuacaoCredito(pausada)}`
     : final.texto;
 
   return {
-    ...(pausada ? { fluxo: { ...pausada, pausado: false } } : {}),
+    ...(pausada ? { fluxo: { ...pausada, pausado: false, ...(lembrar ? { lembradoEm: agoraCompose } : {}) } } : {}),
     reply: saida,
     restoDaResposta: final.resto ? { texto: final.resto, criadoEm: Date.now() } : null,
     // Consumido: se sobrasse no checkpoint, o turno seguinte que respondesse
@@ -2995,12 +3031,10 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
             // mapa nenhum; `limpar` (memory.ts) descarta por garantia qualquer
             // fato que ainda carregue `⟨`.
             const textoRed = redigir(turnText);
-            const replyRed = redigir(reply);
             const novos = await extractFacts({
               orgId,
               phone,
               userText: textoRed,
-              replyText: replyRed,
               known: facts,
             });
             const gravados = await saveFacts(orgId, phone, novos);

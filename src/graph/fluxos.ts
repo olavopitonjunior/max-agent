@@ -1290,6 +1290,24 @@ export async function iniciarProposta(
 
 // ─── O turno dentro de um fluxo ───────────────────────────────────────────
 
+/**
+ * O lembrete "Continuando a ficha/captação…" vale UMA vez por pausa e só enquanto a pausa é recente
+ * (mesmo teto de 24h do fluxo longo). Fora disso a resposta do modelo sai limpa; o fluxo continua
+ * vivo e retomável ("continuar captação").
+ */
+export function deveLembrarDaPausa(f: { lembradoEm?: number; atualizadoEm: number }, agora: number): boolean {
+  return !f.lembradoEm && agora - f.atualizadoEm <= FLUXO_TTL_POS_RASCUNHO_MS;
+}
+
+/** A ficha/captação voltou a andar: a próxima pausa ganha o lembrete de novo. */
+export function aposRetomada<T extends Fluxo | null>(f: T): T {
+  if (f && "lembradoEm" in f && f.lembradoEm !== undefined) {
+    const { lembradoEm: _lembrado, ...resto } = f as Fluxo & { lembradoEm?: number };
+    return resto as unknown as T;
+  }
+  return f;
+}
+
 export function fluxoExpirou(f: Fluxo, agora: number): boolean {
   const longo = (f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave) || f.kind === "credito" || (f.kind === "captacao" && (!!f.captacaoId || !!f.chave));
   const ttl = longo ? FLUXO_TTL_POS_RASCUNHO_MS : FLUXO_TTL_MS;

@@ -34,6 +34,9 @@ import { lerDocumento, renderDocumentos, type DocumentoItem } from "./documentos
 import { lerCobranca, renderCobrancas, type CobrancaItem } from "./cobranca";
 import { filtrarPorBusca, lerBusca } from "./busca";
 
+/** Teto de opções que uma busca por nome mostra quando acha mais de um negócio. */
+const ITENS_POR_BUSCA = 3;
+
 /**
  * O DESPACHANTE — a única porta por onde uma chamada de tool vira efeito.
  *
@@ -458,7 +461,15 @@ export async function despacharLeituras(params: {
 
     // Fail-closed contra CM antigo: ele descarta `busca` em silêncio e devolve a lista inteira. Só o que casa
     // por título ou cliente segue; o resto sai ANTES de numerar e nunca ganha número.
-    if (buscaLocal) r.items = filtrarPorBusca(r.items, buscaLocal);
+    if (buscaLocal) {
+      r.items = filtrarPorBusca(r.items, buscaLocal);
+      // Busca por nome ambígua: no máximo 3 opções para a pessoa escolher (o 4º em diante é cortado ANTES de
+      // numerar, e o corte se declara em `truncated`). Um achado só segue direto para a leitura com numero=1.
+      if (r.items.length > ITENS_POR_BUSCA) {
+        r.items = r.items.slice(0, ITENS_POR_BUSCA);
+        r.truncated = true;
+      }
+    }
 
     // G2: o código numera, o modelo vê só número + rótulo. Leitura que não
     // declara o que produz passa como veio (nenhuma hoje).
