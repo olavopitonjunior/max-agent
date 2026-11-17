@@ -174,6 +174,27 @@ export const CAPABILITIES = [
   "google.calendar.read",
   "google.calendar.write",
   "google.tasks.write",
+  /**
+   * Avisos da fila do copiloto no `pending.summary` (copiloto 2.8b, 15/11/2026, par do
+   * contractmaker#3130): o bloco `avisos` só sai para o papel que a tem. Posição 33
+   * (0-based), FIXA, ao FIM, depois de `google.tasks.write`. FORA do `POLITICA_PADRAO`
+   * do ImobPro (fail-closed): a org liga em `/admin/max`, e papel com entrada própria
+   * não herda o curinga. Sem ela o Max nem pede o bloco.
+   */
+  "pending.avisos",
+  /**
+   * PR-O4cat (16/11/2026, par do contractmaker `feat/max-o4cat`): três leituras
+   * nascidas reservadas (INERTES, nasce OFF). `certidao.status` (status de certidões,
+   * tool `situacao_certidoes`, PR-O4b), `document.list` (documentos do negócio, tool
+   * `listar_documentos`, PR-O4c) e `charge.status` (cobranças do negócio, tool
+   * `status_cobranca`, PR-O4d, só leitura) já ganharam verbo e tool: hoje nenhuma resta
+   * inerte. Seguem fora do padrão e do `brokerDefault` (fail-closed): a org liga em
+   * `/admin/max`. Posições 34, 35 e 36 FIXAS (0-based, ao FIM, nesta ordem): mesma
+   * posição da lista do ImobPro (teste de paridade).
+   */
+  "certidao.status",
+  "document.list",
+  "charge.status",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

@@ -12,7 +12,7 @@
  * WhatsApp), marcador de lista `* item`, asterisco solto, a URL, nem máscara
  * de documento (`***.***.789-01`, `***.456.789-**`) ou `2**3`.
  */
-const NEGRITO_MARKDOWN = /(?<![*\w])\*\*(?=[^\s*])([^*\n]*?[^\s*])\*\*(?![*\w])/g;
+export const NEGRITO_MARKDOWN = /(?<![*\w])\*\*(?=[^\s*])([^*\n]*?[^\s*])\*\*(?![*\w])/g;
 
 export function paraFormatoWhatsapp(texto: string): string {
   if (!texto.includes("**")) return texto;

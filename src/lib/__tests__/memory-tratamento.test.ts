@@ -19,7 +19,7 @@ vi.mock("../db", () => ({
 vi.mock("../llm", () => ({ complete: vi.fn(), DEFAULT_MODEL: "x" }));
 vi.mock("../cm", () => ({ reportUsage: vi.fn().mockResolvedValue(undefined) }));
 
-const { saveFacts, renderFacts, ehFatoDeTratamento } = await import("../memory");
+const { saveFacts, renderFacts, ehFatoDeNome } = await import("../memory");
 
 beforeEach(() => {
   sql.chamadas.length = 0;
@@ -38,11 +38,14 @@ describe("fato de tratamento", () => {
     "chamado_de",
     "Como_Pessoa_Prefere_Ser_Chamada",
   ])("reconhece a chave %s", (k) => {
-    expect(ehFatoDeTratamento(k)).toBe(true);
+    expect(ehFatoDeNome(k, "x")).toBe(true);
   });
 
-  it.each(["area_atuacao", "preferencia_resposta", "foco_atual", "videochamada", "chamada_video", "horario_chamada_telefonica", "prefere_videochamada", "chamado_suporte"])("não pega fato comum: %s", (k) => {
-    expect(ehFatoDeTratamento(k)).toBe(false);
+  // Merge com o master (#192): vale o `ehFatoDeNome` do master, que também descarta
+  // "chamada_video", "horario_chamada_telefonica" e "chamado_suporte" (palavra
+  // "chamada/chamado" separada por `_`). Esses três casos do #169 saíram daqui.
+  it.each(["area_atuacao", "preferencia_resposta", "foco_atual", "videochamada", "prefere_videochamada"])("não pega fato comum: %s", (k) => {
+    expect(ehFatoDeNome(k, "x")).toBe(false);
   });
 
   it("saveFacts não grava tratamento, mas grava o resto", async () => {

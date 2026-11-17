@@ -37,7 +37,7 @@
 
 import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { Capability } from "./policy";
-import { lerConfirmacao, normalizar, TEXTO_PARA_CONFIRMAR } from "./tools";
+import { corrigirProposta, lerConfirmacao, normalizar, TEXTO_PARA_CONFIRMAR } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
 import { conduzirAssinatura, type FluxoAssinatura } from "./assinatura";
@@ -47,6 +47,17 @@ import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-con
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
+import {
+  ESTRANGEIRO,
+  juntarTelefone,
+  TELEFONE_DITADO,
+  telefoneDoModelo,
+  telefoneDoModeloDuvidoso,
+  telefoneDuvidoso,
+  telefoneEstrangeiroValido,
+  telefoneEstrangeiroNoFormato,
+  telefoneEstrangeiroNoTexto,
+} from "@/lib/phone";
 
 /** Inatividade que encerra um fluxo: a próxima mensagem já é outro assunto. */
 export const FLUXO_TTL_MS = 30 * 60 * 1000;
@@ -180,6 +191,11 @@ export type Fluxo =
        * dado em vez de entregar a frase ao modelo, que dizia "vou ajustar" sem gravar.
        */
       aguardaCampo?: { pessoa: "proponente" | "vendedor"; campo: "telefone" | "cpf" | "email" };
+      /**
+       * O turno anterior perguntou um telefone duvidoso (de quem, quando se sabe). Se a resposta repete um número
+       * em formato estrangeiro que a regra mínima não aceita, ele vale como veio: o CM valida no SIM.
+       */
+      duvidaTelefone?: { pessoa?: "proponente" | "vendedor" };
       /**
        * Edição pedida pelo nome ("muda o valor da proposta da Letícia…"): o
        * termo que ACHOU a proposta. Um nome extraído que é só esse termo é a
@@ -351,9 +367,41 @@ function imovelParaPayload(im: DadosDaProposta["imovel"]): DadosDaProposta["imov
   return { ...base, endereco: base.endereco && complemento ? `${base.endereco}, ${complemento}` : base.endereco };
 }
 
+const ESTADOS_POR_UF: Record<string, string> = {
+  AC: "acre", AL: "alagoas", AP: "amapa", AM: "amazonas", BA: "bahia", CE: "ceara", DF: "distrito federal", ES: "espirito santo",
+  GO: "goias", MA: "maranhao", MT: "mato grosso", MS: "mato grosso do sul", MG: "minas gerais", PA: "para", PB: "paraiba",
+  PR: "parana", PE: "pernambuco", PI: "piaui", RJ: "rio de janeiro", RN: "rio grande do norte", RS: "rio grande do sul",
+  RO: "rondonia", RR: "roraima", SC: "santa catarina", SP: "sao paulo", SE: "sergipe", TO: "tocantins",
+};
+
+/**
+ * Endereço do card: "rua, número, complemento, bairro, Cidade/UF". A cidade (e o estado por
+ * extenso, ou a sigla) já escritos no texto livre não se repetem (prod 17/11: "São Paulo, São Paulo, SP").
+ */
 function enderecoNoResumo(im?: DadosDaProposta["imovel"]): string {
   const base = im ? imovelSemNumeroDuplicado(im) : {};
-  return [base.endereco, base.numero, base.complemento, base.bairro, base.cidade, base.uf].filter(Boolean).join(", ");
+  const cidade = base.cidade?.trim();
+  const uf = base.uf?.trim();
+  const repetidos = new Set(
+    [cidade, uf, uf ? ESTADOS_POR_UF[uf.toUpperCase()] : undefined].filter((x): x is string => !!x).map((x) => normalizar(x)),
+  );
+  const segmentos = [base.endereco, base.numero, base.complemento, base.bairro]
+    .flatMap((parte) => (parte ?? "").split(","))
+    .map((x) => x.trim())
+    .filter(Boolean)
+    // "São Paulo/SP" ou "São Paulo - SP" no fim do texto livre: é a cidade com a sigla, que o Cidade/UF do fim já traz.
+    .filter((x) => !(uf && /^[A-Za-z]{2}$/.test(uf) && repetidos.has(normalizar(x.replace(new RegExp(String.raw`\s*[/-]\s*${uf}$`, "i"), "")))))
+    .filter((x) => !repetidos.has(normalizar(x)))
+    .filter((x, i, todos) => i === 0 || normalizar(x) !== normalizar(todos[i - 1]));
+  const local = cidade && uf ? `${cidade}/${uf}` : cidade || uf;
+  return [...segmentos, local].filter(Boolean).join(", ");
+}
+
+/** "financiado, restante" → "restante financiado": a forma lida como frase, não como lista de rótulos. */
+function formaLegivel(forma: string): string {
+  // Só o padrão exato "<uma palavra>, restante": "30% de entrada e o restante" e "R$ 200 mil financiado, restante" ficam como foram escritos.
+  const m = /^(\p{L}+),\s*(?:o\s+)?restante$/iu.exec(forma.trim());
+  return m ? `restante ${m[1]}` : forma.trim();
 }
 
 /** O corpo do resumo — montado do estado, nunca pelo modelo. */
@@ -375,9 +423,9 @@ function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProp
   if (d.vendedor?.nome) linhas.push(`Vendedor: ${linhaPessoa(d.vendedor)}`);
   if (d.pagamento?.sinal || d.pagamento?.forma) {
     linhas.push(
-      `Pagamento: ${[d.pagamento.sinal ? `sinal ${real(d.pagamento.sinal)}` : "", d.pagamento.forma ?? ""]
+      `Pagamento: ${[d.pagamento.sinal ? `sinal ${real(d.pagamento.sinal)}` : "", d.pagamento.forma ? formaLegivel(d.pagamento.forma) : ""]
         .filter(Boolean)
-        .join(", ")}`
+        .join("; ")}`
     );
   }
   if (d.comissao?.percentual || d.comissao?.valor) {
@@ -411,7 +459,7 @@ function linhasDoAjuste(d: DadosDaProposta): string[] {
   if (d.valor) linhas.push(`Valor: ${real(d.valor)}`);
   if (d.vendedor && Object.values(d.vendedor).some(Boolean)) linhas.push(`Vendedor/proprietário: ${linhaPessoa(d.vendedor)}`);
   if (d.pagamento?.sinal) linhas.push(`Sinal: ${real(d.pagamento.sinal)}`);
-  if (d.pagamento?.forma) linhas.push(`Forma de pagamento: ${d.pagamento.forma}`);
+  if (d.pagamento?.forma) linhas.push(`Forma de pagamento: ${formaLegivel(d.pagamento.forma)}`);
   if (d.comissao?.percentual) linhas.push(`Comissão: ${d.comissao.percentual}%`);
   else if (d.comissao?.valor) linhas.push(`Comissão: ${real(d.comissao.valor)}`);
   if (d.canal) linhas.push(`Assinatura chega por: ${d.canal === "email" ? "e-mail" : "WhatsApp"}`);
@@ -515,7 +563,21 @@ export function complementoDitado(texto: string): string | null {
 export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaProposta {
   // `(?<!\d)`: sem fronteira à esquerda o regex casava DENTRO do CPF ("52998224725"
   // → telefone "2998224725"; smoke 26/10).
-  const telefones = (texto.match(/(?<!\d)(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}(?!\d)/g) ?? []).map((t) => t.trim());
+  // Sequência ditada em áudio ("11, 90000-0002", "11 9 0000 0002") entra como os dígitos juntos; a escrita normal fica como veio.
+  const telefonesBrutos = (texto.match(new RegExp(TELEFONE_DITADO.source, "g")) ?? [])
+    .map((t) => t.trim())
+    .map(telefoneDoModelo);
+  // Número com código de país que não é o 55 ("+351 912 345 678"): o regex brasileiro não o casa, mas o que a
+  // pessoa escreveu vale como candidato — sem isso o telefone do modelo era descartado em silêncio.
+  // Mesma regra do `telefoneDuvidoso` (`^\+(?!55)`): "+5511 90000" é +55 truncado, não estrangeiro. Valor em reais
+  // ("sinal de +50 000 000") não é telefone.
+  for (const m of texto.matchAll(/(?<![\d+])\+(?!55)\d{1,3}(?:[\s.-]?\(?\d{1,5}\)?){2,5}(?!\d)/g)) {
+    const antes = texto.slice(Math.max(0, (m.index ?? 0) - 24), m.index ?? 0);
+    if (/(?:r\$|valor|sinal|entrada|parcelas?|reais|pre[cç]o)\W*(?:de\s+|em\s+)?$/iu.test(antes)) continue;
+    telefonesBrutos.push(m[0].trim());
+  }
+  // Sem repetição ("+5511999999999" e a forma formatada são o mesmo número): senão dois candidatos iguais viram ambiguidade.
+  const telefones = telefonesBrutos.filter((t, i) => telefonesBrutos.findIndex((u) => so(u) === so(t)) === i);
   // Onze dígitos sem máscara também cabem no regex de CPF. O rótulo escrito
   // pela pessoa resolve a ambiguidade; o extrator sozinho não pode resolvê-la.
   const telefonesRotulados = new Set([...texto.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)(?:\s+(?:do|da)\s+(?:comprador|compradora|cliente|proponente|vendedor|vendedora|inquilino|inquilina|locatário|locatária))?\s*(?::|=|é|para)?\s*((?<!\d)(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4})(?!\d)/giu)].map(m=>semDdi(so(m[1]))));
@@ -572,15 +634,53 @@ function pedirValorDoCampo(a: NonNullable<FluxoProposta["aguardaCampo"]>): strin
   const de = a.pessoa === "vendedor" ? "do vendedor ou proprietário" : "do comprador";
   return `Me mande o ${NOME_DO_CAMPO[a.campo]} ${de} correto, que eu ajusto o rascunho.`;
 }
+/**
+ * "o nome é X", "nome do comprador é X", "corrige o nome para X": a correção de nome do
+ * comprador, na palavra da pessoa. O extrator deixava passar quando vinha junto de outra
+ * correção (prod 17/11) e o nome pedido sumia em silêncio. Nome de vendedor/proprietário fica fora.
+ */
+function nomeCorrigido(texto: string): string | undefined {
+  const t = texto.trim();
+  // "o nome (do comprador) é X" / "nome: X" (é só com acento: "o nome e o CPF estão certos" não é troca de nome)
+  // ou "corrige/troca o nome (do comprador) para X" ("nome pra assinatura é X" é outro campo).
+  const m =
+    /(?:^|[\s,;.])(?:o\s+)?nome(\s+(?:do|da)\s+[\p{L}]+)?(?:\s+(?:correto|certo))?(?:\s*[:=]|\s+é(?![\p{L}\d]))\s+(.+)$/iu.exec(t) ??
+    /(?:^|[\s,;.])(?:corrig\w*|troc\w*|mud\w*|alter\w*|atualiz\w*)\s+(?:o\s+)?nome(\s+(?:do|da)\s+[\p{L}]+)?\s+(?:para|pra)\s+(.+)$/iu.exec(t);
+  if (!m) return undefined;
+  if (m[1] && !/\b(?:comprador\w*|proponente|inquilin\w*|locatari\w*)\b/i.test(normalizar(m[1]))) return undefined;
+  // "vendedor: o nome é João": a frase fala do outro lado, antes do gatilho.
+  const antes = normalizar(t.slice(0, m.index)).split(/[.;\n]/).pop() ?? "";
+  if (/\b(?:vendedor\w*|proprietari\w*|locador\w*)\b/.test(antes)) return undefined;
+  const nome = m[2]
+    .split(/\s+(?:com\s+mai[uú]scul\w*|mas(?![\p{L}\d])|tamb[eé]m(?![\p{L}\d]))|[,;.\n]/iu)[0]
+    // " e " seguido de palavra minúscula ("… Áudio e financiado") encerra o nome; sem a flag i, que faria \p{Ll} casar maiúscula.
+    .split(/\s+e\s+(?=\p{Ll})/u)[0]
+    .replace(/[*_~`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const palavras = nome.split(" ").filter(Boolean);
+  if (palavras.length === 0 || palavras.length > 7 || /\d|@/.test(nome)) return undefined;
+  return nome;
+}
+
 /** A mensagem é SÓ o valor esperado (telefone, CPF ou e-mail)? Devolve como foi escrito. */
 function valorAvulso(texto: string, campo: "telefone" | "cpf" | "email"): string | null {
   const t = texto.trim();
   const re = {
-    telefone: /^(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4}$/,
+    telefone: new RegExp(`^${TELEFONE_DITADO.source}$`),
     cpf: /^\d{3}\.?\d{3}\.?\d{3}-?\d{2}$/,
     email: /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i,
   }[campo];
-  return re.test(t) ? t : null;
+  if (!re.test(t)) return null;
+  // Telefone: só vale se os dígitos juntos fecham (DDD + 8/9). "11, 9000-0002" casa o padrão mas é celular com dígito perdido.
+  if (campo === "telefone" && !juntarTelefone(t)) return null;
+  return t;
+}
+
+/** A resposta é só um telefone que não fecha ("11, 9000-0002")? Devolve o trecho para perguntar de novo. */
+function telefoneAvulsoQueNaoFecha(texto: string): string | null {
+  const t = texto.trim();
+  return new RegExp(`^${TELEFONE_DITADO.source}$`).test(t) && !juntarTelefone(t) ? t : null;
 }
 
 /** Nome extraído que é só o termo que achou a proposta ("…da Letícia Andrade"). */
@@ -609,6 +709,10 @@ function semReferencia(d: DadosDaProposta, referencia: string | undefined): Dado
 const nomeCompleto = (s?: string) => (s ?? "").trim().split(/\s+/).filter(Boolean).length >= 2;
 const telefoneUtil = (s?: string) => {
   const d = (s ?? "").replace(/\D/g, "");
+  // Estrangeiro (+ e código que não é 55): sem libphonenumber aqui, só as regras mínimas de `telefoneEstrangeiroValido`;
+  // o resto não chega ao SIM para o CM recusar lá.
+  // Formato estrangeiro fora da regra mínima só chega aos dados pela repetição depois da pergunta (`duvidaTelefone`).
+  if (ESTRANGEIRO.test(s ?? "")) return telefoneEstrangeiroValido(s ?? "") || telefoneEstrangeiroNoFormato(s ?? "");
   return d.length === 10 || d.length === 11 || ((d.length === 12 || d.length === 13) && d.startsWith("55"));
 };
 const emailUtil = (s?: string) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test((s ?? "").trim());
@@ -735,7 +839,10 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
   const pessoa = (v: unknown): Pessoa | undefined => {
     if (!v || typeof v !== "object") return undefined;
     const p = v as Record<string, unknown>;
-    const out = { nome: s(p.nome), cpf: s(p.cpf), telefone: s(p.telefone), email: s(p.email) };
+    // Ponto único por onde o telefone do MODELO entra no rascunho (extração inicial e correção):
+    // sequência ditada em pedaços sai juntada; o que não fecha é tratado por `telefoneDuvidosoNoExtraido`.
+    const tel = s(p.telefone);
+    const out = { nome: s(p.nome), cpf: s(p.cpf), telefone: tel ? telefoneDoModelo(tel) : undefined, email: s(p.email) };
     return Object.values(out).some(Boolean) ? out : undefined;
   };
   const im = (o.imovel && typeof o.imovel === "object" ? o.imovel : {}) as Record<string, unknown>;
@@ -760,6 +867,56 @@ export function sanearDados(bruto: unknown): DadosDaProposta {
     canal: o.canal === "email" || o.canal === "whatsapp" ? o.canal : undefined,
     finalidade: o.finalidade === "comercial" || o.finalidade === "residencial" ? o.finalidade : undefined,
   };
+}
+
+/** Telefone que o extrator devolveu e que não fecha DDD + 8/9 dígitos: o trecho, para perguntar de novo. */
+function telefoneDuvidosoNoExtraido(d: DadosDaProposta): string | null {
+  for (const k of ["proponente", "vendedor"] as const) {
+    const duvida = telefoneDoModeloDuvidoso(d[k]?.telefone);
+    if (duvida) return duvida;
+  }
+  return null;
+}
+
+/**
+ * De quem é o trecho de telefone, pelo papel dito logo antes dele ("telefone do vendedor 11, 9000-0002").
+ * `null` quando o texto não diz: quem pergunta não pode assumir o comprador.
+ */
+function pessoaDoRotulo(texto: string, trecho: string): "proponente" | "vendedor" | null {
+  const i = texto.indexOf(trecho);
+  if (i < 0) return null;
+  const antes = normalizar(texto.slice(Math.max(0, i - 50), i));
+  // Só vale o papel COLADO ao termo de telefone ("telefone do vendedor", "celular da proprietária"); papel solto na
+  // frase ("vendedor Maria (proprietária), ... telefone 11, 9000-0002 do comprador") não diz de quem é o número.
+  // "é" opcional entre o papel e o número ("telefone do vendedor é 11, …"; depois do `normalizar` vira "e").
+  const papeis = [...antes.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)\s+(?:do|da)\s+(vendedor\w*|proprietari\w*|locador\w*|comprador\w*|proponente|inquilin\w*|locatari\w*|cliente)(?:\s+e)?\W*$/g)];
+  const ultimo = papeis.at(-1)?.[1];
+  if (!ultimo) return null;
+  return /^(vendedor|proprietari|locador)/.test(ultimo) ? "vendedor" : "proponente";
+}
+
+/** Tira o telefone que não fecha, dizendo de quem era (só o que o modelo atribuiu; sem atribuição, `null`). */
+function semTelefoneDuvidoso(d: DadosDaProposta): { dados: DadosDaProposta; pessoa: "proponente" | "vendedor" | null } {
+  const dados: DadosDaProposta = { ...d };
+  let pessoa: "proponente" | "vendedor" | null = null;
+  for (const k of ["proponente", "vendedor"] as const) {
+    const p = dados[k];
+    if (!p || !telefoneDoModeloDuvidoso(p.telefone)) continue;
+    const { telefone: _t, ...resto } = p;
+    if (Object.keys(resto).length) dados[k] = resto;
+    else delete dados[k];
+    pessoa = k;
+    break;
+  }
+  return { dados, pessoa };
+}
+
+function perguntaDoTelefoneDuvidoso(trecho: string, anotado = false, semDono = false): string {
+  return (
+    `Não consegui ler o telefone com segurança (entendi "${trecho}"), então ${anotado ? "deixei só o telefone de fora" : "não anotei esta mensagem"}. ` +
+    "Me mande de novo, com o telefone completo (DDD + número), por exemplo (11) 90000-0000, ou com +código do país, ex. +351 912 345 678." +
+    (semDono ? " E me diga de quem é esse telefone (comprador ou vendedor)." : "")
+  );
 }
 
 /**
@@ -821,7 +978,7 @@ export function querCancelar(texto: string): boolean {
 
 /** 1/proposta/assinar → proposta; 2/negócio/formulário/contrato → negócio. */
 export function lerEscolha(texto: string): "proposta" | "negocio" | null {
-  const t = normalizar(texto);
+  const t = corrigirProposta(normalizar(texto));
   const proposta = /^1$|\bproposta\b|\brapida\b|\bassina/.test(t);
   const negocio = /^2$|\bnegocio\b|\bformulario\b|\bcontrato\b|\bficha\b/.test(t);
   if (proposta === negocio) return null;
@@ -987,7 +1144,7 @@ const NEGACAO = /\bnao\s+(re)?(envi|mand|dispar|encaminh)/;
  */
 export function pedeEnvio(texto: string): boolean {
   if (texto.includes("?")) return false;
-  const t = normalizar(texto);
+  const t = corrigirProposta(normalizar(texto));
   if (NEGACAO.test(t) || PERGUNTA_DE_PROCESSO.test(t) || E_CRIACAO.test(t)) return false;
   if (PEDE_ENVIO.test(t) || SO_ENVIO.test(t)) return true;
   if (RELATO.test(t)) return false;
@@ -1237,21 +1394,30 @@ function tituloDeclarado(texto: string | undefined): string | undefined {
   return valor.replace(/\s+/g,' ').trim().slice(0,200)||undefined;
 }
 
+const REFERE_PROPOSTA_EXISTENTE =
+  /\b(?:a|da|na|esta|essa|dessa|daquela)\s+proposta\b|\bprop-\d|\b(?:status|ver|consultar|consulta|assinar|enviar|reenviar)\b/;
+
 /**
- * "proposta de compra", "proposta de venda", "proposta de locação/aluguel" no
- * pedido, sem palavra de formulário/ficha/contrato/negócio que torne o pedido
- * ambíguo. Devolve a natureza dita ou `null` (segue a pergunta de escolha).
+ * O pedido já é de proposta rápida sem ambiguidade: diz "proposta de compra/venda/locação/aluguel" ou traz
+ * comprador/proponente/inquilino, valor ou sinal. "Formulário"/"ficha" explícito NUNCA vai direto (é a escolha).
  */
-export function propostaExplicitaNoPedido(pedido: string | undefined): { natureza: "venda" | "locacao" | undefined } | null {
-  if (!pedido) return null;
-  const t = pedido
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase();
-  if (/\b(?:formulario|ficha|contrato|negocio)\b/.test(t)) return null;
-  const m = /\bproposta\s+(?:rapida\s+)?(?:de|para)\s+(compra(?:\s+e\s+venda)?|venda|locacao|aluguel)\b/.exec(t);
-  if (!m) return null;
-  return { natureza: m[1] === "locacao" || m[1] === "aluguel" ? "locacao" : "venda" };
+export function pedidoClaroDeProposta(pedido: string): boolean {
+  const t = corrigirProposta(normalizar(pedido));
+  if (/\b(formulario|ficha)\b/.test(t) || !/\bproposta\b/.test(t)) return false;
+  // Consulta ou referência a uma proposta que JÁ existe ("qual o valor da proposta do comprador João?") não é criação.
+  if (pedido.includes("?") || REFERE_PROPOSTA_EXISTENTE.test(t)) return false;
+  return (
+    /\bproposta\s+(?:rapida\s+)?(?:de|do|da|para)\s+(?:compra|venda|locacao|aluguel)\b/.test(t) ||
+    /\b(?:compradore?s?|proponentes?|inquilin\w*|locatari\w*|sinal)\b|\bvalor\b|r\$/.test(t)
+  );
+}
+
+function naturezaDoPedido(pedido: string): "venda" | "locacao" | undefined {
+  const t = normalizar(pedido);
+  const porPalavra = lerNatureza(pedido);
+  if (porPalavra) return porPalavra;
+  if (/\bcompradore?s?\b/.test(t)) return "venda";
+  return undefined;
 }
 
 /**
@@ -1290,14 +1456,12 @@ export async function iniciarFluxo(
   if (params.tipo !== "proposta" && podeNegocio) {
     return carregarCamposDoNegocio(params.tipo, params.agora, deps, tituloDoPedido);
   }
-  // "Proposta de compra/venda/locação" dita por extenso é pedido de PROPOSTA:
-  // perguntar "1 proposta ou 2 formulário" de novo foi o que a pessoa reclamou
-  // em 10/11/2026. A pergunta fica só para o pedido ambíguo ("uma proposta").
-  const explicita = propostaExplicitaNoPedido(params.pedido);
-  if (podeProposta && explicita) {
-    return iniciarProposta(explicita.natureza ?? params.natureza, params.pedido, params.agora, deps);
-  }
   if (podeProposta && podeNegocio) {
+    // Prod 17/11: "proposta de compra … compradores …, valor R$ 800.000" ainda recebia o "1 ou 2". Só o
+    // pedido ambíguo ("gera uma proposta pra mim") pergunta; o que já diz o tipo ou traz os dados vai direto.
+    if (params.tipo === "proposta" && params.pedido && pedidoClaroDeProposta(params.pedido)) {
+      return iniciarProposta(params.natureza ?? naturezaDoPedido(params.pedido), params.pedido, params.agora, deps);
+    }
     return {
       reply: TEXTO_ESCOLHA,
       fluxo: { kind: "escolha", natureza: params.natureza, pedido: params.pedido, nomeCliente: tituloDoPedido, atualizadoEm: params.agora },
@@ -1362,8 +1526,29 @@ export async function iniciarProposta(
   // extraídos agora, para a lista de campos não pedir o que já foi dito.
   let dados: DadosDaProposta = {};
   if (pedido) {
+    // Mesma regra do turno dentro do fluxo: telefone que não fecha DDD + 8/9 dígitos se pergunta, não vira card.
     const extraido = await deps.extrairProposta(pedido, natureza);
-    if (extraido) dados = mesclarDados({}, sanearDados(extraido));
+    // O valor do modelo concilia com o texto antes de qualquer dúvida (mesma ordem do turno dentro do fluxo).
+    const lido = extraido ? conferirDitado(sanearDados(extraido), pedido) : {};
+    const duvida = telefoneDuvidoso(pedido) ?? telefoneDuvidosoNoExtraido(lido);
+    if (duvida) {
+      // Guarda o resto do pedido e espera só o telefone: a resposta curta completa o card.
+      const { dados: semTel, pessoa: doModelo } = semTelefoneDuvidoso(lido);
+      // O rótulo escrito vale mais que a atribuição do modelo; sem nenhum dos dois, não assume o comprador (fail-closed).
+      const pessoa = pessoaDoRotulo(pedido, duvida) ?? doModelo;
+      const guardado = prefill ? mesclarDados(mesclarDados({}, semTel), sanearDados(prefill)) : mesclarDados({}, semTel);
+      return {
+        reply: perguntaDoTelefoneDuvidoso(duvida, true, !pessoa),
+        fluxo: {
+          kind: "proposta", etapa: "coleta", natureza, dados: guardado,
+          ...(pessoa ? { aguardaCampo: { pessoa, campo: "telefone" as const } } : {}),
+          duvidaTelefone: pessoa ? { pessoa } : {},
+          leaseClientId, atualizadoEm: agora,
+        },
+        evento: "telefone_duvidoso",
+      };
+    }
+    if (extraido) dados = mesclarDados({}, lido);
   }
   if (prefill) dados = mesclarDados(dados, sanearDados(prefill));
   const f: Fluxo = { kind: "proposta", etapa: "coleta", natureza, dados, leaseClientId, atualizadoEm: agora };
@@ -1382,6 +1567,24 @@ export async function iniciarProposta(
 }
 
 // ─── O turno dentro de um fluxo ───────────────────────────────────────────
+
+/**
+ * O lembrete "Continuando a ficha/captação…" vale UMA vez por pausa e só enquanto a pausa é recente
+ * (mesmo teto de 24h do fluxo longo). Fora disso a resposta do modelo sai limpa; o fluxo continua
+ * vivo e retomável ("continuar captação").
+ */
+export function deveLembrarDaPausa(f: { lembradoEm?: number; atualizadoEm: number }, agora: number): boolean {
+  return !f.lembradoEm && agora - f.atualizadoEm <= FLUXO_TTL_POS_RASCUNHO_MS;
+}
+
+/** A ficha/captação voltou a andar: a próxima pausa ganha o lembrete de novo. */
+export function aposRetomada<T extends Fluxo | null>(f: T): T {
+  if (f && "lembradoEm" in f && f.lembradoEm !== undefined) {
+    const { lembradoEm: _lembrado, ...resto } = f as Fluxo & { lembradoEm?: number };
+    return resto as unknown as T;
+  }
+  return f;
+}
 
 export function fluxoExpirou(f: Fluxo, agora: number): boolean {
   const longo = (f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave) || f.kind === "credito" || (f.kind === "captacao" && (!!f.captacaoId || !!f.chave));
@@ -1819,8 +2022,25 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   // Coleta, correção no resumo, ou ajuste depois do rascunho: extrai e mescla.
   // Campo pendente + só o valor na mensagem: vale o que foi escrito, sem depender do extrator.
-  const avulso = f.aguardaCampo ? valorAvulso(ctx.texto, f.aguardaCampo.campo) : null;
-  const extraido = f.aguardaCampo && avulso
+  // Resposta à pergunta de telefone duvidoso com número em formato estrangeiro: vale como veio (o CM valida no SIM).
+  // Só o formato com "+" e código que não é 55; o número brasileiro que não fecha continua sendo perguntado.
+  const respondeDuvida = f.aguardaCampo?.campo === "telefone" || !!f.duvidaTelefone;
+  const estrangeiroAceito = respondeDuvida ? telefoneEstrangeiroNoTexto(ctx.texto) : null;
+  const doEstrangeiro = f.aguardaCampo?.campo === "telefone" ? f.aguardaCampo.pessoa : f.duvidaTelefone?.pessoa;
+  const estrangeiroAvulso = estrangeiroAceito && doEstrangeiro && ctx.texto.trim() === estrangeiroAceito ? estrangeiroAceito : null;
+  const eOAceito = (t: string) => !!estrangeiroAceito && so(t) === so(estrangeiroAceito);
+  const avulso = estrangeiroAvulso ?? (f.aguardaCampo ? valorAvulso(ctx.texto, f.aguardaCampo.campo) : null);
+  // Telefone ditado que não fecha DDD + 8/9 dígitos (a transcrição de áudio come dígitos): pergunta, não grava.
+  const duvidaDeTelefone = avulso
+    ? null
+    : (f.aguardaCampo?.campo === "telefone" ? telefoneAvulsoQueNaoFecha(ctx.texto) : null) ?? telefoneDuvidoso(ctx.texto);
+  if (duvidaDeTelefone && !eOAceito(duvidaDeTelefone)) {
+    const pessoa = (f.aguardaCampo?.campo === "telefone" ? f.aguardaCampo.pessoa : null) ?? pessoaDoRotulo(ctx.texto, duvidaDeTelefone) ?? f.duvidaTelefone?.pessoa;
+    return { reply: perguntaDoTelefoneDuvidoso(duvidaDeTelefone), fluxo: { ...f, duvidaTelefone: pessoa ? { pessoa } : {}, atualizadoEm: agora }, evento: "telefone_duvidoso" };
+  }
+  const extraido = estrangeiroAvulso && doEstrangeiro
+    ? ({ [doEstrangeiro]: { telefone: estrangeiroAvulso } } as DadosDaProposta)
+    : f.aguardaCampo && avulso
     ? ({ [f.aguardaCampo.pessoa]: { [f.aguardaCampo.campo]: avulso } } as DadosDaProposta)
     : await deps.extrairProposta(ctx.texto, f.natureza ?? "venda");
   if (extraido === null) return { reply: TEXTO_SEM_RESPOSTA, fluxo: f, evento: "falha_extracao" };
@@ -1830,10 +2050,26 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   const novos = avulso
     ? semReferencia(sanearDados(extraido), f.referencia)
     : conferirDitado(semReferencia(sanearDados(extraido), f.referencia), ctx.texto);
+  // O modelo pode devolver a sequência ditada sem o rótulo que a regex do texto reconhece. A dúvida
+  // vem DEPOIS de conciliar com o texto: o que a pessoa escreveu vale ("119888-7777" do modelo para
+  // "11 98888-7777" escrito não vira pergunta) e o telefone que o texto não traz já saiu.
+  const duvidaNoExtraido = avulso ? null : telefoneDuvidosoNoExtraido(novos);
+  if (duvidaNoExtraido && !eOAceito(duvidaNoExtraido)) {
+    const pessoa = semTelefoneDuvidoso(novos).pessoa ?? f.duvidaTelefone?.pessoa;
+    return { reply: perguntaDoTelefoneDuvidoso(duvidaNoExtraido), fluxo: { ...f, duvidaTelefone: pessoa ? { pessoa } : {}, atualizadoEm: agora }, evento: "telefone_duvidoso" };
+  }
   // No ajuste parcial, o canal só muda quando a pessoa fala dele: o extrator
   // devolvia "WhatsApp" para "remove o fiador da proposta da X" (eval 09/10),
   // e o PATCH trocaria o canal sem ninguém pedir.
   if (parcial && novos.canal && !/\b(whats\w*|zap|e-?mail|canal|sms)\b/.test(normalizar(ctx.texto))) delete novos.canal;
+  // Correção de nome dita com todas as letras vale mesmo que o extrator só devolva a outra correção da
+  // mensagem. Entra DEPOIS da mescla: é a mesma pessoa corrigida, não "outra pessoa" (que perderia telefone/CPF).
+  const nomePedido = avulso ? undefined : nomeCorrigido(ctx.texto);
+  if (nomePedido && novos.proponente) {
+    const { nome: _nome, ...semNome } = novos.proponente;
+    if (Object.keys(semNome).length) novos.proponente = semNome;
+    else delete novos.proponente;
+  }
   // W46: "complemento é apartamento 1" é correção de UM campo, dita por extenso.
   // O extrator às vezes devolve nada (ou copia o complemento antigo) e o fluxo
   // liberava para o modelo, que prometia "ajusto" sem gravar. O que a pessoa
@@ -1842,7 +2078,8 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     const complemento = complementoDitado(ctx.texto);
     if (complemento) novos.imovel = { ...novos.imovel, complemento };
   }
-  const dados = mesclarDados(f.dados, novos);
+  let dados = mesclarDados(f.dados, novos);
+  if (nomePedido) dados = { ...dados, proponente: { ...(dados.proponente ?? {}), nome: nomePedido } };
   if (novos.imovel?.complemento && !dados.imovel?.endereco) {
     return {
       reply: "Me informe o endereço completo do imóvel, incluindo o novo complemento, para eu atualizar sem perder a rua e o número.",
@@ -1890,7 +2127,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   }
 
   // Dado mudou: o "sim" anterior (e a chave dele) não vale para o resumo novo.
-  const g: FluxoProposta = { ...f, dados, chave: undefined, aguardaCampo: undefined, atualizadoEm: agora };
+  const g: FluxoProposta = { ...f, dados, chave: undefined, aguardaCampo: undefined, duvidaTelefone: undefined, atualizadoEm: agora };
   const falta = parcial ? invalidosNoAjuste(dados) : faltandoNaProposta(dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
   const depoisDoRascunho = !!f.propostaId && (f.etapa === "ajustes" || f.etapa === "revisao_ajuste");
   if (falta.length > 0) {
@@ -2331,7 +2568,7 @@ export const TOOL_EXTRAIR_PROPOSTA = {
         type: "object",
         properties: {
           sinal: VALOR_DA_PROPOSTA_SCHEMA,
-          forma: { type: "string", description: "Ex.: 'R$ 200 mil financiado, restante à vista'." },
+          forma: { type: "string", description: "Como o pagamento será feito, em frase curta (o sinal vai em sinal). Ex.: 'R$ 200 mil financiado, restante à vista'; 'restante financiado'." },
         },
         additionalProperties: false,
       },

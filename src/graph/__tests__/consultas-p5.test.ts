@@ -111,11 +111,25 @@ describe("detalhar_proposta / detalhar_negocio — o despachante", () => {
     expect(r.trilha[0].outcome).toBe("ok");
   });
 
-  it("negócio: traduz o número em negocio_id", async () => {
-    escopo.mockResolvedValue({ items: [{ id: "negocio-id-1", titulo: "Rua A", etapa: "Docs" }], truncated: false });
+  it("negócio: traduz o número em negocio_id e entrega o resumo (o JSON do servidor não chega ao modelo)", async () => {
+    // Forma do contrato (PR-O4a). O item solto de antes ({id,titulo,etapa}) não tem as chaves
+    // obrigatórias (pendencias, tipo, partes...) e seria descartado: o ajuste continua valendo mesmo com
+    // chave extra tolerada. Ver `detalhar-negocio.test.ts` para o render e para o descarte.
+    escopo.mockResolvedValue({
+      items: [{
+        id: "negocio-id-1", etapa: "Docs", pendencias: [], atualizadoEm: "2026-10-20T12:00:00.000Z",
+        titulo: "Rua A", cliente: null, valor: null, tipo: "venda", partes: [], contrato: null,
+        proposta: null, assinatura: null, link: "/deals/negocio-id-1",
+      }],
+      truncated: false,
+    });
     const r = await despacharLeituras({ ...neg, chamadas: [{ name: "detalhar_negocio", args: { numero: "1" } }] });
     expect(escopo).toHaveBeenCalledWith(expect.objectContaining({ verb: "deal.detail", args: { negocio_id: "negocio-id-1" } }));
-    expect(r.resultados[0].items).toEqual([{ n: 1, titulo: "Rua A", etapa: "Docs" }]);
+    const [item] = r.resultados[0].items as { n: number; resumo: string }[];
+    expect(item.n).toBe(1);
+    expect(item.resumo).toContain("*Rua A* (venda)");
+    expect(item.resumo).toContain("Etapa: Docs");
+    expect(JSON.stringify(r.resultados)).not.toContain('"id"');
   });
 
   it("servidor sem resposta: falha_na_consulta (não finge dado)", async () => {
