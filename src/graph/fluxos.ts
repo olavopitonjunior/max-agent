@@ -530,6 +530,9 @@ export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaPropos
   const telefones = (texto.match(new RegExp(TELEFONE_DITADO.source, "g")) ?? [])
     .map((t) => t.trim())
     .map(telefoneDoModelo);
+  // Número com código de país que não é o 55 ("+351 912 345 678"): o regex brasileiro não o casa, mas o que a
+  // pessoa escreveu vale como candidato — sem isso o telefone do modelo era descartado em silêncio.
+  for (const m of texto.matchAll(/(?<![\d+])\+(?!55(?!\d))\d{1,3}(?:[\s.-]?\(?\d{1,5}\)?){2,5}(?!\d)/g)) telefones.push(m[0].trim());
   // Onze dígitos sem máscara também cabem no regex de CPF. O rótulo escrito
   // pela pessoa resolve a ambiguidade; o extrator sozinho não pode resolvê-la.
   const telefonesRotulados = new Set([...texto.matchAll(/\b(?:telefone|celular|whatsapp|fone|tel)(?:\s+(?:do|da)\s+(?:comprador|compradora|cliente|proponente|vendedor|vendedora|inquilino|inquilina|locatário|locatária))?\s*(?::|=|é|para)?\s*((?<!\d)(?:\+?55[\s-]*)?\(?\d{2}\)?[\s-]*9?\d{4}[\s.-]?\d{4})(?!\d)/giu)].map(m=>semDdi(so(m[1]))));
@@ -661,6 +664,8 @@ function semReferencia(d: DadosDaProposta, referencia: string | undefined): Dado
 const nomeCompleto = (s?: string) => (s ?? "").trim().split(/\s+/).filter(Boolean).length >= 2;
 const telefoneUtil = (s?: string) => {
   const d = (s ?? "").replace(/\D/g, "");
+  // Estrangeiro (+ e código de país que não é o 55): o CM aceita como está (mesma regra do `telefoneDuvidoso`).
+  if (/^\s*\+(?!55(?!\d))\d/.test(s ?? "")) return d.length >= 8 && d.length <= 15;
   return d.length === 10 || d.length === 11 || ((d.length === 12 || d.length === 13) && d.startsWith("55"));
 };
 const emailUtil = (s?: string) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test((s ?? "").trim());
@@ -826,10 +831,24 @@ function telefoneDuvidosoNoExtraido(d: DadosDaProposta): string | null {
   return null;
 }
 
-/** Tira o telefone que não fecha, dizendo de quem era (default: o comprador, que é quem o texto livre costuma citar). */
-function semTelefoneDuvidoso(d: DadosDaProposta): { dados: DadosDaProposta; pessoa: "proponente" | "vendedor" } {
+/**
+ * De quem é o trecho de telefone, pelo papel dito logo antes dele ("telefone do vendedor 11, 9000-0002").
+ * `null` quando o texto não diz: quem pergunta não pode assumir o comprador.
+ */
+function pessoaDoRotulo(texto: string, trecho: string): "proponente" | "vendedor" | null {
+  const i = texto.indexOf(trecho);
+  if (i < 0) return null;
+  const antes = normalizar(texto.slice(Math.max(0, i - 50), i));
+  const papeis = [...antes.matchAll(/\b(vendedor\w*|proprietari\w*|locador\w*|comprador\w*|proponente|inquilin\w*|locatari\w*)/g)];
+  const ultimo = papeis.at(-1)?.[1];
+  if (!ultimo) return null;
+  return /^(vendedor|proprietari|locador)/.test(ultimo) ? "vendedor" : "proponente";
+}
+
+/** Tira o telefone que não fecha, dizendo de quem era (só o que o modelo atribuiu; sem atribuição, `null`). */
+function semTelefoneDuvidoso(d: DadosDaProposta): { dados: DadosDaProposta; pessoa: "proponente" | "vendedor" | null } {
   const dados: DadosDaProposta = { ...d };
-  let pessoa: "proponente" | "vendedor" = "proponente";
+  let pessoa: "proponente" | "vendedor" | null = null;
   for (const k of ["proponente", "vendedor"] as const) {
     const p = dados[k];
     if (!p || !telefoneDoModeloDuvidoso(p.telefone)) continue;
@@ -842,10 +861,11 @@ function semTelefoneDuvidoso(d: DadosDaProposta): { dados: DadosDaProposta; pess
   return { dados, pessoa };
 }
 
-function perguntaDoTelefoneDuvidoso(trecho: string, anotado = false): string {
+function perguntaDoTelefoneDuvidoso(trecho: string, anotado = false, semDono = false): string {
   return (
     `Não consegui ler o telefone com segurança (entendi "${trecho}"), então ${anotado ? "deixei só o telefone de fora" : "não anotei esta mensagem"}. ` +
-    "Me mande de novo, com o telefone completo (DDD + número), por exemplo (11) 90000-0000."
+    "Me mande de novo, com o telefone completo (DDD + número), por exemplo (11) 90000-0000." +
+    (semDono ? " E me diga de quem é esse telefone (comprador ou vendedor)." : "")
   );
 }
 
@@ -1416,11 +1436,13 @@ export async function iniciarProposta(
     const duvida = telefoneDuvidoso(pedido) ?? telefoneDuvidosoNoExtraido(lido);
     if (duvida) {
       // Guarda o resto do pedido e espera só o telefone: a resposta curta completa o card.
-      const { dados: semTel, pessoa } = semTelefoneDuvidoso(lido);
+      const { dados: semTel, pessoa: doModelo } = semTelefoneDuvidoso(lido);
+      // O rótulo escrito vale mais que a atribuição do modelo; sem nenhum dos dois, não assume o comprador (fail-closed).
+      const pessoa = pessoaDoRotulo(pedido, duvida) ?? doModelo;
       const guardado = prefill ? mesclarDados(mesclarDados({}, semTel), sanearDados(prefill)) : mesclarDados({}, semTel);
       return {
-        reply: perguntaDoTelefoneDuvidoso(duvida, true),
-        fluxo: { kind: "proposta", etapa: "coleta", natureza, dados: guardado, aguardaCampo: { pessoa, campo: "telefone" }, leaseClientId, atualizadoEm: agora },
+        reply: perguntaDoTelefoneDuvidoso(duvida, true, !pessoa),
+        fluxo: { kind: "proposta", etapa: "coleta", natureza, dados: guardado, ...(pessoa ? { aguardaCampo: { pessoa, campo: "telefone" as const } } : {}), leaseClientId, atualizadoEm: agora },
         evento: "telefone_duvidoso",
       };
     }
