@@ -216,6 +216,25 @@ export function telefoneEstrangeiroValido(raw: string): boolean {
   return false;
 }
 
+/**
+ * Formato estrangeiro qualquer ("+" e código que não é o 55, 8–15 dígitos), sem a regra mínima por país. Vale só
+ * quando o corretor REPETE o número depois da pergunta de telefone duvidoso: aí ele é aceito como veio e o CM, que
+ * tem libphonenumber, valida no SIM. Sem isso, +34/+44/+54/+598 ficavam numa pergunta sem saída.
+ */
+export function telefoneEstrangeiroNoFormato(raw: string): boolean {
+  if (!ESTRANGEIRO.test(raw)) return false;
+  const n = onlyDigits(raw).length;
+  return n >= 8 && n <= 15;
+}
+
+/** O número em formato estrangeiro escrito no texto (um só), como veio; `null` se não há ou há mais de um. */
+export function telefoneEstrangeiroNoTexto(texto: string): string | null {
+  const achados = [...texto.matchAll(/(?<![\d+])\+(?!55)\d[\d\s().-]*\d/g)]
+    .map((m) => m[0].trim())
+    .filter(telefoneEstrangeiroNoFormato);
+  return achados.length === 1 ? achados[0] : null;
+}
+
 /** Rótulo com o número COLADO: só espaço, ":", "=", "é" ou "do/da <pessoa>" entre os dois ("telefone não tem, CPF 529…" não vale). */
 const ROTULO_DE_TELEFONE = /\b(?:telefone|celular|whats\w*|zap|fone|tel|cel)\b\.?(?:\s+(?:do|da|de)\s+\p{L}+)?\s*(?::|=|é)?\s*(?=\+?\(?\d)/giu;
 const COMECA_COM_TELEFONE = new RegExp(`^${TELEFONE_DITADO.source}`);
