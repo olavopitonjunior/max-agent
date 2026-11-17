@@ -319,7 +319,12 @@ export function redigirProfundo<T>(valor: T, campos: Categoria[] = TODAS_CATEGOR
   if (Array.isArray(valor)) return valor.map((v) => redigirProfundo(v, campos)) as T;
   if (valor && typeof valor === "object") {
     return Object.fromEntries(
-      Object.entries(valor).map(([k, v]) => [k, redigirProfundo(v, campos)])
+      Object.entries(valor).map(([k, v]) => [
+        k,
+        // Redação por CHAVE: `busca` é nome de negócio ou de cliente (dado de terceiro), que nenhuma regex de
+        // documento/contato pega. O valor nunca chega ao log nem ao `tools_json`.
+        k === "busca" && typeof v === "string" ? "⟨BUSCA⟩" : redigirProfundo(v, campos),
+      ])
     ) as T;
   }
   return valor;

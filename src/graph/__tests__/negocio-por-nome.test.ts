@@ -207,6 +207,25 @@ describe("despacharLeituras com o negócio citado pelo nome", () => {
     expect(escopo.mock.calls[1][0].args).toMatchObject({ negocio_id: "cd9" });
   });
 
+  it("lista de negócios montada NESTE turno (busca do listar_negocios, master): vale o número dela, sem nova listagem", async () => {
+    escopo.mockResolvedValueOnce({ items: [{ id: "k", estado: "rascunho" }], truncated: false });
+    const daBusca = {
+      criadoEm: 1_000,
+      turno: "m1",
+      itens: [{ n: 1, tipo: "negocio" as const, id: "cd9", rotulo: "TESTE1" }],
+    };
+    const r = await despacharLeituras({
+      ...base,
+      referencias: daBusca,
+      texto: "qual o status do contrato do negócio TESTE1?",
+      chamadas: [{ name: "situacao_contrato", args: { numero: 1 } }],
+    });
+    expect(escopo).toHaveBeenCalledTimes(1);
+    expect(escopo.mock.calls[0][0].verb).toBe("contract.status");
+    expect(escopo.mock.calls[0][0].args).toMatchObject({ negocio_id: "cd9" });
+    expect(r.trilha[0].outcome).toBe("ok");
+  });
+
   it("nome explícito sem casamento: NÃO consulta nada e diz que não achou (nunca 'tente mais tarde')", async () => {
     escopo.mockResolvedValueOnce({ items: CARTEIRA, truncated: false });
     const r = await despacharLeituras({
