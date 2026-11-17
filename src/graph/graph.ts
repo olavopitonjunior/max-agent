@@ -18,9 +18,11 @@ import { payloadDoNumero } from "@/lib/aviso/numero";
 import { iniciarAtividade, textoDeOcupado, textoAtividadeNaoLiberada, type OperacaoDeAtividade } from "./atividades";
 import { iniciarPreferencias, preferenciasPermitidas, TEXTO_PREFS_NAO_LIBERADO } from "./preferencias";
 import { resolverReferencia } from "./referencias";
+import { lerBusca } from "./busca";
 import { iniciarContinuidade, pedeContinuidade } from "./continuidade";
 import { iniciarGestao, pedeGestao } from "./gestao";
 import { iniciarAssinatura, pedeAssinatura } from "./assinatura";
+import { pedeProprietario, respostaAoAviso, sugestaoPendente } from "./proprietario";
 import {
   negaAcao, pedeAcaoForaDoMax, pedeCapacidades, pedeLeituraNaoLiberada, TEXTO_LEITURA_NAO_LIBERADA, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
   textoDoAndamentoDoContrato, textoForaDoMax, pedeProcessoDeAssinatura, textoDoProcesso, TEXTO_TIPOS_DE_ASSINATURA,
@@ -82,8 +84,11 @@ import {
   TEXTO_PARA_CONFIRMAR,
   textoFalhou,
   MUDAR_MINHAS_NOTIFICACOES,
+  MINHAS_PENDENCIAS,
+  leiturasDeSegundaVolta,
   type PendingAction,
 } from "./tools";
+import { respostaDePendencias } from "./resumo-pendencias";
 import { downloadMedia, sendReaction, interativoDisponivel } from "@/lib/transport";
 import { newtonMediaAtiva, ZAPI_MEDIA_PREFIX } from "@/lib/transport/newton-media";
 import {
@@ -125,7 +130,7 @@ import {
   textoDeRecusa,
 } from "./prompt";
 import { houveEscritaNoTurno } from "./escrita-do-turno";
-import { corrigirVocativo, humanizarCodigosInternos, limitarTamanho, sanitizar, travarCriacaoFalsa } from "./compose";
+import { corrigirVocativo, humanizarCodigosInternos, limitarTamanho, paraWhatsApp, sanitizar, travarCriacaoFalsa } from "./compose";
 import { resolverPolitica, type Capability } from "./policy";
 import {
   argsDaCriacao,
@@ -136,8 +141,10 @@ import {
 } from "./despachante";
 import { renderizarNegociosSelecionados, type MapaDeReferencias } from "./referencias";
 import {
+  aposRetomada,
   citaOutraProposta,
   conduzirFluxo,
+  deveLembrarDaPausa,
   fluxoExpirou,
   iniciarFluxo,
   lerEscolha,
@@ -1210,7 +1217,16 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   }
   // Lembrar quem falta assinar / cancelar a assinatura de uma proposta (Passo 4, 25/10): fluxo próprio.
   // "Cancela a proposta" nunca é "exclui a proposta" (gestão): as duas detecções são disjuntas.
-  let assinatura = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura" ? pedeAssinatura(userText) : null;
+  // Depois que o proponente assina, a decisão é "enviar ao proprietário" ou "encerrar" (14/11/2026): o pedido
+  // explícito (`pedeProprietario`) ou a resposta curta ao aviso que o próprio Max mandou (`respostaAoAviso`,
+  // só com o aviso como ÚLTIMA fala do assistente). "encerrar"/"enviar" soltos, sem aviso, não viram verbo.
+  const sugestao = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura" ? sugestaoPendente(state.messages) : null;
+  const doAviso = sugestao ? respostaAoAviso(userText, sugestao) : null;
+  let assinatura = podeEscrever(state.identity) && livre && atual?.kind !== "assinatura"
+    ? (pedeAssinatura(userText) ?? pedeProprietario(userText) ?? doAviso)
+    : null;
+  // Resposta ao aviso: a proposta é a do aviso (a frase curta não a cita). Pedido explícito a cita por conta própria.
+  const termoDoAviso = assinatura && assinatura === doAviso && !pedeProprietario(userText) && !pedeAssinatura(userText) ? sugestao!.codigo : undefined;
   // Trocar o contato de quem assina (Passo 4c): só orienta quando a proposta JÁ foi enviada. Antes do envio
   // (ou sem proposta achada, sem política, leitura falhando) o pedido não é deste fluxo: `assinatura` volta a
   // null e TUDO abaixo (gestão/edição, escopo, modelo) roda como se a detecção não tivesse disparado.
@@ -1269,7 +1285,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
 
   if (assinatura && !escritaEmAberto) {
     const passo = await iniciarAssinatura(assinatura, { texto: userText, messageId: state.inbound.messageId,
-      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage));
+      policy: state.policy, politicaIndisponivel: state.politicaIndisponivel, agora }, depsDoFluxo(state, usage), termoDoAviso);
     return { fluxo: passo.fluxo, reply: passo.reply,
       messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
       toolLog: [{ name: "fluxo", args: { kind: "assinatura", operacao: assinatura }, outcome: passo.evento }] };
@@ -1402,7 +1418,8 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
   const daFicha = atual.kind === "credito" || atual.kind === "captacao";
   return {
-    fluxo: passo.fluxo,
+    // O fluxo andou: a próxima pausa ganha o lembrete "Continuando…" de novo.
+    fluxo: aposRetomada(passo.fluxo),
     messages: [
       { role: "user", content: daFicha ? `(resposta da ficha de ${atual.kind === "captacao" ? "captação" : "crédito"})` : userText },
       { role: "assistant", content: passo.reply },
@@ -1641,6 +1658,30 @@ async function answer(state: MaxStateType): Promise<MaxUpdate> {
    ? {...result, googleRefs: null} : result;
 }
 
+/**
+ * Volta 1, e SÓ ela: a leitura que consome o número da lista que a volta 0 acabou de montar (ver
+ * `leiturasDeSegundaVolta`). Na volta 2 em diante nada é oferecido: o modelo tem de responder em texto —
+ * sem esse teto, `situacao_certidoes` (que não monta lista nova) seguia oferecida até `TOOL_MAX_ROUNDS` e o
+ * turno acabava sem resposta (review #192).
+ */
+function leiturasDaVolta(state: MaxStateType) {
+  if (state.toolRounds !== 1) return [];
+  return leiturasDeSegundaVolta({
+    oferecidas: state.toolsOferecidas, referencias: state.referencias, turno: state.inbound.messageId,
+    policy: state.policy, identity: state.identity,
+  });
+}
+
+/**
+ * Trava b por volta: o que o despachante e o `autorizarChamada` aceitam é o que ESTA volta mostrou ao
+ * modelo. `toolsOferecidas` continua sendo a oferta do turn (volta 0); herdá-la nas voltas seguintes
+ * deixava escrita e `listar_negocios` executáveis numa volta em que o modelo nem as via (review #192).
+ * `toolRounds` só avança no retorno do nó `tools`, então answer e tools calculam o mesmo conjunto.
+ */
+function oferecidasDaVolta(state: MaxStateType): string[] {
+  return state.toolRounds === 0 ? state.toolsOferecidas : leiturasDaVolta(state).map((e) => e.nome);
+}
+
 async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   const stageSubject = JSON.stringify([state.identity.orgId, subjectDe(state.identity)]);
   const text = textoDoTurno(state).trim();
@@ -1656,12 +1697,34 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   if (state.toolRounds > 0 && singleDeal && !singleDeal.clarification && (selectedDeal || singleDeal.items?.length === 0)) {
     const completed = [...state.toolLog].reverse().find(entry => entry.name === "listar_negocios" && entry.outcome === "ok");
     const stage = typeof completed?.args.estado === "string" ? completed.args.estado.trim() : "";
-    const draft = singleDeal.items === null || !completed
+    // Busca por nome vale só para o usuário (o corretor nunca manda o termo): vazio com busca = nome não achado.
+    const buscou = state.identity.kind === "user" && lerBusca(completed?.args.busca) !== null;
+    const draft = singleDeal.buscaIndisponivel
+      ? "A busca por nome não está disponível para o seu perfil. Peça seus negócios e escolha pelo número."
+      : singleDeal.items === null || !completed
       ? "Não consegui consultar seus negócios agora. Tente novamente mais tarde."
       : singleDeal.items.length === 0
-        ? `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`
+        ? (buscou
+          // Lista cortada pelo CM: o nome pode estar além do corte, então não se afirma que não existe.
+          ? (singleDeal.truncated
+            ? "Não encontrei esse nome entre os negócios que consegui consultar. Pode haver outros."
+            : "Não encontrei negócio com esse nome visível para você.")
+          : `Não encontrei negócios${stage ? ` na etapa “${stage}”` : ""} para esta consulta.`)
         : renderizarNegociosSelecionados(singleDeal.items, state.referencias, singleDeal.truncated);
     return { selectedDealQuery: null, queryOptions: null, restoDaResposta: null, draft };
+  }
+  // "Minhas pendências": o texto é do sistema, não do modelo. Em produção (16/11/2026) o modelo chamou
+  // 4 negócios com formulário de "4 pendências", omitiu a atividade atrasada e falou em 1ª pessoa.
+  // Só quando é a ÚNICA leitura do turno; com outra tool ao lado, o modelo segue compondo.
+  const soPendencias = state.toolResults.length === 1 && state.toolResults[0].tool === MINHAS_PENDENCIAS.nome ? state.toolResults[0] : null;
+  if (state.toolRounds > 0 && soPendencias) {
+    const pedida = [...state.toolLog].reverse().find((e) => e.name === MINHAS_PENDENCIAS.nome);
+    const draft = respostaDePendencias(
+      soPendencias,
+      { filtro: pedida?.args.filtro, comNegocio: typeof pedida?.args.negocio_id === "string" && pedida.args.negocio_id.trim() !== "" },
+      Date.now()
+    );
+    if (draft !== null) return { draft };
   }
   if (state.toolRounds === 0 && state.queryOptions) {
     const pending = state.queryOptions;
@@ -1727,6 +1790,12 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
     criacao,
     avisos: state.identity.kind === "user" && preferenciasPermitidas({ policy: state.policy, politicaIndisponivel: state.politicaIndisponivel }),
     pendencias: !state.politicaIndisponivel && state.policy.includes("pending.summary"),
+    // Avisos da fila (2.8b): só usuário da plataforma com `pending.summary` E `pending.avisos`.
+    avisosDaFila:
+      !state.politicaIndisponivel &&
+      state.identity.kind === "user" &&
+      state.policy.includes("pending.summary") &&
+      state.policy.includes("pending.avisos"),
     // Vazio na primeira volta; preenchido quando o `tools` já rodou.
     toolResults: state.toolResults,
     credito: creditoLigado(),
@@ -1775,13 +1844,16 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
   }
 
   const googleDefs = state.toolRounds === 0 ? googleToolsForTurn(googleContext(state), userText, state.googleRefs, state.referencias) : [];
+  const daSegundaVolta = state.toolRounds === 0 ? [] : leiturasDaVolta(state);
+  // Trava b por volta: depois da volta 0, `autorizarChamada` (aqui) e o despachante (`tools`) só aceitam o
+  // que ESTA volta mostrou ao modelo — ver `leiturasDaVolta`. `toolsOferecidas` segue sendo a oferta do turn.
   const oferecidas =
-    state.toolRounds === 0 ? [...oferta.entradas.map((e) => e.nome), ...googleDefs.map(e => e.name)] : state.toolsOferecidas;
+    state.toolRounds === 0 ? [...oferta.entradas.map((e) => e.nome), ...googleDefs.map(e => e.name)] : daSegundaVolta.map((e) => e.nome);
   // Só a volta 0 grava: as seguintes herdam a oferta do turn.
   const daOferta = state.toolRounds === 0 ? { toolsOferecidas: oferecidas, queryOptions: null }
     : clarification?.options.length ? { queryOptions: { subjectKey: stageSubject, createdAt: Date.now(),
         options: clarification.options, offset: 0, numbered: false } } : {};
-  const defs = [...oferta.entradas.map((e) => e.def), ...googleDefs];
+  const defs = [...oferta.entradas.map((e) => e.def), ...googleDefs, ...daSegundaVolta.map((e) => e.def)];
   const tools = defs.length > 0 ? defs : undefined;
 
   /**
@@ -2202,7 +2274,7 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
    */
   const dispatch = (calls: typeof chamadas) => despacharLeituras({
     chamadas: calls,
-    oferecidas: state.toolsOferecidas,
+    oferecidas: oferecidasDaVolta(state),
     policy: state.policy,
     identity: state.identity,
     fromPhone: state.inbound.fromPhone,
@@ -2237,7 +2309,7 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
   if (!missing.length && state.toolRounds === 0 && chamadas.length === 1 && chamadas[0].name === "listar_negocios" &&
       namedStage && namedStage !== chamadas[0].args.estado) {
     const corrected = await despacharLeituras({ chamadas: [{ ...chamadas[0], args: { ...chamadas[0].args, estado: namedStage } }],
-      oferecidas: state.toolsOferecidas, policy: state.policy, identity: state.identity,
+      oferecidas: oferecidasDaVolta(state), policy: state.policy, identity: state.identity,
       fromPhone: state.inbound.fromPhone, referencias, turno: state.inbound.messageId });
     resultados = corrected.resultados;
     trilha = [...trilha, ...corrected.trilha];
@@ -2318,7 +2390,8 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
 
   // Antes do teto: afirmação de criação no texto livre é falsa por construção
   // (escrita real sai por template) — ver `travarCriacaoFalsa`.
-  const trava = travarCriacaoFalsa(texto, {
+  // Markdown do modelo (`**x**`, `## título`) vira a sintaxe do WhatsApp; só aqui, no texto do modelo.
+  const trava = travarCriacaoFalsa(paraWhatsApp(texto), {
     houveLeitura: state.toolResults.some((r) => r.items !== null),
     podeCriar: modoDeCriacao(state.identity, state.policy) === "disponivel",
     podeEnviar: podeEscrever(state.identity) && state.policy.includes("proposal.send"),
@@ -2335,12 +2408,16 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   const final = limitarTamanho(trava.texto);
   // Ficha de crédito pausada por uma pergunta: volta ao campo em aberto.
   const pausada = (state.fluxo?.kind === "credito" || state.fluxo?.kind === "captacao") && state.fluxo.pausado ? state.fluxo : null;
-  const saida = pausada
+  // O lembrete vale UMA vez por pausa (`lembradoEm`) e só se a pausa é recente (24h): sem isso ele ia
+  // colado em toda resposta fora do assunto enquanto o fluxo ficasse aberto (prod 16/11).
+  const agoraCompose = Date.now();
+  const lembrar = pausada !== null && deveLembrarDaPausa(pausada, agoraCompose);
+  const saida = pausada && lembrar
     ? `${final.texto}\n\n${pausada.kind === "captacao" ? continuacaoCaptacao(pausada) : continuacaoCredito(pausada)}`
     : final.texto;
 
   return {
-    ...(pausada ? { fluxo: { ...pausada, pausado: false } } : {}),
+    ...(pausada ? { fluxo: { ...pausada, pausado: false, ...(lembrar ? { lembradoEm: agoraCompose } : {}) } } : {}),
     reply: saida,
     restoDaResposta: final.resto ? { texto: final.resto, criadoEm: Date.now() } : null,
     // Consumido: se sobrasse no checkpoint, o turno seguinte que respondesse

@@ -318,8 +318,15 @@ const CATALOGO_DO_IMOBPRO = [
   "google.calendar.read",
   "google.calendar.write",
   "google.tasks.write",
-  // Leitura de documento (15/11/2026, par do contractmaker §18.13.13): posição 33, FIXA.
-  // Nasce desligada e NUNCA vai ao comissionado.
+  // Avisos da fila no pending.summary (2.8b, 15/11/2026): posição 33 (0-based), ao FIM, fora do padrão.
+  "pending.avisos",
+  // PR-O4cat (16/11/2026): três leituras futuras INERTES (sem verbo, fora do padrão e do
+  // brokerDefault). Posições 34, 35 e 36 (0-based), ao FIM, nesta ordem.
+  "certidao.status",
+  "document.list",
+  "charge.status",
+  // Leitura de documento (15/11/2026, par do contractmaker §18.13.13): posição 37, FIXA
+  // (renumerada em 17/11/2026 depois das 33 a 36 da produção). Nasce desligada e NUNCA vai ao comissionado.
   "document.read",
 ];
 

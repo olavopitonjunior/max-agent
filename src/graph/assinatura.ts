@@ -4,6 +4,7 @@ import { termoDaEdicao, pedeGestao } from "./gestao";
 import { avisoDeMais, buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type CanalDeAssinatura, type PropostaListada } from "./localizar";
 import { lerConfirmacao, normalizar } from "./tools";
 import { negaAcao } from "./capacidades";
+import { pedeProprietario } from "./proprietario";
 
 /**
  * Lembrar quem falta assinar e cancelar a assinatura de uma proposta pelo
@@ -17,36 +18,63 @@ import { negaAcao } from "./capacidades";
  * NUNCA afirma que algo aconteceu sem o 200.
  */
 
-/** "trocar" é só leitura: orienta o caminho de trocar signatário DEPOIS do envio (Passo 4c, 26/10). */
-type Operacao = "lembrar" | "cancelar" | "trocar";
+/**
+ * "trocar" é só leitura: orienta o caminho de trocar signatário DEPOIS do envio (Passo 4c, 26/10).
+ * `enviar_proprietario` e `encerrar` (14/11/2026): a decisão depois que o proponente assinou
+ * (`proposal.send_owner` / `proposal.complete`); detecção em `proprietario.ts`.
+ */
+type Operacao = "lembrar" | "cancelar" | "trocar" | "enviar_proprietario" | "encerrar";
 type OperacaoDeEscrita = Exclude<Operacao, "trocar">;
 interface AssinaturaDoAlvo { nome: string; status: string; canal?: CanalDeAssinatura }
 interface Alvo { id: string; codigo: string; titulo?: string; estado?: string; status?: string; nomes?: string[]; assinaturas?: AssinaturaDoAlvo[] }
+/** Quem assina pelo proprietário, quando o servidor pede (esteira B sem vendedor no plano): dito pela PESSOA, nunca inventado. */
+interface VendedorDito { name: string; email: string }
 
 export interface FluxoAssinatura {
   kind: "assinatura";
   operacao: Operacao;
-  /** `resumo` = o resumo foi interrompido: o próximo SIM só o reapresenta (nunca escreve). */
-  etapa: "selecao" | "motivo" | "resumo" | "confirmacao" | "concluida";
+  /** `resumo` = o resumo foi interrompido: o próximo SIM só o reapresenta (nunca escreve). `vendedor` = falta nome e e-mail do proprietário. */
+  etapa: "selecao" | "motivo" | "vendedor" | "resumo" | "confirmacao" | "concluida";
   alvo?: Alvo;
   candidatos?: Alvo[];
   /** O que a pessoa digitou para achar a proposta. */
   termo?: string;
   /** Cancelar: o motivo (3–500), vai no histórico da proposta. */
   motivo?: string;
+  /** Enviar ao proprietário: quem assina, só depois de o servidor responder `vendedor_obrigatorio`. */
+  vendedor?: VendedorDito;
   chave?: { verbo: string; valor: string };
   atualizadoEm: number;
 }
 type Resposta = Extract<PassoDoFluxo, { reply: string }>;
 
-const VERBO: Record<OperacaoDeEscrita, string> = { lembrar: "proposal.remind", cancelar: "proposal.cancel" };
+const VERBO: Record<OperacaoDeEscrita, string> = {
+  lembrar: "proposal.remind", cancelar: "proposal.cancel",
+  enviar_proprietario: "proposal.send_owner", encerrar: "proposal.complete",
+};
 /** Estados em que o servidor aceita lembrar (REMINDABLE_STATUSES do ImobPro). */
 const LEMBRAVEIS = new Set(["enviada", "entregue", "visualizada", "assinada_proponente", "aguardando_vendedor"]);
 /** Estados em que o servidor aceita cancelar (CANCELLABLE_STATUSES, apps/web/src/lib/proposals/status-sets.ts). */
 const CANCELAVEIS = new Set(["rascunho", "aguardando_aprovacao", "enviada", "entregue", "visualizada", "assinada_proponente", "aguardando_vendedor", "falha_envio"]);
 /** Cancelar estes não mexe na ClickSign: ainda não há assinatura em andamento. */
 const SEM_ASSINATURA_VIVA = new Set(["rascunho", "aguardando_aprovacao", "falha_envio"]);
-const UTEIS: Record<OperacaoDeEscrita, Set<string>> = { lembrar: LEMBRAVEIS, cancelar: CANCELAVEIS };
+/**
+ * O proponente assinou e a decisão é do corretor. Esteira A: `assinada_proponente` (não `aguardando_vendedor`,
+ * que já foi liberada). Esteira B (fluxo versionado): o status da proposta segue `enviada` enquanto o fluxo
+ * está em `awaiting_release`/`ready_to_finish`, e o Max não enxerga o fluxo; aceita `enviada` aqui e deixa o
+ * servidor decidir (devolve `not_awaiting_decision`, que vira mensagem amigável).
+ */
+const AGUARDANDO_DECISAO = new Set(["assinada_proponente", "enviada"]);
+const UTEIS: Record<OperacaoDeEscrita, Set<string>> = {
+  lembrar: LEMBRAVEIS, cancelar: CANCELAVEIS, enviar_proprietario: AGUARDANDO_DECISAO, encerrar: AGUARDANDO_DECISAO,
+};
+
+/** O termo vindo de um aviso é o código da proposta: a busca vai por ele (proposal.status), não pela frase curta. */
+const CODIGO_DO_AVISO = /^PROP-\d{4}-\d+$/i;
+const NAO_LIBERADO: Record<OperacaoDeEscrita, string> = {
+  lembrar: "Lembrar a assinatura de proposta", cancelar: "Cancelar proposta",
+  enviar_proprietario: "Enviar proposta ao proprietário", encerrar: "Encerrar proposta",
+};
 
 const MOTIVO_MIN = 3;
 const MOTIVO_MAX = 500;
@@ -66,7 +94,7 @@ const PALAVRA_DE_ASSINATURA = /\b(?:quem|assin\w*|signat\w*|pendente\w*|lembrete
 /** "manda/reenvia um lembrete da proposta…". */
 const LEMBRAR_LEMBRETE = new RegExp(PREF + String.raw`(?:mand|envi|reenvi|dispar)(?:a|ar|e|o)\s+(?:um\s+|o\s+|outro\s+|novo\s+)*lembrete\b[^.?!]{0,60}?\b(?:proposta\b|prop-\d)`);
 /** Negar a AÇÃO ("não cancela", "nunca lembra"), e não qualquer "não" da frase ("lembra quem não assinou"). */
-const NEGA_O_VERBO = /\b(?:nao|nunca|jamais)\s+(?:precisa\s+|quero\s+que\s+(?:voce\s+|vc\s+)?|vai\s+|pode\s+|deve\s+)?(?:cancel|lembr|cobr|mand|envi|reenvi)/;
+const NEGA_O_VERBO = /\b(?:nao|nunca|jamais)\s+(?:precisa\s+|quero\s+que\s+(?:voce\s+|vc\s+)?|vai\s+|pode\s+|deve\s+)?(?:cancel|lembr|cobr|mand|envi|reenvi|encerr|encaminh)/;
 /** Estados em que a assinatura já foi enviada: o contato de quem assina não muda mais no mesmo envio. */
 const POS_ENVIO = new Set(["enviada", "entregue", "visualizada", "assinada_proponente", "aguardando_vendedor"]);
 /** Antes do envio o contato se corrige pelo caminho normal (edição da proposta, `proposal.update`). */
@@ -119,6 +147,29 @@ export function pedeAssinatura(texto: string): Operacao | null {
   return pedeTrocaDeSignatario(texto) ? "trocar" : null;
 }
 
+const EMAIL = /[^\s<>(),;:]+@[^\s<>(),;:]+\.[^\s<>(),;:]+/;
+/**
+ * Nome e e-mail de quem assina pelo proprietário, ditos pela pessoa ("Maria Souza, maria@exemplo.com").
+ * Sem os dois (nome com 2+ caracteres e e-mail com forma de e-mail), `null`: nada é adivinhado.
+ */
+export function vendedorDaFrase(texto: string): VendedorDito | null {
+  const achado = EMAIL.exec(texto);
+  if (!achado) return null;
+  const email = achado[0].replace(/[.]+$/, "");
+  if (email.length > 254) return null;
+  const nome = texto
+    .replace(achado[0], " ")
+    .replace(/\b(?:o\s+)?(?:e-?mail|nome)\b\s*(?:é|e|:)?/gi, " ")
+    .replace(/^\s*(?:max\b[\s,:-]*)?/i, "")
+    .replace(/[,;:()<>]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    // Sobra do conector da frase ("Maria Souza e o e-mail: …" → "Maria Souza e").
+    .replace(/(?:\s+(?:e|o|a|é))+$/i, "");
+  if (nome.length < 2 || nome.length > 120 || !/\p{L}{2}/u.test(nome)) return null;
+  return { name: nome, email };
+}
+
 /** O motivo dito na frase do pedido ("…porque o cliente desistiu"), se couber em 3–500. */
 export function motivoDaFrase(texto: string): string | null {
   const m = EXTRAI_MOTIVO.exec(texto);
@@ -150,7 +201,13 @@ function alvoDe(p: PropostaListada): Alvo {
 }
 /** O pedido não é deste fluxo: o turno segue o atendimento normal, como se a detecção não tivesse disparado. */
 const naoEComigo = (evento: string): PassoDoFluxo => ({ liberar: true, fluxo: null, evento });
-const verbo = (op: OperacaoDeEscrita) => (op === "lembrar" ? "lembrar" : "cancelar");
+const VERBO_NO_INFINITIVO: Record<OperacaoDeEscrita, string> = {
+  lembrar: "lembrar", cancelar: "cancelar", enviar_proprietario: "enviar ao proprietário", encerrar: "encerrar",
+};
+const verbo = (op: OperacaoDeEscrita) => VERBO_NO_INFINITIVO[op];
+const EM_QUE_ESTADO: Record<OperacaoDeEscrita, string> = {
+  lembrar: "receber lembrete", cancelar: "ser cancelada", enviar_proprietario: "ser enviada ao proprietário", encerrar: "ser encerrada",
+};
 
 const CANAL: Record<CanalDeAssinatura, string> = { email: "e-mail", whatsapp: "WhatsApp", sms: "SMS" };
 const SITUACAO: Record<string, string> = { assinou: "assinou", pendente: "pendente", recusou: "recusou" };
@@ -188,6 +245,17 @@ function resumo(f: FluxoAssinatura): Resposta {
       `Lembrar a assinatura da proposta ${rotulo}?\nVai para quem ainda não assinou, pelo canal de cada um:\n${quem}${ja}${rec}\n\n${PEDE_SIM}`);
   }
 
+  // Textos FIXOS: nada do servidor entra aqui, e o Max não afirma quem é o proprietário (a projeção não diz).
+  if (f.operacao === "enviar_proprietario") {
+    const para = f.vendedor ? `${umaLinha(f.vendedor.name, 80)} (${umaLinha(f.vendedor.email, 120)})` : "o proprietário";
+    return resposta({ ...f, etapa: "confirmacao" },
+      `Enviar a proposta ${rotulo} para ${para} assinar? (R$ 1,50 por assinante)\nO proponente já assinou; esta é a via do proprietário.\n\n${PEDE_SIM}`);
+  }
+  if (f.operacao === "encerrar") {
+    return resposta({ ...f, etapa: "confirmacao" },
+      `Encerrar a proposta ${rotulo} agora, sem o proprietário?\nO proprietário não vai assinar e a proposta não pode ser reaberta. Sem custo de assinatura.\n\n${PEDE_SIM}`);
+  }
+
   const viva = !SEM_ASSINATURA_VIVA.has(alvo.status ?? "");
   const aviso = viva ? " A assinatura em andamento será cancelada na ClickSign e ninguém mais conseguirá assinar." : "";
   const signatarios = todos.length || viva
@@ -223,7 +291,7 @@ export async function iniciarAssinatura(
   if (!permitido(ctx)) {
     return resposta(null, ctx.politicaIndisponivel
       ? "Não consegui validar sua permissão agora. Nada foi alterado; tente de novo em instantes."
-      : `${op === "lembrar" ? "Lembrar a assinatura de" : "Cancelar"} proposta pelo ${nomeDoAgente()} não está liberado para você. Faça pela tela de propostas do sistema.`,
+      : `${NAO_LIBERADO[op]} pelo ${nomeDoAgente()} não está liberado para você. Faça pela tela de propostas do sistema.`,
     "assinatura_sem_politica");
   }
   if (op === "cancelar") {
@@ -232,7 +300,9 @@ export async function iniciarAssinatura(
   }
   const termo = termoDado !== undefined ? termoDado : termoDoPedido(ctx.texto);
   // A busca lê a parte do pedido SEM a justificativa: "porque a Ana desistiu" não cita a proposta da Ana.
-  const r = await buscarPropostas(deps, cabecaDe(ctx.texto), termo);
+  // Resposta curta a um aviso ("enviar"): o código vem do aviso, não da frase, e a busca é por esse código.
+  const textoDaBusca = termo && CODIGO_DO_AVISO.test(termo) ? termo : cabecaDe(ctx.texto);
+  const r = await buscarPropostas(deps, textoDaBusca, termo);
   if (!r) return resposta(null, "Não consegui consultar suas propostas agora. Nada foi alterado; tente de novo em instantes.", "assinatura_sem_resposta");
   if (r.termo) f.termo = r.termo;
   if (!r.itens.length) {
@@ -245,7 +315,9 @@ export async function iniciarAssinatura(
     const onde = r.termo ? ` com "${r.termo}"` : " sua recente";
     const quadro = op === "lembrar"
       ? `Nenhuma proposta${onde} tem assinatura em andamento para lembrar`
-      : `Nenhuma proposta${onde} pode ser cancelada agora`;
+      : op === "enviar_proprietario" || op === "encerrar"
+        ? `Nenhuma proposta${onde} está aguardando a sua decisão (o proponente assinou e o proprietário ainda não)`
+        : `Nenhuma proposta${onde} pode ser cancelada agora`;
     const mais = r.total > r.itens.length ? "\n(Há mais propostas; me diga o nome ou o código.)" : "";
     return resposta(null, `${quadro}:\n${r.itens.slice(0, 5).map((p) => `• ${rotuloDaProposta(p)}`).join("\n")}${mais}`, "assinatura_nada_util");
   }
@@ -254,7 +326,7 @@ export async function iniciarAssinatura(
     if (uteis.length === 1 && r.itens.length === 1) return seguirComAlvo(f, alvoDe(uteis[0]!));
     if (uteis.length === 1) {
       // As outras que casam ficam ditas: a pessoa pode ter falado de outra.
-      const aviso = `Achei ${r.itens.length} propostas com "${r.termo}"; só a ${uteis[0]!.codigo} está em estado de ${op === "lembrar" ? "receber lembrete" : "ser cancelada"}.\n`;
+      const aviso = `Achei ${r.itens.length} propostas com "${r.termo}"; só a ${uteis[0]!.codigo} está em estado de ${EM_QUE_ESTADO[op]}.\n`;
       return seguirComAlvo(f, alvoDe(uteis[0]!), aviso);
     }
   }
@@ -355,8 +427,53 @@ function pulados(body: Record<string, unknown>): { nome: string | null; motivo: 
 }
 const doPulado = (p: { nome: string | null; motivo: string }) => `${p.nome ?? "um signatário"} (${p.motivo})`;
 
+/**
+ * Recusas de "enviar ao proprietário" e "encerrar" → frase FIXA por código. Nenhum texto do servidor
+ * (mensagem crua, dado do signatário) entra na frase: só o código do erro escolhe qual dizer.
+ */
+function textoDaRecusaDoProprietario(f: FluxoAssinatura, status: number, body: Record<string, unknown>): string {
+  const c = f.alvo!.codigo;
+  const erro = String(body.error ?? "");
+  const encerrar = f.operacao === "encerrar";
+  const nada = "Nada foi alterado.";
+  if (status === 403 && body.reason === "politica_nao_concede") {
+    return `${NAO_LIBERADO[f.operacao as OperacaoDeEscrita]} pelo ${nomeDoAgente()} não está liberado para você. Faça pela tela de propostas do sistema. ${nada}`;
+  }
+  if (erro === "MODULE_DISABLED") return `Propostas estão desligadas para a sua imobiliária. ${nada}`;
+  if (erro === "papel_sem_envio" || status === 403) {
+    return `Sua permissão no sistema não permite ${encerrar ? "encerrar" : "enviar ao proprietário"} a proposta ${c}. ${nada}`;
+  }
+  if (status === 404) return `Não encontrei a proposta ${c} entre as suas. ${nada}`;
+  if (status === 402 || erro === "plano_clicksign_esgotado") {
+    return `O limite de assinaturas do plano da ClickSign da sua imobiliária acabou. Não enviei a proposta ${c}. ${nada}`;
+  }
+  if (erro === "not_awaiting_decision") return `A proposta ${c} não está aguardando a sua decisão (enviar ao proprietário ou encerrar). ${nada}`;
+  if (erro === "ja_enviada" || erro === "proprietario_ja_junto") {
+    return `A via do proprietário da proposta ${c} já foi enviada. Confira o andamento na tela de propostas. ${nada}`;
+  }
+  if (erro === "fluxo_em_revisao") return `A proposta ${c} está em revisão na tela de propostas. Termine por lá e tente de novo. ${nada}`;
+  if (erro === "fluxo_indisponivel") return `Não consegui ler o andamento da assinatura da proposta ${c} agora. Tente de novo em instantes. ${nada}`;
+  if (erro === "sem_vendedor_na_proposta" || erro === "vendedor_nao_incluido" || erro === "vendedor_invalido") {
+    return `Não consegui incluir o proprietário na proposta ${c}. Inclua-o pela tela de propostas e peça de novo. ${nada}`;
+  }
+  if (erro === "assinatura_nao_configurada" || erro === "modelo_sem_documento" || erro === "preflight_recusado") {
+    return `A proposta ${c} não está pronta para enviar a via do proprietário. Confira a configuração da assinatura na tela de propostas. ${nada}`;
+  }
+  if (erro === "liberacao_recusada") {
+    return `A ClickSign não liberou a assinatura do proprietário na proposta ${c}. Confira o status na tela de propostas antes de tentar de novo.`;
+  }
+  if (erro === "conclusao_recusada") return `Não consegui encerrar a proposta ${c} agora. Confira o status na tela de propostas. ${nada}`;
+  if (status === 202 || erro === "em_conciliacao") {
+    return `Ainda estou confirmando com a ClickSign o que aconteceu na proposta ${c}. Não repita o pedido; responda SIM em instantes para eu verificar o mesmo pedido.`;
+  }
+  return encerrar
+    ? `O sistema não confirmou o encerramento da proposta ${c}. Confira o status na tela de propostas antes de tentar de novo.`
+    : `O sistema não confirmou o envio da proposta ${c} ao proprietário. Confira o status na tela de propostas antes de tentar de novo.`;
+}
+
 /** Recusas do servidor → frase fixa. Nada aqui afirma que a operação aconteceu. */
 function textoDaRecusa(f: FluxoAssinatura, status: number, body: Record<string, unknown>): string {
+  if (f.operacao === "enviar_proprietario" || f.operacao === "encerrar") return textoDaRecusaDoProprietario(f, status, body);
   const c = f.alvo!.codigo;
   const erro = String(body.error ?? "");
   const lembrar = f.operacao === "lembrar";
@@ -393,7 +510,7 @@ function textoDaRecusa(f: FluxoAssinatura, status: number, body: Record<string, 
 }
 
 /** O que `negaAcao` devolve para a ação DESTE fluxo — só ela vale como NÃO. */
-const ACAO_NEGAVEL: Record<Operacao, string> = { lembrar: "enviar", cancelar: "cancelar", trocar: "alterar" };
+const ACAO_NEGAVEL: Record<Operacao, string> = { lembrar: "enviar", cancelar: "cancelar", trocar: "alterar", enviar_proprietario: "enviar", encerrar: "encerrar" };
 
 // ─── Condução ───────────────────────────────────────────────────────────────
 
@@ -408,10 +525,10 @@ export async function conduzirAssinatura(f: FluxoAssinatura, ctx: ContextoDoTurn
     // confere o MESMO pedido antes de repetir.
     return f.chave
       ? resposta({ ...f, etapa: "resumo", atualizadoEm: ctx.agora }, "Parei por aqui. O pedido anterior pode já ter sido registrado: confira na tela de propostas.", "assinatura_cancelada")
-      : resposta(null, `Parei por aqui. Nada foi ${f.operacao === "lembrar" ? "enviado" : "alterado"}.`, "assinatura_cancelada");
+      : resposta(null, `Parei por aqui. Nada foi ${f.operacao === "lembrar" || f.operacao === "enviar_proprietario" ? "enviado" : "alterado"}.`, "assinatura_cancelada");
   }
-  // Outro pedido de lembrar/cancelar (outra operação ou outra proposta) recomeça, salvo escrita em aberto.
-  const outro = pedeAssinatura(ctx.texto);
+  // Outro pedido de lembrar/cancelar/enviar ao proprietário/encerrar (outra operação ou outra proposta) recomeça, salvo escrita em aberto.
+  const outro = pedeAssinatura(ctx.texto) ?? pedeProprietario(ctx.texto);
   if (outro && !f.chave) return iniciarAssinatura(outro, ctx, deps);
   if (!permitido(ctx)) {
     return resposta({ ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa }, "Não consegui validar sua permissão agora. Nada foi alterado.");
@@ -454,6 +571,19 @@ export async function conduzirAssinatura(f: FluxoAssinatura, ctx: ContextoDoTurn
     return resumo({ ...f, motivo, atualizadoEm: ctx.agora });
   }
 
+  // Enviar ao proprietário: o servidor pediu quem assina (`vendedor_obrigatorio`). O nome e o e-mail são
+  // DITOS pela pessoa; sem os dois, pergunta de novo. Depois, o resumo com eles e o SIM de sempre.
+  if (f.etapa === "vendedor") {
+    if (pedeGestao(ctx.texto) || /\?\s*$/.test(ctx.texto.trim())) return { liberar: true, fluxo: f, evento: "assinatura_outro_assunto" };
+    const vendedor = vendedorDaFrase(ctx.texto);
+    if (!vendedor) {
+      return resposta({ ...f, atualizadoEm: ctx.agora },
+        "Preciso do nome e do e-mail de quem assina pelo proprietário. Me diga assim: Maria Souza, maria@exemplo.com",
+        "assinatura_pede_vendedor");
+    }
+    return resumo({ ...f, vendedor, atualizadoEm: ctx.agora });
+  }
+
   // Outro assunto libera o turno; a chave (se houver) fica no fluxo para o próximo SIM.
   if (confirmacao === "nenhum") return { liberar: true, fluxo: f, evento: "assinatura_outro_assunto" };
   if (f.etapa === "resumo" || confirmacao !== "sim") return resumo({ ...f, atualizadoEm: ctx.agora });
@@ -461,12 +591,41 @@ export async function conduzirAssinatura(f: FluxoAssinatura, ctx: ContextoDoTurn
   const alvo = f.alvo!;
   const chave = f.chave ?? { verbo: VERBO[f.operacao], valor: ctx.messageId };
   const emCurso: FluxoAssinatura = { ...f, chave, atualizadoEm: ctx.agora };
-  const args: Record<string, unknown> = f.operacao === "cancelar" ? { proposta_id: alvo.id, motivo: f.motivo } : { proposta_id: alvo.id };
+  const args: Record<string, unknown> = f.operacao === "cancelar"
+    ? { proposta_id: alvo.id, motivo: f.motivo }
+    : f.operacao === "enviar_proprietario" && f.vendedor
+      ? { proposta_id: alvo.id, sellers: [{ name: f.vendedor.name, email: f.vendedor.email }] }
+      : { proposta_id: alvo.id };
   const r = await deps.acao(chave.verbo, args, chave.valor);
   if (!r || (r.status === 409 && r.body.error === "em_andamento")) {
     return resposta(emCurso, INCERTO, "assinatura_incerta");
   }
+  // 202 `em_conciliacao`: o servidor ainda confere com a ClickSign. A chave FICA: o próximo SIM confere o MESMO pedido.
+  if (r.status === 202 && (f.operacao === "enviar_proprietario" || f.operacao === "encerrar")) {
+    return resposta({ ...emCurso, etapa: "resumo" }, textoDaRecusa(f, r.status, r.body), "assinatura_em_conciliacao");
+  }
+  // O servidor pede quem assina: o pedido NÃO foi feito (422 é antes de qualquer efeito), então a chave não fica.
+  if (f.operacao === "enviar_proprietario" && !f.vendedor && r.status === 422 && r.body.error === "vendedor_obrigatorio") {
+    return resposta({ ...f, etapa: "vendedor", chave: undefined, atualizadoEm: ctx.agora },
+      `A proposta ${alvo.codigo} não tem o proprietário cadastrado. Me diga o nome e o e-mail de quem assina por ele (nada foi enviado ainda).`,
+      "assinatura_pede_vendedor");
+  }
   if (r.status !== 200) return resposta(null, textoDaRecusa(f, r.status, r.body), `assinatura_${f.operacao}_${r.status}`);
+
+  if (f.operacao === "enviar_proprietario") {
+    // Só o `ok:true` do servidor prova o envio; nada do corpo (avisos, dados de signatário) é repetido aqui.
+    if (r.body.ok !== true) {
+      return resposta(null, `O sistema respondeu, mas não confirmou o envio da proposta ${alvo.codigo} ao proprietário. Confira o status na tela de propostas.`, "assinatura_proprietario_nao_confirmado");
+    }
+    return resposta(null, `Enviei a proposta ${alvo.codigo} para o proprietário assinar.`, "proposta_enviada_ao_proprietario");
+  }
+  if (f.operacao === "encerrar") {
+    const encerrada = r.body.ok === true && (r.body.status === "encerrada" || r.body.status === "completa");
+    if (!encerrada) {
+      return resposta(null, `O sistema respondeu, mas não confirmou o encerramento da proposta ${alvo.codigo}. Confira o status na tela de propostas.`, "assinatura_encerrar_nao_confirmado");
+    }
+    return resposta(null, `Proposta ${alvo.codigo} encerrada sem o proprietário. Ele não vai assinar.`, "proposta_encerrada");
+  }
 
   if (f.operacao === "cancelar") {
     const proposta = r.body.proposta && typeof r.body.proposta === "object" ? (r.body.proposta as Record<string, unknown>) : {};
