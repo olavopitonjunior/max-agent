@@ -177,7 +177,8 @@ export function juntarTelefone(raw: string): string | null {
   return d.length === 10 || d.length === 11 ? d : null;
 }
 
-const ROTULO_DE_TELEFONE = /\b(?:telefone|celular|whats\w*|zap|fone|tel|cel)\b[^\d\n]{0,30}?(?=\+?\(?\d)/gi;
+/** Rótulo com o número COLADO: só espaço, ":", "=", "é" ou "do/da <pessoa>" entre os dois ("telefone não tem, CPF 529…" não vale). */
+const ROTULO_DE_TELEFONE = /\b(?:telefone|celular|whats\w*|zap|fone|tel|cel)\b\.?(?:\s+(?:do|da|de)\s+\p{L}+)?\s*(?::|=|é)?\s*(?=\+?\(?\d)/giu;
 const COMECA_COM_TELEFONE = new RegExp(`^${TELEFONE_DITADO.source}`);
 const SEQUENCIA_APOS_ROTULO = /^\+?\(?\d{2}\)?[\s,.-]{0,3}\d{1,5}(?:[\s.-]\d{1,5}){0,3}/;
 
@@ -193,6 +194,8 @@ export function telefoneDuvidoso(texto: string): string | null {
   }
   for (const r of texto.matchAll(ROTULO_DE_TELEFONE)) {
     const resto = texto.slice((r.index ?? 0) + r[0].length);
+    // Estrangeiro (+ e código de país que não é o 55): o CM aceita como está, sem pergunta.
+    if (/^\+(?!55)\d/.test(resto)) continue;
     const ok = COMECA_COM_TELEFONE.exec(resto);
     if (ok && juntarTelefone(ok[0])) continue;
     const seq = SEQUENCIA_APOS_ROTULO.exec(resto)?.[0];

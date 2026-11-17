@@ -169,3 +169,130 @@ describe("D6 — telefone ditado", () => {
     if (r.fluxo && r.fluxo.kind === "proposta") expect(r.fluxo.dados.proponente?.telefone).toBeUndefined();
   });
 });
+
+// ─── Rodada 2 do review ──────────────────────────────────────────────────────
+
+describe("R2.1 — telefone ditado em resposta avulsa (aguardaCampo)", () => {
+  const fluxoEsperando = (): Fluxo => ({
+    kind: "proposta", etapa: "ajustes", natureza: "venda", propostaId: "p1", codigo: "PROP-1",
+    dados: sanearDados(base), aguardaCampo: { pessoa: "proponente", campo: "telefone" }, atualizadoEm: 1,
+  });
+  const deps = (extraido: DadosDaProposta) => ({
+    acao: async () => { throw new Error("sem escrita"); },
+    extrairProposta: async () => extraido,
+    extrairCampos: async () => null,
+  });
+
+  it("'11, 9000-0002' (10 dígitos com 9 logo após o DDD) pergunta de novo e não grava", async () => {
+    const r = await conduzirFluxo(fluxoEsperando(), { texto: "11, 9000-0002", messageId: "m-r21", agora: 2, policy: ["proposal.create"] } satisfies ContextoDoTurno, deps({}));
+    expect(r.reply).toMatch(/telefone/i);
+    expect(r.reply).toMatch(/DDD/);
+    if (r.fluxo && r.fluxo.kind === "proposta") expect(r.fluxo.dados.proponente?.telefone).toBe("(11) 90000-0006");
+  });
+
+  it("'11, 90000-0002' fecha e é gravado", async () => {
+    const r = await conduzirFluxo(fluxoEsperando(), { texto: "11, 90000-0002", messageId: "m-r21b", agora: 2, policy: ["proposal.create"] } satisfies ContextoDoTurno, deps({}));
+    if (!r.fluxo || r.fluxo.kind !== "proposta") throw new Error("fluxo");
+    expect(String(r.fluxo.dados.proponente?.telefone).replace(/\D/g, "")).toBe("11900000002");
+  });
+});
+
+describe("R2.2 — nomeCorrigido não captura demais", () => {
+  const fluxoAberto = (): Fluxo => ({ kind: "proposta", etapa: "revisao", natureza: "venda", dados: sanearDados(base), atualizadoEm: 1 });
+  const deps = {
+    acao: async () => { throw new Error("correção aguarda confirmação"); },
+    extrairProposta: async () => ({}) as DadosDaProposta,
+    extrairCampos: async () => null,
+  };
+  const nomeApos = async (texto: string) => {
+    const r = await conduzirFluxo(fluxoAberto(), { texto, messageId: "m-r22", agora: 2, policy: ["proposal.create"] } satisfies ContextoDoTurno, deps);
+    return r.fluxo && r.fluxo.kind === "proposta" ? r.fluxo.dados.proponente?.nome : undefined;
+  };
+
+  it.each([
+    "o nome e o CPF estão certos, só muda o valor",
+    "nome do comprador e telefone: Maria Silva, (11) 90000-0001",
+    "vendedor: o nome é João Prado",
+    "nome pra assinatura é Maria Lima",
+  ])("não renomeia o comprador: '%s'", async (texto) => {
+    expect(await nomeApos(texto)).toBe("TESTE Comprador Reteste");
+  });
+
+  it.each([
+    "o nome é TESTE Comprador Áudio e é financiado",
+    "o nome é TESTE Comprador Áudio e financiado",
+    "nome do comprador é TESTE Comprador Áudio",
+    "corrige o nome para TESTE Comprador Áudio",
+  ])("renomeia exatamente: '%s'", async (texto) => {
+    expect(await nomeApos(texto)).toBe("TESTE Comprador Áudio");
+  });
+});
+
+describe("R2.3 — telefoneDuvidoso só olha dígitos colados ao rótulo", () => {
+  it.each([
+    "telefone não tem, CPF 529.982.247-25",
+    "sem telefone, matrícula 123.456",
+    "telefone ok, sinal 100.000",
+    "celular: não sei, cpf 529.982.247-25",
+  ])("não marca: '%s'", (t) => {
+    expect(telefoneDuvidoso(t)).toBeNull();
+  });
+
+  it.each(["telefone +351 912 345 678", "celular +1 305 555 1234"])("estrangeiro com + aceito como está: '%s'", (t) => {
+    expect(telefoneDuvidoso(t)).toBeNull();
+  });
+
+  it("rótulo com número colado continua pegando o que não fecha", () => {
+    expect(telefoneDuvidoso("telefone 11 9876 54")).toBeTruthy();
+    expect(telefoneDuvidoso("telefone do vendedor: 11, 9000-0002")).toBeTruthy();
+  });
+});
+
+describe("R2.4 — formaLegivel só reescreve '<palavra>, restante'", () => {
+  const pag = (forma: string) =>
+    resumoDaProposta({ natureza: "venda", dados: sanearDados({ ...base, pagamento: { sinal: 95000, forma } }) });
+
+  it("'financiado, restante' vira 'restante financiado'", () => {
+    expect(pag("financiado, restante")).toMatch(/Pagamento: sinal R\$\s95\.000,00; restante financiado\n/);
+  });
+  it.each([
+    "30% de entrada e o restante",
+    "FGTS e financiamento do restante",
+    "R$ 200 mil financiado, restante",
+  ])("não mexe em '%s'", (forma) => {
+    expect(pag(forma)).toContain(`; ${forma}\n`);
+  });
+});
+
+describe("R2.5 — unidade no texto da captação", () => {
+  const extrator = async () => ({ rua: "Rua X", numero: "10", cidade: "São Paulo", uf: "SP" });
+  const comp = async (t: string) => (await lerImovel(t, extrator)).dados.complemento;
+
+  it.each([
+    "cobertura 2 suítes", "cobertura 2 suites", "sala 2 ambientes", "apto 3 banheiros", "loja 200m", "loja 200 m²", "apto 2 quartos",
+    "torre e o parque", "apartamento 3 dormitórios",
+  ])("não grava complemento em '%s'", async (frase) => {
+    expect(await comp(`${frase}, na Rua X, 10, São Paulo/SP`)).toBeUndefined();
+  });
+
+  it.each([
+    ["apto 41", "apto 41"],
+    ["apto 41 bloco B", "apto 41"],
+    ["sala 1203", "sala 1203"],
+    ["conj. 52", "conj. 52"],
+    ["bloco B", "bloco B"],
+    ["torre 2", "torre 2"],
+  ])("mantém '%s'", async (frase, esperado) => {
+    expect(await comp(`o imóvel na Rua X, 10, ${frase}, São Paulo/SP`)).toContain(esperado);
+  });
+});
+
+describe("R2.6 — endereço livre já terminado em 'Cidade/UF' ou 'Cidade - UF'", () => {
+  it.each(["Rua Haddock Lobo, 300, São Paulo/SP", "Rua Haddock Lobo, 300, São Paulo - SP", "Rua Haddock Lobo, 300, São Paulo-SP"])(
+    "não repete a cidade: '%s'",
+    (endereco) => {
+      const r = resumoDaProposta({ natureza: "venda", dados: sanearDados({ ...base, imovel: { endereco, cidade: "São Paulo", uf: "SP" } }) });
+      expect(r).toContain("Imóvel: Rua Haddock Lobo, 300, São Paulo/SP\n");
+    },
+  );
+});

@@ -957,7 +957,10 @@ export interface ImovelLido { dados: Record<string, unknown>; erro?: string }
 /** "apto 42", "bloco B", "fundos", "casa 2"… — um complemento de verdade tem número ou uma destas palavras. */
 const PALAVRA_DE_COMPLEMENTO = /\b(ap(?:to|artamento)?|bloco|bl|casa|fundos|sala|loja|cobertura|andar|quadra|lote|torre|conjunto|conj|sobrado|km)\b/i;
 /** Unidade escrita no texto: "apto 41", "bloco B", "sala 12" — com número ("apartamento na Rua" e "apartamento 2 quartos" não são). */
-const UNIDADE_NO_TEXTO = /\b(?:(?:bloco|bl|torre)\.?\s*[\p{L}\d-]{1,4}[\s,]+)?(?:ap(?:to|artamento)?|sala|conj(?:unto)?|cobertura|loja)\.?\s*\d[\p{L}\d-]*(?![\p{L}\d-])(?!\s*(?:quartos?|dormit\w*|suites?|vagas?|m2|m²|metros))|\b(?:bloco|bl|torre)\.?\s*(?:\d[\p{L}\d-]*|\p{L}(?![\p{L}\d]))/iu;
+// O número da unidade não pode ser seguido de cômodo ou medida ("cobertura 2 suítes", "sala 2 ambientes", "loja 200m"). Bloco/torre
+// só com identificador: número aqui, letra maiúscula isolada em BLOCO_COM_LETRA (a flag i deixaria "torre e o parque" passar).
+const UNIDADE_NO_TEXTO = /\b(?:(?:bloco|bl|torre)\.?\s*[\p{L}\d-]{1,4}[\s,]+)?(?:ap(?:to|artamento)?|sala|conj(?:unto)?|cobertura|loja)\.?\s*\d+(?!\d)(?!\s*(?:m2|m²|m(?![\p{L}\d])|metros?|quartos?|dormit|su[ií]tes?|ambientes?|banheiros?|vagas?))(?:-?[\p{L}\d]+)?(?![\p{L}\d-])|\b(?:bloco|bl|torre)\.?\s*\d[\p{L}\d-]*/iu;
+const BLOCO_COM_LETRA = /\b(?:[Bb]loco|[Bb]l|[Tt]orre)\.?\s*[A-Z](?![\p{L}\d])/u;
 const pareceComplemento = (c: string) => /\d/.test(c) || PALAVRA_DE_COMPLEMENTO.test(c);
 
 /** Endereço pelo extrator (conferido contra o texto); matrícula, área, vagas e tipo em código. */
@@ -993,7 +996,7 @@ export async function lerImovel(texto: string, extrair: ExtratorDeSecao): Promis
   // Prod 17/11: "…, 300, apto 41, Cerqueira César…" perdeu o "apto 41" — o extrator deixou o complemento de
   // fora e nada o recuperava. A unidade escrita no texto (apto/bloco/sala… + número ou letra) vale.
   if (!dados.complemento) {
-    const unidade = UNIDADE_NO_TEXTO.exec(texto)?.[0]?.trim();
+    const unidade = (UNIDADE_NO_TEXTO.exec(texto) ?? BLOCO_COM_LETRA.exec(texto))?.[0]?.trim();
     if (unidade) dados.complemento = unidade;
   }
   const uf = str(r?.uf)?.toUpperCase();

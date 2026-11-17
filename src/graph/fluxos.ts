@@ -374,6 +374,8 @@ function enderecoNoResumo(im?: DadosDaProposta["imovel"]): string {
     .flatMap((parte) => (parte ?? "").split(","))
     .map((x) => x.trim())
     .filter(Boolean)
+    // "São Paulo/SP" ou "São Paulo - SP" no fim do texto livre: é a cidade com a sigla, que o Cidade/UF do fim já traz.
+    .filter((x) => !(uf && /^[A-Za-z]{2}$/.test(uf) && repetidos.has(normalizar(x.replace(new RegExp(String.raw`\s*[/-]\s*${uf}$`, "i"), "")))))
     .filter((x) => !repetidos.has(normalizar(x)))
     .filter((x, i, todos) => i === 0 || normalizar(x) !== normalizar(todos[i - 1]));
   const local = cidade && uf ? `${cidade}/${uf}` : cidade || uf;
@@ -382,8 +384,9 @@ function enderecoNoResumo(im?: DadosDaProposta["imovel"]): string {
 
 /** "financiado, restante" → "restante financiado": a forma lida como frase, não como lista de rótulos. */
 function formaLegivel(forma: string): string {
-  const m = /^(.+?),?\s+(?:o\s+)?restante$/i.exec(forma.trim());
-  return m ? `restante ${m[1].replace(/,\s*$/, "")}` : forma.trim();
+  // Só o padrão exato "<uma palavra>, restante": "30% de entrada e o restante" e "R$ 200 mil financiado, restante" ficam como foram escritos.
+  const m = /^(\p{L}+),\s*(?:o\s+)?restante$/iu.exec(forma.trim());
+  return m ? `restante ${m[1]}` : forma.trim();
 }
 
 /** O corpo do resumo — montado do estado, nunca pelo modelo. */
@@ -589,11 +592,21 @@ function pedirValorDoCampo(a: NonNullable<FluxoProposta["aguardaCampo"]>): strin
  * correção (prod 17/11) e o nome pedido sumia em silêncio. Nome de vendedor/proprietário fica fora.
  */
 function nomeCorrigido(texto: string): string | undefined {
-  const m = /(?:^|[\s,;.])(?:o\s+)?nome(\s+(?:do|da)\s+[\p{L}]+)?(?:\s+(?:correto|certo))?(?:\s*[:=]|\s+(?:é|e|para|pra)(?![\p{L}\d]))\s+(.+)$/iu.exec(texto.trim());
+  const t = texto.trim();
+  // "o nome (do comprador) é X" / "nome: X" (é só com acento: "o nome e o CPF estão certos" não é troca de nome)
+  // ou "corrige/troca o nome (do comprador) para X" ("nome pra assinatura é X" é outro campo).
+  const m =
+    /(?:^|[\s,;.])(?:o\s+)?nome(\s+(?:do|da)\s+[\p{L}]+)?(?:\s+(?:correto|certo))?(?:\s*[:=]|\s+é(?![\p{L}\d]))\s+(.+)$/iu.exec(t) ??
+    /(?:^|[\s,;.])(?:corrig\w*|troc\w*|mud\w*|alter\w*|atualiz\w*)\s+(?:o\s+)?nome(\s+(?:do|da)\s+[\p{L}]+)?\s+(?:para|pra)\s+(.+)$/iu.exec(t);
   if (!m) return undefined;
   if (m[1] && !/\b(?:comprador\w*|proponente|inquilin\w*|locatari\w*)\b/i.test(normalizar(m[1]))) return undefined;
+  // "vendedor: o nome é João": a frase fala do outro lado, antes do gatilho.
+  const antes = normalizar(t.slice(0, m.index)).split(/[.;\n]/).pop() ?? "";
+  if (/\b(?:vendedor\w*|proprietari\w*|locador\w*)\b/.test(antes)) return undefined;
   const nome = m[2]
-    .split(/\s+(?:com\s+mai[uú]scul\w*|e\s+(?:é|e|o|a|os|as|ele|ela|vai|ser[aá]|tem|quero)\b|mas\b|tamb[eé]m\b)|[,;.\n]/iu)[0]
+    .split(/\s+(?:com\s+mai[uú]scul\w*|mas(?![\p{L}\d])|tamb[eé]m(?![\p{L}\d]))|[,;.\n]/iu)[0]
+    // " e " seguido de palavra minúscula ("… Áudio e financiado") encerra o nome; sem a flag i, que faria \p{Ll} casar maiúscula.
+    .split(/\s+e\s+(?=\p{Ll})/u)[0]
     .replace(/[*_~`]/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -610,7 +623,16 @@ function valorAvulso(texto: string, campo: "telefone" | "cpf" | "email"): string
     cpf: /^\d{3}\.?\d{3}\.?\d{3}-?\d{2}$/,
     email: /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i,
   }[campo];
-  return re.test(t) ? t : null;
+  if (!re.test(t)) return null;
+  // Telefone: só vale se os dígitos juntos fecham (DDD + 8/9). "11, 9000-0002" casa o padrão mas é celular com dígito perdido.
+  if (campo === "telefone" && !juntarTelefone(t)) return null;
+  return t;
+}
+
+/** A resposta é só um telefone que não fecha ("11, 9000-0002")? Devolve o trecho para perguntar de novo. */
+function telefoneAvulsoQueNaoFecha(texto: string): string | null {
+  const t = texto.trim();
+  return new RegExp(`^${TELEFONE_DITADO.source}$`).test(t) && !juntarTelefone(t) ? t : null;
 }
 
 /** Nome extraído que é só o termo que achou a proposta ("…da Letícia Andrade"). */
@@ -1811,7 +1833,9 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // Campo pendente + só o valor na mensagem: vale o que foi escrito, sem depender do extrator.
   const avulso = f.aguardaCampo ? valorAvulso(ctx.texto, f.aguardaCampo.campo) : null;
   // Telefone ditado que não fecha DDD + 8/9 dígitos (a transcrição de áudio come dígitos): pergunta, não grava.
-  const duvidaDeTelefone = avulso ? null : telefoneDuvidoso(ctx.texto);
+  const duvidaDeTelefone = avulso
+    ? null
+    : (f.aguardaCampo?.campo === "telefone" ? telefoneAvulsoQueNaoFecha(ctx.texto) : null) ?? telefoneDuvidoso(ctx.texto);
   if (duvidaDeTelefone) {
     return {
       reply:
