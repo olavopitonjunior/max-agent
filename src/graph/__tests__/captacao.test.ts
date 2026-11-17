@@ -2319,3 +2319,247 @@ describe("pedido de envio com uma captação aberta em coleta (prod 17/11/2026)"
     expect(r.reply).not.toContain("ainda não está pronta");
   });
 });
+
+describe("coleta (17/11, prod): nome, dado perdido e resposta com vários campos", () => {
+  async function ateOsProprietarios(fala: ReturnType<typeof conversa>) {
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do TESTE");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("pular");
+  }
+  const donoGravado = () => (ultimo("captacao.create")!.args.dados as { proprietarios: Record<string, unknown>[] }).proprietarios[0]!;
+
+  it("B1: 'proprietário: TESTE Proprietário Silva' guarda o nome inteiro (rótulo só some como prefixo)", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    const r = await fala("proprietário: TESTE Proprietário Silva");
+    expect(donoGravado().nome).toBe("TESTE Proprietário Silva");
+    expect(r.reply).toContain("Anotei TESTE Proprietário Silva");
+    expect(r.reply).not.toContain("TESTE Silva");
+  });
+
+  it("B1: com CPF e a palavra no meio do nome ('TESTE Proprietário Silva, CPF …') o nome também fica inteiro", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala(`TESTE Proprietário Silva, CPF ${CPF}`);
+    expect(donoGravado().nome).toBe("TESTE Proprietário Silva");
+  });
+
+  it("B1: o rótulo continua saindo no começo ('Proprietária Maria Silva, CPF …' e 'nome: Maria Silva')", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala(`Proprietária Maria Silva, CPF ${CPF}`);
+    expect(donoGravado().nome).toBe("Maria Silva");
+    await fala("nome: João Souza, CPF 529.982.247-25");
+    expect(donoGravado().nome).toBe("João Souza");
+  });
+
+  it("B2: nome + telefone + e-mail + estado civil sem CPF viram proprietário parcial (nada se perde, sem repetir o estado civil)", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    const r = await fala("TESTE Proprietário Silva, telefone 11 90000-0000, teste.proprietario@example.com, solteiro");
+    expect(donoGravado()).toMatchObject({
+      nome: "TESTE Proprietário Silva", email: "teste.proprietario@example.com", telefone1: "+5511900000000", estado_civil: "solteiro",
+    });
+    expect(donoGravado().cpf).toBeUndefined();
+    expect(r.reply).toContain("Anotei TESTE Proprietário Silva");
+    expect(r.reply).toContain("próximo proprietário");
+    expect(r.reply).not.toContain("estado civil de");
+    expect(r.reply).not.toContain("Preciso do CPF");
+  });
+
+  it("B2: contato sem nome de pessoa ('11 90000-0000, a@b.com') continua recusado", async () => {
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    const r = await fala("11 90000-0000, a@b.com");
+    expect((r.fluxo as { proprietarios?: unknown[] } | null)?.proprietarios ?? []).toEqual([]);
+    expect(verbos("captacao.create").filter((c) => (c.args.dados as { proprietarios?: unknown })?.proprietarios)).toHaveLength(0);
+  });
+
+  it("B3: 'apartamento, valor de venda R$ 850.000, comissão 6%' grava tipo, valor e comissão e pergunta o próximo faltante (CPF)", async () => {
+    exigeMatricula = false; exigeTipo = true;
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala("proprietário: TESTE Proprietário Silva");
+    await fala("pular"); // estado civil
+    await fala("FIM");
+    await fala("NÃO"); // testemunha
+    const antes = verbos("captacao.create").length;
+    const r = await fala("apartamento, valor de venda R$ 850.000, comissão 6%");
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    expect(ultimo("captacao.create")!.args.dados).toEqual({
+      imovel: { kind: "apartamento" }, condicoes: { valor: 850000, comissao_percent: 6 },
+    });
+    expect(r.reply).toContain("tipo: apartamento");
+    expect(r.reply).toContain("CPF de TESTE Proprietário Silva");
+  });
+
+  it("B3: o faltante atual é o valor e a resposta traz também a comissão: grava os dois", async () => {
+    exigeMatricula = false;
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala(`TESTE Proprietário Silva, CPF ${CPF}, solteiro`);
+    await fala("FIM");
+    await fala("NÃO");
+    const r = await fala("valor 850 mil, comissão 6%");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ condicoes: { valor: 850000, comissao_percent: 6 } });
+    expect(r.reply).toContain("Prazo da autorização");
+  });
+
+  it("B3: resposta de CEP não vira valor nem comissão por engano", async () => {
+    exigeMatricula = false; exigeCep = true;
+    const fala = conversa();
+    await ateOsProprietarios(fala);
+    await fala(`TESTE Proprietário Silva, CPF ${CPF}, solteiro`);
+    await fala("FIM");
+    await fala("NÃO");
+    await fala("01310-100");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { cep: "01310-100" } });
+  });
+});
+
+describe("abertura (17/11, prod): valor, proprietária e nome vindos da 1ª mensagem", () => {
+  const ABERTURA =
+    "Max, bom dia! Quero cadastrar uma captação nova. A proprietária é a TESTE Proprietária Longa, ela é viúva, telefone 11 90000-0004 e e-mail teste.longa@example.com. " +
+    "O imóvel é uma casa na Rua Oscar Freire, 1500, Pinheiros, São Paulo/SP, CEP 05409-010. Ela quer vender por R$ 1.350.000, combinamos comissão de 5% e exclusividade de 120 dias. " +
+    "Ela ainda vai me passar o CPF depois.";
+  const IMOVEL_OSCAR = { rua: "Rua Oscar Freire", numero: "1500", bairro: "Pinheiros", cidade: "São Paulo", uf: "SP" };
+  const donoDaAbertura = () =>
+    verbos("captacao.create").map((c) => (c.args.dados as { proprietarios?: Record<string, unknown>[] } | undefined)?.proprietarios?.[0]).find(Boolean);
+
+  it("B6: 'vender por R$ 1.350.000' (sem a palavra valor) é lido como valor da venda", () => {
+    expect(cap.lerCondicoes("ela quer vender por R$ 1.350.000, comissão de 5%", "venda").condicoes).toEqual({ valor: 1350000, comissao_percent: 5 });
+    expect(cap.lerCondicoes("casa na Rua X, 1500, CEP 05409-010, vender por R$ 1.350.000, comissão 5%, 120 dias", "venda").condicoes.valor).toBe(1350000);
+  });
+
+  it("B6: um R$ que pertence a outro rótulo (condomínio) não vira o valor principal", () => {
+    expect(cap.lerCondicoes("condomínio R$ 500", "locacao").locacao).toEqual({ condominio: 500 });
+  });
+
+  it("B6: o valor da abertura é gravado no rascunho, junto de comissão, prazo e exclusividade", async () => {
+    extracao = IMOVEL_OSCAR;
+    await conversa()(ABERTURA);
+    const criacao = verbos("captacao.create")[0]!;
+    expect((criacao.args.dados as { condicoes: unknown }).condicoes).toEqual({ valor: 1350000, comissao_percent: 5, prazo_dias: 120, exclusiva: true });
+  });
+
+  it("B7: a proprietária da abertura entra como proprietário parcial (falta só o CPF) e o estado civil não é perguntado de novo", async () => {
+    extracao = IMOVEL_OSCAR;
+    const r = await conversa()(ABERTURA);
+    expect(donoDaAbertura()).toMatchObject({
+      id: "p1", nome: "TESTE Proprietária Longa", email: "teste.longa@example.com", telefone1: "+5511900000004", estado_civil: "viuva",
+    });
+    expect(donoDaAbertura()!.cpf).toBeUndefined();
+    expect(r.reply).toContain("Anotei TESTE Proprietária Longa");
+    expect(r.reply).not.toContain("Qual o estado civil");
+    expect(r.reply).toContain("próximo proprietário");
+    // a escrita do dono tem chave própria: não colide com a do create (senão o servidor trata como repetição)
+    const chaves = verbos("captacao.create").map((c) => c.key);
+    expect(new Set(chaves).size).toBe(chaves.length);
+    expect(((r.fluxo as { proprietarios?: { id: string; nome: string }[] }).proprietarios ?? []).map((p) => p.nome)).toEqual(["TESTE Proprietária Longa"]);
+  });
+
+  it("B7: telefone e e-mail da abertura não ficam no checkpoint (só id e nome)", async () => {
+    extracao = IMOVEL_OSCAR;
+    const s = await conversa()(ABERTURA);
+    const estado = JSON.stringify(Object.entries(s).filter(([k]) => k !== "inbound"));
+    expect(estado).not.toContain("teste.longa@example.com");
+    expect(estado).not.toContain("90000-0004");
+    expect(estado).not.toContain("900000004");
+  });
+
+  it("B8: sem nome dado, a captação leva o nome da proprietária e o endereço, em vez de perguntar", async () => {
+    extracao = IMOVEL_OSCAR;
+    const r = await conversa()(ABERTURA);
+    expect(r.reply).not.toContain("Que nome dou");
+    expect(verbos("captacao.create")[0]!.args.nome).toBe("TESTE Proprietária Longa — Rua Oscar Freire, 1500");
+  });
+
+  it("B8: sem proprietária nem endereço no pedido, continua perguntando o nome", async () => {
+    const r = await conversa()("quero uma captação de venda");
+    expect(r.reply).toContain("Que nome dou");
+  });
+
+  it("B8: nome dito no pedido ('captação do Apto da Dona Maria') tem prioridade sobre o derivado", async () => {
+    extracao = IMOVEL_OSCAR;
+    await conversa()("cria uma captação de venda do Apto da Dona Maria. A proprietária é a Maria Souza Lima, tel 11 90000-0004. Rua Oscar Freire, 1500, Pinheiros, São Paulo/SP, comissão 5%");
+    expect(verbos("captacao.create")[0]!.args.nome).toBe("Apto da Dona Maria");
+  });
+});
+
+describe("review R2 (17/11): condição rotulada e R$ único não gravam valor errado", () => {
+  const FV = { path: "condicoes.valor", rotulo: "Valor" };
+  const FC = { path: "condicoes.comissao_percent", rotulo: "Comissão" };
+  const FA = { path: "locacao.aluguel", rotulo: "Aluguel" };
+
+  it("B3: 'valor a combinar, CPF …' não vira valor (CPF lido como número)", () => {
+    expect(cap.lerCondicaoRotulada(FV, "valor a combinar, CPF 123.456.789-09")).toBe("vazio");
+    expect(cap.lerCondicaoRotulada(FV, "o valor a combinar. CPF 529.982.247-25")).toBe("vazio");
+  });
+
+  it("B3: 'valor a definir, CEP …' não vira valor (CEP lido como número)", () => {
+    expect(cap.lerCondicaoRotulada(FV, "valor a definir, CEP 01310-100")).toBe("vazio");
+    expect(cap.lerCondicaoRotulada(FA, "aluguel a combinar, CEP 01310-100")).toBe("vazio");
+  });
+
+  it("B3: 'valor a combinar, telefone …' e comissão a combinar também não leem nada", () => {
+    expect(cap.lerCondicaoRotulada(FV, "valor a combinar, telefone 11 90000-0004")).toBe("vazio");
+    expect(cap.lerCondicaoRotulada(FC, "comissão a combinar, CEP 01310-100")).toBe("vazio");
+  });
+
+  it("B3: o rótulo logo antes do número continua lendo", () => {
+    expect(cap.lerCondicaoRotulada(FV, "valor de venda R$ 850.000, comissão 6%")).toMatchObject({ dados: { condicoes: { valor: 850000 } } });
+    expect(cap.lerCondicaoRotulada(FV, "valor 850 mil")).toMatchObject({ dados: { condicoes: { valor: 850000 } } });
+    expect(cap.lerCondicaoRotulada(FV, "valor: R$ 850.000, CPF 529.982.247-25")).toMatchObject({ dados: { condicoes: { valor: 850000 } } });
+    expect(cap.lerCondicaoRotulada(FC, "valor 850 mil, comissão 6%")).toMatchObject({ dados: { condicoes: { comissao_percent: 6 } } });
+    expect(cap.lerCondicaoRotulada(FA, "aluguel R$ 3.000")).toMatchObject({ dados: { locacao: { aluguel: 3000 } } });
+  });
+
+  it("B6: R$ de comissão, taxa, financiamento, sinal, entrada ou saldo não é o valor do imóvel", () => {
+    expect(cap.lerCondicoes("comissão de R$ 40 mil", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("financiamento de R$ 200 mil, valor a definir", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("sinal de R$ 80 mil", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("entrada de R$ 100.000", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("saldo R$ 300.000", "venda").condicoes.valor).toBeUndefined();
+    expect(cap.lerCondicoes("taxa de administração R$ 300", "locacao").locacao.aluguel).toBeUndefined();
+    expect(cap.lerCondicoes("IPTU R$ 300", "locacao").locacao.aluguel).toBeUndefined();
+  });
+
+  it("B6: o R$ sem rótulo continua sendo o valor, mesmo com comissão em % na frase", () => {
+    expect(cap.lerCondicoes("ela quer vender por R$ 1.350.000, comissão de 5%", "venda").condicoes).toEqual({ valor: 1350000, comissao_percent: 5 });
+    expect(cap.lerCondicoes("casa grande, quer vender por R$ 900.000", "venda").condicoes.valor).toBe(900000);
+  });
+});
+
+describe("review R2 (17/11): dono da abertura só recebe o que vem logo depois do nome (B7)", () => {
+  const CPF_DELE = "529.982.247-25";
+
+  it("CPF 'dele' (do cônjuge) não vai para a proprietária; o estado civil dela fica", () => {
+    const d = cap.lerDonoDaAbertura(`A proprietária é a Maria Silva, casada com João, CPF dele ${CPF_DELE}`);
+    expect(d).toMatchObject({ nome: "Maria Silva", estadoCivil: "casada" });
+    expect(d!.cpf).toBeUndefined();
+  });
+
+  it("CPF seguido de 'dele' / 'do marido' não é atribuído", () => {
+    expect(cap.lerDonoDaAbertura(`A proprietária é a Maria Silva, CPF ${CPF_DELE} dele, casada com João`)!.cpf).toBeUndefined();
+    expect(cap.lerDonoDaAbertura(`A proprietária é a Maria Silva, tem CPF ${CPF_DELE} do marido`)!.cpf).toBeUndefined();
+  });
+
+  it("telefone e e-mail do cônjuge não vão para a proprietária", () => {
+    const d = cap.lerDonoDaAbertura("A proprietária é a Maria Silva, casada com João, telefone dele 11 90000-0004, e-mail dele joao@example.com");
+    expect(d!.telefone).toBeUndefined();
+    expect(d!.email).toBeUndefined();
+  });
+
+  it("estado civil só vale logo depois do nome, não na descrição do imóvel", () => {
+    const d = cap.lerDonoDaAbertura("A proprietária é a Maria Silva, tel 11 90000-0004. O imóvel é uma casa com a garagem separada da sala, Rua X, 10");
+    expect(d).toMatchObject({ nome: "Maria Silva", telefone: "11900000004" });
+    expect(d!.estadoCivil).toBeUndefined();
+  });
+
+  it("CPF, telefone, e-mail e estado civil logo depois do nome continuam valendo", () => {
+    expect(cap.lerDonoDaAbertura(`A proprietária é a Maria Silva, CPF ${CPF_DELE}, solteira, tel 11 90000-0004, e-mail maria@example.com`)).toEqual({
+      nome: "Maria Silva", cpf: "52998224725", telefone: "11900000004", email: "maria@example.com", estadoCivil: "solteira",
+    });
+  });
+});

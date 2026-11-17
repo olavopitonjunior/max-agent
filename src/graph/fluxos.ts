@@ -37,7 +37,7 @@
 
 import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { Capability } from "./policy";
-import { lerConfirmacao, normalizar } from "./tools";
+import { corrigirProposta, lerConfirmacao, normalizar } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
 import { conduzirAssinatura, type FluxoAssinatura } from "./assinatura";
@@ -799,7 +799,7 @@ export function querCancelar(texto: string): boolean {
 
 /** 1/proposta/assinar → proposta; 2/negócio/formulário/contrato → negócio. */
 export function lerEscolha(texto: string): "proposta" | "negocio" | null {
-  const t = normalizar(texto);
+  const t = corrigirProposta(normalizar(texto));
   const proposta = /^1$|\bproposta\b|\brapida\b|\bassina/.test(t);
   const negocio = /^2$|\bnegocio\b|\bformulario\b|\bcontrato\b|\bficha\b/.test(t);
   if (proposta === negocio) return null;
@@ -955,7 +955,7 @@ const NEGACAO = /\bnao\s+(re)?(envi|mand|dispar|encaminh)/;
  */
 export function pedeEnvio(texto: string): boolean {
   if (texto.includes("?")) return false;
-  const t = normalizar(texto);
+  const t = corrigirProposta(normalizar(texto));
   if (NEGACAO.test(t) || PERGUNTA_DE_PROCESSO.test(t) || E_CRIACAO.test(t)) return false;
   if (PEDE_ENVIO.test(t) || SO_ENVIO.test(t)) return true;
   return !RELATO.test(t) && PEDE_ENVIO_DA_PROPOSTA.test(t);
@@ -1168,6 +1168,32 @@ function tituloDeclarado(texto: string | undefined): string | undefined {
   return valor.replace(/\s+/g,' ').trim().slice(0,200)||undefined;
 }
 
+const REFERE_PROPOSTA_EXISTENTE =
+  /\b(?:a|da|na|esta|essa|dessa|daquela)\s+proposta\b|\bprop-\d|\b(?:status|ver|consultar|consulta|assinar|enviar|reenviar)\b/;
+
+/**
+ * O pedido já é de proposta rápida sem ambiguidade: diz "proposta de compra/venda/locação/aluguel" ou traz
+ * comprador/proponente/inquilino, valor ou sinal. "Formulário"/"ficha" explícito NUNCA vai direto (é a escolha).
+ */
+export function pedidoClaroDeProposta(pedido: string): boolean {
+  const t = corrigirProposta(normalizar(pedido));
+  if (/\b(formulario|ficha)\b/.test(t) || !/\bproposta\b/.test(t)) return false;
+  // Consulta ou referência a uma proposta que JÁ existe ("qual o valor da proposta do comprador João?") não é criação.
+  if (pedido.includes("?") || REFERE_PROPOSTA_EXISTENTE.test(t)) return false;
+  return (
+    /\bproposta\s+(?:rapida\s+)?(?:de|do|da|para)\s+(?:compra|venda|locacao|aluguel)\b/.test(t) ||
+    /\b(?:compradore?s?|proponentes?|inquilin\w*|locatari\w*|sinal)\b|\bvalor\b|r\$/.test(t)
+  );
+}
+
+function naturezaDoPedido(pedido: string): "venda" | "locacao" | undefined {
+  const t = normalizar(pedido);
+  const porPalavra = lerNatureza(pedido);
+  if (porPalavra) return porPalavra;
+  if (/\bcompradore?s?\b/.test(t)) return "venda";
+  return undefined;
+}
+
 /**
  * Pedido de criação reconhecido (a `propor_criacao` do turn). Pedido explícito
  * de formulário/ficha (`tipo` venda/locação) já é o fluxo de negócio; pedido de
@@ -1205,6 +1231,11 @@ export async function iniciarFluxo(
     return carregarCamposDoNegocio(params.tipo, params.agora, deps, tituloDoPedido);
   }
   if (podeProposta && podeNegocio) {
+    // Prod 17/11: "proposta de compra … compradores …, valor R$ 800.000" ainda recebia o "1 ou 2". Só o
+    // pedido ambíguo ("gera uma proposta pra mim") pergunta; o que já diz o tipo ou traz os dados vai direto.
+    if (params.tipo === "proposta" && params.pedido && pedidoClaroDeProposta(params.pedido)) {
+      return iniciarProposta(params.natureza ?? naturezaDoPedido(params.pedido), params.pedido, params.agora, deps);
+    }
     return {
       reply: TEXTO_ESCOLHA,
       fluxo: { kind: "escolha", natureza: params.natureza, pedido: params.pedido, nomeCliente: tituloDoPedido, atualizadoEm: params.agora },

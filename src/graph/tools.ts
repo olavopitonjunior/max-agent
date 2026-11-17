@@ -204,7 +204,19 @@ const PEDE_ESCRITA =
   /(formul[aá]ri|ficha|cadastr|link|proposta|abrir?|cri(a|ar|e)|nov[oa] (neg[oó]cio|venda|loca[cç][aã]o|cliente)|manda?r? o link)/i;
 
 export function shouldOfferTools(text: string): boolean {
-  return PEDE_ESCRITA.test(text);
+  // "propsta"/"porposta"…: a mesma tolerância de `ehPedidoDeCriacao` (que tira as leituras e deixa o modelo sem tool).
+  return PEDE_ESCRITA.test(text) || /\bproposta/.test(corrigirProposta(normalizar(text)));
+}
+
+/**
+ * Erros comuns de digitação de "proposta" (prod 17/11: "max preciso de uma propsta" caiu na conversa livre).
+ * Lista fechada, de propósito: só trocas de letra/omissão que não formam outra palavra do português.
+ */
+const PROPOSTA_MAL_DIGITADA = /\b(?:propsta|porposta|propota|prposta|proposa|propostta|propposta|propsota|proposata|propoasta)(s?)\b/g;
+
+/** Texto JÁ normalizado → com "proposta" corrigida. Só para as regex de INTENÇÃO da proposta. */
+export function corrigirProposta(textoNormalizado: string): string {
+  return textoNormalizado.replace(PROPOSTA_MAL_DIGITADA, "proposta$1");
 }
 
 /**
@@ -719,7 +731,7 @@ const PEDE_CRIACAO_SEM_VERBO =
 
 /** O texto é um pedido de criação de documento? (Normalizado: sem acento.) */
 export function ehPedidoDeCriacao(texto: string): boolean {
-  const n = normalizar(texto);
+  const n = corrigirProposta(normalizar(texto));
   return PEDE_CRIACAO.test(n) || PEDE_CRIACAO_SEM_VERBO.test(n);
 }
 

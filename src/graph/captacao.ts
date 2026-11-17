@@ -865,7 +865,10 @@ export function lerEmails(texto: string): string[] {
 
 const ESTADO_CIVIL = /\b(solteir[oa]|casad[oa]|divorciad[oa]|viuv[oa]|separad[oa]|uniao estavel)\b/;
 // Achado 18: "propriet[aá]ri[oa]s?"/"don[oa]s?" com acento (a pessoa escreve "proprietário:") também contam como rótulo.
-const ROTULOS_SOLTOS = /\b(cpf|cnpj|rg|tel\w*|cel\w*|whats\w*|fone|zap|e-?mail|email|nome|propriet[aá]ri[oa]s?|don[oa]s?|pj|pessoa juridica|pessoa fisica|percentual|casad[oa]|solteir[oa]|divorciad[oa]|viuv[oa]|separad[oa]|uniao estavel|razao social|empresa)\b/gi;
+const ROTULOS_SOLTOS = /\b(cpf|cnpj|rg|tel\w*|cel\w*|whats\w*|fone|zap|e-?mail|email|pj|pessoa juridica|pessoa fisica|percentual|casad[oa]|solteir[oa]|divorciad[oa]|viuv[oa]|separad[oa]|uniao estavel|razao social|empresa)\b/gi;
+// "proprietário"/"dono"/"nome" só são rótulo no COMEÇO do trecho ("proprietário: Maria", "a proprietária Maria", "nome - Maria"):
+// no meio do nome ("TESTE Proprietário Silva") fazem parte dele.
+const ROTULO_NO_INICIO = /^(?:(?:o|a|do|da)\s+)?(?:propriet[aá]ri[oa]s?|don[oa]s?|nome)\b\s*[:\-–]?\s*/i;
 
 /** O texto citado está de fato na mensagem? (mesmo teste do `credito`) */
 function noTexto(trecho: string, texto: string): boolean {
@@ -921,7 +924,7 @@ export async function lerPessoa(texto: string, extrair: ExtratorDeSecao): Promis
   if (pct !== undefined) out.percentual = pct;
 
   const semContatos = n.restante.replace(global(RE_EMAIL_LOCAL), " ").replace(/\d+(?:[.,]\d+)?\s*(?:%|por cento)/gi, " ");
-  const segmentos = semContatos.replace(ROTULOS_SOLTOS, " ").split(/[,;\n]/).map((s) => s.replace(/^[\s:–-]+|[\s:–-]+$/g, "").replace(/\s+/g, " ")).filter(Boolean);
+  const segmentos = semContatos.replace(ROTULOS_SOLTOS, " ").split(/[,;\n]/).map((s) => s.replace(/^[\s:–-]+|[\s:–-]+$/g, "").replace(ROTULO_NO_INICIO, "").replace(/^[\s:–-]+|[\s:–-]+$/g, "").replace(/\s+/g, " ")).filter(Boolean);
   if (out.pj) {
     const razao = segmentos.find((s) => s.length >= 3 && s.length <= 120 && !/\d/.test(s));
     if (razao) out.nome = razao;
@@ -1012,6 +1015,14 @@ const MARCAS: [RegExp, string][] = [
   [/\b(?:taxa(?: de)? admin\w*|administracao|taxa)\b/g, "taxa"],
 ];
 
+/**
+ * Dinheiro que NÃO é o valor do imóvel: o número logo depois de um rótulo de comissão, taxa, financiamento, saldo, sinal,
+ * entrada, condomínio ou IPTU ("comissão de R$ 40 mil", "financiamento de R$ 200 mil"). Só conectivos entre rótulo e número.
+ */
+const RE_DINHEIRO_DE_OUTRO_ROTULO =
+  /\b(?:comiss\w*|taxa|financ\w*|saldo|sinal|entrada|condom\w*|iptu)(?:\s+(?:de|do|da|no|valor|total|em|por|a|e|admin\w*))*\s*[:=–-]?\s*(?:r\$\s*)?\d[\d.,]*(?:\s*(?:mil|milhao|milhoes|k)\b)?/g;
+const semDinheiroDeOutroRotulo = (s: string) => s.replace(RE_DINHEIRO_DE_OUTRO_ROTULO, " ");
+
 const semPercentualEPrazo = (s: string) =>
   s.replace(/\d+(?:[.,]\d+)?\s*(?:%|por cento)/g, " ").replace(/\d+\s*(?:dias?|meses|mes)\b/g, " ");
 
@@ -1071,12 +1082,19 @@ export function lerCondicoes(texto: string, tipo: TipoDeCaptacao): CondicoesLida
   const principal = tipo === "venda" ? condicoes.valor : locacao.aluguel;
   if (principal === undefined) {
     const primeiraMarca = achadas[0]?.ini ?? t.length;
-    const solto = valoresNoTexto(semPercentualEPrazo(t.slice(0, primeiraMarca)));
+    const solto = valoresNoTexto(semDinheiroDeOutroRotulo(semPercentualEPrazo(t.slice(0, primeiraMarca))));
     if (solto.length === 1) setMoeda("valor", solto[0]);
     else if (!achadas.length) {
-      const todos = valoresNoTexto(semPercentualEPrazo(t));
+      const todos = valoresNoTexto(semDinheiroDeOutroRotulo(semPercentualEPrazo(t)));
       if (todos.length === 1) setMoeda("valor", todos[0]);
     }
+  }
+  // "Ela quer vender por R$ 1.350.000" (prod 17/11): sem a palavra "valor" e no meio de CEP, número e telefone, o solto
+  // não é único. Um único "R$" no texto, sem nenhum rótulo de dinheiro (condomínio, IPTU…) para reivindicá-lo, é o valor.
+  if ((tipo === "venda" ? condicoes.valor : locacao.aluguel) === undefined && !usadas.size) {
+    // Um R$ de outro rótulo ("comissão de R$ 40 mil", "financiamento de R$ 200 mil") não conta nem como candidato.
+    const emReais = [...semDinheiroDeOutroRotulo(t).matchAll(/r\$\s*(\d[\d.,]*(?:\s*(?:mil|milhao|milhoes|k)\b)?)/g)];
+    if (emReais.length === 1) setMoeda("valor", valoresNoTexto(emReais[0]![1]!)[0]);
   }
   // Sem rótulo: "180 dias" é o prazo; um único "%" solto é a comissão.
   if (condicoes.prazo_dias === undefined) {
@@ -1349,6 +1367,42 @@ async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: stri
   }
 }
 
+/** Palavras que podem ficar entre o rótulo e o número ("valor DE VENDA R$ 850.000", "valor É 850 mil"). */
+const LIGACAO_DO_ROTULO = "de|da|do|venda|locacao|aluguel|total|por|em|e|eh|sera|fica|minimo|pretendido|pedido";
+
+/**
+ * Valor, comissão e aluguel ditos COM o rótulo ("valor de venda R$ 850.000, comissão 6%") dentro de uma
+ * resposta a OUTRO faltante (ou ao próprio, quando a frase traz mais de um número). Sem a palavra do
+ * campo na frase não lê nada: um CEP ou um CPF não pode virar valor. `"vazio"` = não veio.
+ */
+export function lerCondicaoRotulada(fa: FaltanteDeCaptacao, texto: string): Leitura {
+  // Sem CPF/CNPJ/telefone (senão "CPF 123.456.789-09" vira o número 123456789) e com o número LOGO depois do rótulo
+  // ("valor a combinar, CEP 01310-100" não tem número do valor: o CEP não pode ocupar o lugar).
+  const limpo = lerNumeros(texto).restante;
+  const t = normalizar(limpo);
+  const num = (n: number | undefined) => (typeof n === "number" && n >= 0 ? n : undefined);
+  const logoApos = (rotulo: string) => new RegExp(`\\b(?:${rotulo})(?:\\s+(?:${LIGACAO_DO_ROTULO})\\b)*[\\s:=–-]*(?:r\\$\\s*)?\\d`).test(t);
+  switch (fa.path) {
+    case "condicoes.valor": {
+      if (!logoApos("valor|preco|pretend\\w*|pedind\\w*")) return "vazio";
+      const v = num(lerCondicoes(limpo, "venda").condicoes.valor as number | undefined);
+      return v === undefined ? "vazio" : { dados: { condicoes: { valor: v } }, eco: `${fa.rotulo}: ${brValor(v)}` };
+    }
+    case "condicoes.comissao_percent": {
+      if (!logoApos("comiss\\w*") && !/\d\s*(?:%|por cento)\s*(?:de\s+)?comiss/.test(t)) return "vazio";
+      const p = num(lerCondicoes(limpo, "venda").condicoes.comissao_percent as number | undefined);
+      return p === undefined || p > 100 ? "vazio" : { dados: { condicoes: { comissao_percent: p } }, eco: `${fa.rotulo}: ${p}%` };
+    }
+    case "locacao.aluguel": {
+      if (!logoApos("alugue[lu]|valor|preco|pretend\\w*|pedind\\w*")) return "vazio";
+      const v = num(lerCondicoes(limpo, "locacao").locacao.aluguel as number | undefined);
+      return v === undefined ? "vazio" : { dados: { locacao: { aluguel: v } }, eco: `${fa.rotulo}: ${brValor(v)}` };
+    }
+    default:
+      return "vazio";
+  }
+}
+
 // ─── Gate e escrita ──────────────────────────────────────────────────────
 
 type CapacidadeDoFluxo =
@@ -1448,8 +1502,63 @@ async function depoisDaNatureza(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: De
   return seguirParaNomeOuImovel(g(f, ctx, { modeloId: modelos[0]!.id, modelos: undefined, ...exclusivaDoModelo(modelos[0]) }), ctx, deps, `${prefixo}${aviso}`);
 }
 
+// ─── Proprietária e nome vindos da mensagem de abertura (17/11, prod) ────
+
+export interface DonoDaAbertura { nome: string; cpf?: string; email?: string; telefone?: string; estadoCivil?: string }
+
+const DONO_NA_ABERTURA = /\bpropriet[aá]ri[oa]\s*(?:é|eh|:|-|–|se chama)\s*(?:(?:o|a)\s+)?([^,;.\n]{3,80})/iu;
+const FIM_DO_NOME_NA_FRASE = /\s+(?:que|ela|ele|e\s+(?:ela|ele)|mora|tem|quer|est[aá]|vai|pretende)\b.*$/i;
+const RUA_NA_ABERTURA = /\b(?:rua|avenida|av\.?|alameda|travessa|rodovia|estrada|pra[cç]a)\s+[^,\n]+?,\s*\d+[a-z]?\b/iu;
+
+/** Onde a janela do dono termina: " com " (casada com João), "dele", cônjuge, outro proprietário, ou o fim da frase. */
+const FIM_DA_JANELA_DO_DONO = /\s+com\s+|\bdele\b|\b(?:marido|esposa|esposo|c[oô]njuge)\b|\bpropriet[aá]ri[oa]s?\b|\n|\.\s+(?=\p{L})/iu;
+/** Um CPF seguido de "dele"/"do marido"/"da esposa"/"do cônjuge" é de outra pessoa. */
+const CPF_DE_OUTRA_PESSOA = new RegExp(`${RE_CPF.source}(?=\\s*,?\\s*(?:dele|do\\s+(?:marido|esposo|c[oô]njuge)|da\\s+esposa))`, "giu");
+
+/**
+ * "A proprietária é a Maria Silva, ela é viúva, telefone …, e-mail …": o dono que a pessoa já deu na 1ª
+ * mensagem. Só com o rótulo "proprietário é/:" e nome de verdade; contato e documento só valem quando
+ * aparece UM de cada (com dois, não dá para saber de quem é — fica para o fluxo perguntar).
+ */
+export function lerDonoDaAbertura(texto: string): DonoDaAbertura | null {
+  const m = DONO_NA_ABERTURA.exec(texto);
+  if (!m) return null;
+  const semFim = m[1]!.replace(FIM_DO_NOME_NA_FRASE, "");
+  const nome = semFim.trim();
+  if (!nomeValido(nome) || !noTexto(nome, texto)) return null;
+  // Contato, documento e estado civil só valem na janela logo depois do nome: até a próxima pessoa citada
+  // ("casada com João", "dele", "do marido"), o fim da frase ou ~100 caracteres. Fora dela é de outro (ou do imóvel).
+  const fimDoNome = m.index + m[0].indexOf(m[1]!) + semFim.length;
+  const bruta = texto.slice(fimDoNome, fimDoNome + 100).replace(CPF_DE_OUTRA_PESSOA, " ");
+  const corte = FIM_DA_JANELA_DO_DONO.exec(bruta)?.index;
+  const janela = corte === undefined ? bruta : bruta.slice(0, corte);
+  const n = lerNumeros(janela);
+  const emails = lerEmails(janela);
+  const civil = ESTADO_CIVIL.exec(normalizar(janela))?.[1];
+  return {
+    nome,
+    ...(n.cpfs.length === 1 && !n.cnpjs.length ? { cpf: n.cpfs[0]! } : {}),
+    ...(n.telefones.length === 1 ? { telefone: n.telefones[0]! } : {}),
+    ...(emails.length === 1 ? { email: emails[0]! } : {}),
+    ...(civil ? { estadoCivil: civil } : {}),
+  };
+}
+
+/** Sem nome dito, a captação se chama "Proprietária — Rua X, 123" (o que a mensagem trouxe); nada a derivar → null (pergunta). */
+export function nomeDaAberturaDerivado(texto: string | undefined): string | null {
+  if (!texto) return null;
+  const dono = lerDonoDaAbertura(texto)?.nome;
+  const rua = RUA_NA_ABERTURA.exec(texto)?.[0]?.replace(/\s+/g, " ").trim();
+  const nome = [dono, rua].filter(Boolean).join(" — ").slice(0, 120);
+  return nome || null;
+}
+
 async function seguirParaNomeOuImovel(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, prefixo: string): Promise<Resposta> {
-  if (!f.nome) return resposta(g(f, ctx, { etapa: "nome" }), `${prefixo}${TEXTO_NOME}`, "captacao_nome");
+  if (!f.nome) {
+    const derivado = nomeDaAberturaDerivado(f.pedidoOriginal);
+    if (!derivado) return resposta(g(f, ctx, { etapa: "nome" }), `${prefixo}${TEXTO_NOME}`, "captacao_nome");
+    return aproveitarPedidoOriginal(g(f, ctx, { nome: derivado }), ctx, deps, prefixo);
+  }
   return aproveitarPedidoOriginal(f, ctx, deps, prefixo);
 }
 
@@ -1483,7 +1592,9 @@ async function aproveitarPedidoOriginal(fOriginal: FluxoCaptacao, ctx: ContextoD
   if (imovel && temCondicoesEm(dados)) {
     const eco = `Já anotei do seu pedido: imóvel ${ecoDoImovel(imovel)}; ${ecoDasCondicoes(lidas)}.\n`;
     // Confirmação única (26/10): com imóvel e condições, cria direto — o único "sim" do fluxo é o do resumo final.
-    return criar(g(f, ctx, { criacao: { chave: "", dados } }), ctx, deps, dados, `${prefixo}${eco}`);
+    // O dono só é lido do texto desta mesma mensagem: contato e documento nunca ficam no estado (achado 1).
+    const dono = pedido && redigir(ctx.texto, ["CPF", "CNPJ", "EMAIL", "TEL"]) === pedido ? lerDonoDaAbertura(ctx.texto) : null;
+    return criar(g(f, ctx, { criacao: { chave: "", dados } }), ctx, deps, dados, `${prefixo}${eco}`, dono ?? undefined);
   }
   if (imovel) {
     const eco = `Já anotei o imóvel do seu pedido: ${ecoDoImovel(imovel)}.\n`;
@@ -1906,7 +2017,36 @@ function exclusivaDoServidor(body: Record<string, unknown>): boolean | undefined
 const comOuSem = (b: boolean) => (b ? "com" : "sem");
 
 /** `captacao.create` (rascunho novo). A chave é a `messageId` desta mensagem e fica guardada até a resposta. */
-async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, dados: DadosDeCaptacao, prefixo: string): Promise<Resposta> {
+/**
+ * A proprietária dita na abertura é gravada logo depois do rascunho nascer (mesma `captacao.create` com
+ * `captacaoId`+`version` que o fluxo já usa por proprietário, chave própria `:dono`). Falhou → o fluxo
+ * pergunta pelos proprietários como sempre; nada se perde além do que já se perderia.
+ */
+async function gravarDonoDaAbertura(
+  f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, d: DonoDaAbertura,
+): Promise<{ f: FluxoCaptacao; anotei: string; seguinte: string } | null> {
+  const id = "p1";
+  const item: Record<string, unknown> = {
+    id, papel: "proprietario", tipo_pessoa: "fisica", nome: d.nome,
+    ...(d.cpf ? { cpf: d.cpf } : {}), ...(d.email ? { email: d.email } : {}),
+    ...(d.telefone ? { telefone1: normalizeBrPhone(d.telefone) ?? d.telefone } : {}),
+    ...(d.estadoCivil ? { estado_civil: d.estadoCivil } : {}), ...(f.canalDito ? { canal: f.canalDito } : {}),
+  };
+  const r = await complementar(f, ctx, deps, { proprietarios: [item] }, `${ctx.messageId}:dono`);
+  if (!r.ok) return null;
+  const guardou = [d.cpf ? "CPF" : "", d.telefone ? "telefone" : "", d.email ? "e-mail" : "", d.estadoCivil ? "estado civil" : ""].filter(Boolean);
+  const anotei = `${r.prefixo}Anotei ${d.nome}${guardou.length ? ` (${guardou.join(", ")})` : ""}.`;
+  const novo = g(r.f, ctx, {
+    proprietarios: [{ id, nome: d.nome }], tentativas: 0,
+    ...(f.canalDito ? { canalDito: f.canalDito, canalAplicado: f.canalDito } : {}),
+  });
+  if (!d.estadoCivil) {
+    return { f: g(novo, ctx, { etapa: "estado_civil", estadoCivilDe: id }), anotei, seguinte: perguntaDoEstadoCivil(d.nome) };
+  }
+  return { f: g(novo, ctx, { etapa: "proprietarios" }), anotei, seguinte: TEXTO_PROXIMO_PROPRIETARIO };
+}
+
+async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, dados: DadosDeCaptacao, prefixo: string, donoInicial?: DonoDaAbertura): Promise<Resposta> {
   const chave = f.criacao?.chave || ctx.messageId;
   const guardado: FluxoCaptacao = g(f, ctx, { etapa: "condicoes", criacao: { chave, dados } });
   const args: Record<string, unknown> = {
@@ -1926,18 +2066,20 @@ async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, 
       versaoGravada: typeof c.version === "number" ? c.version : 0,
       criacao: undefined, proprietarios: [], tentativas: 0, ...comResumo(f, dados),
     });
-    const texto = `${prefixo}Criei o rascunho${lembrete(criado)} ("${f.nome}", ${nomeDaEsteira(f)}).`;
+    const dono = donoInicial ? await gravarDonoDaAbertura(criado, ctx, deps, donoInicial) : null;
+    const aberto = dono?.f ?? criado;
+    const texto = `${prefixo}Criei o rascunho${lembrete(criado)} ("${f.nome}", ${nomeDaEsteira(f)}).${dono ? ` ${dono.anotei}` : ""}`;
     // Item 6: o modelo diz uma exclusividade e a pessoa disse outra — avisa UMA vez e pergunta qual vale.
     const doModelo = exclusivaDoServidor(r.body) ?? f.modeloExclusiva;
     const disse = dados.condicoes?.exclusiva;
     if (typeof doModelo === "boolean" && typeof disse === "boolean" && doModelo !== disse && !f.exclusividadeAvisada) {
       return resposta(
-        g(criado, ctx, { etapa: "exclusividade", modeloExclusiva: doModelo, exclusividadeAvisada: true }),
+        g(aberto, ctx, { etapa: "exclusividade", modeloExclusiva: doModelo, exclusividadeAvisada: true }),
         `${texto}\nAtenção: o modelo escolhido é ${comOuSem(doModelo)} exclusividade, mas você disse ${comOuSem(disse)}. Qual vale? Responda *COM* ou *SEM* exclusividade.`,
         "captacao_exclusividade_conflito"
       );
     }
-    return resposta(criado, `${texto} ${TEXTO_PROPRIETARIOS}`, "captacao_criada");
+    return resposta(aberto, `${texto} ${dono?.seguinte ?? TEXTO_PROPRIETARIOS}`, "captacao_criada");
   }
   const erro = str(r.body.error);
   if (r.status === 409 && erro === "escolher_modelo") {
@@ -2093,10 +2235,15 @@ async function complementar(
   return { ok: false, r: resposta(g(f, ctx), "Não consegui gravar agora. Mande de novo em instantes.", "captacao_complemento_falhou") };
 }
 
-/** "nome:"/"proprietário:" explícito, ou documento — senão não é declaração de pessoa (achado 18). */
+/**
+ * "nome:"/"proprietário:" explícito, ou documento — senão não é declaração de pessoa (achado 18).
+ * Nome acompanhado de e-mail ou telefone também é (17/11): quem manda contato com o nome está
+ * declarando a pessoa, e recusar por falta de CPF jogava fora tudo o que veio junto. A conversa
+ * solta ("Bom dia Roberto") segue recusada: sem documento, rótulo nem contato.
+ */
 const ROTULO_DE_PESSOA = /\b(propriet[aá]ri[oa]s?|don[oa]s?|nome)\s*[:\-–]/i;
 function pareceProprietario(texto: string, p: PessoaLida): boolean {
-  return !!(p.cpf || p.cnpj || ROTULO_DE_PESSOA.test(texto));
+  return !!(p.cpf || p.cnpj || ROTULO_DE_PESSOA.test(texto) || (p.nome && (p.email || p.telefone)));
 }
 
 // ─── Cofre LEGADO (checkpoint de antes da confirmação única) ─────────────
@@ -2474,11 +2621,15 @@ async function conduzirFaltantes(f: FluxoCaptacao, t: string, ctx: ContextoDoTur
   }
   if (PERGUNTA_FORA.test(t)) return pausar(f);
   const extrair: ExtratorDeSecao = async (texto, secao) => (deps.extrairCaptacao ? deps.extrairCaptacao(texto, secao) : null);
-  const lido = await lerFaltante(f, fa, ctx.texto, extrair);
+  let lido = await lerFaltante(f, fa, ctx.texto, extrair);
+  // Texto livre (matrícula, nome, endereço…) não é lido por rótulo de condição: "valor" numa descrição não é o valor.
+  const tipoAtual = tipoDoFaltante(fa);
+  const textoLivre = tipoAtual === "texto" || tipoAtual === "texto_longo" || tipoAtual === "nome" || tipoAtual === "endereco_imovel" || tipoAtual === "endereco_pessoa";
+  // "valor 850 mil, comissão 6%" respondendo ao valor: dois números, o leitor de campo único recusa; o rotulado separa.
+  if (!leu(lido) && !textoLivre) { const alt = lerCondicaoRotulada(fa, ctx.texto); if (leu(alt)) lido = alt; }
   // Item 5: quando a pergunta é de um campo curto, a mesma resposta preenche os
   // OUTROS campos curtos que trouxer — do imóvel, ou do MESMO proprietário.
   const juntos: { fa: FaltanteDeCaptacao; dados: DadosDeCaptacao; eco: string }[] = [];
-  const tipoAtual = tipoDoFaltante(fa);
   if (tipoAtual && COMBINAVEIS.has(tipoAtual)) {
     for (const outro of (f.faltantes ?? []).slice(1)) {
       const tipo = tipoDoFaltante(outro);
@@ -2486,6 +2637,14 @@ async function conduzirFaltantes(f: FluxoCaptacao, t: string, ctx: ContextoDoTur
       if (outro.path.startsWith("proprietarios[]") !== fa.path.startsWith("proprietarios[]")) continue;
       if (outro.path.startsWith("proprietarios[]") && outro.proprietarioId !== fa.proprietarioId) continue;
       const l = await lerFaltante(f, outro, ctx.texto, extrair);
+      if (leu(l)) juntos.push({ fa: outro, ...l });
+    }
+  }
+  // A resposta é lida contra TODOS os faltantes de condição (valor, comissão, aluguel), só com o rótulo na frase.
+  if (!textoLivre) {
+    for (const outro of (f.faltantes ?? []).slice(1)) {
+      if (juntos.some((j) => j.fa === outro)) continue;
+      const l = lerCondicaoRotulada(outro, ctx.texto);
       if (leu(l)) juntos.push({ fa: outro, ...l });
     }
   }
