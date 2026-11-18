@@ -36,4 +36,9 @@ describe("paraWhatsApp", () => {
   it("**** vazio e asteriscos soltos não viram nada estranho", () => {
     expect(paraWhatsApp("**** e ** solto")).toBe("**** e ** solto");
   });
+
+  it("mesma regra de negrito do ponto de saída (#169): máscara de documento e 2**3 ficam intactas", () => {
+    expect(paraWhatsApp("CPF ***.456.789-** e **ok**")).toBe("CPF ***.456.789-** e *ok*");
+    expect(paraWhatsApp("2**3")).toBe("2**3");
+  });
 });

@@ -1,0 +1,12 @@
+{
+  "caller": { "phone": "5511900000001", "name": "Olavo" },
+  "channel": "whatsapp",
+  "orgId": "org-newcore",
+  "groupId": null,
+  "text": "[imagem enviada]",
+  "attachments": [{ "type": "image", "mime": "image/jpeg" }],
+  "messageId": "3EB0A1B2C3D4E5F6",
+  "mediaUrl": "https://media.zapi.example/instances/X/foto.jpeg",
+  "mediaKind": "image",
+  "mimeType": "image/jpeg"
+}

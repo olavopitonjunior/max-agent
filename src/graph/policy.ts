@@ -195,6 +195,31 @@ export const CAPABILITIES = [
   "certidao.status",
   "document.list",
   "charge.status",
+  /**
+   * Leitura de documento pelo Max (15/11/2026, par do contractmaker PR5, max.md
+   * §18.13.13): foto/PDF recebido no WhatsApp vai ao servidor, que devolve os
+   * campos lidos SUGERIDOS para conferir (verbo `document.read`, nunca grava).
+   * Nasce DESLIGADA e FORA do `POLITICA_PADRAO` do ImobPro: a org liga no
+   * editor da política. Só para `kind: "user"`: o servidor recusa o corretor
+   * comissionado (403 `verbo_requer_sujeito_usuario`) e este módulo nunca a
+   * resolve para ele (`SO_USUARIO`), nem por `brokerDefault` nem por
+   * `byRecipient.allow`. Posição 37 (0-based), FIXA
+   * (renumerada em 17/11/2026: 33 a 36 são da produção: `pending.avisos`,
+   * `certidao.status`, `document.list`, `charge.status`); `document.text.edit`
+   * é a 38, logo depois.
+   */
+  "document.read",
+  /**
+   * Correção de texto do documento por IA (15/11/2026, par do contractmaker #3140, max.md
+   * §18.13.14): o corretor pede a mudança de um trecho da proposta ou da captação, vê o
+   * antes/depois e só um SIM explícito aplica (verbos `proposal.text.suggest|apply` e
+   * `captacao.text.suggest|apply`, TODOS de escrita). Nasce DESLIGADA e FORA do
+   * `POLITICA_PADRAO` do ImobPro, e só para `kind: "user"` (`SO_USUARIO`): o corretor
+   * comissionado nunca a recebe, nem por `brokerDefault` nem por `byRecipient.allow`.
+   * Posição 38 (0-based), FIXA, a última deste lado (renumerada em 17/11/2026, depois de
+   * `document.read` na 37).
+   */
+  "document.text.edit",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -227,6 +252,14 @@ export interface MaxPolicy {
   /** Preset de quem é corretor comissionado sem override. Fail-closed. */
   brokerDefault?: string[] | null;
 }
+
+/**
+ * Capabilities que só um USUÁRIO da plataforma pode ter. O corretor comissionado
+ * não passa pelo RBAC do servidor, e estas leem documento de cliente: o `allow`
+ * de um override ou o `brokerDefault` as listarem não as concede a ele. O
+ * servidor também recusa; esta é a segunda trava, do lado que oferece.
+ */
+const SO_USUARIO: ReadonlySet<Capability> = new Set<Capability>(["document.read", "document.text.edit"]);
 
 /**
  * Capability desconhecida é IGNORADA, não é erro.
@@ -309,7 +342,7 @@ export function resolverPolitica(params: {
       mapa && typeof mapa === "object" && Object.hasOwn(mapa, sujeito.splitRecipientId)
         ? mapa[sujeito.splitRecipientId]
         : undefined;
-    return aplicarOverride(base, over);
+    return aplicarOverride(base, over).filter((c) => !SO_USUARIO.has(c));
   }
 
   // Sem chave de papel (telefone que não resolve, membership degenerada) é

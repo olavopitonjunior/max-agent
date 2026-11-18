@@ -1,0 +1,163 @@
+/**
+ * Estado do fluxo v2 dos formulários pelo WhatsApp (proposta; a captação v2 usa
+ * `FluxoCaptacao.versao`).
+ *
+ * O estado vai para o CHECKPOINT. Regra de PII (Global Constraint 6): nada de
+ * CPF, RG, e-mail, telefone ou texto de documento aqui. Do que foi lido de
+ * mídia guardam-se só o caminho do campo (`path`) e uma referência opaca
+ * (`ref`, o id da mensagem de mídia): o valor lido vive na ficha do turno, nunca
+ * no checkpoint.
+ */
+
+export type VersaoDoFluxo = 1 | 2;
+
+/** Passo da revisão (T11/T12): um Flow (ou uma lista numerada) por passo. */
+export type PassoDeRevisao = "partes" | "imovel_valor" | "assinatura";
+
+/**
+ * A revisão em curso (T11/T12). Só caminhos canônicos do rascunho (`compradores[0].cpf`):
+ * nunca valor. `itens` é a numeração da lista ("2 Maria Souza" = o 2º caminho).
+ *
+ * `via`: `texto` (lista numerada) até o Flow PROVAR ter chegado: vira `flow` só quando uma resposta
+ * de Flow com o token deste envio é aceita (o condutor decide antes do envio e não sabe se a Meta
+ * entregou o Flow ou o texto de reserva). `nonce`: o segredo deste envio de Flow, parte do
+ * `flow_token` (`fv2:<passo>:<nonce>`); sem ele (revisão só em texto) nenhuma resposta de Flow vale.
+ * Não é dado pessoal.
+ */
+export interface RevisaoEmCurso {
+  passo: PassoDeRevisao;
+  via: "flow" | "texto";
+  itens: string[];
+  nonce?: string;
+}
+
+/**
+ * O passo da assinatura e do envio (PR-D, T13/T14). Só ids opacos e escolhas: nenhum nome, CPF,
+ * e-mail ou telefone (o texto das testemunhas sai do `options` a cada turno).
+ *
+ *  - `testemunhas`: a lista numerada das do cadastro (padrão marcado);
+ *  - `testemunhas_cartao`: o cartão "Testemunhas: ... Confirma?" (o SIM grava `proposal.witnesses.set`);
+ *  - `tipo`: a escolha de e-mail / WhatsApp / Aceite;
+ *  - `celular`: o Aceite escolhido sem celular de um signatário: o celular vem ANTES de qualquer preflight;
+ *  - `canal_cartao`: o canal guardado difere do escolhido; o SIM grava `proposal.update { tipo_assinatura }`;
+ *  - `regerar`: o servidor recusou por `documento_proprio`; o aviso de perda de edição vem ANTES do SIM;
+ *  - `envio_cartao`: o resumo do preflight; o SIM manda o `proposal.send` com o `instrumento_confirmado`.
+ *
+ * `mostrado`: o instrumento e o tipo efetivo do resumo que o corretor VIU; só eles vão como
+ * `instrumento_confirmado`. `nonce`: o segredo do Flow de assinatura (`fv2:assinatura:<nonce>`); fica
+ * aqui, e não em `revisao`, porque a revisão trataria o "sim" do cartão como o fim da revisão.
+ */
+export type PassoDaAssinatura = "testemunhas" | "testemunhas_cartao" | "tipo" | "celular" | "canal_cartao" | "regerar" | "envio_cartao";
+
+export interface AssinaturaEmCurso {
+  passo: PassoDaAssinatura;
+  tipo?: "email" | "whatsapp" | "aceite";
+  /** `idPadrao` das testemunhas escolhidas (o catálogo é o do cadastro). Só ids. */
+  testemunhas?: string[];
+  /** As testemunhas já foram gravadas neste fluxo (`proposal.witnesses.set` 200). */
+  testemunhasOk?: boolean;
+  /** O canal escolhido já foi gravado (`proposal.update`): o preflight que ainda difere vira aviso, não novo cartão. */
+  canalGravado?: boolean;
+  /** O resumo que o corretor viu. `mostradoEm` (ms) dá a validade do SIM (R22): passados 15 min o preflight é refeito. */
+  mostrado?: { instrumento: "envelope" | "aceite"; tipoEfetivo: "email" | "whatsapp" | "aceite"; mostradoEm?: number };
+  nonce?: string;
+}
+
+export type EtapaV2 = "entender" | "compor" | "ficha" | "revisar" | "assinatura" | "envio" | "correcao";
+
+/** O campo que a próxima resposta curta preenche ("123.456.789-09" sem dizer de quê). */
+export interface CampoAguardado {
+  /** Posição + papel da parte (`proponente:1`) ou `imovel`/`negociacao`/`corretor`. Nunca nome. */
+  parteRef: string;
+  /** O campo como o servidor o nomeia no `faltando` (`proponente.documento`, `negociacao.valor`, `proprietarios[1].cpf`). */
+  path: string;
+}
+
+export interface FluxoFormularioV2 {
+  kind: "proposta_v2";
+  versao: 2;
+  esteira: "venda" | "locacao";
+  /** Só depois do `proposal.create`. */
+  proposalId?: string;
+  /** `schemaType` escolhido (obrigatório no create v2). */
+  schemaType?: string;
+  etapa: EtapaV2;
+  aguardaCampo?: CampoAguardado;
+  /** Instante da última entrada do corretor: base da pausa antes da ficha (D2). */
+  ultimaEntradaEm: number;
+  /** Leitura de mídia não confirmada: só caminho + referência, sem valor. */
+  lidosPendentes: Array<{ path: string; ref: string }>;
+  /**
+   * O VALOR do que `lidosPendentes` aponta, cifrado (AES-256-GCM, chave derivada da
+   * `MAX_ENCRYPTION_KEY`, amarrado à thread): o checkpoint nunca tem valor lido em
+   * claro. Só `midia.ts` abre. Some quando `lidosPendentes` esvazia.
+   */
+  cofreLidos?: string;
+  /**
+   * As últimas falas do corretor neste fluxo, cifradas (mesmo cofre, AAD própria): o histórico do
+   * checkpoint (`messages`) guarda só o marcador "(resposta da ficha de proposta)" (CPF/telefone
+   * ditos nunca ficam em claro), e a janela de extração lê as falas anteriores DAQUI. Só `midia.ts`
+   * abre. Ausente = sem falas anteriores para a janela.
+   */
+  cofreFalas?: string;
+  /** Campos já perguntados (para não repetir a mesma pergunta). Só caminhos. */
+  perguntados: string[];
+  /** A escrita em curso: a `messageId` do primeiro "sim" (Global Constraint 5). */
+  chave?: { verbo: string; valor: string };
+  /**
+   * Quantas mensagens do corretor, ANTES da atual, pertencem a este fluxo. Começa em 0
+   * (a mensagem que abriu é a atual daquele turno) e sobe 1 a cada turno tratado
+   * (`contarEntradaDoFluxo`). A janela de extração só olha para essa quantidade de
+   * mensagens: o que o corretor disse antes de o fluxo abrir (outra proposta, outro
+   * comprador) não entra. Contagem, não índice: a compactação do histórico não a
+   * desalinha (só pode encurtar a janela). Ausente em checkpoint antigo = 0.
+   */
+  mensagensDoFluxo?: number;
+  /**
+   * Valor de `mensagensDoFluxo` no recomeço da janela de extração: depois do SIM (gravou) ou do
+   * NÃO (descartou) o que veio antes já foi resolvido e não pode ser extraído de novo (I3). A
+   * janela passada ao modelo tem `mensagensDoFluxo - janelaDesde` mensagens. Ausente = desde o início.
+   */
+  janelaDesde?: number;
+  /**
+   * Quando a ficha agendada na pausa (T10) foi marcada para sair pelo outbox. É só o agendamento:
+   * o horário NÃO prova que o corretor viu a ficha (o cron pode atrasar ou a linha ser cancelada).
+   * O "sim" só vale depois de `pausa.entregue` confirmar a linha enviada. Sem dado pessoal.
+   */
+  fichaAgendadaEm?: number;
+  /**
+   * Parte já gravada que a leitura nova contradiz (N1): aguarda o "é um novo" ou o
+   * "é o mesmo, troca". Só grupo e posição; o nome vem do servidor a cada turno.
+   */
+  conflito?: { grupo: "compradores" | "vendedores"; posicao: number };
+  /** A revisão do rascunho em curso (T11/T12). Ausente = não está revisando. */
+  revisao?: RevisaoEmCurso;
+  /** O passo da assinatura e do envio (T13/T14). Ausente = não está nele. */
+  assinatura?: AssinaturaEmCurso;
+  /** Todo `Fluxo` carrega isto: TTL e expiração. */
+  atualizadoEm: number;
+}
+
+export function novoFluxoV2(args: {
+  esteira: "venda" | "locacao";
+  agora: number;
+  schemaType?: string;
+}): FluxoFormularioV2 {
+  return {
+    kind: "proposta_v2",
+    versao: 2,
+    esteira: args.esteira,
+    schemaType: args.schemaType,
+    etapa: "entender",
+    ultimaEntradaEm: args.agora,
+    lidosPendentes: [],
+    perguntados: [],
+    mensagensDoFluxo: 0,
+    atualizadoEm: args.agora,
+  };
+}
+
+/** Chamado uma vez por turno em que o fluxo tratou uma fala do corretor (a atual vira "anterior" no próximo). */
+export function contarEntradaDoFluxo(f: FluxoFormularioV2): FluxoFormularioV2 {
+  return { ...f, mensagensDoFluxo: (f.mensagensDoFluxo ?? 0) + 1 };
+}

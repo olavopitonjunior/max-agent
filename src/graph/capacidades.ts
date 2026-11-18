@@ -30,6 +30,62 @@ export function pedeCapacidades(texto: string): boolean {
   return PEDE_CAPACIDADES.test(t.trim());
 }
 
+/**
+ * Tipos de assinatura e resumo do processo — UMA fonte para Max e Newton.
+ *
+ * Template, sem modelo: no perfil Newton "quais os tipos de assinatura?" caía
+ * em "Isso foge do que eu faço por aqui" (o modelo julgava fora do escopo).
+ * Processo e assinatura SÃO escopo de qualquer perfil. Quais tipos ficam
+ * liberados é da imobiliária (o CM devolve `metodos` no envio), por isso o
+ * texto diz isso e não promete nenhum.
+ */
+export const TIPOS_DE_ASSINATURA = [
+  { rotulo: "E-mail (ClickSign)", descricao: "o assinante recebe o link por e-mail." },
+  { rotulo: "WhatsApp (ClickSign)", descricao: "o assinante recebe o link por WhatsApp, se o plano da imobiliária permitir." },
+] as const;
+
+/**
+ * O Aceite NÃO é tipo de assinatura do contrato principal (docs do CM:
+ * contratos-diversos.md e clicksign-v3.md, Caminho D): vale para propostas e
+ * documentos diversos; na captação, vai no mesmo envio da ClickSign.
+ */
+export const TEXTO_ACEITE = "O Aceite por WhatsApp vale para propostas e documentos diversos, não para o contrato.";
+
+export const TEXTO_TIPOS_DE_ASSINATURA =
+  "O contrato é assinado pela ClickSign, de um destes jeitos:\n" +
+  TIPOS_DE_ASSINATURA.map((t, i) => `${i + 1}. ${t.rotulo}: ${t.descricao}`).join("\n") +
+  `\n${TEXTO_ACEITE} Na captação, o aceite vai no mesmo envio da ClickSign.` +
+  "\nNo envio eu mostro as opções liberadas para a sua imobiliária.";
+
+export function textoDoProcesso(): string {
+  return (
+    "O caminho é proposta, contrato e assinatura:\n" +
+    "1. Proposta: colho os dados, gero o rascunho e envio para assinatura.\n" +
+    "2. Contrato: com a proposta fechada, vira negócio; o contrato é feito e aprovado na tela do negócio.\n" +
+    "3. Assinatura: o contrato aprovado vai para assinatura pela tela do negócio.\n" +
+    `Tipos de assinatura do contrato: ${TIPOS_DE_ASSINATURA.map((t) => t.rotulo).join(", ")}. ${TEXTO_ACEITE}`
+  );
+}
+
+/**
+ * Ancorado na frase inteira (curta), como `pedeCapacidades`: "como funciona o
+ * prompt do sistema?" e "quem falta assinar a proposta da Ana?" não são este
+ * pedido. Devolve qual texto responder.
+ */
+const PEDE_TIPOS = new RegExp(
+  String.raw`^(?:e\s+)?(?:(?:o\s*)?max[\s,:-]*)?(?:(?:quais|que|qual)\s+(?:sao\s+)?(?:os\s+|as\s+)?(?:tipos?|formas?|modos?|metodos?|opcoes)\s+de\s+assinatura(?:\s+(?:existem|tem|ha|temos|posso usar|voce (?:faz|tem)))?)\s*[?.!]*$`
+);
+const PEDE_PROCESSO = new RegExp(
+  String.raw`^(?:e\s+)?(?:(?:o\s*)?max[\s,:-]*)?como\s+(?:funciona|e|eh)\s+(?:a\s+assinatura(?:\s+d[aeo]s?\s+(?:proposta|contrato)s?)?|o\s+processo(?:\s+de\s+(?:assinatura|proposta|contrato))?)\s*[?.!]*$`
+);
+
+export function pedeProcessoDeAssinatura(texto: string): "tipos" | "processo" | null {
+  const t = normalizar(texto).replace(/[?!]+$/g, "").trim();
+  if (PEDE_TIPOS.test(t)) return "tipos";
+  if (PEDE_PROCESSO.test(t)) return "processo";
+  return null;
+}
+
 export function textoDeCapacidades(policy: readonly Capability[], podeEscrever: boolean, credito = false, captacao = false, autorizacao = false): string {
   const tem = (c: Capability) => policy.includes(c);
   const linhas: string[] = [];

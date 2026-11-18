@@ -362,7 +362,7 @@ export async function conduzirAtividade(f: FluxoAtividade, ctx: ContextoDoTurno,
 
   if (f.etapa === "texto") {
     // "Sim" não é o texto: é a pessoa respondendo a uma pergunta que não fizemos.
-    if (confirmacao === "sim") return perguntarTexto(f);
+    if (confirmacao === "sim" || confirmacao === "vago") return perguntarTexto(f);
     const dado = ctx.texto.trim();
     const erro = erroDoTexto(f.operacao, dado);
     if (erro) return resposta({ ...f, atualizadoEm: ctx.agora }, erro, "atividade_texto_invalido");

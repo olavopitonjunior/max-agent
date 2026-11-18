@@ -38,7 +38,7 @@ export interface PedidoDeLista {
   comFormulario?: boolean;
 }
 
-const EQUIPE = /\b(da equipe|de todos|dos corretores|de todos os corretores|todos os corretores|da imobiliaria|de toda (a )?(equipe|imobiliaria)|toda a (equipe|imobiliaria))\b/;
+const EQUIPE = /\b(da equipe|de todos|dos corretores|de todos os corretores|todos os corretores|da imobiliaria|de toda (a )?(equipe|imobiliaria)|toda a (equipe|imobiliaria)|(a|as) (imobiliaria|empresa) (ja )?(fez|fizeram|criou|criaram|gerou|enviou|emitiu)|(tem|teve|existem?) (propostas? )?na (imobiliaria|empresa))\b/;
 const RESPONSAVEL = /\b(em que (eu )?sou (o |a )?(responsavel|gerente)|que sou (o |a )?(responsavel|gerente)|como (o |a )?(gerente|responsavel)|destinadas? ((a|ao|para|pra) )?\S+ como|(a|ao|para|pra) (?!(o|a|os|as|um|uma|minha|minhas|sua|suas|nossa|nova|novo|outra|outro|meu|seu|nosso) )\S+ (gerente|responsavel)|sob (a )?minha responsabilidade|atribuidas? a mim|destinadas? a mim)\b/;
 const NOME_DO_CORRETOR = /\b(nome do corretor|corretor de cada|qual corretor|de quem (e|sao))\b/;
 
@@ -164,6 +164,11 @@ function linha(p: PropostaListada, comCorretor: boolean): string {
 const DICA_EQUIPE = (mes?: string) =>
   `Para ver as de toda a equipe ou as em que você é responsável, peça "propostas da equipe${mes ? ` de ${mes.split(" de ")[0]}` : ""}" ou "em que sou responsável".`;
 
+const TEXTO_EQUIPE_INDISPONIVEL = (pedido: PedidoDeLista) =>
+  pedido.escopo === "equipe"
+    ? "Não tenho o total da equipe ou da imobiliária para o seu perfil: eu só enxergo as propostas que você mesmo criou."
+    : "Não tenho as propostas em que você é responsável para o seu perfil: eu só enxergo as que você mesmo criou.";
+
 export async function responderListaFiltrada(
   deps: DepsDoFluxo,
   pedido: PedidoDeLista
@@ -173,6 +178,10 @@ export async function responderListaFiltrada(
   if (pedido.estados) args.estados = pedido.estados;
   if (pedido.busca) args.busca = pedido.busca;
   const r = await deps.acao("proposal.list", args);
+  // Perfil que não enxerga a equipe: o servidor recusa. Diz isso, em vez de "não consegui consultar".
+  if (r?.status === 403 && pedido.escopo !== "minhas") {
+    return { reply: TEXTO_EQUIPE_INDISPONIVEL(pedido), evento: "consulta_equipe_indisponivel" };
+  }
   if (!r || r.status !== 200) {
     return { reply: "Não consegui consultar as propostas agora. Tente de novo em instantes.", evento: "consulta_sem_resposta" };
   }
@@ -186,6 +195,14 @@ export async function responderListaFiltrada(
   }
   const itens = (Array.isArray(r.body.items) ? r.body.items : []).map(paraListada).filter((p): p is PropostaListada => !!p);
   const total = Math.max(Number(r.body.total) || 0, itens.length);
+  // Pediu a equipe e o servidor devolveu só as da própria pessoa (perfil sem acesso à
+  // equipe): o número é DELA, e a resposta diz isso, sem chamá-lo de total da casa.
+  if (pedido.escopo !== "minhas" && r.body.escopo === "minhas") {
+    const proprias = pedido.escopo === "equipe"
+      ? `Você tem ${total} ${total === 1 ? "proposta criada" : "propostas criadas"} por você${pedido.rotuloMes ? ` em ${pedido.rotuloMes}` : ""}.`
+      : "";
+    return { reply: [TEXTO_EQUIPE_INDISPONIVEL(pedido), proprias].filter(Boolean).join("\n"), evento: "consulta_equipe_indisponivel" };
+  }
   const sobre = [pedido.rotuloMes ? `em ${pedido.rotuloMes}` : "", pedido.rotuloEstados ? `(${pedido.rotuloEstados})` : "", pedido.busca ? `com "${pedido.busca}"` : ""]
     .filter(Boolean).join(" ");
   const quem = pedido.escopo === "equipe" ? "da equipe" : pedido.escopo === "responsavel" ? "em que você é responsável" : "criadas por você";

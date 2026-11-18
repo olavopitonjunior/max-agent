@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../meta", async (orig) => ({
   ...(await orig<typeof import("../meta")>()),
@@ -126,6 +126,69 @@ describe("sendText com interativo", () => {
     const res = await sendText(params);
     expect(res.messageId).toMatch(/^log-/);
     expect(meta.sendInteractive).not.toHaveBeenCalled();
+  });
+});
+
+describe("sendText com Flow (revisão v2)", () => {
+  const flow = {
+    tipo: "flow" as const,
+    flowId: "FLOW123",
+    screen: "PARTE_1",
+    data: { compradores_0__nome: "Maria Souza" },
+    corpo: "Revisão da proposta",
+    flowToken: "fv2:partes:NONCE",
+  };
+  const params = { to: "5511999990000", body: "ficha numerada", quoteMessageId: "Q", interativo: flow };
+
+  // O config do Newton roda a suíte com o perfil `newton`: o Max é fixado aqui, e o Newton no último caso.
+  beforeEach(() => vi.stubEnv("AGENT_DEPLOY_PROFILE", "max"));
+
+  it("transporte log nunca recebe Flow: só o texto", async () => {
+    vi.stubEnv("AGENT_TRANSPORT", "log");
+    const res = await sendText(params);
+    expect(res.messageId).toMatch(/^log-/);
+    expect(meta.sendInteractive).not.toHaveBeenCalled();
+  });
+
+  it("MAX_INTERACTIVE=off manda o texto numerado, sem Flow", async () => {
+    vi.stubEnv("MAX_INTERACTIVE", "off");
+    vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.T" });
+    await sendText(params);
+    expect(meta.sendInteractive).not.toHaveBeenCalled();
+    expect(meta.sendText).toHaveBeenCalledWith({ to: "5511999990000", body: "ficha numerada", quoteMessageId: "Q" });
+  });
+
+  it("na Meta o Flow sai como interactive/flow, com a citação", async () => {
+    vi.mocked(meta.sendInteractive).mockResolvedValue({ messageId: "wamid.F" });
+    expect(await sendText(params)).toEqual({ messageId: "wamid.F" });
+    expect(meta.sendInteractive).toHaveBeenCalledWith({ to: "5511999990000", interativo: flow, quoteMessageId: "Q" });
+    expect(meta.sendText).not.toHaveBeenCalled();
+  });
+
+  it("400 da Meta (Flow recusado: id inválido, não publicado) cai no texto numerado", async () => {
+    vi.mocked(meta.sendInteractive).mockRejectedValue(new MetaHttpError("/1/messages", 400, '{"error":{"code":131009}}'));
+    vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.T" });
+    expect(await sendText(params)).toEqual({ messageId: "wamid.T" });
+    expect(meta.sendText).toHaveBeenCalledWith({ to: "5511999990000", body: "ficha numerada", quoteMessageId: "Q" });
+  });
+
+  // M10: nenhum caminho do Flow loga nome, CPF, telefone, e-mail, a ficha nem o token.
+  it("o 400 que cai no texto loga só tipo e código, nunca o dado do Flow", async () => {
+    const espioes = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+    const corpoDoErro = JSON.stringify({ error: { code: 131009, message: "Maria Souza 529.982.247-25 maria@exemplo.com 5511987654321" } });
+    vi.mocked(meta.sendInteractive).mockRejectedValue(new MetaHttpError("/1/messages", 400, corpoDoErro));
+    vi.mocked(meta.sendText).mockResolvedValue({ messageId: "wamid.T" });
+    await sendText({ ...params, interativo: { ...flow, data: { compradores_0__nome: "Maria Souza" }, corpo: "Ficha: Maria Souza CPF 529.982.247-25" } });
+    const saida = espioes.flatMap((e) => e.mock.calls.map((c) => c.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "))).join("\n");
+    expect(saida).toContain("transport.interativo_recusado");
+    for (const dado of ["Maria", "529.982", "52998224725", "maria@exemplo.com", "5511987654321", "fv2:partes", "NONCE", "FLOW123"]) expect(saida).not.toContain(dado);
+  });
+
+  it("Newton (bridge) nunca manda Flow à Meta nem ao bridge", async () => {
+    vi.stubEnv("AGENT_DEPLOY_PROFILE", "newton");
+    await sendText(params).catch(() => undefined);
+    expect(meta.sendInteractive).not.toHaveBeenCalled();
+    expect(meta.sendText).not.toHaveBeenCalled();
   });
 });
 

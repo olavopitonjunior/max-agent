@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { catalog } from '../catalog';
+import { durableRuntimeEnabled, featureEnabled } from '../rollout';
 import { ferramentasDoTurno } from '@/graph/tools';
 import { marketingStep } from '@/graph/marketing';
 import { executarAcao } from '../../acao';
@@ -11,6 +12,8 @@ vi.mock('../../http', () => ({
   fetchWithTimeout: async (url: string) => { network.requests.push(url); return Response.json({ items: [{ id: 'fixture' }], truncated: false }); },
   imobproBase: () => 'https://fixture.test', IMOBPRO_TIMEOUT_MS: 8000,
   IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS: 30000, IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS: 30000,
+  IMOBPRO_DOCUMENT_READ_TIMEOUT_MS: 45000,
+  IMOBPRO_TEXT_EDIT_TIMEOUT_MS: 30000,
   captacaoSendTimeoutMs: () => 30000,
 }));
 const enabled = JSON.stringify({ 'pilot-org': ['runtime', 'queries', 'marketing', 'handoff'] });
@@ -84,4 +87,39 @@ it('preserves tracking and authenticated status of accepted marketing after disa
  expect(await executarAcao({orgId:p.orgId,rawPhone:'+5511999990888',subject:{kind:'user',userId:'user'},verb:'marketing.generate',args:{}})).toMatchObject({status:403});
  action.mockClear();expect(await marketingStep({...p,policy:[]},action)).toMatchObject({pending,event:'marketing_status_denied'});expect(action).not.toHaveBeenCalled();
  expect(await marketingStep({...p,text:'quero outro vídeo'},action)).toMatchObject({pending,event:'marketing_tracking_preserved'});
+});
+
+describe('formularios_v2 no rollout por org (T1)', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('formularios_v2 desligado sem MAX_ROLLOUT_ORGS', () => {
+    vi.stubEnv('MAX_FORMULARIOS_V2', 'true');
+    vi.stubEnv('MAX_ROLLOUT_ORGS', '');
+    expect(featureEnabled('formularios_v2', 'pilot-org')).toBe(false);
+    vi.stubEnv('MAX_ROLLOUT_ORGS', 'not json');
+    expect(featureEnabled('formularios_v2', 'pilot-org')).toBe(false);
+  });
+
+  it('formularios_v2 exige global E org', () => {
+    vi.stubEnv('MAX_ROLLOUT_ORGS', JSON.stringify({ 'pilot-org': ['formularios_v2'] }));
+    vi.stubEnv('MAX_FORMULARIOS_V2', 'false');
+    expect(featureEnabled('formularios_v2', 'pilot-org')).toBe(false);
+    vi.stubEnv('MAX_FORMULARIOS_V2', 'true');
+    expect(featureEnabled('formularios_v2', 'pilot-org')).toBe(true);
+    expect(featureEnabled('formularios_v2', 'other-org')).toBe(false);
+    expect(featureEnabled('formularios_v2', undefined)).toBe(false);
+  });
+
+  it('org com outras features não herda formularios_v2', () => {
+    vi.stubEnv('MAX_FORMULARIOS_V2', 'true');
+    vi.stubEnv('MAX_ROLLOUT_ORGS', JSON.stringify({ 'pilot-org': ['runtime', 'queries', 'marketing', 'handoff'] }));
+    expect(featureEnabled('formularios_v2', 'pilot-org')).toBe(false);
+  });
+
+  it('formularios_v2 não liga as outras features nem o runtime durável', () => {
+    vi.stubEnv('MAX_FORMULARIOS_V2', 'true');
+    vi.stubEnv('MAX_ROLLOUT_ORGS', JSON.stringify({ 'pilot-org': ['formularios_v2'] }));
+    expect(featureEnabled('runtime', 'pilot-org')).toBe(false);
+    expect(durableRuntimeEnabled('pilot-org')).toBe(false);
+  });
 });

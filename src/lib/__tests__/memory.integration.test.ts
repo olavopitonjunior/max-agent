@@ -208,12 +208,12 @@ describe("extração (sem banco)", () => {
 
   it("lê o JSON do modelo", async () => {
     llm.mockResolvedValue({
-      text: '{"chamar_de":"Neto","area":"locação"}',
+      text: '{"regiao":"zona sul","area":"locação"}',
       usage: { model: "m", promptTokens: 1, latencyMs: 1 },
     });
 
     expect(await extractFacts(args)).toEqual({
-      chamar_de: "Neto",
+      regiao: "zona sul",
       area: "locação",
     });
   });
