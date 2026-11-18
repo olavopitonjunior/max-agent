@@ -6,7 +6,7 @@ import { VERBOS_DE_LEITURA } from '@/graph/scope-contract';
 import { DEFAULT_MODEL } from '../llm';
 import { CATALOG_VERSION, WORKFLOW_VERSION } from './contracts';
 import { deployProfile } from '../deploy-profile';
-export const READ_ACTIONS = new Set<string>(['google.availability','google.activities','proposal.list','proposal.status','proposal.options','proposal.preflight','form.options','credit.preflight','credit.status','captacao.options','captacao.preflight','captacao.list','captacao.autorizacao.listar','marketing.options','marketing.library','marketing.status','document.read']);
+export const READ_ACTIONS = new Set<string>(['google.availability','google.activities','proposal.list','proposal.status','proposal.options','proposal.preflight','form.options','credit.preflight','credit.status','captacao.options','captacao.preflight','captacao.list','captacao.autorizacao.listar','marketing.options','marketing.draft_get','marketing.draft_list','marketing.editorial_list','marketing.library','marketing.status','document.read']);
 export function isWriteVerb(verb:string):boolean {return !READ_ACTIONS.has(verb);}
 /**
  * PR-O4cat (16/11/2026): capabilities do catálogo SEM tool e SEM verbo — "reservada, verbo
@@ -66,7 +66,7 @@ const DOMAIN_SCOPE: Record<string, string> = {
 };
 function capability(id:string):Capability|null {
  if(Object.hasOwn(POLICY_MAPPING,id))return POLICY_MAPPING[id];
- if(id.startsWith('marketing.'))return id==='marketing.generate'||id==='marketing.prepare'?'marketing.generate':'marketing.read';
+ if(id.startsWith('marketing.'))return id==='marketing.generate'||id==='marketing.prepare'||id==='marketing.draft_create'?'marketing.generate':'marketing.read';
  if(id.startsWith('credit.'))return id==='credit.request'?'credit.request':'credit.read';
  if(id==='lead.upsert')return 'credit.request';
  if(id.startsWith('captacao.')&&!['captacao.send','captacao.list','captacao.autorizacao.pedir','captacao.autorizacao.decidir','captacao.autorizacao.listar'].includes(id))return 'captacao.create';

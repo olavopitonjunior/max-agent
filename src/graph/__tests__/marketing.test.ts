@@ -10,11 +10,11 @@ describe('marketing deterministic confirmation',()=>{
   const prepared=await marketingStep(base,action);expect(prepared?.pending?.briefId).toBe('brief-1');expect(calls).toEqual(['marketing.prepare']);
   const generated=await marketingStep({...base,text:'sim',messageId:'confirm-message-id',pending:prepared!.pending},action);expect(generated?.pending?.jobId).toBe('job-1');expect(calls).toEqual(['marketing.prepare','marketing.generate']);expect(generated?.reply).toContain('pronta');
  });
- it('lets a broker choose visible property and named template without internal ids',async()=>{
+ it('opens an editable authenticated draft after visible property selection',async()=>{
   vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({fixture:['marketing']}));vi.stubEnv('MAX_MARKETING','true');const verbs:string[]=[];
-  const action=async(verb:string,args:Record<string,unknown>)=>{verbs.push(verb);if(verb==='marketing.options')return {status:200,body:{templates:[{id:'template-internal',name:'Minimal'}]}};if(verb==='property.list')return {status:200,body:{items:[{id:'property-internal',tipo:'apartamento',bairro:'Centro',cidade:'São Paulo',dormitorios:2}],truncated:false}};expect(args.propertyId).toBe('property-internal');expect(args.templateId).toBe('template-internal');return {status:200,body:{briefId:'brief-2',confirmationDigest:'b'.repeat(64),expiresAt:new Date(base.now+60000).toISOString(),snapshot:{copy:'Apartamento no Centro',template:'Minimal',quotaUnits:1}}};};
+  const action=async(verb:string,args:Record<string,unknown>)=>{verbs.push(verb);if(verb==='marketing.options')return {status:200,body:{templates:[{id:'template-internal',name:'Minimal'}]}};if(verb==='property.list')return {status:200,body:{items:[{id:'property-internal',tipo:'apartamento',bairro:'Centro',cidade:'São Paulo',dormitorios:2}],truncated:false}};expect(args.propertyId).toBe('property-internal');return {status:200,body:{id:'draft-2',version:1,format:'card',studioPath:'/marketing?draft=draft-2'}};};
   const choose=await marketingStep({...base,text:'Quero uma arte para anunciar um imóvel'},action);expect(choose?.reply).toContain('1.');expect(choose?.reply).not.toContain('property-internal');
-  const preview=await marketingStep({...base,text:'1',pending:choose!.pending},action);expect(preview?.reply).toContain('Confirma');expect(verbs).toEqual(['marketing.options','property.list','marketing.prepare']);
+  const preview=await marketingStep({...base,text:'1',pending:choose!.pending},action);expect(preview?.reply).toContain('/marketing?draft=draft-2');expect(verbs).toEqual(['property.list','marketing.draft_create']);
  });
  it('expires confirmation and does not treat unrelated turn as approval',async()=>{
   vi.stubEnv('MAX_ROLLOUT_ORGS',JSON.stringify({fixture:['marketing']}));vi.stubEnv('MAX_MARKETING','true');let calls=0;const action=async()=>{calls++;return null;};

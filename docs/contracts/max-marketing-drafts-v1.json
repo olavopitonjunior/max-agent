@@ -1,0 +1,12 @@
+{
+  "contractVersion": "marketing-drafts-v1",
+  "create": {
+    "verb": "marketing.draft_create",
+    "args": {"brief":"Crie um card educativo sobre preparação da visita","format":"card"},
+    "idempotencyKey":"fixture-message-create",
+    "response":{"id":"fixture-draft","version":1,"format":"card","studioPath":"/marketing?draft=fixture-draft"}
+  },
+  "get": {"verb":"marketing.draft_get","args":{"draftId":"fixture-draft"}},
+  "list":{"verb":"marketing.draft_list","args":{}},
+  "calendar":{"verb":"marketing.editorial_list","args":{}}
+}
