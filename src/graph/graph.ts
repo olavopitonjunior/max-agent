@@ -25,7 +25,7 @@ import { iniciarAssinatura, pedeAssinatura } from "./assinatura";
 import { pedeProprietario, respostaAoAviso, sugestaoPendente } from "./proprietario";
 import {
   negaAcao, pedeAcaoForaDoMax, pedeCapacidades, pedeLeituraNaoLiberada, TEXTO_LEITURA_NAO_LIBERADA, perguntaDoContrato, textoDaNegacao, textoDeCapacidades,
-  textoDoAndamentoDoContrato, textoForaDoMax,
+  textoDoAndamentoDoContrato, textoForaDoMax, pedeProcessoDeAssinatura, textoDoProcesso, TEXTO_TIPOS_DE_ASSINATURA,
 } from "./capacidades";
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import {
@@ -128,6 +128,7 @@ import {
 import { renderizarNegociosSelecionados, type MapaDeReferencias } from "./referencias";
 import {
   aposRetomada,
+  citaOutraProposta,
   conduzirFluxo,
   deveLembrarDaPausa,
   fluxoExpirou,
@@ -1206,6 +1207,13 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
       messages: [{ role: "user", content: userText }, { role: "assistant", content: TEXTO_LEITURA_NAO_LIBERADA }],
       toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: `leitura_nao_liberada_${leituraNegada}` }] };
   }
+  // Processo e assinatura são escopo de qualquer perfil (Newton recusava como "foge do que eu faço"): template, sem modelo.
+  const processo = !coletando && !gestao && !assinatura && !continuidade && !foraDoMax && !contratoPergunta && !negada ? pedeProcessoDeAssinatura(userText) : null;
+  if (processo) {
+    const reply = processo === "tipos" ? TEXTO_TIPOS_DE_ASSINATURA : textoDoProcesso();
+    return { reply, pendingAction: null, messages: [{ role: "user", content: userText }, { role: "assistant", content: reply }],
+      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: `processo_${processo}` }] };
+  }
   if (!coletando && !gestao && !assinatura && !continuidade && (foraDoMax || contratoPergunta || negada || pedeCapacidades(userText))) {
     const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
     const linkDoNegocio = resultado?.match(/Negócio: (\S+)/)?.[1] ?? null;
@@ -1284,6 +1292,10 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     (atual.kind === "negocio" && atual.etapa === "tipo" && !lerNatureza(userText)) ||
     (atual.kind === "proposta" && atual.etapa === "natureza" && !lerNatureza(userText)) ||
     (atual.kind === "proposta" && atual.etapa === "selecao_envio") ||
+    // Rascunho aberto para ajuste, e o pedido de envio cita OUTRA proposta (prod 10/11):
+    // o fluxo é da anterior, a citada se acha pela busca. Sem escrita em aberto (`chave`).
+    (atual.kind === "proposta" && !!atual.propostaId && !atual.chave && !atual.ajustePendente && ["ajustes", "metodo"].includes(atual.etapa) &&
+      citaOutraProposta(userText, atual.codigo)) ||
     (atual.kind === "gestao" && !atual.chave) ||
     (atual.kind === "assinatura" && !atual.chave);
   if (naoComecou && podeEscrever(state.identity) && pedeEnvio(userText)) {

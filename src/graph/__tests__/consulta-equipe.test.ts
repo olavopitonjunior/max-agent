@@ -269,3 +269,51 @@ describe("frases reais da segunda rodada", () => {
     expect(pedidoDeLista("propostas de outubro para o gerente aprovar", AGORA)?.escopo).toBe("minhas");
   });
 });
+
+/**
+ * Prod 10/11/2026 (Max Fincasa): "quantas propostas a imobiliária fez este mês?"
+ * respondeu "Não achei propostas criadas por você" — "a imobiliária fez" não era
+ * lido como pedido da equipe. Quem filtra é o servidor (`escopo`); se o perfil
+ * não vê a equipe, a resposta diz isso em vez de passar o número dele por da casa.
+ */
+describe("'a imobiliária fez' é escopo da equipe (prod 10/11)", () => {
+  it.each([
+    "quantas propostas a imobiliária fez este mês?",
+    "quantas propostas a empresa já fez este mês",
+    "quantas propostas tem na imobiliária este mês?",
+  ])("%s", (t) => {
+    expect(pedidoDeLista(t, AGORA)).toMatchObject({ escopo: "equipe", mes: "2026-11" });
+    expect(pedeConsulta(t)).toBe(true);
+  });
+  it("com o mês dito por nome", () => {
+    expect(pedidoDeLista("quantas propostas a imobiliaria criou em outubro", AGORA)).toMatchObject({ escopo: "equipe", mes: "2026-10" });
+  });
+
+  it("'para a imobiliária' (destinatário) não vira equipe", () => {
+    expect(pedidoDeLista("faz uma proposta para a imobiliária este mês", AGORA)?.escopo ?? "minhas").toBe("minhas");
+  });
+
+  it("perfil sem acesso à equipe (o servidor devolve o escopo 'minhas'): diz que o número é só dele", async () => {
+    const { deps } = depsCom({ escopo: "minhas", total: 3, items: [item("PROP-2026-0001")] });
+    const r = await responderListaFiltrada(deps, pedidoDeLista("quantas propostas a imobiliária fez este mês?", AGORA)!);
+    expect(r.evento).toBe("consulta_equipe_indisponivel");
+    expect(r.reply).toContain("3 propostas criadas por você");
+    expect(r.reply).toMatch(/total da (equipe|imobili[aá]ria)/i);
+    expect(r.reply).not.toMatch(/\bda equipe em novembro\b/);
+  });
+
+  it("perfil sem acesso (403): não cai no 'não consegui consultar'", async () => {
+    const { deps } = depsCom({ erro: "sem_permissao" }, 403);
+    const r = await responderListaFiltrada(deps, pedidoDeLista("quantas propostas a imobiliária fez este mês?", AGORA)!);
+    expect(r.evento).toBe("consulta_equipe_indisponivel");
+    expect(r.reply).toMatch(/não (tenho|posso|consigo) .*(equipe|imobili)/i);
+    expect(r.reply).not.toContain("sem_permissao");
+  });
+
+  it("perfil com acesso: o total da equipe, normalmente", async () => {
+    const { deps } = depsCom({ escopo: "equipe", total: 41, items: [item("PROP-2026-0001", { corretor: "Ana" })] });
+    const r = await responderListaFiltrada(deps, pedidoDeLista("quantas propostas a imobiliária fez este mês?", AGORA)!);
+    expect(r.evento).toBe("consulta_lista_filtrada");
+    expect(r.reply).toContain("41 propostas da equipe em novembro de 2026");
+  });
+});
