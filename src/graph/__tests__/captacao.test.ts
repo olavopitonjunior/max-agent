@@ -2263,6 +2263,470 @@ describe("revisão opus (26/10, rodada de correções)", () => {
   });
 });
 
+// ─── Captação fluida (11/2026): a mensagem única não vira interrogatório ────
+
+describe("lerCondicoes: valor com R$ / mil / milhão, mesmo com outros números no texto", () => {
+  const venda = (t: string) => cap.lerCondicoes(t, "venda").condicoes.valor;
+
+  it.each([
+    ["Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000", 800000],
+    ["Rua das Flores, 123, venda R$800 mil", 800000],
+    ["Av. Brasil, 77, apto 12, R$ 1,2 milhão", 1200000],
+    ["Rua A, 10, 800 mil", 800000],
+    ["800 mil, Rua A, 10", 800000],
+    ["Rua B, 5, valor R$ 950.000,00, comissão 6%", 950000],
+  ])("%s → %d", (texto, esperado) => {
+    expect(venda(texto)).toBe(esperado);
+  });
+
+  it("sem R$/mil e com dois números: não chuta (número da rua não vira valor)", () => {
+    expect(venda("Rua TESTE, 5, venda 800")).toBeUndefined();
+    expect(venda("Rua A, 10, apto 52")).toBeUndefined();
+  });
+
+  it("pedido sem preço: o número da rua nunca vira valor", () => {
+    expect(venda("nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999990000, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda")).toBeUndefined();
+    expect(venda("Rua TESTE Captação, 5, São Paulo/SP")).toBeUndefined();
+    expect(venda("Avenida Paulista 1000, venda")).toBeUndefined();
+    expect(venda("Rua A, nº 88, CEP 01310-100")).toBeUndefined();
+  });
+
+  it.each([
+    ["nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999990000, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, por 800 mil", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, valor 1,2 milhão", 1200000],
+    ["850000", 850000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, 800000 reais", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, 800k", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, preço 800000", 800000],
+    ["Rua TESTE Captação, 5, São Paulo/SP, valor 800000", 800000],
+  ])("com marcador (ou só o valor) continua: %s → %d", (texto, esperado) => {
+    expect(venda(texto)).toBe(esperado);
+  });
+
+  it("dois valores marcados diferentes: não chuta", () => {
+    expect(venda("Rua A, 10, R$ 800.000 ou R$ 750.000")).toBeUndefined();
+  });
+
+  it("R$ ligado a condomínio/IPTU na locação não vira o aluguel", () => {
+    const l = cap.lerCondicoes("Rua A, condomínio R$ 500, IPTU R$ 120", "locacao");
+    expect(l.locacao.aluguel).toBeUndefined();
+    expect(l.locacao.condominio).toBe(500);
+    expect(l.locacao.iptu).toBe(120);
+    expect(cap.lerCondicoes("Rua A, 10, R$ 3.500", "locacao").locacao.aluguel).toBe(3500);
+  });
+
+  it("o rótulo continua mandando: 'valor 850 mil' não é afetado por outros R$", () => {
+    expect(venda("valor 850 mil, comissão 6%, prazo 180 dias")).toBe(850000);
+  });
+});
+
+describe("lerImovel: Cidade/UF, Cidade - UF, Cidade, UF vão para cidade e uf, nunca para bairro", () => {
+  const ler = (texto: string, extraido: Record<string, unknown>) => cap.lerImovel(texto, async () => extraido);
+  const RUA = { rua: "Rua TESTE Captação", numero: "5" };
+
+  it("caso real de produção: o extrator devolveu bairro='São Paulo/SP'", async () => {
+    const r = await ler("imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000", { ...RUA, bairro: "São Paulo/SP" });
+    expect(r.dados).toMatchObject({ rua: "Rua TESTE Captação", numero: "5", cidade: "São Paulo", uf: "SP" });
+    expect(r.dados.bairro).toBeUndefined();
+  });
+
+  it.each([
+    ["Rua TESTE Captação, 5, Campinas - SP", "Campinas", "SP"],
+    ["Rua TESTE Captação, 5, Belo Horizonte, MG", "Belo Horizonte", "MG"],
+    ["Rua TESTE Captação, 5, Ribeirão Preto/sp", "Ribeirão Preto", "SP"],
+    ["Rua TESTE Captação, 5, Rio de Janeiro / RJ", "Rio de Janeiro", "RJ"],
+  ])("%s", async (texto, cidade, uf) => {
+    const r = await ler(texto, { ...RUA });
+    expect(r.dados).toMatchObject({ cidade, uf });
+    expect(r.dados.bairro).toBeUndefined();
+  });
+
+  it("não inventa bairro e mantém o que o extrator achou de verdade", async () => {
+    const r = await ler("Rua TESTE Captação, 5, Centro, Campinas/SP", { ...RUA, bairro: "Centro" });
+    expect(r.dados).toMatchObject({ bairro: "Centro", cidade: "Campinas", uf: "SP" });
+    const sem = await ler("Rua TESTE Captação, 5, Campinas/SP", { ...RUA });
+    expect(sem.dados.bairro).toBeUndefined();
+  });
+
+  it("bairro igual à cidade escrita com barra ('Cidade/UF') é descartado", async () => {
+    const a = await ler("Rua TESTE Captação, 5, São Paulo/SP", { ...RUA, bairro: "São Paulo" });
+    expect(a.dados.bairro).toBeUndefined();
+    expect(a.dados).toMatchObject({ cidade: "São Paulo", uf: "SP" });
+  });
+
+  it.each([
+    ["Rua Augusta, 1250, Bela Vista, SP", "Bela Vista"],
+    ["Rua Augusta, 1250, Centro, SP", "Centro"],
+    ["Rua Augusta, 1250 - Bela Vista - SP", "Bela Vista"],
+  ])("'Bairro, UF' / 'Bairro - UF': %s mantém o bairro, grava a uf e deixa a cidade faltando", async (texto, bairro) => {
+    const r = await ler(texto, { rua: "Rua Augusta", numero: "1250", bairro });
+    expect(r.dados).toMatchObject({ bairro, uf: "SP" });
+    expect(r.dados.cidade).toBeUndefined();
+  });
+
+  it("bairro do extrator já com ', UF' grudado: bairro limpo, uf gravada, cidade faltando", async () => {
+    const r = await ler("Rua Augusta, 1250, Bela Vista, SP", { rua: "Rua Augusta", numero: "1250", bairro: "Bela Vista, SP" });
+    expect(r.dados).toMatchObject({ bairro: "Bela Vista", uf: "SP" });
+    expect(r.dados.cidade).toBeUndefined();
+  });
+
+  it("cidade do extrator no formato 'Cidade/UF' é dividida", async () => {
+    const r = await ler("Rua TESTE Captação, 5, São Paulo/SP", { ...RUA, cidade: "São Paulo/SP" });
+    expect(r.dados).toMatchObject({ cidade: "São Paulo", uf: "SP" });
+  });
+
+  it("sem espaço de vírgula depois da rua, ainda pega a cidade pela cidade do extrator", async () => {
+    const r = await ler("Rua Augusta São Paulo/SP", { rua: "Rua Augusta", cidade: "São Paulo" });
+    expect(r.dados).toMatchObject({ rua: "Rua Augusta", cidade: "São Paulo", uf: "SP" });
+  });
+
+  it("negativos: sigla inválida, rua com vírgula e número não viram cidade", async () => {
+    const a = await ler("Rua TESTE Captação, 5, apto 52, XX", { ...RUA });
+    expect(a.dados.cidade).toBeUndefined();
+    expect(a.dados.uf).toBeUndefined();
+    const b = await ler("Rua Augusta, SP", { rua: "Rua Augusta" });
+    expect(b.dados.cidade).toBeUndefined();
+    const c = await ler("Rua TESTE Captação, 5, Apto 52, SP", { ...RUA });
+    expect(c.dados.cidade).toBeUndefined();
+  });
+
+  it("'SP' sozinho continua aceito como uf (caminho antigo)", async () => {
+    const r = await ler("Rua TESTE Captação, 5, SP", { ...RUA, uf: "SP" });
+    expect(r.dados.uf).toBe("SP");
+    expect(r.dados.cidade).toBeUndefined();
+  });
+
+  it("o texto escrito vence um uf alucinado pelo extrator", async () => {
+    const r = await ler("Rua TESTE Captação, 5, Campinas/SP", { ...RUA, cidade: "Campinas", uf: "RJ" });
+    expect(r.dados).toMatchObject({ cidade: "Campinas", uf: "SP" });
+  });
+});
+
+describe("donosDaPrimeiraMensagem: só com rótulo explícito, em código", () => {
+  it("proprietário rotulado: nome e telefone, cortando no imóvel", async () => {
+    const r = await cap.donosDaPrimeiraMensagem("nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999063228, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000");
+    expect(r).toEqual([{ nome: "Pedro TESTE Captação", telefone: "11999063228" }]);
+  });
+
+  it("vendedor e locador contam; dois rótulos = duas pessoas", async () => {
+    const r = await cap.donosDaPrimeiraMensagem(`captação de venda. vendedor Maria Silva, CPF ${CPF}, ${EMAIL}; proprietário João Souza, tel ${FONE}. Rua A, 10`);
+    expect(r).toEqual([
+      { nome: "Maria Silva", cpf: CPF_D, email: EMAIL },
+      { nome: "João Souza", telefone: FONE_D },
+    ]);
+  });
+
+  it("negativos: 'Dona Maria' no apelido do imóvel, 'e' entre dois nomes, sem rótulo e CPF inválido", async () => {
+    expect(await cap.donosDaPrimeiraMensagem("cria uma captação de venda do Apto da Dona Maria, Rua A, 10")).toEqual([]);
+    expect(await cap.donosDaPrimeiraMensagem("proprietários Pedro Alves e Maria Alves, Rua A, 10")).toEqual([]);
+    expect(await cap.donosDaPrimeiraMensagem("captação de venda, Maria Silva, tel 11999063228, Rua A, 10")).toEqual([]);
+    expect(await cap.donosDaPrimeiraMensagem("proprietário Maria Silva, CPF 111.444.777-36, Rua A, 10")).toEqual([]);
+  });
+
+  it("um proprietário só e um telefone só no texto: o telefone solto depois do imóvel é dele", async () => {
+    const r = await cap.donosDaPrimeiraMensagem("proprietário Pedro Alves, imóvel Rua A, 10, venda 500 mil, contato 11999063228");
+    expect(r).toEqual([{ nome: "Pedro Alves", telefone: "11999063228" }]);
+  });
+});
+
+describe("captação fluida: o pedido de uma mensagem só não vira interrogatório", () => {
+  const FONE_PEDRO = "11999063228";
+  const MSG = `nova captação TESTE: proprietário Pedro TESTE Captação, tel ${FONE_PEDRO}, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000`;
+  type ArgsCriacao = { nome: string; dados: { imovel: Record<string, unknown>; condicoes: Record<string, unknown>; proprietarios?: Record<string, unknown>[] } };
+  const semTelefoneDoPedro = (x: unknown) => !JSON.stringify(x ?? null).includes("999063228");
+
+  it("caso real de 10/11: um create só, com nome derivado, proprietário, valor, cidade e UF", async () => {
+    const fala = conversa();
+    extracao = { rua: "Rua TESTE Captação", numero: "5", bairro: "São Paulo/SP" };
+    const r = await fala(MSG);
+    const criacoes = verbos("captacao.create");
+    expect(criacoes).toHaveLength(1);
+    const args = criacoes[0]!.args as unknown as ArgsCriacao;
+    expect(args.nome).toBe("Pedro TESTE Captação — Rua TESTE Captação, 5");
+    expect(args.dados.condicoes).toMatchObject({ valor: 800000 });
+    expect(args.dados.imovel).toMatchObject({ rua: "Rua TESTE Captação", numero: "5", cidade: "São Paulo", uf: "SP" });
+    expect(args.dados.imovel.bairro).toBeUndefined();
+    expect(args.dados.proprietarios).toEqual([
+      { id: "p1", papel: "proprietario", tipo_pessoa: "fisica", nome: "Pedro TESTE Captação", telefone1: "+5511999063228" },
+    ]);
+    expect(r.reply).not.toContain("Que nome dou");
+    expect(r.reply).not.toContain("valor pretendido");
+    expect(r.reply).toContain("Criei o rascunho");
+    expect(r.reply).toContain("Pedro TESTE Captação");
+    expect(r.reply).not.toContain("um por mensagem");
+    // O que vai ao checkpoint e ao extrator (LLM) não carrega o telefone.
+    const vazou = Object.entries(r).filter(([k, v]) => k !== "inbound" && !semTelefoneDoPedro(v)).map(([k]) => k);
+    expect(vazou).toEqual([]);
+    expect(semTelefoneDoPedro(llm.mock.calls)).toBe(true);
+    const fluxo = r.fluxo as { proprietarios?: unknown[]; pessoasCifradas?: string };
+    expect(fluxo.proprietarios).toEqual([{ id: "p1", nome: "Pedro TESTE Captação" }]);
+    expect(fluxo.pessoasCifradas).toBeUndefined();
+  });
+
+  it("só o endereço: o nome vem do endereço e nada de proprietário é inventado", async () => {
+    const fala = conversa();
+    extracao = { rua: "Rua TESTE Captação", numero: "5" };
+    const r = await fala("nova captação de venda, imóvel Rua TESTE Captação, 5, Campinas - SP, R$ 500 mil");
+    const args = verbos("captacao.create")[0]!.args as unknown as ArgsCriacao;
+    expect(args.nome).toBe("Rua TESTE Captação, 5");
+    expect(args.dados.proprietarios).toBeUndefined();
+    expect(args.dados.imovel).toMatchObject({ cidade: "Campinas", uf: "SP" });
+    expect(r.reply).not.toContain("Que nome dou");
+  });
+
+  it("só o proprietário: o nome vem dele, pergunta só o imóvel e leva o proprietário até o create", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    const p = await fala(`cria uma captação de venda, proprietário Pedro Alves, tel ${FONE_PEDRO}`);
+    expect(p.reply).not.toContain("Que nome dou");
+    expect(p.reply).toContain("Pedro Alves");
+    expect(p.reply).toContain("Qual o imóvel?");
+    expect(verbos("captacao.create")).toEqual([]);
+    expect(semTelefoneDoPedro(p.fluxo)).toBe(true);
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    const args = verbos("captacao.create")[0]!.args as unknown as ArgsCriacao;
+    expect(args.nome).toBe("Pedro Alves");
+    expect(args.dados.proprietarios).toMatchObject([{ id: "p1", nome: "Pedro Alves", telefone1: "+5511999063228" }]);
+  });
+
+  it("sem proprietário e sem endereço: continua perguntando o nome (e o pedido é conservado)", async () => {
+    const fala = conversa();
+    const p = await fala("quero fazer uma captação de venda");
+    expect(p.reply).toContain("Que nome dou");
+  });
+
+  it("o nome derivado respeita o limite de 120 caracteres", async () => {
+    const fala = conversa();
+    const longo = "Rua " + "Muito Longa ".repeat(9).trim();
+    extracao = { rua: longo, numero: "5" };
+    await fala(`nova captação de venda, proprietário Pedro Alves, imóvel ${longo}, 5, R$ 500 mil`);
+    const args = verbos("captacao.create")[0]!.args as unknown as ArgsCriacao;
+    expect(args.nome.length).toBeLessThanOrEqual(120);
+  });
+
+  it("junção com a frase de parada: 'Rua Deixa Pra Lá 10' no pedido não encerra o fluxo; vira create com nome, dono, cidade/UF e valor", async () => {
+    const fala = conversa();
+    // "Campinas SP" (sem separador) é lido pelo extrator; o leitor em código só cobre "Cidade/UF", "- UF" e ", UF".
+    extracao = { rua: "Rua Deixa Pra Lá", numero: "10", cidade: "Campinas", uf: "SP" };
+    const r = await fala("nova captação TESTE: proprietária Ana Teste, Rua Deixa Pra Lá 10, Campinas SP, venda por 800 mil");
+    expect(r.reply).not.toContain("Que nome dou");
+    expect(r.fluxo).toBeDefined();
+    const criacoes = verbos("captacao.create");
+    expect(criacoes).toHaveLength(1);
+    const args = criacoes[0]!.args as unknown as ArgsCriacao;
+    expect(args.nome).toBe("Ana Teste — Rua Deixa Pra Lá, 10");
+    expect(args.dados.proprietarios).toMatchObject([{ id: "p1", nome: "Ana Teste" }]);
+    expect(args.dados.imovel).toMatchObject({ rua: "Rua Deixa Pra Lá", numero: "10", cidade: "Campinas", uf: "SP" });
+    expect(args.dados.condicoes).toMatchObject({ valor: 800000 });
+    expect(r.reply).toContain("Criei o rascunho");
+  });
+
+  it("CPF, e-mail e telefone do 1º pedido vão só ao create; nunca ao checkpoint nem ao extrator", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    const r = await fala(`cria uma captação de venda, proprietário Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada, Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP, valor 850 mil`);
+    const args = verbos("captacao.create")[0]!.args as unknown as ArgsCriacao;
+    expect(args.dados.proprietarios).toMatchObject([
+      { id: "p1", nome: "Maria Silva", cpf: CPF_D, email: EMAIL, telefone1: "+55" + FONE_D, estado_civil: "casada" },
+    ]);
+    const vazou = Object.entries(r).filter(([k, v]) => k !== "inbound" && !semDadosPessoais(v)).map(([k]) => k);
+    expect(vazou).toEqual([]);
+    expect(JSON.stringify(llm.mock.calls)).not.toContain(CPF_D);
+    expect(JSON.stringify(llm.mock.calls)).not.toContain(FONE_D);
+  });
+});
+
+describe("captação fluida: pendências dos proprietários numa mensagem só", () => {
+  const RUA_DO_PEDIDO = { rua: "Rua TESTE Captação", numero: "5" };
+  const CPF2 = "529.982.247-25";
+  const CPF2_D = "52998224725";
+  const MSG = "nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999063228, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda R$ 800.000";
+  type Fluxo = { etapa?: string; proprietarios?: { id: string; nome: string }[]; donosEmAberto?: { id: string; falta: string[] }[] };
+  const fluxoDe = (s: { fluxo?: unknown }) => (s.fluxo ?? {}) as Fluxo;
+
+  async function ateOProprietario(fala: ReturnType<typeof conversa>) {
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    return fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+  }
+
+  it("pedido sem preço: não grava o número da rua como valor e pede as condições na mesma resposta", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    const r = await fala("nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999990000, imóvel Rua TESTE Captação, 5, São Paulo/SP, venda");
+    for (const c of verbos("captacao.create")) {
+      expect((c.args.dados as { condicoes?: { valor?: unknown } } | undefined)?.condicoes?.valor).toBeUndefined();
+    }
+    expect(r.reply).not.toContain("R$ 5,00");
+    expect(r.reply).toContain("valor pretendido");
+  });
+
+  it("sem MAX_ENCRYPTION_KEY: nada do dono fica em claro nem cifrado, e o fluxo volta a pedir os proprietários", async () => {
+    const antiga = process.env.MAX_ENCRYPTION_KEY;
+    try {
+      delete process.env.MAX_ENCRYPTION_KEY;
+      const fala = conversa();
+      extracao = RUA_DO_PEDIDO;
+      const r = await fala(MSG);
+      expect(JSON.stringify(r.fluxo ?? {})).not.toContain("999063228");
+      expect((r.fluxo as { pessoasCifradas?: string } | null)?.pessoasCifradas).toBeUndefined();
+      expect(semDadosPessoais(r.fluxo)).toBe(true);
+      const create = ultimo("captacao.create");
+      expect(create).toBeDefined();
+      expect((create!.args.dados as { proprietarios?: unknown } | undefined)?.proprietarios).toBeUndefined();
+      expect(r.reply).toContain("um por linha");
+    } finally {
+      process.env.MAX_ENCRYPTION_KEY = antiga;
+    }
+  });
+
+  it("cofre dos donos que não abre: não some em silêncio — avisa e pede os proprietários de novo", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala("nova captação TESTE: proprietário Pedro TESTE Captação, tel 11999063228, imóvel Rua TESTE Captação, 5, São Paulo/SP");
+    const app = (fala as unknown as { app: { getState: Function; updateState: Function } }).app;
+    const thread = (fala as unknown as { thread: string }).thread;
+    const estado = await app.getState({ configurable: { thread_id: thread } });
+    const atual = (estado as { values: { fluxo: Record<string, unknown> } }).values.fluxo;
+    expect(atual.etapa).toBe("natureza");
+    const deOutraThread = cap.cifrarCofreCaptacao(JSON.stringify([{ id: "p1", nome: "Pedro TESTE Captação" }]), "thread-que-nao-e-esta");
+    await app.updateState({ configurable: { thread_id: thread } }, { fluxo: { ...atual, pessoasCifradas: deOutraThread } });
+    await fala("venda");
+    const r = await fala("valor 800 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    const create = ultimo("captacao.create");
+    expect(create).toBeDefined();
+    expect((create!.args.dados as { proprietarios?: unknown } | undefined)?.proprietarios).toBeUndefined();
+    expect(JSON.stringify(r.fluxo ?? {})).not.toContain("999063228");
+    expect(r.reply).toContain("Não consegui ler os proprietários do seu pedido");
+    expect(r.reply).toContain("um por linha");
+    expect((r.fluxo as { pessoasCifradas?: string } | null)?.pessoasCifradas).toBeUndefined();
+  });
+
+  it("o pedido de proprietários não é mais 'um por mensagem': aceita todos de uma vez, um por linha", async () => {
+    const fala = conversa();
+    const r = await ateOProprietario(fala);
+    expect(r.reply).toContain("um por linha");
+    expect(r.reply).toContain("FIM");
+    expect(r.reply).not.toContain("um por mensagem");
+  });
+
+  it("dois proprietários na mesma mensagem: uma gravação só, ids distintos, sem interrogar estado civil de cada um", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const antes = verbos("captacao.create").length;
+    const r = await fala(`Maria Silva, CPF ${CPF}, casada\nJoão Souza, CPF ${CPF2}, tel ${FONE}, solteiro`);
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    expect(ultimo("captacao.create")!.args.dados).toMatchObject({
+      proprietarios: [
+        { id: "p1", nome: "Maria Silva", cpf: CPF_D, estado_civil: "casada" },
+        { id: "p2", nome: "João Souza", cpf: CPF2_D, telefone1: `+55${FONE_D}`, estado_civil: "solteiro" },
+      ],
+    });
+    expect(r.reply).toContain("Anotei Maria Silva");
+    expect(r.reply).toContain("Anotei João Souza");
+    expect(r.reply).not.toContain("Qual o estado civil");
+    expect(fluxoDe(r).proprietarios).toEqual([{ id: "p1", nome: "Maria Silva" }, { id: "p2", nome: "João Souza" }]);
+    expect(semDadosPessoais(r.fluxo)).toBe(true);
+    expect(semDadosPessoais(r.reply)).toBe(true);
+  });
+
+  it("linha sem entendimento: grava as boas, avisa pelo número da linha e não repete o texto dela", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const r = await fala(`Maria Silva, CPF ${CPF}, casada\nJoão, tel ${FONE}`);
+    expect(ultimo("captacao.create")!.args.dados).toMatchObject({ proprietarios: [{ id: "p1", nome: "Maria Silva" }] });
+    expect(r.reply).toContain("linha 2");
+    expect(r.reply).not.toContain("João,");
+    expect(fluxoDe(r).proprietarios).toHaveLength(1);
+  });
+
+  it("dono escrito em várias linhas: a linha só de dados vai para a pessoa da linha anterior", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const r = await fala(`Maria Silva, tel ${FONE}\nCPF ${CPF}, casada`);
+    expect(ultimo("captacao.create")!.args.dados).toMatchObject({
+      proprietarios: [{ id: "p1", nome: "Maria Silva", cpf: CPF_D, telefone1: `+55${FONE_D}`, estado_civil: "casada" }],
+    });
+    expect(r.reply).not.toContain("linha 2");
+    expect(fluxoDe(r).proprietarios).toEqual([{ id: "p1", nome: "Maria Silva" }]);
+    expect(semDadosPessoais(r.fluxo)).toBe(true);
+  });
+
+  it("última linha FIM: grava e já segue para as testemunhas", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const r = await fala(`Maria Silva, CPF ${CPF}, casada\nJoão Souza, CPF ${CPF2}, solteiro\nFIM`);
+    expect(r.reply).toContain("testemunha");
+    expect(fluxoDe(r).etapa).toBe("extras");
+    expect(fluxoDe(r).proprietarios).toHaveLength(2);
+  });
+
+  it("dono vindo do 1º pedido: pergunta só o que falta dele, numa mensagem", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    const r = await fala(MSG);
+    expect(r.reply).toContain("Pedro TESTE Captação: CPF, estado civil");
+    expect(r.reply).toContain("PULAR");
+    expect(fluxoDe(r).donosEmAberto).toEqual([{ id: "p1", falta: ["cpf", "estado_civil"] }]);
+  });
+
+  it("a resposta só com dados (sem nome) completa o dono em aberto; não cria outro proprietário", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala(MSG);
+    const r = await fala(`CPF ${CPF2}, solteiro`);
+    const grava = ultimo("captacao.create")!;
+    expect(grava.args.dados).toMatchObject({ proprietarios: [{ id: "p1", papel: "proprietario", tipo_pessoa: "fisica", cpf: CPF2_D, estado_civil: "solteiro" }] });
+    expect((grava.args.dados as { proprietarios: unknown[] }).proprietarios).toHaveLength(1);
+    expect(r.reply).toContain("Anotei Pedro TESTE Captação");
+    expect(fluxoDe(r).proprietarios).toEqual([{ id: "p1", nome: "Pedro TESTE Captação" }]);
+    expect(fluxoDe(r).donosEmAberto ?? []).toEqual([]);
+    expect(r.reply).not.toContain("Falta pouco");
+  });
+
+  it("completar só uma parte mantém o resto em aberto", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala(MSG);
+    const r = await fala("solteiro");
+    expect(fluxoDe(r).donosEmAberto).toEqual([{ id: "p1", falta: ["cpf"] }]);
+    expect(r.reply).toContain("CPF");
+    expect(r.reply).toContain("Pedro TESTE Captação: CPF.");
+  });
+
+  it("repetir o nome de um dono já anotado completa esse dono em vez de duplicar", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala(MSG);
+    const r = await fala(`Pedro TESTE Captação, CPF ${CPF2}, solteiro`);
+    expect(ultimo("captacao.create")!.args.dados).toMatchObject({ proprietarios: [{ id: "p1", cpf: CPF2_D }] });
+    expect(fluxoDe(r).proprietarios).toHaveLength(1);
+  });
+
+  it("PULAR deixa o que falta para a tela e não grava nada", async () => {
+    const fala = conversa();
+    extracao = RUA_DO_PEDIDO;
+    await fala(MSG);
+    const antes = verbos("captacao.create").length;
+    const r = await fala("pular");
+    expect(verbos("captacao.create")).toHaveLength(antes);
+    expect(r.reply).toContain("fica para a tela");
+    expect(fluxoDe(r).donosEmAberto ?? []).toEqual([]);
+    const fim = await fala("FIM");
+    expect(fluxoDe(fim).etapa).toBe("extras");
+  });
+
+  it("dado solto sem nome e sem dono em aberto continua pedindo o nome", async () => {
+    const fala = conversa();
+    await ateOProprietario(fala);
+    const r = await fala(`CPF ${CPF}`);
+    expect(r.reply).toContain("Não achei o nome");
+  });
+});
+
 describe("pedido de envio com uma captação aberta em coleta (prod 17/11/2026)", () => {
   // Em produção a CAP-2026-0008 estava parada em "proprietários" e "quero mandar o contrato da
   // captação CAP-2026-0008 pra assinatura. o que falta?" caiu no "pergunta fora da ficha" (o "?"
