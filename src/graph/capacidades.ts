@@ -193,22 +193,37 @@ const PERGUNTA = /^(como|quando|onde|por que|porque|o que|qual|quais|quanto)\b/;
 const NEGACAO = /\b(nao|nunca|jamais)\b/;
 
 /**
+ * Smoke em prod 18/11: "Exclui a captação CAP-2026-0013" caía no modelo livre,
+ * que encenou o card e respondeu "excluída" sem verbo nenhum. Não existe
+ * exclusão de captação pelo agente: resposta fixa. O verbo age DIRETO sobre a
+ * captação ("exclui o proprietário da captação" é outra coisa).
+ */
+const EXCLUSAO_DE_CAPTACAO =
+  /\b(?:exclu\w*|apag\w*|delet\w*|remov\w*|cancel\w*|descart\w*|tir[ae]r?|arquiv\w*)\s+(?:a\s+|essa\s+|esta\s+|minha\s+|aquela\s+)?(?:captacao\b|cap-\d)/;
+
+export type ForaDoMax = "contrato" | "cobranca" | "captacao_exclusao";
+
+/**
  * Pedido de fazer algo com o CONTRATO (gerar, editar, enviar, aprovar) ou de
  * cobrança. O Max não faz nenhum dos dois (decisão do Olavo, 09/10): responde
  * com o caminho, nunca deixa o modelo improvisar. Pergunta (inclusive com "?"
  * no fim) e negação seguem para o atendimento normal. Quem chama avalia antes
  * continuidade e gestão: "converte… pra gerar o contrato" é conversão.
  */
-export function pedeAcaoForaDoMax(texto: string): "contrato" | "cobranca" | null {
+export function pedeAcaoForaDoMax(texto: string): ForaDoMax | null {
   const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "");
   if (PERGUNTA.test(t) || /\?\s*$/.test(texto) || NEGACAO.test(t)) return null;
+  if (EXCLUSAO_DE_CAPTACAO.test(t)) return "captacao_exclusao";
   if (COBRANCA.test(t)) return "cobranca";
   if (ACAO_NO_CONTRATO.test(t)) return "contrato";
   return null;
 }
 
 /** `linkDoNegocio`: o negócio de que a conversa acabou de tratar, quando há. */
-export function textoForaDoMax(tipo: "contrato" | "cobranca", linkDoNegocio?: string | null): string {
+export function textoForaDoMax(tipo: ForaDoMax, linkDoNegocio?: string | null): string {
+  if (tipo === "captacao_exclusao") {
+    return `Por aqui eu não excluo nem cancelo captação. Se você tiver permissão, faça isso pela tela da captação, no sistema.`;
+  }
   const tela = linkDoNegocio ? `pela tela do negócio: ${linkDoNegocio}` : "pela tela do negócio, no sistema.";
   if (tipo === "cobranca") return `Cobrança não é feita pelo ${nomeDoAgente()}. Se você tiver permissão, faça ${tela}`;
   return `Contrato eu não gero, não edito nem envio para assinatura. Se você tiver permissão, faça ${tela}\n` +
