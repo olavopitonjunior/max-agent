@@ -199,7 +199,7 @@ const NEGACAO = /\b(nao|nunca|jamais)\b/;
  * captação ("exclui o proprietário da captação" é outra coisa).
  */
 const EXCLUSAO_DE_CAPTACAO =
-  /\b(?:exclu\w*|apag\w*|delet\w*|remov\w*|cancel\w*|descart\w*)\s+(?:a\s+|essa\s+|esta\s+|minha\s+|aquela\s+)?(?:captacao\b|cap-\d)/;
+  /\b(?:exclu\w*|apag\w*|delet\w*|remov\w*|cancel\w*|descart\w*|tir[ae]r?|arquiv\w*)\s+(?:a\s+|essa\s+|esta\s+|minha\s+|aquela\s+)?(?:captacao\b|cap-\d)/;
 
 export type ForaDoMax = "contrato" | "cobranca" | "captacao_exclusao";
 

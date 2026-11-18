@@ -59,6 +59,8 @@ describe("pedido de excluir/cancelar captação: resposta fixa", () => {
     "deleta a captação CAP-2026-0013",
     "cancela a captação CAP-2026-0013",
     "remove a captação do Seu João",
+    "tira a captação CAP-2026-0013",
+    "arquiva a captação da Rua TESTE",
   ])("%s → fora do Max", (t) => expect(pedeAcaoForaDoMax(t)).toBe("captacao_exclusao"));
 
   it.each([
@@ -101,6 +103,9 @@ describe("texto livre afirmando exclusão sem escrita no turno", () => {
     "A captação foi excluída.",
     "Proposta removida.",
     "Vou excluir a captação agora.",
+    "Vou excluir a captação CAP-2026-0013. A exclusão é definitiva.",
+    "Pronto, excluída com sucesso!",
+    "Captação CAP-2026-0013 excluída e não aparece mais na lista.",
   ])("reconhece: %s", (t) => expect(afirmaExclusao(t)).toBe(true));
 
   it.each([
@@ -113,18 +118,30 @@ describe("texto livre afirmando exclusão sem escrita no turno", () => {
     "A exclusão de captação é feita pela imobiliária.",
     "Removi o filtro de data da lista.",
     "Cancelei a busca anterior, segue a nova lista.",
+    // review #198: leitura de status/histórico, exclusividade e processo passam
+    "Na proposta PROP-2026-0006, o fiador foi removido em 12/11.",
+    "Histórico: proposta PROP-2026-0006 excluída por Ana em 10/11.",
+    "Para excluir, a proposta precisa estar em rascunho; a exclusão é definitiva.",
+    "A proposta PROP-2026-0003 está cancelada.",
+    "A exclusividade da captação CAP-2026-0013 é definitiva até março.",
   ])("não pega explicação, pergunta ou negação: %s", (t) => expect(afirmaExclusao(t)).toBe(false));
 
   it.each([
     "Beleza. Confirma que você quer excluir a captação *CAP-2026-0013* mesmo (definitivo)?",
     "Tem certeza que quer apagar a captação CAP-2026-0013?",
-    "Vou excluir a captação CAP-2026-0013. A exclusão é definitiva.",
+    "Confirma a exclusão da captação CAP-2026-0013?",
+    "Você deseja mesmo apagar? Confirma que quer deletar a proposta PROP-2026-0006?",
   ])("encenação do card de exclusão: %s", (t) => expect(encenaExclusao(t)).toBe(true));
 
   it.each([
     "Quer que eu exclua a proposta?",
     "Captação se exclui pela tela, no sistema.",
     "Confirma o valor de R$ 800.000?",
+    "Confirma pra mim se a captação tem exclusividade?",
+    "A exclusividade da captação CAP-2026-0013 é definitiva até março.",
+    "Posso confirmar: a proposta PROP-2026-0003 está cancelada.",
+    "Tem certeza que o cliente cancelou a visita?",
+    "Para excluir, a proposta precisa estar em rascunho; a exclusão é definitiva.",
   ])("não é encenação de exclusão: %s", (t) => expect(encenaExclusao(t)).toBe(false));
 
   it("trava: troca pelo texto honesto, mesmo quando o turno leu", () => {
