@@ -105,6 +105,7 @@ import { orgById } from "@/lib/orgs";
 import { conversationKey, phoneTag } from "@/lib/phone";
 import { registrarTurn, type ToolLogEntry } from "@/lib/turnlog";
 import { rotaDoTurn } from "./rota";
+import { houveEscritaNoTurno } from "./escrita-do-turno";
 import { tokenizar, destokenizarResposta, destokenizarArgs, redigir, redigirProfundo, redigirCredito, type MapaPii } from "@/lib/pii";
 import {
   assuntoBloqueado,
@@ -2282,6 +2283,7 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
     houveLeitura: state.toolResults.some((r) => r.items !== null),
     podeCriar: modoDeCriacao(state.identity, state.policy) === "disponivel",
     podeEnviar: podeEscrever(state.identity) && state.policy.includes("proposal.send"),
+    houveEscrita: houveEscritaNoTurno(state.toolLog ?? [], (nome) => buscarNoRegistro(nome)?.tipo === "escrita"),
   });
   if (trava.travou) {
     console.warn(`[compose] afirmação de criação/envio sem escrita em ${state.identity.orgId}`);
