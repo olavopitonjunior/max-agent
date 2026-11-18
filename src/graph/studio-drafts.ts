@@ -40,6 +40,26 @@ function studioLink(id: unknown): string | null {
   url.searchParams.set("draft", id);
   return url.toString();
 }
+/** undefined means a general request, null means an unusable link. */
+function requestedDraft(text: string): string | null | undefined {
+  if (!/^(?:(?:max|por favor)[\s,!]+)*(?:(?:quero|pode)\s+)?(?:retom(?:e|ar)|abra|abrir)\b/i.test(text))
+    return undefined;
+  if (!/\b(?:rascunho|carrossel|card|marketing|est[uú]dio)\b/i.test(text))
+    return undefined;
+
+  const links = text.match(/https?:\/\/[^\s<>]+/gi);
+  if (!links) return text.match(/\bc[a-z0-9]{24}\b/i)?.[0];
+  if (links.length !== 1) return null;
+  try {
+    const url = new URL(links[0].replace(/[).,!?]+$/, ""));
+    const ids = url.searchParams.getAll("draft");
+    if (url.origin !== new URL(imobproBase()).origin || url.pathname !== "/marketing" ||
+        url.username || url.password || ids.length !== 1 || !/^[\w-]{1,160}$/.test(ids[0])) return null;
+    return ids[0];
+  } catch {
+    return null;
+  }
+}
 /** Only explicit requests start a draft. Questions about marketing have no effects. */
 function requestsCreation(text: string): boolean {
   const command = text
@@ -71,6 +91,7 @@ export async function studioDraftStep(
   ) => ({ reply, event, pending });
   const selection = previous?.phase === "studio_property";
   if (previous && !selection && previous.phase !== "tracking") return null;
+  const target = requestedDraft(text);
   const resume =
     /\b(rascunho[s]?|retom(?:ar|e))\b/i.test(text) &&
     /\b(marketing|artes?|cards?|posts?|carrossel|est[uú]dio)\b/i.test(text);
@@ -84,9 +105,16 @@ export async function studioDraftStep(
         text,
       )) &&
     !/\bv[ií]deo\b/i.test(text);
-  if (!selection && !resume && !agenda && !artwork) return null;
+  if (!selection && target === undefined && !resume && !agenda && !artwork) return null;
   if (!turn.policy.includes("marketing.read"))
     return finish("Marketing não está liberado para você.", "studio_denied");
+  if (target !== undefined) {
+    if (!target) return finish("Envie o link de um rascunho do seu estúdio.", "studio_invalid_link");
+    const result = await action("marketing.draft_get", { draftId: target });
+    if (!result || result.status !== 200 || result.body.id !== target)
+      return finish("Não consegui abrir esse rascunho na sua conta.", "studio_resume_unavailable");
+    return finish(`Abra seu rascunho no estúdio.\n${studioLink(target)}`, "studio_resume");
+  }
   if (agenda || resume) {
     const result = await action(
       agenda ? "marketing.editorial_list" : "marketing.draft_list",

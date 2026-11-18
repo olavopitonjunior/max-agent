@@ -122,6 +122,43 @@ describe("retomada de marketing pelo WhatsApp", () => {
     expect(ambiguous?.pending).toEqual(start?.pending);
     expect(call.mock.calls).toHaveLength(1);
   });
+  const oldDraft = "cmwmov30p000xpxtq9p4soxeh";
+  const oldDraftLink = "https://staging.imobpro.ia.br/marketing?draft=" + oldDraft;
+  it.each([
+    "Retome o meu carrossel " + oldDraftLink,
+    "Abra o rascunho de marketing pelo ID " + oldDraft,
+    "Retomar o rascunho " + oldDraft,
+  ])("consulta diretamente uma peça antiga com leitura autorizada: %s", async (text) => {
+    const call = vi.fn(async () => ({ status: 200, body: { id: oldDraft, version: 2, studioPath: "https://outro.invalid" } }));
+    const result = await marketingStep({ ...base, text, canWrite: false, policy: ["marketing.read"] }, call);
+    expect(call.mock.calls).toEqual([["marketing.draft_get", { draftId: oldDraft }]]);
+    expect(result?.reply).toContain(oldDraftLink);
+    expect(result?.reply).not.toContain("outro.invalid");
+    expect(result?.event).toBe("studio_resume");
+  });
+
+  it.each([
+    "https://outro.invalid/marketing?draft=" + oldDraft,
+    "https://staging.imobpro.ia.br/outro?draft=" + oldDraft,
+    oldDraftLink + "&draft=outro",
+  ])("não consulta um link de estúdio inválido: %s", async (url) => {
+    const call = vi.fn();
+    const result = await marketingStep({ ...base, text: "Abra o rascunho de marketing " + url }, call);
+    expect(call).not.toHaveBeenCalled();
+    expect(result?.reply).not.toContain(url);
+  });
+
+  it("respeita a política de leitura e a autorização da própria peça", async () => {
+    const text = "Retome o rascunho " + oldDraftLink;
+    const call = vi.fn(async () => ({ status: 404, body: {} }));
+    await marketingStep({ ...base, text, policy: [] }, call);
+    expect(call).not.toHaveBeenCalled();
+    const denied = await marketingStep({ ...base, text }, call);
+    expect(call.mock.calls).toEqual([["marketing.draft_get", { draftId: oldDraft }]]);
+    expect(denied?.reply).not.toContain(oldDraft);
+    expect(denied?.event).toBe("studio_resume_unavailable");
+  });
+
   it("nega retomada sem política de leitura", async () => {
     const call = vi.fn();
     const result = await marketingStep(
