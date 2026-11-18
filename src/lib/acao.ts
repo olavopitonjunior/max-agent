@@ -8,7 +8,7 @@ import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import {
   fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS, IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS, IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS,
-  captacaoSendTimeoutMs, IMOBPRO_DOCUMENT_READ_TIMEOUT_MS,
+  captacaoSendTimeoutMs, IMOBPRO_DOCUMENT_READ_TIMEOUT_MS, IMOBPRO_TEXT_EDIT_TIMEOUT_MS,
 } from "./http";
 import type { ScopeSubject } from "@/graph/scope-contract";
 
@@ -90,8 +90,20 @@ export const VERBOS_DE_ACAO = [
   // mídia que o corretor mandou, campos SUGERIDOS para conferir. Leitura (nunca grava),
   // mas exige `x-idempotency-key` (a `messageId` da mídia): a resposta é cacheada e o OCR custa.
   "document.read",
+  // Correção de texto por IA (PR-E, par do contractmaker §18.13.14): quatro ESCRITAS com capability
+  // `document.text.edit` (catalog), `x-idempotency-key` obrigatória (o fluxo guarda a chave pendente).
+  // `suggest` NUNCA altera o documento; `apply` só roda com SIM explícito do corretor.
+  "proposal.text.suggest",
+  "proposal.text.apply",
+  "captacao.text.suggest",
+  "captacao.text.apply",
 ] as const;
 export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
+
+/** Os quatro verbos da correção de texto por IA (capability `document.text.edit`). */
+export function ehVerboDeTexto(verb: string): boolean {
+  return verb === "proposal.text.suggest" || verb === "proposal.text.apply" || verb === "captacao.text.suggest" || verb === "captacao.text.apply";
+}
 
 /** Envio de proposta, de análise de crédito e de captação esperam mais; o resto, o teto comum. */
 export function timeoutDoVerbo(verb: VerboDeAcao): number {
@@ -102,6 +114,7 @@ export function timeoutDoVerbo(verb: VerboDeAcao): number {
   if (verb === "credit.request") return IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS;
   // OCR de PDF: o teto comum de 8 s cortaria justo a leitura que o servidor termina e cobra.
   if (verb === "document.read") return IMOBPRO_DOCUMENT_READ_TIMEOUT_MS;
+  if (ehVerboDeTexto(verb)) return IMOBPRO_TEXT_EDIT_TIMEOUT_MS;
   return IMOBPRO_TIMEOUT_MS;
 }
 
@@ -160,7 +173,12 @@ async function executarAcaoDireta(params: {
     // vez com chave nova; tratá-lo como "sem resposta" perderia a distinção do retry.
     const recusaCanonica = (params.verb === "proposal.remind" && erroDoCorpo === "lembrete_recusado") ||
       (params.verb === "proposal.cancel" && erroDoCorpo === "cancelamento_falhou") ||
-      (params.verb === "document.read" && erroDoCorpo === "leitura_indisponivel");
+      (params.verb === "document.read" && erroDoCorpo === "leitura_indisponivel") ||
+      // Correção de texto (§18.13.14): 502 `documento_indisponivel` (o Google não respondeu), 502
+      // `redacao_indisponivel` (o modelo não respondeu) e 503 `nao_configurado` são frases FIXAS do
+      // fluxo, sem retry automático; tratá-los como "sem resposta" apagaria a distinção.
+      (ehVerboDeTexto(params.verb) &&
+        (erroDoCorpo === "documento_indisponivel" || erroDoCorpo === "redacao_indisponivel" || erroDoCorpo === "nao_configurado"));
     if (res.status >= 500 && !naoConfigurado && !falhaDeEnvio && !recusaCanonica) {
       console.warn(`[acao] ${params.verb} ${res.status} na org ${params.orgId}`);
       return null;

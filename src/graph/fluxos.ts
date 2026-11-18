@@ -36,6 +36,7 @@
  */
 
 import { nomeDoAgente } from "@/lib/deploy-profile";
+import { featureEnabled } from "@/lib/runtime/rollout";
 import type { Capability } from "./policy";
 import { corrigirProposta, lerConfirmacao, normalizar, TEXTO_PARA_CONFIRMAR } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
@@ -48,6 +49,7 @@ import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
 import type { FluxoFormularioV2 } from "./formularios/estado";
+import type { FluxoCorrecaoTexto } from "./formularios/correcao-texto";
 import type { DocumentoLido, JanelaDeExtracao } from "./formularios/janela";
 import type { DepsDaPausa } from "./formularios/pausa";
 import {
@@ -140,6 +142,7 @@ export type Fluxo =
   | FluxoAtividade
   | FluxoPreferencias
   | FluxoFormularioV2
+  | FluxoCorrecaoTexto
   | {
       kind: "escolha";
       natureza?: "venda" | "locacao";
@@ -1089,6 +1092,10 @@ export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
     }
     return f.etapa === "ficha" && !f.chave ? { ...semAgendada, etapa: "compor" } : semAgendada;
   }
+  // Correção de texto (PR-E): toda etapa pode levar a um "sim" que escreve no documento (criar o Doc,
+  // aplicar). Uma interrupção desfaz o fluxo (o "sim" seguinte exige sugestão nova); com `chave`
+  // (apply sem resposta) o fluxo fica, para o SIM repetir a mesma chave.
+  if (f.kind === "correcao_texto") return f.chave ? f : null;
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
   if (f.kind === "assinatura") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
   // Atividade (M1): a confirmação volta ao resumo; com `chave` (escrita incerta) a etapa fica.
@@ -1719,6 +1726,17 @@ export async function conduzirFluxo(
   if (fluxo.kind === "proposta_v2") {
     const { conduzirV2 } = await import("./formularios/condutor");
     return conduzirV2(fluxo, ctx, deps);
+  }
+  // Correção de texto (PR-E): import tardio, o módulo importa daqui as frases fixas.
+  if (fluxo.kind === "correcao_texto") {
+    // Fail-closed: a feature saiu do ar com o fluxo aberto, nada mais é conduzido (nem escrita incerta).
+    // R34: nunca o modelo livre num "sim" de escrita nem em escrita incerta (frase fixa em `respostaRecursoDesligado`).
+    if (!featureEnabled("formularios_v2", ctx.orgId)) {
+      const { respostaRecursoDesligado } = await import("./formularios/correcao-texto");
+      return respostaRecursoDesligado(fluxo, ctx);
+    }
+    const { conduzirCorrecaoTexto } = await import("./formularios/correcao-texto");
+    return conduzirCorrecaoTexto(fluxo, ctx, deps);
   }
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };

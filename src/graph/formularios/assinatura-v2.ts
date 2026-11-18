@@ -113,7 +113,7 @@ export function textoDoErroDeTestemunhas(erro: ErroDeTestemunhas, extra: { maxim
     case "nao_encontrada":
       return "Não encontrei essa proposta para você no sistema.";
     case "signatarios_duplicados":
-      return "Não gravei: há assinantes repetidos (mesmo CPF ou contato) na proposta. Corrija na tela de propostas.";
+      return "Não gravei: há assinantes repetidos na proposta. Corrija na tela de propostas.";
     case "dados_invalidos":
       return "Não gravei: o sistema não aceitou essa lista de testemunhas. Me diga de novo quais ficam.";
     case "sem_chave":

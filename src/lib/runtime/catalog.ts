@@ -1,7 +1,7 @@
 import { featureEnabled, rolloutStatus, durableRuntimeEnabled } from './rollout';
 import { CAPABILITIES, type Capability } from "@/graph/policy";
 import { MARKETING_WORKERS } from "./marketing-events";
-import { VERBOS_DE_ACAO,timeoutDoVerbo } from '../acao';
+import { VERBOS_DE_ACAO,timeoutDoVerbo,ehVerboDeTexto } from '../acao';
 import { VERBOS_DE_LEITURA } from '@/graph/scope-contract';
 import { DEFAULT_MODEL } from '../llm';
 import { CATALOG_VERSION, WORKFLOW_VERSION } from './contracts';
@@ -27,7 +27,11 @@ const POLICY_MAPPING: Record<string, Capability | null> = {
  'google.availability': 'google.calendar.read', 'google.activities': 'google.calendar.read',
  'google.propose': 'google.calendar.write', 'google.confirm': 'google.calendar.write',
  'proposal.status': null, 'proposal.options': null, 'proposal.preflight': null,
- 'proposal.update': 'proposal.create', 'proposal.witnesses.set': 'proposal.create', 'proposal.cancel': 'proposal.send', 'proposal.remind': 'proposal.send',
+ 'proposal.update': 'proposal.create', 'proposal.witnesses.set': 'proposal.create',
+ // Correção de texto (PR-E): checado ANTES do prefixo `captacao.` (senão cairia em `captacao.create`).
+ 'proposal.text.suggest': 'document.text.edit', 'proposal.text.apply': 'document.text.edit',
+ 'captacao.text.suggest': 'document.text.edit', 'captacao.text.apply': 'document.text.edit',
+ 'proposal.cancel': 'proposal.send', 'proposal.remind': 'proposal.send',
  'proposal.send_owner': 'proposal.send',
  'proposal.complete': 'proposal.send', 'proposal.recreate': 'proposal.create',
  'proposal.convert': 'proposal.create', 'proposal.duplicate': 'proposal.create',
@@ -55,6 +59,10 @@ const DOMAIN_SCOPE: Record<string, string> = {
  'form.options': 'DEAL_CREATE or LEASE_CREATE; department pipeline scope + enabled module.',
  'document.read': 'PROPOSAL_CREATE or PROPOSAL_SEND (proposta) / CAPTACAO_CREATE (captacao); user subject only; reads one document, never writes business data.',
  'form.create': 'DEAL_CREATE or LEASE_CREATE; department pipeline scope + enabled module.',
+ 'proposal.text.suggest': 'PROPOSAL_CREATE or PROPOSAL_SEND; proposalScopeWhere + own Google Doc; user subject only; suggests one paragraph rewrite, never edits the document.',
+ 'proposal.text.apply': 'PROPOSAL_CREATE or PROPOSAL_SEND; proposalScopeWhere; user subject only; applies a stored suggestion only with explicit human YES; never cancels an envelope.',
+ 'captacao.text.suggest': 'CAPTACAO_CREATE; captacao scope + enabled module; user subject only; suggests one paragraph rewrite, never edits the document.',
+ 'captacao.text.apply': 'CAPTACAO_CREATE; captacao scope + enabled module; user subject only; applies a stored suggestion only with explicit human YES; never cancels an envelope.',
 };
 function capability(id:string):Capability|null {
  if(Object.hasOwn(POLICY_MAPPING,id))return POLICY_MAPPING[id];
@@ -75,7 +83,7 @@ function tool(id:string,executor:CatalogTool['executor'],orgId?:string):CatalogT
  if(id==='marketing.prepare')Object.assign(schema,{required:['propertyId','templateId','modality'],properties:{propertyId:{type:'string'},templateId:{type:'string'},modality:{enum:['copy','artwork','video']},headline:{type:'string'},callToAction:{type:'string'}}});
  if(id==='marketing.generate')Object.assign(schema,{required:['briefId','confirmationDigest','confirmed','idempotencyKey'],properties:{briefId:{type:'string'},confirmationDigest:{type:'string',pattern:'^[a-f0-9]{64}$'},confirmed:{const:true},idempotencyKey:{type:'string',minLength:8,maxLength:160}}});
  if(isQuery)Object.assign(schema,{properties:{limite:{type:'integer',minimum:1,maximum:50},cursor:{type:'string'},estado:{type:'string'},negocio_id:{type:'string'},proposta_id:{type:'string'},imovel_id:{type:'string'}}});
- return {id,...(id==='marketing.status'?{recoveryOnly:true}:{}),version:CATALOG_VERSION,status:enabled?'current':'disabled',installed:true,enabled,executor,effect,...(flag?{flag}:{}),schema,permission:capability(id),policyCapability:capability(id),domainScope:executor===null?'Planned; no executable permission.':DOMAIN_SCOPE[id]??'Live ImobPro subject RBAC, tenant scope and domain guards; Max policy alone does not grant domain access.',projection:isQuery?'ImobPro server projection per subject; broker restricted':'ImobPro live subject RBAC and domain projection',dataClass:id.startsWith('credit.')||id==='lead.upsert'?'sensitive-credit':id==='document.read'?'sensitive-document':effect==='read'?'tenant-operational':'tenant-write',timeoutMs:executor==='scope-action'?timeoutDoVerbo(id as Parameters<typeof timeoutDoVerbo>[0]):8000,retry:effect==='read'?'caller-controlled; fresh read':'never automatically retry uncertain effect; stable idempotency key',reconciliation:effect==='read'?'fresh-query':id.startsWith('marketing.')?'marketing.status':'domain status plus execution_intent unknown review',confirmation:effect!=='read',evaluationCases:effect==='read'?['tenant-isolation','role-revocation','projection','pagination']:['approval-content-bound','idempotency','lost-ack-unknown','takeover-fence'],provenance:executor==='scope-action'?'src/lib/acao.ts → ImobPro scope-action':'src/lib/scope.ts → ImobPro scope-query'};
+ return {id,...(id==='marketing.status'?{recoveryOnly:true}:{}),version:CATALOG_VERSION,status:enabled?'current':'disabled',installed:true,enabled,executor,effect,...(flag?{flag}:{}),schema,permission:capability(id),policyCapability:capability(id),domainScope:executor===null?'Planned; no executable permission.':DOMAIN_SCOPE[id]??'Live ImobPro subject RBAC, tenant scope and domain guards; Max policy alone does not grant domain access.',projection:isQuery?'ImobPro server projection per subject; broker restricted':'ImobPro live subject RBAC and domain projection',dataClass:id.startsWith('credit.')||id==='lead.upsert'?'sensitive-credit':id==='document.read'||ehVerboDeTexto(id)?'sensitive-document':effect==='read'?'tenant-operational':'tenant-write',timeoutMs:executor==='scope-action'?timeoutDoVerbo(id as Parameters<typeof timeoutDoVerbo>[0]):8000,retry:effect==='read'?'caller-controlled; fresh read':'never automatically retry uncertain effect; stable idempotency key',reconciliation:effect==='read'?'fresh-query':id.startsWith('marketing.')?'marketing.status':'domain status plus execution_intent unknown review',confirmation:effect!=='read',evaluationCases:effect==='read'?['tenant-isolation','role-revocation','projection','pagination']:['approval-content-bound','idempotency','lost-ack-unknown','takeover-fence'],provenance:executor==='scope-action'?'src/lib/acao.ts → ImobPro scope-action':'src/lib/scope.ts → ImobPro scope-query'};
 }
 export function catalog(orgId?:string) {
  // Agente, prompt e canal vêm do perfil do deploy: o catálogo do Newton não se anuncia como Max.

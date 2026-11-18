@@ -127,6 +127,14 @@ function frase(body: Record<string, unknown>): string | undefined {
   return m ? m.replace(/\s+/g, " ").trim().slice(0, 300) : undefined;
 }
 
+/**
+ * 409 `signatarios_duplicados` (índice único). O contrato (CM `docs/max.md`) só declara o código, sem
+ * campo de causa: o texto é sempre neutro, nunca afirma CPF, e-mail ou telefone, e não manda trocar
+ * nada às cegas.
+ */
+const TEXTO_DUPLICADO =
+  "Não gravei: há assinantes repetidos na proposta. Confira os dados de cada parte e me diga o que corrigir.";
+
 function textoOuUndefined(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
@@ -284,7 +292,7 @@ export function textoDoParcial(r: ResultadoParcial, ctx: { codigo?: string }): s
     case "envio_em_andamento":
       return "Tem um envio para assinatura em andamento nessa proposta. Espere terminar para ajustar.";
     case "signatarios_duplicados":
-      return "Esse contato já está em outro assinante da proposta. Me mande um telefone ou e-mail diferente.";
+      return TEXTO_DUPLICADO;
     case "indisponivel":
       return "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
   }
