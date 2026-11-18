@@ -374,9 +374,12 @@ describe("detalhar_negocio — nenhum caminho chama deal.detail sem a capability
     const quem = fontes
       .filter(({ f, s }) => f !== "lib/scope.ts" && /\bconsultarEscopo\(/.test(s))
       .map(({ f, s }) => ({ f, s }));
-    expect(quem.map(({ f }) => f).sort()).toEqual(["graph/despachante.ts", "graph/graph.ts"]);
+    // negocio-por-nome.ts (#169): lista a carteira (`deal.list`) para achar o negócio pelo nome.
+    expect(quem.map(({ f }) => f).sort()).toEqual(["graph/despachante.ts", "graph/graph.ts", "graph/negocio-por-nome.ts"]);
     const grafo = quem.find(({ f }) => f === "graph/graph.ts")!;
     expect(grafo.s).not.toContain("deal.detail");
+    const porNome = quem.find(({ f }) => f === "graph/negocio-por-nome.ts")!;
+    expect(porNome.s).not.toMatch(/verb:\s*"deal\.detail"/);
   });
 
   it("o literal do verbo na tool é a única ligação tool -> verbo, e exige a capability de mesmo nome", () => {
