@@ -263,9 +263,13 @@ export async function lerDocumento(args: {
       case 403:
         // Capability não concedida, flag da esteira desligada, sem RBAC: para o corretor
         // tudo é "não leio documento por aqui"; o motivo exato fica com o servidor.
-        return { ok: false, motivo: "politica" };
+        // Exceção (M3, §18.13.1): `fluxo_desligado` é o gate do v2 e rebaixa o fluxo para v1.
+        return { ok: false, motivo: codigo === "fluxo_desligado" ? "fluxo_desligado" : "politica" };
       case 502:
         return codigo === "leitura_indisponivel" ? { ok: false, motivo: "indisponivel" } : falha;
+      case 503:
+        // Kill switch de gasto (`MAX_PAID_KILL`): não repete e não promete voltar; segue como "não leio por aqui".
+        return codigo === "paid_disabled" ? { ok: false, motivo: "politica" } : falha;
       case 504:
         // Desfecho canônico do prazo estourado (`acao.ts`): o servidor pode ter terminado a leitura.
         return codigo === "processando" ? { ok: false, motivo: "processando" } : falha;

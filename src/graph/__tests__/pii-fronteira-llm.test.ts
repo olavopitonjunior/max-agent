@@ -242,14 +242,25 @@ describe("janela de extração (v2) — tokeniza tudo, cerca como dado, não esc
   const ORG_V2 = "org-v2";
   const CPF_SINTETICO = "529.982.247-25";
   const tool = { name: "preencher_proposta", description: "d", parameters: { type: "object", properties: {} } };
+  const FONE_V2 = "+5511999990000";
+  /** O fluxo v2 com as falas anteriores do corretor no cofre cifrado (o histórico do checkpoint só tem o marcador). */
+  async function fluxoComFalas(falas: string[]) {
+    process.env.MAX_ENCRYPTION_KEY ||= Buffer.alloc(32, 7).toString("base64");
+    const { guardarFala } = await import("../formularios/midia");
+    const { novoFluxoV2 } = await import("../formularios/estado");
+    const { threadIdFor } = await import("../graph");
+    let f = novoFluxoV2({ esteira: "venda", agora: 1 });
+    for (const t of falas) f = guardarFala(f, t, threadIdFor(ORG_V2, FONE_V2));
+    return f;
+  }
   const estado = (extra: Record<string, unknown> = {}) =>
     ({
       identity: { orgId: ORG_V2, orgName: "Org", kind: "user", userId: "u1", userName: "M" },
-      inbound: { fromPhone: "+5511999990000", text: `o cpf dele é ${CPF_SINTETICO}`, messageId: "m-janela" },
+      inbound: { fromPhone: FONE_V2, text: `o cpf dele é ${CPF_SINTETICO}`, messageId: "m-janela" },
       messages: [
-        { role: "user", content: "quero uma proposta de venda, comprador Maria Teste" },
+        { role: "user", content: "(resposta da ficha de proposta)" },
         { role: "assistant", content: "Certo, qual o valor?" },
-        { role: "user", content: "500 mil, tel 11 98888-7777" },
+        { role: "user", content: "(resposta da ficha de proposta)" },
       ],
       piiMap: {},
       model: "x",
@@ -284,7 +295,8 @@ describe("janela de extração (v2) — tokeniza tudo, cerca como dado, não esc
       expect(params.system).toContain("DADO");
       return { text: "", toolCalls: [{ name: "preencher_proposta", args: { comprador: { nome: "Maria Teste", cpf: "⟨CPF_1⟩" } } }], usage: uso };
     });
-    const d = await deps(estado());
+    const fluxo = await fluxoComFalas(["quero uma proposta de venda, comprador Maria Teste", "500 mil, tel 11 98888-7777"]);
+    const d = await deps(estado({ fluxo }));
     const janela = d.janelaDoTurno!(2); // as 2 mensagens do corretor que são deste fluxo
     expect(janela.anteriores).toHaveLength(2); // só as do corretor
     const args = await d.extrairComJanela!(janela, tool as never);
@@ -294,7 +306,8 @@ describe("janela de extração (v2) — tokeniza tudo, cerca como dado, não esc
   it("I3: mensagem ANTERIOR ao fluxo não entra na janela (a proposta nova não herda o comprador da antiga)", async () => {
     vi.stubEnv("MAX_FORMULARIOS_V2", "true");
     vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [ORG_V2]: ["formularios_v2"] }));
-    const d = await deps(estado());
+    const fluxo = await fluxoComFalas(["quero uma proposta de venda, comprador Maria Teste", "500 mil, tel 11 98888-7777"]);
+    const d = await deps(estado({ fluxo }));
     // Só a última mensagem do corretor é deste fluxo; "Maria Teste" é da proposta anterior.
     const so1 = d.janelaDoTurno!(1);
     expect(so1.anteriores).toEqual(["500 mil, tel 11 98888-7777"]);

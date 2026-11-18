@@ -257,6 +257,26 @@ describe("parseWebhook — mensagens", () => {
       expect(m.buttonPayload ?? null).toBeNull();
     });
 
+    // I1: o token do Flow do Max amarra a resposta ao envio. Só `fv2:` vira payload (`flow:<token>`);
+    // o de qualquer outro Flow segue descartado, como antes.
+    it("token fv2 do Max vira button_payload flow:<token>, fora do texto e dos campos", () => {
+      const ev = parseWebhook(
+        nfm("wamid.F7", { response_json: JSON.stringify({ flow_token: "fv2:partes:abc_DEF-123", compradores_0__nome: "Maria Souza" }) }),
+        PNID
+      );
+      const m = ev.messages[0];
+      expect(m.buttonPayload).toBe("flow:fv2:partes:abc_DEF-123");
+      expect(m.text).toBe("compradores_0__nome: Maria Souza");
+      expect(m.flowResponse).toEqual({ compradores_0__nome: "Maria Souza" });
+    });
+
+    it("token que não é fv2 (outro Flow, vazio, não-string) não vira payload", () => {
+      for (const flow_token of ["TOKEN-SECRETO", "", 42, null, "xfv2:partes:n"]) {
+        const ev = parseWebhook(nfm("wamid.F8", { response_json: JSON.stringify({ flow_token, nome: "Ana" }) }), PNID);
+        expect(ev.messages[0].buttonPayload ?? null).toBeNull();
+      }
+    });
+
     it("texto do Flow tem o mesmo teto de 4096 do texto digitado", () => {
       const ev = parseWebhook(
         nfm("wamid.F9", { response_json: JSON.stringify({ obs: "x".repeat(5000) }) }),
@@ -837,6 +857,37 @@ describe("chamadas à Graph API", () => {
       },
       context: { message_id: "wamid.Q" },
     });
+  });
+
+  it("sendInteractive Flow: type flow, navigate, tela e data pré-preenchidos, corpo e cta cortados", async () => {
+    fetchMock.mockResolvedValue(json(200, { messages: [{ id: "wamid.FLW" }] }));
+    const res = await sendInteractive({
+      to: "5511987654321",
+      quoteMessageId: "wamid.Q",
+      interativo: {
+        tipo: "flow",
+        flowId: "FLOW123",
+        screen: "PARTE_1",
+        data: { compradores_0__nome: "Maria Souza" },
+        corpo: "x".repeat(1100),
+        cta: "Revisar a proposta inteira agora mesmo",
+        flowToken: "fv2:partes:NONCE",
+      },
+    });
+    expect(res).toEqual({ messageId: "wamid.FLW" });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.type).toBe("interactive");
+    expect(body.context).toEqual({ message_id: "wamid.Q" });
+    expect(body.interactive.type).toBe("flow");
+    expect(body.interactive.body.text).toHaveLength(1024);
+    expect(body.interactive.action.name).toBe("flow");
+    const par = body.interactive.action.parameters;
+    expect(par.flow_message_version).toBe("3");
+    expect(par.flow_id).toBe("FLOW123");
+    expect(par.flow_cta.length).toBeLessThanOrEqual(30);
+    expect(par.flow_token).toBe("fv2:partes:NONCE");
+    expect(par.flow_action).toBe("navigate");
+    expect(par.flow_action_payload).toEqual({ screen: "PARTE_1", data: { compradores_0__nome: "Maria Souza" } });
   });
 
   it("sendInteractive lista: uma seção, descrição só quando existe, sem citação se não pedida", async () => {

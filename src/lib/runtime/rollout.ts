@@ -47,6 +47,16 @@ export function featureEnabled(feature: RolloutFeature, orgId?: string): boolean
   return rolloutStatus(orgId).features[feature].enabled;
 }
 
+/**
+ * Is the feature on for AT LEAST ONE organization (global switch on AND some org selected)?
+ * Same resolver as `featureEnabled`, so it fails closed: missing/invalid config = false.
+ * Used by platform-wide jobs (no org in hand) to skip work for a feature nobody uses.
+ */
+export function featureEnabledForAnyOrg(feature: RolloutFeature): boolean {
+  if (process.env[ROLLOUT_FLAGS[feature]] !== 'true') return false;
+  return Object.keys(configuration().organizations).some(orgId => featureEnabled(feature, orgId));
+}
+
 /** Handoff and marketing also need durable intents even if the runtime-only switch is off. */
 export function durableRuntimeEnabled(orgId: string): boolean {
   const status = rolloutStatus(orgId).features;

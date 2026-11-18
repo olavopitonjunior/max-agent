@@ -188,7 +188,7 @@ describe("o fluxo não sequestra a conversa", () => {
     expect(lerRespostaAoCampo(comAguarda("corretor", "corretor.nome"), "x".repeat(300)).tipo).toBe("liberar");
   });
 
-  it("conduzirFluxo continua liberando o turno de um fluxo v2 (o condutor é do PR-C)", async () => {
+  it("conduzirFluxo sem a janela de extração (feature desligada) libera o turno do fluxo v2", async () => {
     const f = comAguarda("proponente", "proponente.documento");
     const ctx: ContextoDoTurno = { texto: "qual a previsão do tempo?", messageId: "m1", policy: [], agora };
     const deps = { acao: vi.fn() } as unknown as DepsDoFluxo;
@@ -197,11 +197,11 @@ describe("o fluxo não sequestra a conversa", () => {
     expect(deps.acao).not.toHaveBeenCalled();
   });
 
-  it("M4: o stub só libera e limpa: não cria fluxo v1 (coleta) que ninguém pediu", async () => {
+  it("M4: fail-closed sem a janela só libera e limpa: não cria fluxo v1 (coleta) que ninguém pediu", async () => {
     const f = comAguarda("proponente", "proponente.documento");
     const ctx: ContextoDoTurno = { texto: "oi", messageId: "m1", policy: [], agora };
     const passo = await conduzirFluxo(f, ctx, { acao: vi.fn() } as unknown as DepsDoFluxo);
-    expect(passo).toMatchObject({ liberar: true, fluxo: null, evento: "fluxo_v2_sem_condutor" });
+    expect(passo).toMatchObject({ liberar: true, fluxo: null, evento: "fluxo_v2_desligado" });
   });
 });
 

@@ -425,7 +425,8 @@ describe("campos lidos entram em lidosPendentes, não no rascunho", () => {
 
     const { reply, values } = await turno(foto());
 
-    expect(reply).toBe("Não consegui abrir esse arquivo agora; tente de novo ou digite.");
+    // N4: sem cofre não é falha transitória; a frase não manda tentar de novo.
+    expect(reply).toBe("A leitura de documentos está indisponível agora. Digite os dados que eu confiro com você.");
     const fluxo = values.fluxo as { lidosPendentes: unknown[]; cofreLidos?: string };
     expect(fluxo.lidosPendentes).toEqual([]);
     expect(fluxo.cofreLidos).toBeUndefined();
@@ -530,10 +531,10 @@ describe("só o 'sim' do resumo grava os lidos", () => {
       imovel: { matricula: "12345" },
     });
     expect(r.ok).toBe(true);
-    // O que nao tem destino no PATCH (testemunha) segue pendente, e o resto saiu.
-    expect(r.fluxo.lidosPendentes.map((l) => l.path)).toEqual(["testemunhas[0].nome"]);
-    const aindaNoCofre = lidosDoCofre(r.fluxo, THREAD);
-    expect(aindaNoCofre.map((c) => c.path)).toEqual(["testemunhas[0].nome"]);
+    // M2: o que nao tem destino no PATCH (testemunha) e descartado e dito, nao fica pendente para sempre.
+    expect(r.ok && r.descartados).toEqual(["testemunhas[0].nome"]);
+    expect(r.fluxo.lidosPendentes).toEqual([]);
+    expect(lidosDoCofre(r.fluxo, THREAD)).toEqual([]);
   });
 
   it("a escrita que falha NAO limpa os lidos (o corretor pode tentar de novo)", async () => {
@@ -560,6 +561,10 @@ describe("só o 'sim' do resumo grava os lidos", () => {
 describe("valor lido nunca vai a memory_facts", () => {
   it("foto + legenda: o turno segue com a legenda; CPF e nome lidos nao chegam a memoria, ao modelo nem ao checkpoint", async () => {
     politica(true);
+    // O condutor v2 (PR-C1) pergunta ao servidor se a v2 vale: aqui diz que não, e o turno segue pela legenda.
+    acao.mockImplementation(async (p) =>
+      p.verb === "proposal.options" ? { status: 200, body: { metodos: [], fluxoV2: false } } : LEITURA_200
+    );
 
     const { reply, values } = await turno(foto({ text: "segue o RG do comprador" }));
 
@@ -582,6 +587,49 @@ describe("valor lido nunca vai a memory_facts", () => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
+// 4b. PR-C1: N5 (legenda + mídia não lida) e M3 (gate fluxo_desligado do document.read)
+// ──────────────────────────────────────────────────────────────────────────
+
+describe("mídia não lida com legenda (N5) e fluxo desligado (M3)", () => {
+  const opcoesV2 = { status: 200, body: { metodos: [], fluxoV2: true } };
+
+  it("N5: legenda + foto ilegível: o corretor é avisado de que o anexo não foi lido, o turno segue", async () => {
+    politica(true);
+    acao.mockImplementation(async (p) =>
+      p.verb === "proposal.options"
+        ? opcoesV2
+        : { status: 422, body: { error: "documento_ilegivel" } }
+    );
+
+    const { reply } = await turno(foto({ text: "segue o RG do comprador" }));
+
+    expect(reply).toContain(fraseDeNaoLido("ilegivel", "image"));
+  });
+
+  it("N5 (negado): foto lida com sucesso + legenda não ganha aviso de não lido", async () => {
+    politica(true);
+    acao.mockImplementation(async (p) => (p.verb === "proposal.options" ? opcoesV2 : LEITURA_200));
+
+    const { reply } = await turno(foto({ text: "segue o RG do comprador" }));
+
+    expect(reply ?? "").not.toContain(fraseDeNaoLido("ilegivel", "image"));
+    expect(reply ?? "").not.toContain(fraseDeNaoLido("falha", "image"));
+  });
+
+  it("M3: document.read 403 fluxo_desligado rebaixa o fluxo para v1 e responde com frase honesta", async () => {
+    politica(true);
+    acao.mockImplementation(async (p) =>
+      p.verb === "proposal.options" ? opcoesV2 : { status: 403, body: { error: "fluxo_desligado" } }
+    );
+
+    const { reply, values } = await turno(foto());
+
+    expect(reply).toBe(fraseDeNaoLido("fluxo_desligado", "image"));
+    expect((values.fluxo as { kind: string }).kind).toBe("proposta");
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
 // 5. Confiança baixa e o texto de conferência
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -595,7 +643,9 @@ describe("texto de conferência", () => {
     const t = textoDeConferencia({ documentType: "rg", confianca: 0.9, campos, ignorados: 0 });
     expect(t).toMatch(/lido — confira/i);
     expect(t).toContain(NOME);
-    expect(t).toContain(CPF);
+    // F2 (16/11): o CPF lido sai mascarado, como na ficha.
+    expect(t).toContain("***.982.247-**");
+    expect(t).not.toContain(CPF);
     expect(t).not.toMatch(/atenção/i);
     expect(t).not.toMatch(/✅|anotei|salvei|gravei/i);
   });
@@ -640,7 +690,7 @@ describe("cm.lerDocumento traduz o status do servidor", () => {
     ["422 ilegivel", { status: 422, body: { error: "documento_ilegivel" } }, { ok: false, motivo: "ilegivel" }],
     ["422 dados invalidos", { status: 422, body: { error: "dados_invalidos" } }, { ok: false, motivo: "falha" }],
     ["403 politica", { status: 403, body: { error: "Forbidden", reason: "politica_nao_concede" } }, { ok: false, motivo: "politica" }],
-    ["403 fluxo desligado", { status: 403, body: { error: "fluxo_desligado" } }, { ok: false, motivo: "politica" }],
+    ["403 fluxo desligado", { status: 403, body: { error: "fluxo_desligado" } }, { ok: false, motivo: "fluxo_desligado" }],
     ["502 indisponivel", { status: 502, body: { error: "leitura_indisponivel" } }, { ok: false, motivo: "indisponivel" }],
     ["503 nao configurado", { status: 503, body: { error: "nao_configurado" } }, { ok: false, motivo: "falha" }],
     ["200 sem campos validos", { status: 200, body: { documentType: "rg" } }, { ok: false, motivo: "falha" }],

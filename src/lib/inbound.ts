@@ -1,14 +1,16 @@
 import { captureDispatchFence, DispatchFenceSchema, withCapturedPrivacy, withDeliveryFence, withTransportFence, TransportAcceptedCommitError, type DispatchFence } from "./runtime/delivery-fence";
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
-import { sendText, connectionStatus, markReadTyping, type InboundMessage } from "./transport";
+import { sendText, connectionStatus, markReadTyping, type InboundMessage, type InterativoFlow } from "./transport";
 import { derivarInterativo, PREFIXO_OPCAO } from "./interativo";
+import { descartarFlowDoTurno, espiarFlowDoTurno } from "./meta-flow";
 import { falhaDaMensagemMeta, inoperanciaDoErro } from "./transport/erro";
 import { observeConnection } from "./connection";
 import { abrirJanela } from "./janela24h";
 import { log } from "./log";
 import { redigir, CAMPOS_DA_AUDITORIA, redigirCredito } from "./pii";
 import { runTurn, type TurnResult } from "@/graph/graph";
+import { MARCADOR_DOCUMENTO_LIDO } from "@/graph/formularios/midia";
 import { remetenteConhecido } from "./identity";
 
 /**
@@ -347,6 +349,15 @@ async function toqueEmMensagemAntiga(row: InboundRow): Promise<boolean> {
 export const TEXTO_REENVIO_SENSIVEL =
   "Tive um problema para enviar sua resposta. Mande *RESUMO* para ver a ficha de novo.";
 
+/** Turno que leu um documento: não há "ficha" a pedir de volta; reenviar o documento ou digitar resolve. */
+export const TEXTO_REENVIO_DOCUMENTO =
+  "Tive um problema para enviar a resposta sobre o documento. Mande o documento de novo ou digite os dados.";
+
+/** A frase fixa do reenvio de uma linha sensível: a de documento quando o `reply_text` é o marcador dele. */
+export function textoDeReenvioSensivel(replyGravado: string | null): string {
+  return replyGravado === MARCADOR_DOCUMENTO_LIDO ? TEXTO_REENVIO_DOCUMENTO : TEXTO_REENVIO_SENSIVEL;
+}
+
 export async function runQueued(row: InboundRow): Promise<SettleStatus> {
   if (process.env.MAX_OUTBOUND_KILL === "true") {
     await query(`UPDATE inbound_queue SET status='pending',attempts=GREATEST(attempts-1,0),last_error='outbound_disabled: held without attempt' WHERE id=$1`,[row.id]);
@@ -416,7 +427,7 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
 
     // Retentativa de turno de crédito: o `reply_text` gravado está redigido
     // ("⟨VALOR⟩") e não pode ir à pessoa. Vai a frase fixa.
-    if (afterReply === undefined && row.sensivel && reply) reply = TEXTO_REENVIO_SENSIVEL;
+    if (afterReply === undefined && row.sensivel && reply) reply = textoDeReenvioSensivel(row.reply_text ?? null);
 
     let replyMessageId: string | null = null;
     if (reply) {
@@ -429,7 +440,8 @@ export async function runQueued(row: InboundRow): Promise<SettleStatus> {
           await client.query(`UPDATE inbound_queue SET last_send_started_at=now() WHERE id=$1`,[row.id]);
         });
         res=await withTransportFence({table:'inbound_queue',id:row.id,phone:row.from_phone,fence:dispatchFence},()=>
-          sendText({to:row.from_phone,body:reply!,quoteMessageId:row.message_id,...comInterativo(reply!)}));
+          sendText({to:row.from_phone,body:reply!,quoteMessageId:row.message_id,...comInterativo(reply!,row.message_id)}));
+        descartarFlowDoTurno(row.message_id);
       } catch (err) {
         if(err instanceof TransportAcceptedCommitError)throw err;
         /**
@@ -765,8 +777,17 @@ export async function podarTextoDaFila(dias = 30): Promise<number> {
  * Botões/lista para a resposta, quando ela é um "Responda SIM" ou um menu
  * numerado (`lib/interativo.ts`). Só entra no envio quando existe, para que
  * a chamada sem botão continue idêntica à de antes.
+ *
+ * Revisão v2 no Max (T11): o condutor deixa o Flow do passo num cache por `messageId` (`meta-flow.ts`).
+ * O cache NUNCA é a fonte: só vale se o `corpo` do Flow é exatamente a resposta que vai sair (se o
+ * grafo trocou o `reply` depois do condutor, o Flow antigo não carrega a resposta nova), e é só lido
+ * aqui; sai do cache quando o envio é aceito (`descartarFlowDoTurno`), para a retentativa de uma
+ * falha ainda o achar. Sem cache (outro processo, vencido) a revisão sai em texto, com botões/lista
+ * derivados como sempre.
  */
-function comInterativo(reply: string): { interativo?: NonNullable<ReturnType<typeof derivarInterativo>> } {
+export function comInterativo(reply: string, messageId?: string): { interativo?: NonNullable<ReturnType<typeof derivarInterativo>> | InterativoFlow } {
+  const flow = messageId ? espiarFlowDoTurno(messageId) : undefined;
+  if (flow && flow.corpo === reply) return { interativo: flow };
   const interativo = derivarInterativo(reply);
   return interativo ? { interativo } : {};
 }

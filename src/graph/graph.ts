@@ -29,8 +29,13 @@ import {
 } from "./capacidades";
 import { pedeConsulta, responderConsulta, textoDaConsulta } from "./consulta";
 import { toleranteNaOrg } from "./formularios/intencao";
+import { pedeCorrecaoDeTexto, rotearCorrecaoDeTexto, TEXTO_FLUXO_ABERTO } from "./formularios/correcao-roteamento";
+import { ehSimDeAplicar, TEXTO_SUGESTAO_VENCIDA } from "./formularios/correcao-texto";
 import { ocrTranscribeFallbackLigado } from "./captacao-flags";
-import { camposSemPapel, derivarPapel, fraseDeNaoLido, lerMidia, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
+import { cancelarFicha } from "./formularios/pausa";
+import { rebaixarParaV1 } from "./formularios/selecao";
+import type { FluxoFormularioV2 } from "./formularios/estado";
+import { camposSemPapel, derivarPapel, fraseDeNaoLido, guardarFala, falasDoCofre, lerMidia, MARCADOR_DOCUMENTO_LIDO, registrarLidos, textoDeConferencia, type DepsDaMidia, type CampoLido } from "./formularios/midia";
 import {
   comoMensagemDaJanela,
   INSTRUCAO_DA_JANELA,
@@ -229,6 +234,8 @@ interface TurnoCru {
   texto?: string; reply?: string; draft?: string;
   /** Texto lido de uma imagem (T9): DADO só deste turno, para a janela de extração. Nunca no state. */
   lidos?: DocumentoLido[];
+  /** v2 (N5): a mídia anexada à legenda não foi lida; a resposta do turno diz isso (nunca silêncio). */
+  avisoDeMidia?: string;
 }
 const TURNO_CRU = new Map<string, TurnoCru>();
 /** Põe (ou limpa, com `[]`) os documentos lidos deste turno. Para `runTurnCore` e para testes com `buildGraph`. */
@@ -288,6 +295,90 @@ function blindarCredito(state: MaxStateType, update: MaxUpdate): MaxUpdate {
   if (resto) out.restoDaResposta = { ...resto, texto: redigirCredito(resto.texto) };
   if ("piiMap" in update) out.piiMap = {};
   TURNO_CRU.set(id, cru);
+  return out;
+}
+
+/**
+ * O que a fala do corretor vira no histórico do checkpoint (`messages`). Crédito, captação e proposta v2:
+ * a resposta da ficha traz CPF/telefone/renda, então só o marcador vai para o checkpoint. Nos demais
+ * fluxos a fala fica como está.
+ */
+export function historicoDoCorretor(kind: string, userText: string): string {
+  if (kind === "credito") return "(resposta da ficha de crédito)";
+  if (kind === "captacao") return "(resposta da ficha de captação)";
+  if (kind === "proposta_v2") return "(resposta da ficha de proposta)";
+  return userText;
+}
+
+/**
+ * Proposta v2: a fala do corretor vai CIFRADA para o fluxo (a janela de extração das mensagens
+ * seguintes lê dali, sem perder o elo entre pedaços); o histórico só ganha o marcador. Outros fluxos
+ * (ou nenhum) passam intactos.
+ */
+export function comFalaNoCofre<F extends { kind: string } | null | undefined>(fluxo: F, userText: string, thread: string): F {
+  if (!fluxo || fluxo.kind !== "proposta_v2") return fluxo;
+  return guardarFala(fluxo as unknown as FluxoFormularioV2, userText, thread) as unknown as F;
+}
+
+/**
+ * I5: turno sensível do formulário v2. A resposta real (a ficha, com nome e endereço lidos do
+ * documento) fica só em `TURNO_CRU`, de onde o `runTurn` a lê para responder; o state (e o
+ * checkpoint) guarda o marcador, tanto em `reply` quanto na mensagem do assistente. A fala do
+ * CORRETOR não é tratada aqui: a janela de extração a lê do cofre cifrado do fluxo, e o `messages`
+ * recebe só o marcador no ponto único `blindarFalaV2` (todo nó, qualquer caminho).
+ */
+function blindarFormularioV2(state: MaxStateType, update: MaxUpdate): MaxUpdate {
+  if (!turnoV2Sensivel(update.toolLog as ToolLogEntry[] | undefined)) return update;
+  const id = state.inbound.messageId;
+  const cru: TurnoCru = TURNO_CRU.get(id) ?? {};
+  const out: MaxUpdate = { ...update };
+  if (typeof update.reply === "string") { cru.reply = update.reply; out.reply = MARCADOR_DOCUMENTO_LIDO; }
+  const msgs = update.messages as MessagesUpdate | undefined;
+  if (msgs && Array.isArray(msgs)) {
+    // Correção de texto (R33): a fala do corretor também (passagem colada); na ficha v2 ela fica.
+    const tambemOCorretor = turnoDeCorrecaoTexto(update.toolLog as ToolLogEntry[] | undefined);
+    out.messages = msgs.map((m) => (m.role === "assistant" || (tambemOCorretor && m.role === "user") ? { ...m, content: MARCADOR_DOCUMENTO_LIDO } : m));
+  }
+  TURNO_CRU.set(id, cru);
+  return out;
+}
+
+/**
+ * I1/I2: o ponto ÚNICO que impede a fala do corretor de ir em claro para o `messages` do checkpoint
+ * numa proposta v2. Cada nó escreve a fala do seu jeito (abertura pelo `propor_criacao`, consulta,
+ * gestão, assinatura, "fluxo em andamento"...); em vez de lembrar de blindar cada um, `cronometrar`
+ * passa o update de TODO nó por aqui. Vale quando o turno envolve a proposta v2 (fluxo aberto antes OU
+ * depois): a mensagem do usuário cujo texto é a fala crua do turno vira o marcador. O fluxo v1 e os
+ * demais fluxos passam intactos.
+ *
+ * A abertura (fluxo que NASCE neste turno) também guarda a fala no cofre cifrado: a janela de
+ * extração do turno seguinte lê dali, e sem isso o que foi dito ao abrir (nome, valor) sumia da janela.
+ * Nos outros caminhos o cofre já é cuidado por quem conduz o fluxo (`conduzirInterno`); uma fala de
+ * consulta ou de gestão não entra na janela de extração.
+ */
+function blindarFalaV2(state: MaxStateType, update: MaxUpdate): MaxUpdate {
+  const msgs = update.messages as MessagesUpdate | undefined;
+  if (!msgs || !Array.isArray(msgs)) return update;
+  const fluxoAntes = state.fluxo as { kind?: string } | null | undefined;
+  const fluxoDepois = ("fluxo" in update ? update.fluxo : state.fluxo) as { kind?: string } | null | undefined;
+  if (fluxoAntes?.kind !== "proposta_v2" && fluxoDepois?.kind !== "proposta_v2") return update;
+  const texto = textoDoTurno(state).trim();
+  if (!texto) return update;
+  let trocou = false;
+  const marcador = historicoDoCorretor("proposta_v2", texto);
+  const messages = msgs.map((m) => {
+    if (m.role !== "user" || m.content !== texto) return m;
+    trocou = true;
+    return { ...m, content: marcador };
+  });
+  if (!trocou) return update;
+  const out: MaxUpdate = { ...update, messages };
+  // O mapa token -> valor real (CPF, telefone) é gravado no checkpoint pelo `answer`. Quando a resposta
+  // já está fechada neste nó (não há mais volta do laço de tools), ele não serve para mais nada: zera.
+  if ("piiMap" in update && typeof update.reply === "string") out.piiMap = {};
+  if (fluxoAntes?.kind !== "proposta_v2" && fluxoDepois?.kind === "proposta_v2") {
+    out.fluxo = comFalaNoCofre(update.fluxo as Fluxo, texto, threadIdFor(state.identity.orgId, state.inbound.fromPhone));
+  }
   return out;
 }
 
@@ -902,6 +993,31 @@ async function continuar(state: MaxStateType): Promise<MaxUpdate> {
   };
 }
 
+const FLUXO_V2_MEMO = new Map<string, boolean>();
+
+/**
+ * O servidor fala v2 nesta org? (`options.fluxoV2`, §18.13.3). Só consulta com a feature
+ * `formularios_v2` ligada (org sem ela = v1 byte a byte, sem chamada extra). Uma consulta
+ * por mensagem (memo), falha = `false`: a tolerância a erro de digitação nunca liga sozinha.
+ */
+async function fluxoV2DoServidor(state: MaxStateType): Promise<{ fluxoV2: boolean }> {
+  const orgId = state.identity.orgId;
+  if (!featureEnabled("formularios_v2", orgId)) return { fluxoV2: false };
+  const chave = `${orgId}:${state.inbound.messageId}`;
+  const memo = FLUXO_V2_MEMO.get(chave);
+  if (memo !== undefined) return { fluxoV2: memo };
+  let v = false;
+  try {
+    const { consultarOptions } = await import("./formularios/proposta-v2");
+    v = (await consultarOptions(depsDoFluxo(state, []), {}))?.fluxoV2 === true;
+  } catch {
+    v = false;
+  }
+  if (FLUXO_V2_MEMO.size > 200) FLUXO_V2_MEMO.clear();
+  FLUXO_V2_MEMO.set(chave, v);
+  return { fluxoV2: v };
+}
+
 /**
  * As dependências do fluxo neste turn: o `scope-action` como ESTA pessoa
  * (sujeito + telefone, reconferidos no servidor) e o extrator por ferramenta
@@ -945,7 +1061,9 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
         janelaDoTurno: (mensagensAnteriores: number, lidosDoChamador?: DocumentoLido[]) => {
           // Sem os seus, valem os documentos lidos NESTE turno (texto de imagem, T9).
           const lidos = lidosDoChamador ?? TURNO_CRU.get(state.inbound.messageId)?.lidos ?? [];
-          const doCorretor = state.messages.filter((m) => m.role === "user").map((m) => m.content);
+          // As falas anteriores vêm do cofre cifrado do fluxo (o histórico do checkpoint guarda só o marcador).
+          const fluxoAberto = state.fluxo;
+          const doCorretor = fluxoAberto && fluxoAberto.kind === "proposta_v2" ? falasDoCofre(fluxoAberto, threadIdFor(orgId, state.inbound.fromPhone)) : [];
           // `slice(-0)` devolveria tudo: 0 (ou negativo) é "nenhuma anterior".
           const n = Math.max(0, Math.floor(mensagensAnteriores));
           return montarJanela({
@@ -957,6 +1075,38 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
         extrairComJanela: async (janela: JanelaDeExtracao, tool: ToolDeExtracao) => {
           const { texto, mapa } = comoMensagemDaJanela(janela, state.piiMap);
           return chamarExtracao(SYSTEM_DA_EXTRACAO + INSTRUCAO_DA_JANELA, texto, mapa, tool);
+        },
+        // T10: a ficha sai do outbox depois da pausa. Import tardio: o outbox importa o grafo.
+        pausa: {
+          agendar: async (p: { chave: string; dedupeKey: string; quando: Date; texto: string }) => {
+            const { enqueue } = await import("@/lib/outbox");
+            // I5: a ficha tem valor de documento; vai SELADA (org|telefone) para o outbox.
+            // Sem chave, lança: `agendarFicha` devolve false e a ficha vai no próprio turno.
+            const { selarCorpo } = await import("./formularios/selo");
+            await enqueue({
+              orgId,
+              dedupeKey: p.dedupeKey,
+              audience: "platform_user",
+              phone: state.inbound.fromPhone,
+              recipientName: displayName(state.identity) ?? "corretor",
+              title: "Ficha do rascunho",
+              body: selarCorpo(p.texto, `${orgId}|${state.inbound.fromPhone}`),
+              linkUrl: null,
+              dealId: null,
+              orgName: state.identity.orgName,
+              kind: null,
+              deliverAfter: p.quando,
+            });
+          },
+          cancelar: async (prefixo: string) => {
+            const { cancelarPendentesPorPrefixo } = await import("@/lib/outbox");
+            await cancelarPendentesPorPrefixo(prefixo);
+          },
+          // C1: só a linha ENVIADA prova que o corretor viu a ficha.
+          entregue: async (dedupeKey: string) => {
+            const { linhaEnviada } = await import("@/lib/outbox");
+            return linhaEnviada(dedupeKey);
+          },
         },
       }
     : {};
@@ -1024,15 +1174,26 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // Expira a CONFIRMAÇÃO, não a referência ao negócio nem a chave de retry.
   // Vencida, a gestão só sobrevive com escrita incerta (a chave): seleção ou
   // resumo velhos não podem capturar um "2" dias depois (review 09/10).
-  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "assinatura" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave) || (state.fluxo?.kind === "atividade" && !!state.fluxo.chave);
+  const sobrevive = state.fluxo?.kind === "continuidade" || (state.fluxo?.kind === "gestao" && !!state.fluxo.chave) || (state.fluxo?.kind === "assinatura" && !!state.fluxo.chave) || (state.fluxo?.kind === "captacao" && !!state.fluxo.chave) || (state.fluxo?.kind === "atividade" && !!state.fluxo.chave) || (state.fluxo?.kind === "correcao_texto" && !!state.fluxo.chave);
   const atual = vencido ? (sobrevive ? rebaixarFluxo(state.fluxo) : null) : state.fluxo;
   const escritaEmAberto = !!(atual && "chave" in atual && atual.chave);
+
+  // N2: a sugestão de correção venceu SEM escrita incerta (o fluxo saiu do estado). Um "sim"/"aplicar" tardio não
+  // pode cair no modelo livre, que só vê o marcador do texto e poderia afirmar que aplicou: frase fixa, sem apply.
+  if (vencido && state.fluxo?.kind === "correcao_texto" && !state.fluxo.chave && ehSimDeAplicar(userText)) {
+    return {
+      fluxo: null,
+      reply: TEXTO_SUGESTAO_VENCIDA,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: TEXTO_SUGESTAO_VENCIDA }],
+      toolLog: [{ name: "fluxo", args: { kind: "escopo" }, outcome: "correcao_texto_vencida" }],
+    };
+  }
 
   // O que o Max faz, e o que não faz (contrato, cobrança): resposta do
   // sistema, nunca do modelo (prod 09/10). O fluxo em curso fica como está.
   // Nunca no meio de uma coleta: "forma de pagamento: boleto" é dado da proposta.
   const coletando = atual?.kind === "proposta" || atual?.kind === "negocio" || atual?.kind === "escolha" || atual?.kind === "credito" ||
-    atual?.kind === "captacao" || atual?.kind === "atividade" || atual?.kind === "preferencias";
+    atual?.kind === "captacao" || atual?.kind === "atividade" || atual?.kind === "preferencias" || atual?.kind === "correcao_texto";
   // Continuidade e gestão vêm antes: "converte a proposta… pra gerar o contrato" é conversão.
   // Rascunho aberto para ajuste (sem escrita pendente) não prende o turno: pedido
   // sobre OUTRA proposta ("muda o valor da proposta do João…"), consulta ou
@@ -1133,7 +1294,11 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // formulário). Flag desligada = o Max segue como antes, sem citar crédito.
   const ctxDoTurno = { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
     politicaIndisponivel: state.politicaIndisponivel, agora, orgName: state.identity.orgName,
-    thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone) };
+    thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone),
+    orgId: state.identity.orgId,
+    subjectKey: JSON.stringify([state.identity.orgId, subjectDe(state.identity)]),
+    podeEscrever: podeEscrever(state.identity),
+    botao: state.inbound.buttonPayload ?? null };
   const credito = creditoLigado() && livre && !escritaEmAberto ? pedeCredito(userText) : null;
   if (credito) {
     const deps = depsDoFluxo(state, usage);
@@ -1241,7 +1406,52 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     }
     assinatura = null;
   }
-  const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText, { tolerante: toleranteNaOrg(state.identity.orgId) }) : null;
+  // PR-E (T17): corrigir o TEXTO de um documento ("muda a cláusula de multa da proposta") vem ANTES da gestão,
+  // que leria o mesmo pedido como edição de DADO. Determinístico (sem modelo) e atrás da feature `formularios_v2`
+  // E da capability `document.text.edit`: sem as duas, nada daqui roda e o roteamento é o de antes. Captação só
+  // com o `captacaoId` do fluxo aberto (R30); o dado ("corrige o CPF") segue em `proposal.update`.
+  //
+  // Rodada 1 (R32): a correção NUNCA substitui um fluxo aberto (proposta v2 em coleta, captação em qualquer etapa,
+  // gestão, atividade...). Com fluxo aberto só uma palavra FORTE (cláusula, parágrafo, redação, "texto do documento")
+  // reconhece o pedido, e a resposta é uma frase fixa que não descarta estado nem o job `ficha:` agendado.
+  // Sem fluxo aberto, a resposta que só orienta (contrato pela tela, qual proposta) também deixa tudo como está (M5).
+  const fluxoOcupado = !!atual && atual.kind !== "continuidade" && !rascunhoAberto;
+  const correcaoLigada = !assinatura && !escritaEmAberto && podeEscrever(state.identity) && (livre || atual?.kind === "captacao") &&
+    featureEnabled("formularios_v2", state.identity.orgId) && state.policy.includes("document.text.edit");
+  const alvoDaCorrecao = correcaoLigada ? pedeCorrecaoDeTexto(userText, { forte: fluxoOcupado }) : null;
+  // Vencido sem sobrevivente: o fluxo velho sai; com sobrevivente, grava o rebaixado; senão não toca em nada.
+  const fluxoIntacto = vencido ? (atual ?? null) : undefined;
+  if (alvoDaCorrecao && fluxoOcupado && alvoDaCorrecao !== "contrato") {
+    return {
+      ...(fluxoIntacto !== undefined ? { fluxo: fluxoIntacto } : {}),
+      reply: TEXTO_FLUXO_ABERTO,
+      messages: [{ role: "user", content: userText }, { role: "assistant", content: TEXTO_FLUXO_ABERTO }],
+      // N1: a fala do corretor pode trazer CPF/telefone/trecho colado: cega no checkpoint e no log, como a correção.
+      toolLog: [{ name: "fluxo", args: { kind: "correcao_texto", sensivel: true }, outcome: "correcao_texto_fluxo_aberto" }],
+    };
+  }
+  if (alvoDaCorrecao) {
+    const resultado = state.fluxo?.kind === "continuidade" ? state.fluxo.resultado : undefined;
+    const roteado = await rotearCorrecaoDeTexto(
+      { alvo: alvoDaCorrecao, texto: userText, atual, linkDoNegocio: resultado?.match(/Negócio: (\S+)/)?.[1] ?? null },
+      ctxDoTurno, depsDoFluxo(state, usage)
+    );
+    if (roteado && !roteado.passo.liberar) {
+      const { passo, orienta } = roteado;
+      // Resposta que só orienta não mexe no fluxo aberto; a que abre a correção o substitui (só sem fluxo aberto).
+      const fluxo = orienta ? fluxoIntacto : passo.fluxo;
+      return {
+        ...(fluxo !== undefined ? { fluxo } : {}),
+        reply: passo.reply,
+        messages: [{ role: "user", content: userText }, { role: "assistant", content: passo.reply }],
+        ...(usage.length > 0 ? { usage } : {}),
+        // O antes/depois é texto de documento e a fala do corretor pode trazer dado pessoal (N1): todo turno
+        // roteado pela correção, inclusive o que só orienta, é sensível (checkpoint e log só veem o marcador).
+        toolLog: [{ name: "fluxo", args: { kind: "correcao_texto", sensivel: true }, outcome: passo.evento }],
+      };
+    }
+  }
+  const gestao = !assinatura && podeEscrever(state.identity) && livre && atual?.kind !== "gestao" ? pedeGestao(userText, { tolerante: toleranteNaOrg(state.identity.orgId, await fluxoV2DoServidor(state)) }) : null;
   // "Não converte a proposta da X" é o contrário do pedido: a negação vem antes.
   const negada = !atual ? negaAcao(userText) : null;
   const continuidade = podeEscrever(state.identity) && !negada && pedeContinuidade(userText);
@@ -1317,7 +1527,7 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
   // Ajuste curto de uma lista ("Que sou responsável", "Todos") herda o pedido anterior.
   const textoConsulta = textoDaConsulta(userText, state.messages);
   if (livre && !emSelecao && podeEscrever(state.identity) &&
-      !pedeEnvio(userText) && pedeConsulta(textoConsulta, { tolerante: toleranteNaOrg(state.identity.orgId) })) {
+      !pedeEnvio(userText) && pedeConsulta(textoConsulta, { tolerante: toleranteNaOrg(state.identity.orgId, await fluxoV2DoServidor(state)) })) {
     // Reconhecer a consulta independe da permissão: sem leitura, recusa aqui.
     // Deixar passar ao modelo oferece criação e pode converter o código citado
     // em continuidade de proposta, mesmo quando a pessoa pediu só o status.
@@ -1360,6 +1570,12 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
         policy: state.policy,
         politicaIndisponivel: state.politicaIndisponivel,
         agora,
+        // v2 (PR-D): a org escolhe a versão; thread/pessoa/RBAC/botão são os do turno (a ficha, a pausa e o Flow).
+        orgId: ctxDoTurno.orgId,
+        thread: ctxDoTurno.thread,
+        subjectKey: ctxDoTurno.subjectKey,
+        podeEscrever: ctxDoTurno.podeEscrever,
+        botao: ctxDoTurno.botao,
       },
       depsDoFluxo(state, usage),
       state.fluxo
@@ -1410,24 +1626,54 @@ async function conduzirInterno(state: MaxStateType): Promise<MaxUpdate> {
     // se a resposta do modelo terminar em pergunta, o "sim" a ela não pode
     // criar nem enviar (achado N1 do code review).
     return {
-      fluxo: passo.fluxo === null ? null : rebaixarFluxo(atual),
+      // v2: o condutor pode devolver o fluxo v1 (feature desligada no meio do rascunho): vale o que ele devolveu.
+      fluxo: passo.fluxo === null ? null : comFalaNoCofre(rebaixarFluxo(atual.kind === "proposta_v2" ? passo.fluxo : atual), userText, ctxDoTurno.thread),
       ...(usage.length > 0 ? { usage } : {}),
       toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
     };
   }
+  // N5: o anexo da legenda não foi lido. Nunca silêncio: a pessoa precisa saber.
+  const avisoDeMidia = TURNO_CRU.get(state.inbound.messageId)?.avisoDeMidia;
+  if (passo.silencioso && avisoDeMidia) {
+    return {
+      fluxo: comFalaNoCofre(passo.fluxo, userText, ctxDoTurno.thread),
+      messages: [{ role: "user", content: historicoDoCorretor(atual.kind, userText) }, { role: "assistant", content: avisoDeMidia }],
+      reply: avisoDeMidia,
+      ...(usage.length > 0 ? { usage } : {}),
+      toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
+    };
+  }
+  if (passo.silencioso) {
+    // v2 (T10): coletou e não responde; a ficha sai pelo outbox depois da pausa. `halt` pula o
+    // `compact` e a memória (o turno tem dado de documento) e não gera texto. Nunca "anotei":
+    // no Max, um 👍 na própria mensagem do corretor; no Newton a reação não existe e fica mudo.
+    void sendReaction({ to: state.inbound.fromPhone, messageId: state.inbound.messageId, emoji: "👍" });
+    return {
+      fluxo: comFalaNoCofre(passo.fluxo, userText, ctxDoTurno.thread),
+      halt: "formulario_coletando",
+      // `halt` desvia do `confirm`: uma pendência antiga não pode sobreviver a ele (consentimento).
+      pendingAction: null,
+      messages: [{ role: "user", content: historicoDoCorretor(atual.kind, userText) }],
+      ...(usage.length > 0 ? { usage } : {}),
+      // I5: coletou valor de documento; este turno não vai para resumo, memória nem log com valor.
+      toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "proposta_v2" || atual.kind === "correcao_texto" ? { sensivel: true } : {}) }, outcome: passo.evento }],
+    };
+  }
   // Crédito: a resposta da ficha (CPF, renda) nunca vai para o histórico do checkpoint.
-  const daFicha = atual.kind === "credito" || atual.kind === "captacao";
+  const resposta = avisoDeMidia ? `${avisoDeMidia}\n\n${passo.reply}` : passo.reply;
   return {
     // O fluxo andou: a próxima pausa ganha o lembrete "Continuando…" de novo.
-    fluxo: aposRetomada(passo.fluxo),
+    fluxo: comFalaNoCofre(aposRetomada(passo.fluxo), userText, ctxDoTurno.thread),
     messages: [
-      { role: "user", content: daFicha ? `(resposta da ficha de ${atual.kind === "captacao" ? "captação" : "crédito"})` : userText },
-      { role: "assistant", content: passo.reply },
+      { role: "user", content: historicoDoCorretor(atual.kind, userText) },
+      { role: "assistant", content: resposta },
     ],
-    reply: passo.reply,
+    reply: resposta,
     ...(usage.length > 0 ? { usage } : {}),
     // Sem os DADOS: o que a pessoa ditou (CPF, telefone) não vai para o log.
-    toolLog: [{ name: "fluxo", args: { kind: atual.kind }, outcome: passo.evento }],
+    // I5: v2 = a resposta pode ser a ficha com valor de documento: turno sensível.
+    // PR-E (R29): a correção de texto mostra o antes/depois do documento: mesmo tratamento.
+    toolLog: [{ name: "fluxo", args: { kind: atual.kind, ...(atual.kind === "proposta_v2" || atual.kind === "correcao_texto" ? { sensivel: true } : {}) }, outcome: passo.evento }],
   };
 }
 
@@ -1764,7 +2010,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
 
   // Pedido EXPLÍCITO de criação a quem não pode criar agora: template, sem
   // modelo — é onde o nano mais tende a encenar a ação. Só na volta 0.
-  if (state.toolRounds === 0 && criacao !== "disponivel" && ehPedidoDeCriacao(pedidoBruto, { tolerante: toleranteNaOrg(state.identity.orgId) })) {
+  if (state.toolRounds === 0 && criacao !== "disponivel" && ehPedidoDeCriacao(pedidoBruto, { tolerante: toleranteNaOrg(state.identity.orgId, await fluxoV2DoServidor(state)) })) {
     const texto = textoCriacaoIndisponivel(criacao, state.politicaIndisponivel);
     return {
       toolsOferecidas: [],
@@ -1833,6 +2079,7 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
           texto: `${userText} ${contextoLeitura}`,
           identity: state.identity,
           textoAnterior: pedidoEmAberto(history),
+          ...(await fluxoV2DoServidor(state)),
         })
       : { entradas: [], cortadas: 0 };
 
@@ -2122,6 +2369,11 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
             nomeCliente: args.nomeCliente,
             policy: state.policy,
             agora: Date.now(),
+            ctx: { texto: userText, messageId: state.inbound.messageId, policy: state.policy,
+              politicaIndisponivel: state.politicaIndisponivel, agora: Date.now(), orgName: state.identity.orgName,
+              thread: threadIdFor(state.identity.orgId, state.inbound.fromPhone), orgId: state.identity.orgId,
+              subjectKey: JSON.stringify([state.identity.orgId, subjectDe(state.identity)]),
+              podeEscrever: podeEscrever(state.identity) },
           },
           depsDoFluxo(state, extra)
         );
@@ -2145,6 +2397,9 @@ async function answerInterno(state: MaxStateType): Promise<MaxUpdate> {
         toolLog: [
           ...trilha,
           { name: chamada.name, args: { tipo: args.tipo }, outcome: passo.evento },
+          // A abertura da proposta v2 já traz a ficha com o que foi lido da fala: turno sensível, como
+          // todo turno do `conduzir` nesse fluxo (a resposta real só vai ao corretor, o state guarda o marcador).
+          ...(passo.fluxo?.kind === "proposta_v2" ? [{ name: "fluxo", args: { kind: "proposta_v2", sensivel: true }, outcome: passo.evento }] : []),
         ],
         piiMap: mapaTurno,
       };
@@ -2412,9 +2667,12 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   // colado em toda resposta fora do assunto enquanto o fluxo ficasse aberto (prod 16/11).
   const agoraCompose = Date.now();
   const lembrar = pausada !== null && deveLembrarDaPausa(pausada, agoraCompose);
-  const saida = pausada && lembrar
+  const corpo = pausada && lembrar
     ? `${final.texto}\n\n${pausada.kind === "captacao" ? continuacaoCaptacao(pausada) : continuacaoCredito(pausada)}`
     : final.texto;
+  // N5: legenda + anexo não lido e o turno foi ao modelo (a pergunta saiu da ficha): o aviso vai junto.
+  const avisoDeMidia = TURNO_CRU.get(state.inbound.messageId)?.avisoDeMidia;
+  const saida = avisoDeMidia ? `${avisoDeMidia}\n\n${corpo}` : corpo;
 
   return {
     ...(pausada ? { fluxo: { ...pausada, pausado: false, ...(lembrar ? { lembradoEm: agoraCompose } : {}) } } : {}),
@@ -2427,6 +2685,24 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
     bloqueios,
     messages: [{ role: "assistant", content: saida }],
   };
+}
+
+/**
+ * I5: o turno do formulário v2 trouxe (ou pode ter trazido) valor lido de documento na resposta
+ * (a ficha "lido — confira"). Marcado pelo `conduzir` no toolLog. Esse turno não vai para resumo,
+ * memória nem log com o valor; a resposta real só chega ao corretor.
+ */
+function turnoV2Sensivel(toolLog: readonly ToolLogEntry[] | undefined): boolean {
+  return (toolLog ?? []).some((t) => t.name === "fluxo" && (t.args.kind === "proposta_v2" || t.args.kind === "correcao_texto") && t.args.sensivel === true);
+}
+
+/**
+ * R33: o turno é do fluxo de CORREÇÃO DE TEXTO. A fala do corretor aqui pode ser a passagem do documento
+ * colada (etapa `citar`) ou o pedido com trecho do contrato: some do checkpoint e do log, como a resposta.
+ * Só este fluxo; na ficha v2 a janela de extração precisa da fala do corretor.
+ */
+function turnoDeCorrecaoTexto(toolLog: readonly ToolLogEntry[] | undefined): boolean {
+  return (toolLog ?? []).some((t) => t.name === "fluxo" && t.args.kind === "correcao_texto" && t.args.sensivel === true);
 }
 
 /** O turno passou pela ficha de crédito? Então não vai para resumo nem memória. */
@@ -2454,7 +2730,7 @@ async function compact(state: MaxStateType): Promise<MaxUpdate> {
   // suspendia o resumo por até 24h (TTL do rascunho) mesmo nos turnos em que a
   // pessoa só falava de outro negócio ou de crédito. `turnoDeCredito` já olha
   // só o toolLog DESTE turno (e ignora o turno "liberado").
-  if (state.fluxo?.kind === "credito" || turnoDeCredito(state.toolLog)) return {};
+  if (state.fluxo?.kind === "credito" || turnoDeCredito(state.toolLog) || turnoV2Sensivel(state.toolLog)) return {};
 
   const keep = state.messages.slice(-KEEP_AFTER_COMPACT);
   const older = state.messages.slice(0, -KEEP_AFTER_COMPACT);
@@ -2537,7 +2813,8 @@ function afterContinuar(state: MaxStateType): "conduzir" | "compose" {
 
 /** O fluxo de criação respondeu? Então o turn está resolvido. */
 function afterConduzir(state: MaxStateType): "confirm" | "compose" {
-  return state.reply ? "compose" : "confirm";
+  // `halt` = o turno do v2 que coletou em silêncio (T10): nada a confirmar, nada a dizer.
+  return state.reply || state.halt ? "compose" : "confirm";
 }
 
 /**
@@ -2585,7 +2862,7 @@ function cronometrar(
   return async (state) => {
     const iniciadoEm = Date.now();
     runEvent("agent.started", no);
-    const update = blindarCredito(state, await fn(state));
+    const update = blindarFalaV2(state, blindarFormularioV2(state, blindarCredito(state, await fn(state))));
     const specialized = (update.fluxo as {kind?:string}|null|undefined)?.kind ?? (no === "conduzir" ? state.fluxo?.kind : undefined);
     if (specialized) { runEvent("specialist.completed", specialized, { implementation: "deterministic-flow", model: null }); }
     runEvent("agent.completed", no, { durationMs: Date.now() - iniciadoEm });
@@ -2753,8 +3030,6 @@ export interface TurnResult {
   replyGravado?: string;
 }
 
-/** Marcador do que se grava/loga no lugar da ficha com valores lidos de documento. */
-const MARCADOR_DOCUMENTO_LIDO = "[documento lido: valores omitidos do log]";
 
 /**
  * O que é zerado a CADA turn — o contrato que o checkpointer obriga a manter.
@@ -3018,6 +3293,10 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
    * foto vai à leitura.
    */
   const daMidia = await lerMidiaDoFluxoV2(identity.candidate, inbound);
+  let avisoDeMidia: string | undefined;
+  if (daMidia?.tipo === "nao_lido" && daMidia.motivo === "fluxo_desligado") {
+    await rebaixarFluxoV2ParaV1(identity.candidate, inbound);
+  }
   if (daMidia?.tipo === "nao_lido" && !(daMidia.motivo === "sem_leitura" && inbound.kind === "image")) {
     if (!turnText) {
       await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
@@ -3026,6 +3305,8 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
         error: `sem_leitura_${inbound.kind}_${daMidia.motivo}`,
       });
     }
+    // N5: com legenda a legenda segue como mensagem, mas o corretor precisa saber que o anexo não foi lido.
+    avisoDeMidia = fraseDeNaoLido(daMidia.motivo, inbound.kind as "image" | "document");
   }
   // Texto lido de uma imagem (fallback T9, sempre com legenda): é DADO do turno para a janela
   // de extração. Fica só em `TURNO_CRU`: nunca vira mensagem, memória nem checkpoint.
@@ -3034,7 +3315,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   if (daMidia?.tipo === "campos") {
     // A foto não é um "sim": nenhuma pendência de escrita sobrevive a este turno.
     await descartarPendencias(identity.candidate.orgId, inbound.fromPhone, identity.candidate);
-    const guardou = await guardarLidosNoFluxo(identity.candidate, inbound, daMidia.campos, daMidia.papelIncerto === true);
+    const guardou = await guardarLidosNoFluxo(identity.candidate, inbound, daMidia.campos, daMidia.papelIncerto === true, !turnText);
     if (!guardou) {
       // Sem onde guardar o valor com segurança (sem chave): não mostra nem retém.
       return sair(fraseDeNaoLido("falha", inbound.kind as "image" | "document"), {
@@ -3101,7 +3382,11 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   // turn já faz. Em paralelo com o grafo (que só compila na primeira vez).
   const [facts, app] = await Promise.all([loadFacts(orgId, phone), getApp()]);
 
-  TURNO_CRU.set(inbound.messageId, lidosDoTurno.length ? { texto: turnText, lidos: lidosDoTurno } : { texto: turnText });
+  TURNO_CRU.set(inbound.messageId, {
+    texto: turnText,
+    ...(lidosDoTurno.length ? { lidos: lidosDoTurno } : {}),
+    ...(avisoDeMidia ? { avisoDeMidia } : {}),
+  });
   let replyCru: string | undefined;
   const result = await comRastro(() => app.invoke(
     {
@@ -3137,6 +3422,10 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
   // Turno de crédito: o state tem a resposta redigida; a real veio de `TURNO_CRU`.
   const reply = replyCru ?? result.reply ?? null;
   const deCredito = turnoSensivel(result, {});
+  // I5: turno do formulário v2 (a resposta pode ser a ficha com valor de documento).
+  const deFormularioV2 = turnoV2Sensivel(result.toolLog);
+  // R33: na correção de texto a fala do corretor (passagem colada) também não vai ao log.
+  const deCorrecaoTexto = turnoDeCorrecaoTexto(result.toolLog);
   const usage = result.usage ?? [];
   const tools = result.toolLog ?? [];
   const timings = result.timings ?? [];
@@ -3161,7 +3450,8 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
 
   return {
     reply,
-    sensivel: deCredito,
+    sensivel: deCredito || deFormularioV2,
+    ...(deFormularioV2 && !deCredito ? { replyGravado: MARCADOR_DOCUMENTO_LIDO } : {}),
     // Só vale extrair de um turn que teve as duas pontas: sem resposta não há
     // conversa da qual aprender, e um turn que falhou no modelo ensinaria o
     // erro.
@@ -3180,11 +3470,12 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
         messageId: inbound.messageId,
         kind: inbound.kind,
         // Crédito: auditoria também sem valores (renda, aluguel).
-        inboundText: (deCredito ? redigirCredito(turnText) : turnText) || null,
+        inboundText: (deCorrecaoTexto ? MARCADOR_DOCUMENTO_LIDO : deCredito || deFormularioV2 ? redigirCredito(turnText) : turnText) || null,
         // Só quando houve mídia: repetir o texto digitado nas duas colunas
         // encheria a tabela sem acrescentar informação.
-        transcript: fromMedia ? (deCredito ? redigirCredito(turnText) : turnText) : null,
-        replyText: deCredito && reply ? redigirCredito(reply) : reply,
+        transcript: fromMedia ? (deCorrecaoTexto ? MARCADOR_DOCUMENTO_LIDO : deCredito || deFormularioV2 ? redigirCredito(turnText) : turnText) : null,
+        // I5: a ficha v2 traz valor de documento: no log vai só o marcador.
+        replyText: deFormularioV2 && reply ? MARCADOR_DOCUMENTO_LIDO : deCredito && reply ? redigirCredito(reply) : reply,
         tools,
         usage,
         timings,
@@ -3210,7 +3501,7 @@ async function runTurnCore(inbound: InboundMessage, preparedIdentity?: Identity,
        */
       if (!(reply && turnText) || result.halt) return;
       // Turno da ficha de crédito não alimenta a memória (CPF, renda).
-      if (deCredito) return;
+      if (deCredito || deFormularioV2) return;
       await (async () => {
             // M1 (PII, corrigido em review) — `redigir`, não `tokenizar`: mesmo
             // motivo do `compact` (ver o cabeçalho ali). `extractFacts` grava
@@ -3304,7 +3595,14 @@ async function sujeitoTemCapability(identity: Candidate, phone: string, capabili
  * rascunho. `false` = não guardou (sem fluxo vivo ou sem chave): quem chama não
  * mostra o valor.
  */
-async function guardarLidosNoFluxo(identity: Candidate, inbound: InboundMessage, campos: CampoLido[], semPapel = false): Promise<boolean> {
+async function guardarLidosNoFluxo(
+  identity: Candidate,
+  inbound: InboundMessage,
+  campos: CampoLido[],
+  semPapel = false,
+  /** O turno mostra o card "lido, confira" agora (mídia sem legenda): o próximo SIM já vale. */
+  mostraOCard = false
+): Promise<boolean> {
   try {
     const app = await getApp();
     const thread = currentExecution()?.context.conversationId ?? liveNamespaceFor(identity.orgId, inbound.fromPhone, subjectDe(identity));
@@ -3313,10 +3611,44 @@ async function guardarLidosNoFluxo(identity: Candidate, inbound: InboundMessage,
     if (!fluxo || fluxo.kind !== "proposta_v2") return false;
     const r = registrarLidos(fluxo, { ref: inbound.messageId, campos, ...(semPapel ? { semPapel: true } : {}) }, thread);
     if (!r.ok) return false;
-    await app.updateState(config, { fluxo: r.fluxo });
+    // T10: com o card na tela o corretor JÁ viu o que será gravado (o "sim" do condutor exige isso);
+    // e uma ficha agendada antes da foto ficou velha, então sai da fila.
+    const novo = mostraOCard
+      ? { ...r.fluxo, etapa: "ficha" as const, fichaAgendadaEm: undefined, ultimaEntradaEm: Date.now(), atualizadoEm: Date.now() }
+      : r.fluxo;
+    await app.updateState(config, { fluxo: novo });
+    if (mostraOCard) {
+      try {
+        const { cancelarPendentesPorPrefixo } = await import("@/lib/outbox");
+        await cancelarFicha(
+          { agendar: async () => {}, cancelar: async (p) => void (await cancelarPendentesPorPrefixo(p)) },
+          JSON.stringify([identity.orgId, subjectDe(identity)])
+        );
+      } catch {
+        // Sem a fila, o pior caso é uma ficha repetida.
+      }
+    }
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * M3 (D3/§18.13.1): o servidor desligou o fluxo v2 no meio da conversa (403 `fluxo_desligado`
+ * em `document.read`). O fluxo cai para o v1 e o turno segue sem mensagem de erro técnica.
+ * Os lidos pendentes (cofre cifrado) não vão para o v1: o corretor digita de novo.
+ */
+async function rebaixarFluxoV2ParaV1(identity: Candidate, inbound: InboundMessage): Promise<void> {
+  try {
+    const app = await getApp();
+    const thread = currentExecution()?.context.conversationId ?? liveNamespaceFor(identity.orgId, inbound.fromPhone, subjectDe(identity));
+    const config = { configurable: { thread_id: thread } };
+    const fluxo = ((await app.getState(config)).values as Partial<MaxStateType> | undefined)?.fluxo;
+    if (!fluxo || fluxo.kind !== "proposta_v2") return;
+    await app.updateState(config, { fluxo: rebaixarParaV1(fluxo, {}) as never });
+  } catch {
+    // Sem o checkpoint o turno seguinte rebaixa pelo próprio condutor (options.fluxoV2).
   }
 }
 

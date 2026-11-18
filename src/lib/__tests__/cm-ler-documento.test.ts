@@ -35,6 +35,20 @@ describe("lerDocumento: status do servidor -> motivo", () => {
     expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "processando" });
   });
 
+  it("403 fluxo_desligado é o gate do v2 (rebaixa); outro 403 segue 'politica'", async () => {
+    executarAcao.mockResolvedValue({ status: 403, body: { error: "fluxo_desligado" } });
+    expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "fluxo_desligado" });
+    executarAcao.mockResolvedValue({ status: 403, body: { error: "forbidden" } });
+    expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "politica" });
+  });
+
+  it("503 paid_disabled (kill switch de gasto) vira 'politica', sem repetir; outro 503 segue 'falha'", async () => {
+    executarAcao.mockResolvedValue({ status: 503, body: { error: "paid_disabled" } });
+    expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "politica" });
+    executarAcao.mockResolvedValue({ status: 503, body: { error: "nao_configurado" } });
+    expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "falha" });
+  });
+
   it("sem resposta (null) segue 'falha'", async () => {
     executarAcao.mockResolvedValue(null);
     expect(await lerDocumento(args)).toEqual({ ok: false, motivo: "falha" });
