@@ -219,7 +219,7 @@ export async function saveFacts(
   }
 }
 
-const EXTRACT_SYSTEM = `Você extrai FATOS DURÁVEIS sobre uma pessoa, a partir do que ELA escreveu numa conversa de WhatsApp com um assistente imobiliário. Só o texto da pessoa vale como fonte; nada do que o assistente disse é fato sobre ela.
+const EXTRACT_SYSTEM = `Você extrai FATOS DURÁVEIS sobre uma pessoa, a partir do que ELA escreveu em uma conversa de WhatsApp com um assistente imobiliário. Você recebe SÓ as falas da pessoa; nada do que o assistente disse chega até aqui.
 
 Devolva um objeto JSON plano, com no máximo 5 pares "chave": "valor".
 
@@ -235,6 +235,7 @@ O que NUNCA extrair:
 - qualquer coisa sobre TERCEIROS
 - como chamar a pessoa (nome, apelido, tratamento): isso vem do cadastro, nunca da conversa
 - o assunto pontual desta conversa ("perguntou do contrato X") — isso é contexto, não fato
+- resposta curta a uma pergunta que você não vê ("celular", "o link", "sim"): sem a pergunta, não é preferência da pessoa
 
 Se não houver nada durável, devolva {}. Prefira {} a inventar.
 Responda SOMENTE o JSON, sem cercas de código e sem comentários.`;
@@ -251,6 +252,12 @@ Responda SOMENTE o JSON, sem cercas de código e sem comentários.`;
 export async function extractFacts(params: {
   orgId: string;
   phone: string;
+  /**
+   * SÓ a fala da pessoa. A resposta do assistente NUNCA entra: em produção
+   * a pergunta do bot ("celular ou link no WhatsApp?") virou o fato
+   * `preferências_trabalho_recorrentes` da pessoa. O que o bot diz não é
+   * dado sobre ela.
+   */
   userText: string;
   known: Facts;
 }): Promise<Facts> {

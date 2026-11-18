@@ -105,4 +105,62 @@ describe("formulário para o comprador de um negócio que já existe", () => {
     const s = await run("quero mandar o formulário de negócio para o comprador do Maria Silva Santos");
     expect(s.reply).not.toContain("já existe");
   });
+
+  it("'manda o formulário do comprador do TESTE1': responde com o link logado do negócio, sem criar nada", async () => {
+    escopo.mockResolvedValue({ items: [{ id: "cd9", titulo: "TESTE1", etapa: "Formulário" }, { id: "cd2", titulo: "Outro", etapa: "Formulário" }], truncated: false });
+    const s = await run("manda o formulário do comprador do TESTE1");
+    const reply = s.reply ?? "";
+    expect(reply).toContain("Esse negócio já existe");
+    expect(reply).toContain("TESTE1");
+    // não promete o que não existe: o Max não gera link de parte de negócio aberto
+    expect(reply).toMatch(/não gero o link/i);
+    // link logado do negócio (a base vem do ambiente; o caminho é o do negócio)
+    expect(reply).toMatch(/https?:\/\/\S+\/deals\/cd9/);
+    expect(reply).not.toContain("**");
+    expect(reply).not.toMatch(/Que nome dou|gerente/);
+    expect(reply.length).toBeLessThanOrEqual(500);
+    expect(reply.split("\n").length).toBeLessThanOrEqual(6);
+    expect(s.fluxo ?? null).toBeNull();
+    expect(s.pendingAction ?? null).toBeNull();
+    expect(vi.mocked(executarAcao)).not.toHaveBeenCalled();
+  });
+
+  it("o link sobrevive ao sanitizador e ao teto de tamanho", async () => {
+    const { sanitizar, limitarTamanho } = await import("../compose");
+    const { textoDeNegocioExistente } = await import("../negocio-por-nome");
+    const t = textoDeNegocioExistente({ tipo: "um", negocio: { id: "cd9", titulo: "TESTE1", item: {} } });
+    expect(sanitizar(t).texto).toBe(t);
+    expect(limitarTamanho(t).resto).toBeNull();
+    expect(t).toContain("/deals/cd9");
+  });
+
+  it("ambiguidade: lista no máximo 3 negócios (sem numeração) e pede para dizer qual pelo nome", async () => {
+    escopo.mockResolvedValue({
+      items: [1, 2, 3, 4, 5].map((n) => ({ id: `d${n}`, titulo: `TESTE assinatura 1 - variante ${n}`, etapa: "Formulário" })),
+      truncated: false,
+    });
+    const s = await run("manda o formulário do comprador do TESTE assinatura 1");
+    const reply = s.reply ?? "";
+    const itens = reply.split("\n").filter((l) => l.startsWith("• "));
+    expect(itens).toHaveLength(3);
+    expect(reply.split("\n").some((l) => /^\d+[.)] /.test(l))).toBe(false);
+    expect(reply).toMatch(/Me diga qual pelo nome/);
+    expect(reply).not.toMatch(/\b(responda|diga) (o )?n[uú]mero/i);
+    expect(reply).not.toContain("variante 4");
+    expect(s.fluxo ?? null).toBeNull();
+    expect(s.pendingAction ?? null).toBeNull();
+    expect(vi.mocked(executarAcao)).not.toHaveBeenCalled();
+  });
+
+  it("ambiguidade com 2 negócios: lista os 2 sem número, sem criar", async () => {
+    escopo.mockResolvedValue({
+      items: [{ id: "a", titulo: "TESTE assinatura 1 - à vista", etapa: "Formulário" }, { id: "b", titulo: "TESTE assinatura 1 - financiado", etapa: "Formulário" }],
+      truncated: false,
+    });
+    const s = await run("manda o formulário do comprador do TESTE assinatura 1");
+    const linhas = (s.reply ?? "").split("\n");
+    expect(linhas.filter((l) => l.startsWith("• "))).toHaveLength(2);
+    expect(linhas.some((l) => /^\d+[.)] /.test(l))).toBe(false);
+    expect(vi.mocked(executarAcao)).not.toHaveBeenCalled();
+  });
 });

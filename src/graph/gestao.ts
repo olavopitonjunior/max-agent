@@ -3,6 +3,7 @@ import { conduzirFluxo, type ContextoDoTurno, type DepsDoFluxo, type Fluxo, type
 import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotuloDaProposta, termoDaResposta, termoDeBusca, type PropostaListada } from "./localizar";
 import type { Capability } from "./policy";
 import { lerConfirmacao, normalizar } from "./tools";
+import { normalizarParaIntencao } from "./formularios/intencao";
 import { negaAcao } from "./capacidades";
 import { imobproBase } from "@/lib/http";
 
@@ -86,9 +87,11 @@ export function termoDaEdicao(texto: string): string | null {
 const CRIACAO = /\b(uma|nova|novo|outra)\s+proposta\b/;
 
 /** O pedido é editar uma proposta existente, com alvo citado? */
-export function pedeEdicao(texto: string): boolean {
+export function pedeEdicao(texto: string, opts?: { tolerante?: boolean }): boolean {
   const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "").trim();
-  if (NEGACAO.test(t) || PERGUNTA_DE_PROCESSO.test(t) || CRIACAO.test(t)) return false;
+  // v2: "uma nova porposta" também é criação (o guarda fica mais estrito, nunca mais frouxo).
+  const criacao = CRIACAO.test(t) || (opts?.tolerante === true && CRIACAO.test(normalizarParaIntencao(t)));
+  if (NEGACAO.test(t) || PERGUNTA_DE_PROCESSO.test(t) || criacao) return false;
   // "Pode mudar…?" é pedido; outra frase com "?" é pergunta.
   if (/\?\s*$/.test(texto) && !/^(pode|consegue)\b/.test(t)) return false;
   if (TIRAR_A_PROPOSTA.test(t)) return false;
@@ -97,13 +100,13 @@ export function pedeEdicao(texto: string): boolean {
 }
 
 /** O pedido é excluir, duplicar ou editar uma proposta? Pergunta e negação não contam. */
-export function pedeGestao(texto: string): Operacao | null {
+export function pedeGestao(texto: string, opts?: { tolerante?: boolean }): Operacao | null {
   const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "").trim();
   if (!/\?\s*$/.test(texto) && !NEGACAO.test(t)) {
     if (EXCLUIR.test(t)) return "excluir";
     if (DUPLICAR.test(t)) return "duplicar";
   }
-  return pedeEdicao(texto) ? "editar" : null;
+  return pedeEdicao(texto, opts) ? "editar" : null;
 }
 
 function resposta(f: Fluxo | null, reply: string, evento = "gestao"): Resposta {

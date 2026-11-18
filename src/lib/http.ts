@@ -21,6 +21,9 @@ export const META_TIMEOUT_MS = 10_000;
 /** Bridge do Newton: repassa para a Z-API dentro do próprio POST; 15s cobre o salto extra. */
 export const NEWTON_BRIDGE_TIMEOUT_MS = 15_000;
 
+/** Download da mídia que o corretor mandou ao Newton (storage da Z-API, até 3 MB). */
+export const NEWTON_MEDIA_TIMEOUT_MS = 15_000;
+
 /** ImobPro: consultas de identidade/RAG/escrita. A transcrição é a exceção —
  * sobe até 3 MB em base64 E espera o Gemini transcrever um áudio que pode ter
  * minutos; 20s cortava exatamente as mídias que MAX_MEDIA_BYTES aceita
@@ -32,6 +35,18 @@ export const IMOBPRO_TIMEOUT_MS = 8_000;
  */
 export const IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS = 30_000;
 export const IMOBPRO_TRANSCRIBE_TIMEOUT_MS = 45_000;
+/**
+ * `document.read`: o OCR de um PDF de 3 MB passa dos 8 s do teto comum (a rota do servidor tem
+ * `maxDuration` 300). 45 s cabe no teto de 60 s do turno e na janela de claim; estouro é "ainda
+ * processando" (o servidor segue, cobra e guarda a resposta pela `messageId`), nunca "tente de novo".
+ */
+export const IMOBPRO_DOCUMENT_READ_TIMEOUT_MS = 45_000;
+/**
+ * Correção de texto (PR-E, max.md §18.13.14): `suggest` lê o Google Doc e chama o modelo de redação;
+ * `apply` escreve no Doc. Passam dos 8 s comuns. Estouro é INCERTO (o servidor segue e guarda a
+ * resposta pela chave): o fluxo diz "não consegui confirmar", nunca repete com chave nova.
+ */
+export const IMOBPRO_TEXT_EDIT_TIMEOUT_MS = 30_000;
 /** `credit.request` (M3): o servidor espera a Upestate até 20 s e responde 202 depois; +10 s de rede. */
 export const IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS = 30_000;
 /**

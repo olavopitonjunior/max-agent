@@ -36,8 +36,9 @@
  */
 
 import { nomeDoAgente } from "@/lib/deploy-profile";
+import { featureEnabled } from "@/lib/runtime/rollout";
 import type { Capability } from "./policy";
-import { corrigirProposta, lerConfirmacao, normalizar } from "./tools";
+import { corrigirProposta, lerConfirmacao, normalizar, TEXTO_PARA_CONFIRMAR } from "./tools";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
 import { conduzirAssinatura, type FluxoAssinatura } from "./assinatura";
@@ -47,6 +48,10 @@ import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-con
 import { conduzirCredito, type CampoCredito, type FluxoCredito } from "./credito";
 import { conduzirCaptacao, type FluxoCaptacao, type SecaoDeExtracao } from "./captacao";
 import { termoDeBusca } from "./localizar";
+import type { FluxoFormularioV2 } from "./formularios/estado";
+import type { FluxoCorrecaoTexto } from "./formularios/correcao-texto";
+import type { DocumentoLido, JanelaDeExtracao } from "./formularios/janela";
+import type { DepsDaPausa } from "./formularios/pausa";
 import {
   ESTRANGEIRO,
   juntarTelefone,
@@ -136,6 +141,8 @@ export type Fluxo =
   | FluxoCaptacao
   | FluxoAtividade
   | FluxoPreferencias
+  | FluxoFormularioV2
+  | FluxoCorrecaoTexto
   | {
       kind: "escolha";
       natureza?: "venda" | "locacao";
@@ -227,6 +234,22 @@ export interface DepsDoFluxo {
   /** Captação (P9): extrator de UMA seção (imóvel, endereço, pessoa). Opcional: sem ele, só o código interpreta. */
   extrairCaptacao?(texto: string, secao: SecaoDeExtracao): Promise<Record<string, unknown> | null>;
   /**
+   * v2 (T4): a janela das últimas mensagens do corretor + documentos lidos, para
+   * o extrator juntar o que veio em pedaços. SÓ existe com a feature
+   * `formularios_v2` (sem ela o v1 roda como sempre, sem estes dois métodos).
+   * `mensagensAnteriores` = quantas mensagens do corretor ANTES da atual são deste
+   * fluxo (`FluxoFormularioV2.mensagensDoFluxo`): o que veio antes de o fluxo abrir
+   * nunca entra na janela.
+   * Tudo que vai ao modelo sai tokenizado; os `args` voltam destokenizados.
+   */
+  janelaDoTurno?(mensagensAnteriores: number, lidos?: DocumentoLido[]): JanelaDeExtracao;
+  extrairComJanela?(
+    janela: JanelaDeExtracao,
+    tool: { name: string; description: string; parameters: Record<string, unknown> }
+  ): Promise<Record<string, unknown> | null>;
+  /** v2 (T10): a fila da pausa antes da ficha (outbox com `deliverAfter`). Sem ela a ficha sai na hora. */
+  pausa?: DepsDaPausa;
+  /**
    * Preferências de aviso (M3): leitura e PATCH das preferências da PRÓPRIA pessoa (telefone do turn).
    * `null` = sem resposta utilizável. Opcional: sem ele, o fluxo responde que não conseguiu.
    */
@@ -248,6 +271,17 @@ export interface ContextoDoTurno {
   orgName?: string;
   /** Thread do checkpoint — AAD do cofre da ficha de crédito. */
   thread?: string;
+  /** v2: a org da conversa (escolha da versão do fluxo ao abrir). */
+  orgId?: string;
+  /** v2 (T10): chave da pessoa (`JSON.stringify([orgId, subject])`) — agrupa/cancela a ficha agendada. */
+  subjectKey?: string;
+  /** v2: quem fala pode escrever (RBAC de identidade). `false` = o "sim" nunca grava. */
+  podeEscrever?: boolean;
+  /**
+   * O `button_payload` da entrada. Numa resposta de Flow do Max é `flow:<token>` (`fv2:<passo>:<nonce>`):
+   * o condutor da revisão só aceita a resposta se o token for o do último envio.
+   */
+  botao?: string | null;
 }
 
 /**
@@ -255,7 +289,17 @@ export interface ContextoDoTurno {
  * para o atendimento normal e o fluxo continua como estava.
  */
 export type PassoDoFluxo =
-  | { reply: string; fluxo: Fluxo | null; evento: string; liberar?: false }
+  | {
+      reply: string;
+      fluxo: Fluxo | null;
+      evento: string;
+      liberar?: false;
+      /**
+       * v2 (T10): o turno coletou e não responde (a ficha sai pelo outbox depois da pausa).
+       * `reply` vem vazio; o grafo reage com 👍 (Max) e não manda texto.
+       */
+      silencioso?: true;
+    }
   | { liberar: true; fluxo: Fluxo | null; evento: string; reply?: undefined };
 
 // ─── Textos (templates) ───────────────────────────────────────────────────
@@ -271,7 +315,7 @@ const TEXTO_VENDA_OU_LOCACAO = "É de *venda* ou de *locação*?";
 export const TEXTO_FLUXO_CANCELADO = "Beleza, parei por aqui. Nada foi criado.";
 
 /** Leitura sem resposta: nada foi escrito, então pode dizer que não conseguiu. */
-const TEXTO_SEM_RESPOSTA = "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
+export const TEXTO_SEM_RESPOSTA = "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
 
 /**
  * ESCRITA sem resposta: o servidor pode ter gravado antes de cair. Não afirma
@@ -280,7 +324,7 @@ const TEXTO_SEM_RESPOSTA = "Não consegui falar com o sistema agora. Tenta de no
 export const TEXTO_ESCRITA_INCERTA =
   "O sistema não respondeu e não sei se deu certo. Responda *SIM* de novo para conferir — não duplica.";
 
-const textoSemPermissao = (): string =>
+export const textoSemPermissao = (): string =>
   `Sua conta não tem permissão para isso pelo ${nomeDoAgente()}. Fale com o administrador da imobiliária.`;
 
 /**
@@ -305,7 +349,7 @@ function semModelo(body: Record<string, unknown>): boolean {
   return body.pdfIndisponivel === "sem_modelo";
 }
 
-const TEXTO_NAO_ENCONTREI = "Não encontrei essa proposta para você no sistema.";
+export const TEXTO_NAO_ENCONTREI = "Não encontrei essa proposta para você no sistema.";
 
 const TEXTO_POLITICA_INDISPONIVEL =
   "Não consegui conferir sua permissão agora. Tenta de novo em instantes.";
@@ -538,6 +582,28 @@ function conferirCampo(
   if (candidatos.some((c) => igual(c, valor))) return valor;
   return candidatos.length === 1 ? candidatos[0] : undefined;
 }
+const UNIDADE = "apartamento|apto|ap|unidade|bloco|sala|casa|conjunto|conj|loja|andar|fundos|cobertura|torre";
+const COMPLEMENTO_DITADO = new RegExp(
+  `\\bcomplemento(?:\\s+d[oa]\\s+im[oó]vel)?(?:\\s*[:=]\\s*|\\s+(?:é|e|eh|será|sera|ficou|fica|para|pra|passa a ser|deve ser|vai ser)\\s+|\\s+(?=(?:${UNIDADE})\\b))(.{1,60}?)\\s*[.!]?\\s*$`,
+  "iu"
+);
+/**
+ * O complemento que a pessoa escreveu por extenso ("complemento é apartamento 1").
+ * Determinístico de propósito: é o que vale quando o extrator não devolve nada
+ * ou copia o valor antigo. Pergunta ("o que é complemento?") não casa.
+ */
+export function complementoDitado(texto: string): string | null {
+  const m = texto.trim().match(COMPLEMENTO_DITADO);
+  if (!m) return null;
+  const valor = m[1]
+    .split(/\s+e\s+(?:o|a)\s+(?:valor|preco|preço|telefone|celular|e-?mail|cpf|nome|endereco|endereço|sinal|comissao|comissão|prazo)\b/i)[0]
+    .replace(/[\s.,;!]+$/, "")
+    .trim();
+  if (!valor || /[?]/.test(valor) || valor.length > 40) return null;
+  if (/^(que|o que|quando|como|qual|quais)\b/i.test(valor)) return null;
+  return valor;
+}
+
 export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaProposta {
   // `(?<!\d)`: sem fronteira à esquerda o regex casava DENTRO do CPF ("52998224725"
   // → telefone "2998224725"; smoke 26/10).
@@ -1008,6 +1074,28 @@ function manterChaveDeEnvio(f: { chave?: Chave }): Chave | undefined {
 export function rebaixarFluxo(f: Fluxo | null | undefined): Fluxo | null {
   if (!f) return null;
   if (f.kind === "continuidade") return { ...f, etapa: ["concluida", "selecao"].includes(f.etapa) ? f.etapa : "resumo" };
+  // v2: a ficha mostrada é a etapa em que o próximo "sim" grava. Uma interrupção (pergunta, outro
+  // assunto) a desfaz: o "sim" seguinte exige ficha nova. Com `chave` (escrita incerta) a etapa fica.
+  // O agendamento da ficha some em QUALQUER etapa: num turno interrompido o "sim" não pode valer
+  // como "viu a ficha" por causa de um horário que ninguém confirmou (C1).
+  if (f.kind === "proposta_v2") {
+    const semAgendada = f.fichaAgendadaEm !== undefined ? { ...f, fichaAgendadaEm: undefined } : f;
+    // PR-D: os cartões do envio (testemunhas, canal, regerar, resumo) também são etapas em que o próximo
+    // "sim" escreve. Uma interrupção os desfaz: o "sim" seguinte cai numa lista, nunca grava nem envia.
+    // Com `chave` (escrita incerta) o passo fica: o "sim" seguinte repete a mesma chave.
+    const as = semAgendada.assinatura;
+    if (as && !f.chave) {
+      if (as.passo === "testemunhas_cartao") return { ...semAgendada, assinatura: { ...as, passo: "testemunhas", testemunhas: undefined } };
+      if (as.passo === "canal_cartao" || as.passo === "regerar" || as.passo === "envio_cartao") {
+        return { ...semAgendada, etapa: "assinatura", assinatura: { ...as, passo: "tipo", mostrado: undefined } };
+      }
+    }
+    return f.etapa === "ficha" && !f.chave ? { ...semAgendada, etapa: "compor" } : semAgendada;
+  }
+  // Correção de texto (PR-E): toda etapa pode levar a um "sim" que escreve no documento (criar o Doc,
+  // aplicar). Uma interrupção desfaz o fluxo (o "sim" seguinte exige sugestão nova); com `chave`
+  // (apply sem resposta) o fluxo fica, para o SIM repetir a mesma chave.
+  if (f.kind === "correcao_texto") return f.chave ? f : null;
   if (f.kind === "gestao") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
   if (f.kind === "assinatura") return { ...f, etapa: f.etapa === "confirmacao" ? "resumo" : f.etapa };
   // Atividade (M1): a confirmação volta ao resumo; com `chave` (escrita incerta) a etapa fica.
@@ -1321,10 +1409,33 @@ export async function retomarEnvio(
   };
   const ajuste = prepararCpfDaRetomada(retomado, ctx.texto, ctx);
   if (ajuste) return ajuste;
+  // v2 (PR-D): só com a flag da org ligada E o servidor dizendo `fluxoV2`; qualquer outra coisa devolve
+  // null SEM chamar nada e o v1 segue byte a byte. Uma escrita incerta do v1 (`chave`) nunca vai para o v2.
+  if (!retomado.chave) {
+    const v2 = await tentarEnvioV2(alvo, ctx, deps);
+    if (v2) return v2;
+  }
   const passo = (await oferecerMetodos(retomado, ctx, deps)) as Extract<PassoDoFluxo, { reply: string }>;
   return alvo.codigo && passo.fluxo
     ? { ...passo, reply: `Retomando a proposta ${rotuloDoRascunho(alvo)}.\n${passo.reply}` }
     : passo;
+}
+
+/**
+ * A entrada do envio v2 (PR-D) a partir do v1: `null` = segue o v1 (flag da org desligada, servidor sem
+ * `fluxoV2` para a proposta, sem as deps da janela ou sem a política de envio). O módulo é carregado sob
+ * demanda para o v1 não depender do v2 e para o condutor (que importa este arquivo) não formar ciclo.
+ */
+async function tentarEnvioV2(
+  alvo: { id: string; codigo?: string; titulo?: string },
+  ctx: ContextoDoTurno,
+  deps: DepsDoFluxo
+): Promise<Extract<PassoDoFluxo, { reply: string }> | null> {
+  if (!ctx.orgId) return null;
+  const { abrirEnvioV2 } = await import("./formularios/envio-v2");
+  const r = await abrirEnvioV2({ proposalId: alvo.id, ctx, deps });
+  if (!r) return null;
+  return alvo.codigo && r.fluxo ? { ...r, reply: `Retomando a proposta ${rotuloDoRascunho(alvo)}.\n${r.reply}` } : r;
 }
 
 function prepararCpfDaRetomada(retomado: FluxoProposta, texto: string, ctx: ContextoDoTurno): Extract<PassoDoFluxo, { reply: string }> | null {
@@ -1414,6 +1525,8 @@ export async function iniciarFluxo(
     nomeCliente?: string;
     policy: readonly Capability[];
     agora: number;
+    /** v2: contexto do turno (org, thread, messageId) para abrir a proposta no condutor novo. */
+    ctx?: ContextoDoTurno;
   },
   deps: DepsDoFluxo
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
@@ -1438,7 +1551,7 @@ export async function iniciarFluxo(
     // Prod 17/11: "proposta de compra … compradores …, valor R$ 800.000" ainda recebia o "1 ou 2". Só o
     // pedido ambíguo ("gera uma proposta pra mim") pergunta; o que já diz o tipo ou traz os dados vai direto.
     if (params.tipo === "proposta" && params.pedido && pedidoClaroDeProposta(params.pedido)) {
-      return iniciarProposta(params.natureza ?? naturezaDoPedido(params.pedido), params.pedido, params.agora, deps);
+      return iniciarProposta(params.natureza ?? naturezaDoPedido(params.pedido), params.pedido, params.agora, deps, undefined, undefined, params.ctx);
     }
     return {
       reply: TEXTO_ESCOLHA,
@@ -1446,7 +1559,7 @@ export async function iniciarFluxo(
       evento: "fluxo_escolha",
     };
   }
-  if (podeProposta) return iniciarProposta(params.natureza, params.pedido, params.agora, deps);
+  if (podeProposta) return iniciarProposta(params.natureza, params.pedido, params.agora, deps, undefined, undefined, params.ctx);
   if (podeNegocio) {
     if (params.natureza) return carregarCamposDoNegocio(params.natureza, params.agora, deps, tituloDoPedido);
     return {
@@ -1470,7 +1583,9 @@ export async function iniciarProposta(
   agora: number,
   deps: DepsDoFluxo,
   prefill?: DadosDaProposta,
-  leaseClientId?: string
+  leaseClientId?: string,
+  /** v2: o contexto do turno. Sem ele (ou sem feature/servidor) a proposta abre no v1, como sempre. */
+  ctx?: ContextoDoTurno
 ): Promise<Extract<PassoDoFluxo, { reply: string }>> {
   if (!natureza) {
     return {
@@ -1478,6 +1593,12 @@ export async function iniciarProposta(
       fluxo: { kind: "proposta", etapa: "natureza", dados: {}, pedido, leaseClientId, atualizadoEm: agora },
       evento: "fluxo_proposta",
     };
+  }
+  // v2 (D3): a versão é decidida aqui, uma vez. Crédito aprovado (prefill/lead) segue no v1.
+  if (ctx?.orgId && !prefill && !leaseClientId && deps.janelaDoTurno && deps.extrairComJanela) {
+    const { abrirV2 } = await import("./formularios/condutor");
+    const v2 = await abrirV2(natureza, pedido, agora, deps, ctx);
+    if (v2) return v2;
   }
   // Antes de pedir qualquer dado: há modelo ativo para gerar o PDF? Sem
   // resposta do servidor o fluxo segue — o `proposal.create` avisa de novo.
@@ -1565,7 +1686,7 @@ export function aposRetomada<T extends Fluxo | null>(f: T): T {
 }
 
 export function fluxoExpirou(f: Fluxo, agora: number): boolean {
-  const longo = (f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave) || f.kind === "credito" || (f.kind === "captacao" && (!!f.captacaoId || !!f.chave));
+  const longo = (f.kind === "proposta" && !!f.propostaId && f.etapa === "ajustes" && !f.chave) || (f.kind === "proposta_v2" && !!f.proposalId) || f.kind === "credito" || (f.kind === "captacao" && (!!f.captacaoId || !!f.chave));
   const ttl = longo ? FLUXO_TTL_POS_RASCUNHO_MS : FLUXO_TTL_MS;
   return agora - f.atualizadoEm > ttl;
 }
@@ -1598,6 +1719,25 @@ export async function conduzirFluxo(
   // viola o fail-closed da governança do Max. `false` replica o default
   // seguro de qualquer capability nova.
   if (fluxo.kind === "captacao") return conduzirCaptacao(fluxo, ctx, deps, false);
+  // Formulários v2: o condutor chega no PR-C. Até lá nenhum caminho cria este
+  // fluxo (a feature `formularios_v2` nasce desligada); se um checkpoint v2
+  // aparecer, só libera o turno e limpa o fluxo (D3: nunca quebra a conversa).
+  // Não cria fluxo v1: ninguém pediu uma `coleta`, e o checkpoint não leva `dados`.
+  if (fluxo.kind === "proposta_v2") {
+    const { conduzirV2 } = await import("./formularios/condutor");
+    return conduzirV2(fluxo, ctx, deps);
+  }
+  // Correção de texto (PR-E): import tardio, o módulo importa daqui as frases fixas.
+  if (fluxo.kind === "correcao_texto") {
+    // Fail-closed: a feature saiu do ar com o fluxo aberto, nada mais é conduzido (nem escrita incerta).
+    // R34: nunca o modelo livre num "sim" de escrita nem em escrita incerta (frase fixa em `respostaRecursoDesligado`).
+    if (!featureEnabled("formularios_v2", ctx.orgId)) {
+      const { respostaRecursoDesligado } = await import("./formularios/correcao-texto");
+      return respostaRecursoDesligado(fluxo, ctx);
+    }
+    const { conduzirCorrecaoTexto } = await import("./formularios/correcao-texto");
+    return conduzirCorrecaoTexto(fluxo, ctx, deps);
+  }
   if (querCancelar(ctx.texto)) {
     return { reply: textoCancelado(fluxo), fluxo: null, evento: "fluxo_cancelado" };
   }
@@ -1613,7 +1753,7 @@ export async function conduzirFluxo(
     // Pergunta de 1/2 sem resposta: ENCERRA. Pendurada, ela capturava um "2"
     // dito minutos depois para outra coisa e criava um formulário (prod 07/10).
     if (!escolha) return { liberar: true, fluxo: null, evento: "escolha_encerrada" };
-    if (escolha === "proposta") return iniciarProposta(fluxo.natureza, fluxo.pedido, agora, deps);
+    if (escolha === "proposta") return iniciarProposta(fluxo.natureza, fluxo.pedido, agora, deps, undefined, undefined, ctx);
     const tipo = fluxo.natureza ?? lerNatureza(ctx.texto) ?? undefined;
     if (!tipo) {
       return {
@@ -1632,7 +1772,7 @@ export async function conduzirFluxo(
 // ── Negócio ──
 
 type FluxoNegocio = Extract<Fluxo, { kind: "negocio" }>;
-type FluxoProposta = Extract<Fluxo, { kind: "proposta" }>;
+export type FluxoProposta = Extract<Fluxo, { kind: "proposta" }>;
 
 async function carregarCamposDoNegocio(
   tipo: "venda" | "locacao",
@@ -1734,6 +1874,8 @@ async function conduzirNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: Deps
     return { reply: resumoDoNegocio({ ...f, titulo: nome }), fluxo: { ...f, titulo: nome, etapa: "revisao", chave: undefined, atualizadoEm: agora }, evento: "negocio_revisao" };
   }
   if (f.etapa === "revisao" && resposta === "sim") return criarNegocio(f, ctx, deps);
+  // "ok"/"blz" não autorizam a escrita (W46): a pergunta volta, nada é criado.
+  if (f.etapa === "revisao" && resposta === "vago") return { reply: TEXTO_PARA_CONFIRMAR, fluxo: { ...f, atualizadoEm: agora }, evento: "negocio_confirmar" };
   // Correção do nome no resumo: "nome: Casa da Praia" (o extrator só conhece as chaves do popup).
   const usaPadrao=(f.campos??[]).some(c=>c.chave.startsWith('titleParts.'));
   const novoNome = !usaPadrao && (f.etapa === "revisao" || f.etapa === "campos") ? tituloDeclarado(ctx.texto) ?? /^\s*nome\s*[:\-]\s*(.+)$/i.exec(ctx.texto)?.[1]?.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
@@ -1835,13 +1977,19 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     // dito depois para outra coisa (mesmo padrão da escolha 1/2).
     if (!escolhido) return { liberar: true, fluxo: null, evento: "selecao_encerrada" };
     const retomado: FluxoProposta = { ...f, etapa: "ajustes", propostaId: escolhido.id, codigo: escolhido.codigo, candidatos: undefined, pedido: undefined, atualizadoEm: agora };
-    return prepararCpfDaRetomada(retomado, f.pedido ?? "", ctx) ?? oferecerMetodos(retomado, ctx, deps);
+    const ajusteDaSelecao = prepararCpfDaRetomada(retomado, f.pedido ?? "", ctx);
+    if (ajusteDaSelecao) return ajusteDaSelecao;
+    if (!retomado.chave) {
+      const v2 = await tentarEnvioV2(escolhido, ctx, deps);
+      if (v2) return v2;
+    }
+    return oferecerMetodos(retomado, ctx, deps);
   }
 
   if (f.etapa === "natureza" || (!f.natureza && !f.propostaId)) {
     const natureza = lerNatureza(ctx.texto);
     if (!natureza) return { liberar: true, fluxo: null, evento: "natureza_encerrada" };
-    return iniciarProposta(natureza, f.pedido, agora, deps, undefined, f.leaseClientId);
+    return iniciarProposta(natureza, f.pedido, agora, deps, undefined, f.leaseClientId, ctx);
   }
 
   // O `proposal.create` recusou o vínculo com o lead: este "sim"/"não" é da
@@ -1850,6 +1998,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     if (resposta === "nao") {
       return { reply: "Certo, não abri a proposta. A análise fica na tela do lead.", fluxo: null, evento: "proposta_lead_recusada" };
     }
+    if (resposta === "vago") return { reply: TEXTO_PARA_CONFIRMAR, fluxo: { ...f, atualizadoEm: agora }, evento: "proposta_confirmar" };
     if (resposta !== "sim") return { liberar: true, fluxo: f, evento: "proposta_lead_oferta_liberada" };
     const g: FluxoProposta = { ...f, leaseClientId: undefined, ofertaSemVinculo: undefined, leadIncompleto: undefined, chave: undefined, atualizadoEm: agora };
     const falta = faltandoNaProposta(g.dados);
@@ -1863,6 +2012,10 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   if (f.etapa === "revisao" && resposta === "sim") return criarRascunho(f, ctx, deps);
   if (f.etapa === "revisao_ajuste" && resposta === "sim") return atualizarRascunho(f, ctx, deps);
+  // "ok"/"blz"/"👍" não autorizam escrita (W46): a pergunta volta, nada é gravado.
+  if ((f.etapa === "revisao" || f.etapa === "revisao_ajuste") && resposta === "vago") {
+    return { reply: TEXTO_PARA_CONFIRMAR, fluxo: { ...f, atualizadoEm: agora }, evento: "proposta_confirmar" };
+  }
   if ((f.etapa === "revisao" || f.etapa === "revisao_ajuste") && resposta === "nao") {
     return {
       reply:
@@ -1930,6 +2083,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
 
   if (f.etapa === "envio") {
     if (resposta === "sim") return enviar(f, ctx, deps);
+    if (resposta === "vago") return { reply: TEXTO_PARA_CONFIRMAR, fluxo: { ...f, atualizadoEm: agora }, evento: "envio_confirmar" };
     if (resposta === "nao") {
       return {
         reply: `Ok, não enviei. O rascunho${f.codigo ? ` ${f.codigo}` : ""} continua salvo no sistema.`,
@@ -1978,7 +2132,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
           : { reply: "Ainda preciso de um CPF válido do proponente. Me mande o CPF correto para ajustar o rascunho.", fluxo: f, evento: "cpf_pendente" };
       }
     }
-    const pareceAjuste = /\d|@|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|imovel|rua|bairro|cidade|numero|cpf|telefone|celular|e-?mail|nome|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal)\b/.test(
+    const pareceAjuste = /\d|@|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|imovel|rua|bairro|cidade|numero|complemento|cpf|telefone|celular|e-?mail|nome|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal)\b/.test(
       normalizar(ctx.texto)
     ) || !!campoSoNaTela(ctx.texto);
     // Com dado novo, o ajuste vem ANTES do envio: "corrige o e-mail e manda
@@ -2039,6 +2193,14 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
     const { nome: _nome, ...semNome } = novos.proponente;
     if (Object.keys(semNome).length) novos.proponente = semNome;
     else delete novos.proponente;
+  }
+  // W46: "complemento é apartamento 1" é correção de UM campo, dita por extenso.
+  // O extrator às vezes devolve nada (ou copia o complemento antigo) e o fluxo
+  // liberava para o modelo, que prometia "ajusto" sem gravar. O que a pessoa
+  // escreveu vale — e o resumo é remontado para o SIM.
+  if (!avulso) {
+    const complemento = complementoDitado(ctx.texto);
+    if (complemento) novos.imovel = { ...novos.imovel, complemento };
   }
   let dados = mesclarDados(f.dados, novos);
   if (nomePedido) dados = { ...dados, proponente: { ...(dados.proponente ?? {}), nome: nomePedido } };
@@ -2300,7 +2462,7 @@ function textoEnvio(f: FluxoProposta): string {
   );
 }
 
-async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+export async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   if (!ctx.policy.includes("proposal.send")) {
     if (ctx.politicaIndisponivel) return { reply: TEXTO_POLITICA_INDISPONIVEL, fluxo: f, evento: "politica_indisponivel" };
     return {
@@ -2354,7 +2516,7 @@ export const TEXTO_AVISO_SEM_ASSINATURA =
   "configurações de assinatura do sistema.";
 
 /** Bloqueios do `proposal.send` (contractmaker `CODIGO_DO_BLOQUEIO`) → fato + caminho. */
-const TEXTO_DO_BLOQUEIO: Record<string, string> = {
+export const TEXTO_DO_BLOQUEIO: Record<string, string> = {
   clicksign_nao_configurada:
     "Sua imobiliária ainda não tem a ClickSign conectada, então não dá para enviar para assinatura. " +
     "Um administrador conecta a conta nas configurações de assinatura do sistema.",

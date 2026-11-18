@@ -40,8 +40,9 @@ export interface InboundMessage {
   buttonPayload?: string | null;
   /**
    * Campos de uma resposta de WhatsApp Flow (`nfm_reply`), sem o `flow_token`.
-   * O `text` já traz a versão legível; este é o objeto bruto. Opcional e
-   * ainda sem consumidor: não é persistido na fila.
+   * O `text` já traz a versão legível ("campo: valor" por linha); este é o objeto bruto.
+   * Opcional e NÃO persistido na fila (guardaria CPF em jsonb): quem consome a resposta do
+   * Flow (revisão v2, `lib/meta-flow.ts::flowDoTexto`) relê o `text`, sempre validado.
    */
   flowResponse?: Record<string, unknown>;
 }
@@ -64,6 +65,24 @@ export interface OpcaoInterativa {
 export type Interativo =
   | { tipo: "botoes"; corpo: string; opcoes: OpcaoInterativa[]; imagemUrl?: string }
   | { tipo: "lista"; corpo: string; botao: string; opcoes: OpcaoInterativa[] };
+
+/**
+ * WhatsApp Flow (só Meta, `lib/meta-flow.ts`): `screen` + `data` pré-preenchidos, de um Flow
+ * publicado na WABA (`flowId`, env `MAX_FLOW_ID_*`). `corpo` é o texto da mensagem (a ficha
+ * numerada); quando a Meta recusa a forma, o texto equivalente vai no lugar. Nunca vai ao Newton.
+ * Tipo à parte de `Interativo` de propósito: botões/lista são derivados do texto e todo consumidor
+ * deles lê `opcoes`; o Flow só entra por quem o monta de propósito.
+ */
+export interface InterativoFlow {
+  tipo: "flow";
+  flowId: string;
+  screen: string;
+  data: Record<string, unknown>;
+  corpo?: string;
+  cta?: string;
+  /** Obrigatório: amarra a resposta ao envio (`fv2:<passo>:<nonce>`, `lib/meta-flow.ts`). Não é PII. */
+  flowToken: string;
+}
 
 /** Botão preenchido na hora do envio, na ordem em que o template os declara. */
 export type BotaoEnviado =
@@ -146,7 +165,7 @@ export interface TransportAdapter {
     imagemCabecalho?: string;
   }): Promise<SendResult>;
   /** Ausente quando `capabilities.interactive` é `false`. */
-  sendInteractive?(params: { to: string; interativo: Interativo; quoteMessageId?: string }): Promise<SendResult>;
+  sendInteractive?(params: { to: string; interativo: Interativo | InterativoFlow; quoteMessageId?: string }): Promise<SendResult>;
   /** Ausente quando `capabilities.reactions` é `false`. Lança em erro do provedor. */
   sendReaction?(params: { to: string; messageId: string; emoji: string }): Promise<SendResult>;
   /**
@@ -155,5 +174,30 @@ export interface TransportAdapter {
    */
   markReadTyping?(messageId: string): Promise<boolean>;
   connectionStatus(): Promise<ConnectionState>;
-  downloadMedia(ref: string): Promise<{ data: Buffer; contentType: string | null } | null>;
+  downloadMedia: DownloadMediaFn;
+}
+
+/** O que `downloadMedia` devolve quando a mídia chegou. */
+export interface MidiaBaixada {
+  data: Buffer;
+  contentType: string | null;
+}
+
+/** A mídia passou do teto (3 MB): só aparece quando o chamador pediu `distinguirTamanho`. */
+export interface MidiaGrandeDemais {
+  erro: "tamanho";
+}
+
+export interface OpcoesDeDownload {
+  /**
+   * `true` = a recusa POR TAMANHO volta como `{ erro: "tamanho" }` em vez de `null` (o grafo
+   * responde "grande demais", não "tente de novo"). Sem ele, tudo que não chegou é `null`.
+   * Os demais tropeços (404, host, tipo, vazio) são `null` nos dois modos.
+   */
+  distinguirTamanho?: boolean;
+}
+
+export interface DownloadMediaFn {
+  (ref: string): Promise<MidiaBaixada | null>;
+  (ref: string, opts: OpcoesDeDownload): Promise<MidiaBaixada | MidiaGrandeDemais | null>;
 }

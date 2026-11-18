@@ -29,3 +29,13 @@ export function captacaoEnvioLigado(): boolean {
 export function captacaoAutorizacaoLigada(): boolean {
   return LIGADO.test(process.env.MAX_CAPTACAO_AUTORIZACAO ?? "");
 }
+
+/**
+ * `MAX_OCR_TRANSCRIBE_FALLBACK` (default desligado, formulários v2 / T9): para a org SEM
+ * `document.read`, uma foto com legenda é transcrita (`/api/agents/media/transcribe`,
+ * `kind:"image"`) e o texto entra na janela de extração como `documento_lido`. Sem a
+ * env, a imagem segue "não lida" como antes (G5).
+ */
+export function ocrTranscribeFallbackLigado(): boolean {
+  return LIGADO.test(process.env.MAX_OCR_TRANSCRIBE_FALLBACK ?? "");
+}

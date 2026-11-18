@@ -88,6 +88,26 @@ describe("D3 — saída antecipada descarta a pendência", () => {
     30_000
   );
 
+  // T7: com a feature v2 ligada e SEM proposta v2 aberta, a foto continua na
+  // saída antecipada do G5 (frase fixa) e a pendência continua sendo descartada.
+  itDb("feature v2 ligada sem fluxo proposta_v2: a foto segue no G5 e descarta a pendência", async () => {
+    vi.stubEnv("MAX_FORMULARIOS_V2", "true");
+    vi.stubEnv("MAX_ROLLOUT_ORGS", JSON.stringify({ [CANDIDATO.orgId]: ["formularios_v2"] }));
+    try {
+      const phone = `55116${String(Math.floor(Math.random() * 1e8)).padStart(8, "0")}`;
+      const estado = await semear(phone);
+
+      const r = await runTurn(msg("image", phone));
+
+      expect(r.reply).toBe("Não leio imagens nem documentos por aqui. Para anexar, use o ImobPro.");
+      const depois = await estado();
+      expect(depois.pendingAction).toBeNull();
+      expect(depois.restoDaResposta).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, 30_000);
+
   itDb("o 'sim' depois da foto não cria nada", async () => {
     const phone = `55118${String(Math.floor(Math.random() * 1e8)).padStart(8, "0")}`;
     await semear(phone);

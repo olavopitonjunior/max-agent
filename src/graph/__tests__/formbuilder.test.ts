@@ -261,7 +261,8 @@ describe("propor", () => {
   });
 
   it("pergunta sobre processo não expõe a ferramenta", async () => {
-    await run("como funciona a assinatura do contrato?");
+    // "como funciona a assinatura do contrato?" agora é template (processo-assinatura.test.ts) e nem chega ao modelo.
+    await run("como funciona o prazo para o cliente assinar o contrato?");
 
     expect(llm).toHaveBeenCalledWith(
       expect.objectContaining({ tools: undefined })
@@ -549,8 +550,14 @@ describe("locação e proposta", () => {
 
 describe("matcher de confirmação", () => {
   it("aceita as formas que a pergunta induz", () => {
-    for (const t of ["sim", "SIM", "Sim.", "pode criar", "isso", "ok", "👍", "beleza"]) {
+    for (const t of ["sim", "SIM", "Sim.", "pode criar", "isso", "confirmo", "✅"]) {
       expect(lerConfirmacao(t), t).toBe("sim");
+    }
+  });
+
+  it("ok/blz/beleza/👍 são vagos: não confirmam escrita", () => {
+    for (const t of ["ok", "👍", "beleza", "blz", "certo"]) {
+      expect(lerConfirmacao(t), t).toBe("vago");
     }
   });
 

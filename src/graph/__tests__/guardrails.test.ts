@@ -546,6 +546,26 @@ describe("compose no grafo", () => {
     expect(r.draft).toBeNull();
   });
 
+  it("'ok' não autoriza a escrita pendente: a pendência fica e o SIM é pedido", async () => {
+    profile.mockResolvedValue({
+      enabled: true,
+      model: "x",
+      maxPolicy: { byRole: { "*": ["form.create", "proposal.create"] } },
+    });
+    const pendingAction = {
+      kind: "criar_documento",
+      args: { tipo: "venda", nomeCliente: "João Silva" },
+      askedAt: Date.now(),
+      askedForMessageId: "m0",
+    };
+
+    const r = await run("ok", { pendingAction });
+
+    expect(criar).not.toHaveBeenCalled();
+    expect(r.reply).toBe("Para confirmar, responda SIM.");
+    expect(r.pendingAction).toMatchObject({ kind: "criar_documento" });
+  });
+
   /**
    * Os outros caminhos de template atravessam o `compose` sem serem tocados —
    * inclusive o do kill switch, que agora passa por lá em vez de ir direto ao
