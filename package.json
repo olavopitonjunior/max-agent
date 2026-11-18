@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "eval:formularios-v2": "tsx scripts/eval-formularios-v2.ts",
     "db:migrate": "tsx scripts/migrate.ts",
     "templates:sync": "tsx scripts/templates-sync.ts"
   },

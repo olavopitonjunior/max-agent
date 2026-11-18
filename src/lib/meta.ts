@@ -38,6 +38,10 @@ import type {
   InboundKind,
   InboundMessage,
   Interativo,
+  InterativoFlow,
+  MidiaBaixada,
+  MidiaGrandeDemais,
+  OpcoesDeDownload,
   StatusCallback,
 } from "./transport/types";
 
@@ -117,13 +121,29 @@ export async function sendText(params: {
  */
 export async function sendInteractive(params: {
   to: string;
-  interativo: Interativo;
+  interativo: Interativo | InterativoFlow;
   quoteMessageId?: string;
 }): Promise<{ messageId: string | null }> {
   assertWhatsAppPilotRecipient(params.to);
   const i = params.interativo;
   const interactive =
-    i.tipo === "botoes"
+    i.tipo === "flow"
+      ? {
+          type: "flow",
+          body: { text: (i.corpo ?? "Revise os dados da proposta.").slice(0, 1024) },
+          action: {
+            name: "flow",
+            parameters: {
+              flow_message_version: "3",
+              flow_id: i.flowId,
+              flow_cta: (i.cta ?? "Revisar").slice(0, 30),
+              flow_token: i.flowToken,
+              flow_action: "navigate",
+              flow_action_payload: { screen: i.screen, data: i.data },
+            },
+          },
+        }
+      : i.tipo === "botoes"
       ? {
           type: "button",
           body: { text: i.corpo },
@@ -298,9 +318,18 @@ export async function markReadTyping(messageId: string): Promise<boolean> {
 /** Mesmo teto da Z-API — amarrado ao limite do transcribe do ImobPro. */
 export const MAX_MEDIA_BYTES = 3 * 1024 * 1024;
 
+export async function downloadMedia(ref: string): Promise<MidiaBaixada | null>;
+/** Com `distinguirTamanho`, a recusa por tamanho volta como `{ erro: "tamanho" }` (o grafo diz "grande demais"). */
 export async function downloadMedia(
-  ref: string
-): Promise<{ data: Buffer; contentType: string | null } | null> {
+  ref: string,
+  opts: OpcoesDeDownload
+): Promise<MidiaBaixada | MidiaGrandeDemais | null>;
+export async function downloadMedia(
+  ref: string,
+  opts?: OpcoesDeDownload
+): Promise<MidiaBaixada | MidiaGrandeDemais | null> {
+  // Passou do teto: só vira valor quando o chamador pediu; corpo vazio e o resto seguem `null`.
+  const grande = (): MidiaGrandeDemais | null => (opts?.distinguirTamanho ? { erro: "tamanho" } : null);
   if (!ref.startsWith(META_MEDIA_PREFIX)) {
     console.warn("[meta] referência de mídia que não é da Meta — ignorada");
     return null;
@@ -317,7 +346,7 @@ export async function downloadMedia(
     }
     if (typeof info.file_size === "number" && info.file_size > MAX_MEDIA_BYTES) {
       console.warn(`[meta] mídia grande demais (${info.file_size} bytes) — ignorada`);
-      return null;
+      return grande();
     }
 
     // A URL temporária também exige o token — sem ele a Meta devolve 401.
@@ -333,7 +362,7 @@ export async function downloadMedia(
     const data = Buffer.from(await res.arrayBuffer());
     if (data.byteLength === 0 || data.byteLength > MAX_MEDIA_BYTES) {
       console.warn(`[meta] mídia fora do limite (${data.byteLength} bytes)`);
-      return null;
+      return data.byteLength > MAX_MEDIA_BYTES ? grande() : null;
     }
     return { data, contentType: res.headers.get("content-type") ?? info.mime_type ?? null };
   } catch (err) {
@@ -676,6 +705,9 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
         kind = "text";
         text = flow.texto;
         flowResponse = flow.campos;
+        // O token do Flow do Max (`fv2:<passo>:<nonce>`) amarra a resposta ao envio: o condutor
+        // confere. Só os nossos: o de qualquer outro Flow não vira payload (como antes).
+        if (flow.token?.startsWith("fv2:")) buttonPayload = `flow:${flow.token}`.slice(0, 200);
       }
     }
     // Outro tipo interativo (sem reply nem nfm): `unknown`, mesmo destino.
@@ -702,10 +734,11 @@ function lerMensagem(m: unknown, nomes: Map<string, string>): InboundMessage | n
 
 /**
  * `interactive.nfm_reply.response_json` → campos preenchidos + texto legível.
- * O `flow_token` é do transporte, não da pessoa: sai. `null` quando não sobra
+ * O `flow_token` é do transporte, não da pessoa: sai do texto e dos campos (volta à parte, em
+ * `token`, para o `buttonPayload` dos Flows do Max). `null` quando não sobra
  * campo com valor (JSON inválido, não-objeto, vazio ou só o token).
  */
-function lerFlowResponse(raw: unknown): { campos: Record<string, unknown>; texto: string } | null {
+function lerFlowResponse(raw: unknown): { campos: Record<string, unknown>; texto: string; token: string | null } | null {
   if (typeof raw !== "string") return null;
   let parsed: unknown;
   try {
@@ -716,6 +749,7 @@ function lerFlowResponse(raw: unknown): { campos: Record<string, unknown>; texto
   if (!isRec(parsed)) return null;
   const campos: Record<string, unknown> = {};
   const linhas: string[] = [];
+  const token = typeof parsed.flow_token === "string" ? parsed.flow_token : null;
   for (const [k, v] of Object.entries(parsed)) {
     if (k === "flow_token") continue;
     const legivel = valorLegivel(v);
@@ -724,7 +758,7 @@ function lerFlowResponse(raw: unknown): { campos: Record<string, unknown>; texto
     linhas.push(`${k}: ${legivel}`);
   }
   // Mesmo teto do texto digitado: Flow nosso, mas o texto vai ao modelo.
-  return linhas.length > 0 ? { campos, texto: linhas.join("\n").slice(0, MAX_TEXT_CHARS) } : null;
+  return linhas.length > 0 ? { campos, texto: linhas.join("\n").slice(0, MAX_TEXT_CHARS), token } : null;
 }
 
 function valorLegivel(v: unknown): string {

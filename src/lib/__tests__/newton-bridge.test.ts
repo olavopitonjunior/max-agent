@@ -104,6 +104,214 @@ describe("newtonBridgeAdapter: capacidades", () => {
   });
 });
 
+describe("newtonBridgeAdapter.downloadMedia", () => {
+  const URL_OK = "https://media.zapi.example/instances/X/segredo-do-cliente/foto.jpeg";
+  const REF = `zapi:${URL_OK}`;
+  const MB3 = 3 * 1024 * 1024;
+  const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60)]);
+
+  beforeEach(() => {
+    vi.stubEnv("NEWTON_MEDIA_HOSTS", "media.zapi.example");
+  });
+
+  function resposta(corpo: Buffer, init: ResponseInit = {}) {
+    return new Response(new Uint8Array(corpo), { status: 200, ...init });
+  }
+
+  it("ref que não é zapi: nem chega à rede", async () => {
+    expect(await newtonBridgeAdapter.downloadMedia("meta:123")).toBeNull();
+    expect(await newtonBridgeAdapter.downloadMedia(URL_OK)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("host fora da allowlist, http, IP interno e host com @ não são baixados", async () => {
+    const proibidas = [
+      "zapi:https://evil.example/a.jpg",
+      "zapi:http://media.zapi.example/a.jpg",
+      "zapi:https://127.0.0.1/a.jpg",
+      "zapi:https://localhost/a.jpg",
+      "zapi:https://media.zapi.example@evil.example/a.jpg",
+    ];
+    for (const ref of proibidas) expect(await newtonBridgeAdapter.downloadMedia(ref)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("allowlist vazia recusa tudo, sem rede", async () => {
+    vi.stubEnv("NEWTON_MEDIA_HOSTS", "");
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("os bytes mandam, não o cabeçalho: JPEG com octet-stream vira image/jpeg", async () => {
+    fetchMock.mockResolvedValue(resposta(JPEG, { headers: { "content-type": "application/octet-stream" } }));
+    const r = await newtonBridgeAdapter.downloadMedia(REF);
+    expect(r?.contentType).toBe("image/jpeg");
+    expect(r?.data.equals(JPEG)).toBe(true);
+  });
+
+  it("HTML com content-type application/pdf é recusado", async () => {
+    fetchMock.mockResolvedValue(resposta(Buffer.from("<html><script>x</script></html>"), { headers: { "content-type": "application/pdf" } }));
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+  });
+
+  it("PDF de verdade vale application/pdf mesmo declarado como imagem", async () => {
+    fetchMock.mockResolvedValue(resposta(Buffer.from("%PDF-1.7\n1 0 obj"), { headers: { "content-type": "image/jpeg" } }));
+    expect((await newtonBridgeAdapter.downloadMedia(REF))?.contentType).toBe("application/pdf");
+  });
+
+  it("404, 410 e fetch que lança devolvem null", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("nao", { status: 404 }));
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+    fetchMock.mockResolvedValueOnce(new Response("sumiu", { status: 410 }));
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+    fetchMock.mockRejectedValueOnce(new Error("socket hang up"));
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+  });
+
+  it("Content-Length acima de 3 MB devolve null sem ler o corpo", async () => {
+    const res = resposta(JPEG, { headers: { "content-length": String(MB3 + 1) } });
+    const arrayBuffer = vi.spyOn(res, "arrayBuffer");
+    const getReader = vi.spyOn(res.body as ReadableStream, "getReader");
+    fetchMock.mockResolvedValue(res);
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(getReader).not.toHaveBeenCalled();
+  });
+
+  it("sem Content-Length: 3 MB + 1 byte devolve null; exatamente 3 MB devolve o buffer", async () => {
+    const com = (n: number) => Buffer.concat([JPEG, Buffer.alloc(n - JPEG.length)]);
+    fetchMock.mockResolvedValueOnce(resposta(com(MB3 + 1)));
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+    fetchMock.mockResolvedValueOnce(resposta(com(MB3)));
+    const r = await newtonBridgeAdapter.downloadMedia(REF);
+    expect(r?.data.byteLength).toBe(MB3);
+  });
+
+  it("corpo que passa do teto no meio do stream é cortado sem ler tudo", async () => {
+    let lidos = 0;
+    const corpo = new ReadableStream<Uint8Array>({
+      pull(c) {
+        lidos += 1;
+        c.enqueue(new Uint8Array(1024 * 1024));
+        if (lidos > 100) c.close();
+      },
+    });
+    fetchMock.mockResolvedValue(new Response(corpo, { status: 200 }));
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+    expect(lidos).toBeLessThan(10);
+  });
+
+  it("corpo vazio devolve null", async () => {
+    fetchMock.mockResolvedValue(resposta(Buffer.alloc(0)));
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+  });
+
+  // Rodada 1, I3: o ADAPTADOR REAL diz que recusou por tamanho (o grafo responde "grande demais");
+  // sem o pedido explícito segue `null`, como os chamadores antigos esperam.
+  describe("distinguirTamanho (I3)", () => {
+    const PEDIDO = { distinguirTamanho: true } as const;
+
+    it("Content-Length acima de 3 MB vira { erro: 'tamanho' }, sem ler o corpo", async () => {
+      const res = resposta(JPEG, { headers: { "content-length": String(MB3 + 1) } });
+      const getReader = vi.spyOn(res.body as ReadableStream, "getReader");
+      fetchMock.mockResolvedValue(res);
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toEqual({ erro: "tamanho" });
+      expect(getReader).not.toHaveBeenCalled();
+    });
+
+    it("sem Content-Length, 3 MB + 1 byte vira { erro: 'tamanho' }; exatamente 3 MB devolve o buffer", async () => {
+      const com = (n: number) => Buffer.concat([JPEG, Buffer.alloc(n - JPEG.length)]);
+      fetchMock.mockResolvedValueOnce(resposta(com(MB3 + 1)));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toEqual({ erro: "tamanho" });
+      fetchMock.mockResolvedValueOnce(resposta(com(MB3)));
+      const r = await newtonBridgeAdapter.downloadMedia(REF, PEDIDO);
+      expect(r && "data" in r ? r.data.byteLength : -1).toBe(MB3);
+    });
+
+    it("corpo que estoura no meio do stream vira { erro: 'tamanho' }", async () => {
+      let lidos = 0;
+      const corpo = new ReadableStream<Uint8Array>({
+        pull(c) {
+          lidos += 1;
+          c.enqueue(new Uint8Array(1024 * 1024));
+          if (lidos > 100) c.close();
+        },
+      });
+      fetchMock.mockResolvedValue(new Response(corpo, { status: 200 }));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toEqual({ erro: "tamanho" });
+    });
+
+    it("sem o pedido, a mesma recusa continua null", async () => {
+      fetchMock.mockResolvedValue(resposta(JPEG, { headers: { "content-length": String(MB3 + 1) } }));
+      expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+    });
+
+    it("o que NÃO é tamanho segue null: corpo vazio, 404, host fora da allowlist, tipo desconhecido", async () => {
+      fetchMock.mockResolvedValueOnce(resposta(Buffer.alloc(0)));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toBeNull();
+      fetchMock.mockResolvedValueOnce(new Response("nao", { status: 404 }));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toBeNull();
+      expect(await newtonBridgeAdapter.downloadMedia("zapi:https://evil.example/a.jpg", PEDIDO)).toBeNull();
+      fetchMock.mockResolvedValueOnce(resposta(Buffer.from("<html>x</html>")));
+      expect(await newtonBridgeAdapter.downloadMedia(REF, PEDIDO)).toBeNull();
+    });
+
+    it("o log da recusa por tamanho segue sem a URL (só host e motivo)", async () => {
+      const espioes = (["warn", "error", "log", "info"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+      try {
+        fetchMock.mockResolvedValue(resposta(JPEG, { headers: { "content-length": String(MB3 + 1) } }));
+        await newtonBridgeAdapter.downloadMedia(REF, PEDIDO);
+        const impresso = espioes.flatMap((e) => e.mock.calls).map((c) => c.map(String).join(" ")).join("\n");
+        expect(impresso).not.toContain("segredo-do-cliente");
+        expect(impresso).toContain("media.zapi.example");
+      } finally {
+        espioes.forEach((e) => e.mockRestore());
+      }
+    });
+  });
+
+  it("redirect: 302 devolve null, com redirect manual e sem Authorization", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 302, headers: { location: "https://evil.example/x" } }));
+    expect(await newtonBridgeAdapter.downloadMedia(REF)).toBeNull();
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.redirect).toBe("manual");
+    expect(Object.keys(init.headers ?? {}).map((k) => k.toLowerCase())).not.toContain("authorization");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("o pedido não leva o token do bridge nem cookie", async () => {
+    fetchMock.mockResolvedValue(resposta(JPEG));
+    await newtonBridgeAdapter.downloadMedia(REF);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(URL_OK);
+    expect(JSON.stringify(init)).not.toContain("tok-teste");
+    expect(init.method ?? "GET").toBe("GET");
+  });
+
+  it("nenhum log traz a URL: só o host e o motivo", async () => {
+    const espioes = (["warn", "error", "log", "info"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+    try {
+      fetchMock.mockResolvedValueOnce(new Response("x", { status: 404 }));
+      await newtonBridgeAdapter.downloadMedia(REF);
+      fetchMock.mockResolvedValueOnce(resposta(Buffer.from("<html>")));
+      await newtonBridgeAdapter.downloadMedia(REF);
+      fetchMock.mockResolvedValueOnce(resposta(JPEG, { headers: { "content-length": String(MB3 + 1) } }));
+      await newtonBridgeAdapter.downloadMedia(REF);
+      // O wrapper de timeout põe host+caminho na mensagem do erro: não pode vazar.
+      fetchMock.mockRejectedValueOnce(new Error(`timeout de 15000ms em media.zapi.example/instances/X/segredo-do-cliente/foto.jpeg`));
+      await newtonBridgeAdapter.downloadMedia(REF);
+      await newtonBridgeAdapter.downloadMedia("zapi:https://evil.example/instances/X/segredo-do-cliente/foto.jpeg");
+      const saida = espioes.flatMap((s) => s.mock.calls.flat()).join(" ");
+      expect(saida).not.toContain("segredo-do-cliente");
+      expect(saida).not.toContain("foto.jpeg");
+      expect(saida).toContain("media.zapi.example");
+      expect(saida).toMatch(/http_404/);
+    } finally {
+      espioes.forEach((s) => s.mockRestore());
+    }
+  });
+});
+
 describe("idSintetico", () => {
   const base = { phone: "5511900000001", groupId: null, text: "oi", anexos: 0, agoraMs: 1_700_000_040_000 }; // início exato de um minuto
 
@@ -111,6 +319,18 @@ describe("idSintetico", () => {
     const a = idSintetico(base);
     expect(a).toMatch(/^newton:[0-9a-f]{40}$/);
     expect(idSintetico({ ...base, agoraMs: base.agoraMs + 30_000 })).toBe(a);
+  });
+
+  it("mídia: sem ela (ausente, null ou vazia) o id é o de hoje; com ela muda, e dois arquivos não colidem", () => {
+    const a = idSintetico(base);
+    expect(idSintetico({ ...base, midia: null })).toBe(a);
+    expect(idSintetico({ ...base, midia: "" })).toBe(a);
+    const foto1 = idSintetico({ ...base, midia: "zapi:https://media.zapi.example/1.jpeg" });
+    const foto2 = idSintetico({ ...base, midia: "zapi:https://media.zapi.example/2.jpeg" });
+    expect(foto1).not.toBe(a);
+    expect(foto1).not.toBe(foto2);
+    expect(idSintetico({ ...base, midia: "zapi:https://media.zapi.example/1.jpeg" })).toBe(foto1);
+    expect(foto1).toMatch(/^newton:[0-9a-f]{40}$/);
   });
 
   it("muda com minuto, texto, telefone, grupo ou anexos", () => {

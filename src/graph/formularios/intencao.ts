@@ -12,6 +12,11 @@
  * estão ("proposto", "contato"): sem ela, "foi proposto um valor" viraria
  * "foi proposta um valor" e "contato" viraria "contrato".
  *
+ * F5: proposta e captação aceitam até 2 edições ("porposa", "capitaao"), desde que a
+ * palavra comece pela mesma letra (a troca da inicial é quase sempre outra palavra:
+ * "resposta", "aposta", "capacitação", "adaptação"). A palavra-chave SOZINHA ("propsta",
+ * "uma captaçao") também é pedido de criação.
+ *
  * Quem decide se isto vale é o chamador, pela feature `formularios_v2`
  * (`toleranteNaOrg`): sem ela o v1 segue com o regex de hoje, byte a byte.
  *
@@ -55,6 +60,11 @@ const PALAVRAS_CHAVE = ["proposta", "propostas", "captacao", "captacoes", "formu
 const PROTEGIDAS = new Set([
   "proposto", "propostos", "proposito", "propositos", "proposital", "propositado",
   "captador", "captadora", "captadores",
+  // F5: reais a 1-2 edições (preposta = representante; posposta = adiada).
+  "preposta", "prepostas", "preposto", "prepostos", "posposta", "pospostas", "pospostos",
+  "capacitacao", "capacitacoes", "adaptacao", "adaptacoes", "formulacao", "formulacoes",
+  // M2: reais a 1 edição de "captação" ("cotação" é só inserir um p) e particípios de "captar".
+  "cotacao", "cotacoes", "captado", "captada", "captados", "captadas", "protesta", "protestas",
 ]);
 
 const MINIMO_DE_LETRAS = 7;
@@ -85,6 +95,17 @@ function corrigirPalavra(palavra: string): string {
   for (const chave of PALAVRAS_CHAVE) {
     if (Math.abs(chave.length - palavra.length) <= 1 && distancia(palavra, chave) <= 1) return chave;
   }
+  // M2: 2 edições só em palavra longa (8+ letras) com o MESMO começo (3 letras) e o MESMO fim (2 letras)
+  // da palavra-chave ("capitaao"). Antes valia qualquer palavra a 2 edições da mesma inicial e pegava
+  // palavra real ("proponha", "captadas"): a tolerância é para erro de digitação, não para adivinhar.
+  // Palavra real que ainda passe por aqui ou por 1 edição entra em PROTEGIDAS.
+  if (palavra.length >= 8) {
+    for (const chave of PALAVRAS_CHAVE) {
+      if (Math.abs(chave.length - palavra.length) > 1) continue;
+      if (palavra.slice(0, 3) !== chave.slice(0, 3) || palavra.slice(-2) !== chave.slice(-2)) continue;
+      if (distancia(palavra, chave) <= 2) return chave;
+    }
+  }
   return palavra;
 }
 
@@ -99,8 +120,35 @@ export function normalizarParaIntencao(texto: string): string {
   return base.replace(/[a-z]{7,}/g, corrigirPalavra);
 }
 
-const VERBO_DE_CORRECAO =
-  /\b(?:corrig\w*|corrij\w*|ajust\w*|retific\w*|arrum\w*|conserta\w*|troc\w*|muda\w*|alter\w*|edit\w*|errei|errado|errada)\b/;
+const VERBO_DE_CORRECAO_G =
+  /\b(?:corrig\w*|corrij\w*|ajust\w*|retific\w*|arrum\w*|conserta\w*|troc\w*|muda\w*|alter\w*|edit\w*|errei|errado|errada)\b/g;
+const PARTICIPIO_DE_CORRECAO = /^(?:corrigid|ajustad|retificad|arrumad|consertad|trocad|mudad|alterad|editad)[oa]s?$/;
+const NEGACAO_ANTES_DO_VERBO = /\b(?:nao|nunca|jamais|sem)\s+(?:\w+\s+){0,2}$/;
+const INTERROGATIVA_ANTES_DO_VERBO = /\b(?:como|por que|porque|pq|quando|onde|qual|quais|quem|o que|sera que)\s+(?:\w+\s+){0,3}$/;
+const PEDIDO_EDUCADO_ANTES_DO_VERBO = /\b(?:pode|podes|poderia|consegue|conseguiria|da pra|d[aá] pra|vc pode|voce pode)\s+(?:\w+\s+){0,2}$/;
+
+/**
+ * `true` quando o texto PEDE uma correção (P4). O verbo sozinho casava pergunta
+ * ("a proposta corrige?"), negação ("não corrige a proposta") e particípio
+ * ("foi corrigida ontem"); nenhum destes é pedido. Pedido educado com "?"
+ * ("pode corrigir a proposta?") continua sendo pedido. `n` já vem normalizado.
+ */
+function pedeCorrecao(n: string): boolean {
+  const pergunta = n.trimEnd().endsWith("?");
+  for (const m of n.matchAll(VERBO_DE_CORRECAO_G)) {
+    if (PARTICIPIO_DE_CORRECAO.test(m[0])) continue;
+    const idx = m.index ?? 0;
+    // Só a oração do verbo conta: pontuação separa ("não, corrige a proposta").
+    const prefixo = n.slice(0, idx).split(/[.,;!?]/).pop() ?? "";
+    if (NEGACAO_ANTES_DO_VERBO.test(prefixo)) continue;
+    if (INTERROGATIVA_ANTES_DO_VERBO.test(prefixo)) continue;
+    if (n.slice(idx + m[0].length).trimStart().startsWith("?")) continue;
+    if (pergunta && !PEDIDO_EDUCADO_ANTES_DO_VERBO.test(prefixo)) continue;
+    return true;
+  }
+  return false;
+}
+const PALAVRA_CHAVE_SOZINHA = /^(?:(?:uma|um|a|o)\s+)?(?:(?:nova|novo)\s+)?(proposta|captacao|formulario)\s*[.!]*$/;
 const MENCAO_DE_TEXTO = /\b(?:texto|redacao|clausulas?|paragrafos?|trecho)\b/;
 
 function esteiraDoTexto(n: string): "venda" | "locacao" | undefined {
@@ -115,10 +163,21 @@ function esteiraDoTexto(n: string): "venda" | "locacao" | undefined {
  * algo. `null` quando o texto é outra coisa. "Corrige o contrato" (do negócio) é
  * só a INTENÇÃO `corrigir_redacao` sobre `contrato_do_negocio`: o que o Max
  * responde (o link do Doc) é de outra tarefa (T17).
+ *
+ * Único chamador em produção no PR-C1: `abrirV2` (condutor), que lê só a CORREÇÃO na
+ * abertura do v2 e responde `formulario_correcao` em vez de abrir proposta nova. O
+ * roteamento completo da correção entra no PR-C; não ligar `formularios_v2` esperando
+ * que o Max já corrija. Aqui a normalização é sempre tolerante: quem decide se a
+ * tolerância vale para a org é o chamador (`toleranteNaOrg`).
  */
 export function lerIntencaoDeFormulario(texto: string): IntencaoDeFormulario {
   const n = normalizarParaIntencao(texto);
   if (!n) return null;
+
+  // F5: só a palavra-chave ("propsta", "uma captaçao", "nova proposta!"): pedido de criação. No singular e sem
+  // mais nada na frase: "propostas" é consulta, "a proposta do João" e "proposta de novo?" são outra coisa.
+  const sozinha = PALAVRA_CHAVE_SOZINHA.exec(n);
+  if (sozinha) return { tipo: "criar", alvo: /^captac/.test(sozinha[1]!) ? "captacao" : "proposta" };
 
   const temCaptacao = /\bcaptac(?:ao|oes)\b/.test(n);
   // "cria uma captação" é criação como "cria uma proposta": o mesmo regex, com a palavra trocada.
@@ -128,7 +187,7 @@ export function lerIntencaoDeFormulario(texto: string): IntencaoDeFormulario {
     return { tipo: "criar", alvo: temCaptacao ? "captacao" : "proposta", ...(esteira ? { esteira } : {}) };
   }
 
-  if (VERBO_DE_CORRECAO.test(n)) {
+  if (pedeCorrecao(n)) {
     const redacao = MENCAO_DE_TEXTO.test(n);
     if (temCaptacao) return { tipo: redacao ? "corrigir_redacao" : "corrigir_dado", alvo: "captacao" };
     if (/\bpropostas?\b/.test(n)) return { tipo: redacao ? "corrigir_redacao" : "corrigir_dado", alvo: "proposta" };

@@ -25,7 +25,10 @@ import { MetaHttpError, classificarMeta, falhaDaMensagemMeta } from "./erro";
 import type {
   BotaoEnviado,
   ConnectionState,
+  DownloadMediaFn,
   Interativo,
+  InterativoFlow,
+  OpcoesDeDownload,
   ProviderName,
   SendResult,
   TransportAdapter,
@@ -38,7 +41,11 @@ export type {
   InboundKind,
   InboundMessage,
   Interativo,
+  InterativoFlow,
+  MidiaBaixada,
+  MidiaGrandeDemais,
   OpcaoInterativa,
+  OpcoesDeDownload,
   ProviderName,
   SendResult,
   StatusCallback,
@@ -126,7 +133,7 @@ export async function sendText(params: {
   to: string;
   body: string;
   quoteMessageId?: string;
-  interativo?: Interativo | null;
+  interativo?: Interativo | InterativoFlow | null;
 }): Promise<SendResult> {
   if (process.env.MAX_OUTBOUND_KILL === "true") throw new Error("outbound_disabled");
   if (currentExecution() && currentExecution()!.context.mode !== "live") throw new Error("playground_transport_denied");
@@ -134,9 +141,15 @@ export async function sendText(params: {
   // Ponto único de saída de texto (Max e Newton): negrito de markdown vira o do WhatsApp.
   const { interativo: bruto, ...cru } = params;
   const texto = { ...cru, body: paraFormatoWhatsapp(cru.body) };
-  const interativo = bruto ? { ...bruto, corpo: paraFormatoWhatsapp(bruto.corpo) } : bruto;
+  const interativo = bruto
+    ? bruto.tipo === "flow"
+      ? { ...bruto, ...(bruto.corpo ? { corpo: paraFormatoWhatsapp(bruto.corpo) } : {}) }
+      : { ...bruto, corpo: paraFormatoWhatsapp(bruto.corpo) }
+    : bruto;
   const a = adapter();
-  if (interativo && a.sendInteractive && interativoDisponivel()) {
+  // Flow é da Cloud API da Meta: nenhum outro provedor (Newton/Z-API, log) o recebe, mesmo que alguém peça.
+  const formaPermitida = !interativo || interativo.tipo !== "flow" || a.name === "meta";
+  if (interativo && formaPermitida && a.sendInteractive && interativoDisponivel()) {
     try {
       return await a.sendInteractive({ to: texto.to, interativo, quoteMessageId: texto.quoteMessageId });
     } catch (err) {
@@ -209,11 +222,9 @@ export async function connectionStatus(): Promise<ConnectionState> {
   return adapter().connectionStatus();
 }
 
-export async function downloadMedia(
-  ref: string
-): Promise<{ data: Buffer; contentType: string | null } | null> {
-  return adapter().downloadMedia(ref);
-}
+export const downloadMedia: DownloadMediaFn = ((ref: string, opts?: OpcoesDeDownload) =>
+  // Só repassa `opts` quando existe: o adaptador e os mocks veem a chamada de um argumento de sempre.
+  opts ? adapter().downloadMedia(ref, opts) : adapter().downloadMedia(ref)) as DownloadMediaFn;
 
 /** Prefixos de id que o código fabrica (não existem na Meta): Newton, playground e handoff. */
 const SINTETICOS = [NEWTON_SYNTHETIC_PREFIX, "playground-", "human-"];

@@ -51,14 +51,34 @@ export async function consultarOptions(
   deps: DepsAcao,
   args: { tipo?: "venda" | "locacao"; schemaType?: string; alvo?: { proposalId?: string; codigo?: string } }
 ): Promise<OptionsV1 | OptionsV2 | null> {
+  const r = await consultarOptionsDetalhado(deps, args);
+  return r.ok ? r.options : null;
+}
+
+/**
+ * Por que o `proposal.options` não serviu (C2). A distinção importa ao condutor:
+ *  - `fluxo_desligado` (403) e `sem_alvo` (400: o servidor não conhece o alvo/esteira) são
+ *    DEFINITIVOS: o fluxo v2 não tem como continuar, o turno é liberado e o v1/atendimento assume;
+ *  - `indisponivel` (sem resposta, 5xx, corpo estranho) é TRANSITÓRIO: nunca derruba o fluxo nem
+ *    vira "sistema fora do ar" para uma fala que não era do fluxo.
+ */
+export type MotivoSemOptions = "fluxo_desligado" | "sem_alvo" | "indisponivel";
+
+export async function consultarOptionsDetalhado(
+  deps: DepsAcao,
+  args: { tipo?: "venda" | "locacao"; schemaType?: string; alvo?: { proposalId?: string; codigo?: string } }
+): Promise<{ ok: true; options: OptionsV1 | OptionsV2 } | { ok: false; motivo: MotivoSemOptions }> {
   const corpo: Record<string, unknown> = {};
   if (args.tipo) corpo.tipo = args.tipo;
   if (args.schemaType) corpo.schemaType = args.schemaType;
   if (args.alvo?.proposalId) corpo.proposta_id = args.alvo.proposalId;
   else if (args.alvo?.codigo) corpo.codigo = args.alvo.codigo;
   const r = await deps.acao("proposal.options", corpo);
-  if (!r || r.status !== 200 || !Array.isArray(r.body?.metodos)) return null;
-  return r.body as unknown as OptionsV1 | OptionsV2;
+  if (!r) return { ok: false, motivo: "indisponivel" };
+  if (ehFluxoDesligado(r)) return { ok: false, motivo: "fluxo_desligado" };
+  if (r.status === 400) return { ok: false, motivo: "sem_alvo" };
+  if (r.status !== 200 || !Array.isArray(r.body?.metodos)) return { ok: false, motivo: "indisponivel" };
+  return { ok: true, options: r.body as unknown as OptionsV1 | OptionsV2 };
 }
 
 export type ErroDoParcial =
@@ -106,6 +126,14 @@ function frase(body: Record<string, unknown>): string | undefined {
   const m = [body.message, body.motivo].find((x): x is string => typeof x === "string" && x.trim().length > 0);
   return m ? m.replace(/\s+/g, " ").trim().slice(0, 300) : undefined;
 }
+
+/**
+ * 409 `signatarios_duplicados` (índice único). O contrato (CM `docs/max.md`) só declara o código, sem
+ * campo de causa: o texto é sempre neutro, nunca afirma CPF, e-mail ou telefone, e não manda trocar
+ * nada às cegas.
+ */
+const TEXTO_DUPLICADO =
+  "Não gravei: há assinantes repetidos na proposta. Confira os dados de cada parte e me diga o que corrigir.";
 
 function textoOuUndefined(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
@@ -209,6 +237,8 @@ export async function salvarParcial(
   }
 
   const doc = r.body?.documento as { descartado?: unknown; link?: unknown } | undefined;
+  // Um campo `bloqueio` no 200 não existe no contrato (§18.13.5): é ignorado de propósito. Texto do
+  // servidor nunca chega ao corretor por um campo que o contrato não declara.
   return {
     ok: true,
     criou: criando,
@@ -253,16 +283,16 @@ export function textoDoParcial(r: ResultadoParcial, ctx: { codigo?: string }): s
         (r.link ? `\n${r.link}` : "")
       );
     case "documento_proprio":
+      // Sem oferecer "refaça (SIM)": o SIM só repetiria o mesmo 409 (a regeneração é pela tela).
       return (
-        `Essa proposta${codigo} já tem um documento próprio, que pode ter sido editado à mão. ` +
-        "Se eu mudar os dados, o documento precisa ser refeito e o texto editado se perde. " +
-        `Confira o documento atual:${r.link ? `\n${r.link}` : " ele está no sistema."}\n` +
-        "Quer que eu refaça o documento? (SIM)"
+        `Essa proposta${codigo} já tem um documento próprio, que pode ter sido editado à mão, ` +
+        "então não anotei o que você mandou por aqui. O ajuste precisa ser feito pela tela, onde o documento é refeito. " +
+        `Confira o documento atual:${r.link ? `\n${r.link}` : " ele está no sistema."}`
       );
     case "envio_em_andamento":
       return "Tem um envio para assinatura em andamento nessa proposta. Espere terminar para ajustar.";
     case "signatarios_duplicados":
-      return "Esse contato já está em outro assinante da proposta. Me mande um telefone ou e-mail diferente.";
+      return TEXTO_DUPLICADO;
     case "indisponivel":
       return "Não consegui falar com o sistema agora. Tenta de novo em instantes.";
   }
@@ -573,8 +603,17 @@ function lerValor(tipo: TipoDeCampo, texto: string, def: CampoObrigatorio | unde
 export function lerRespostaAoCampo(f: FluxoFormularioV2, texto: string, obrigatorios?: CampoObrigatorio[]): RespostaAoCampo {
   const aguarda = f.aguardaCampo;
   if (!aguarda) return LIBERAR;
+  return lerCampoPorCaminho(aguarda.path, aguarda.parteRef, texto, obrigatorios);
+}
+
+/**
+ * A MESMA leitura da resposta ao campo, para um campo escolhido por caminho (T11/T12): o item
+ * numerado da revisão ("2 Maria Souza") e cada campo de uma resposta de Flow passam por aqui, então
+ * a validação (CPF/CNPJ com dígito, telefone, valor, data, opção do catálogo) é a do texto livre.
+ */
+export function lerCampoPorCaminho(path0: string, parteRef: string, texto: string, obrigatorios?: CampoObrigatorio[]): RespostaAoCampo {
   // Checkpoint antigo ou de outra origem: a chave do catálogo é convertida aqui, com a posição da `parteRef`.
-  const path = caminhoCanonico(aguarda.path, signatarioDaParteRef(aguarda.parteRef));
+  const path = caminhoCanonico(path0, signatarioDaParteRef(parteRef));
   const destino = destinoDoCampo(path);
   if (!destino) return LIBERAR;
   const def = obrigatorios?.find((o) => semIndice(caminhoCanonico(o.chave, null)) === semIndice(path));
@@ -585,7 +624,7 @@ export function lerRespostaAoCampo(f: FluxoFormularioV2, texto: string, obrigato
   if (!leitura) return LIBERAR;
   if ("invalido" in leitura) return { tipo: "invalida", reply: leitura.invalido };
   const patch = patchDe(destino, leitura.valor);
-  return patch ? { tipo: "preenche", patch, campo: { parteRef: aguarda.parteRef, path } } : LIBERAR;
+  return patch ? { tipo: "preenche", patch, campo: { parteRef, path } } : LIBERAR;
 }
 
 // ─── Retomada de rascunho ────────────────────────────────────────────────

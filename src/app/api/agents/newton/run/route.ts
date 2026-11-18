@@ -5,6 +5,7 @@ import { deployProfile } from "@/lib/deploy-profile";
 import { enqueueInbound, processInboundNow } from "@/lib/inbound";
 import { log } from "@/lib/log";
 import { idDoBridge, idSintetico, textoDoBridge } from "@/lib/transport/newton-inbound";
+import { midiaDoBridge, newtonMediaAtiva } from "@/lib/transport/newton-media";
 import type { InboundMessage } from "@/lib/transport";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +17,8 @@ export const maxDuration = 60;
  * Entrada do Newton: o bridge (`whatsapp-newton-bridge`, `forwardToNewton`)
  * faz POST aqui com o mesmo corpo que mandava ao sidecar do VPS —
  * `{caller:{phone,name}, channel, orgId, groupId, groupName, members, text,
- * attachments, messageId?}` — e `Bearer NEWTON_INBOUND_TOKEN`, exclusivo desta
+ * attachments, messageId?, mediaUrl?, mediaKind?, mimeType?}` — e
+ * `Bearer NEWTON_INBOUND_TOKEN`, exclusivo desta
  * porta (não o `NEWTON_GATEWAY_TOKEN` que o bridge usa com o sidecar).
  *
  * O bridge chama `/agents/newton/run` na raiz; o rewrite em `next.config.js`
@@ -35,12 +37,20 @@ export const maxDuration = 60;
  * virada do minuto passa, e a MESMA frase repetida de propósito no mesmo
  * minuto vira uma só.
  *
+ * ── Mídia ────────────────────────────────────────────────────────────────
+ * Com `NEWTON_MEDIA_INBOUND=true` e o trio `mediaUrl`/`mediaKind`/`mimeType`
+ * válido (https, host em `NEWTON_MEDIA_HOSTS`, imagem ou PDF; ver
+ * `newton-media.ts`), a mensagem entra na fila como `image`/`document`, com
+ * `media_url = "zapi:<url>"`; quem baixa é o `downloadMedia` do adapter, no
+ * turno. Sem a flag, ou com o trio recusado, o anexo é o de antes: o marcador
+ * do bridge ("[imagem enviada]", "[documento: …]") não conta como texto e sem
+ * texto vira `unknown` para o grafo pedir por escrito. A URL é link de
+ * documento de cliente: nunca vai para log nem para erro (só o telefone).
+ *
  * ── Fora do escopo desta rota (por ora) ──────────────────────────────────
- * Grupo: aceito e ignorado até a resposta a menção existir (PR 2.2). Anexo:
- * sem mídia no transporte; o marcador do bridge ("[imagem enviada]",
- * "[documento: …]") não conta como texto, e sem texto vira `unknown` para o
- * grafo pedir por escrito. Áudio transcrito entra como a transcrição. `orgId` do corpo não é confiado: a org sai da
- * identidade do telefone, como no Max.
+ * Grupo: aceito e ignorado até a resposta a menção existir (PR 2.2), com ou
+ * sem mídia. Áudio transcrito entra como a transcrição. `orgId` do corpo não é
+ * confiado: a org sai da identidade do telefone, como no Max.
  */
 
 interface CorpoDoBridge {
@@ -49,6 +59,9 @@ interface CorpoDoBridge {
   text?: unknown;
   attachments?: unknown;
   messageId?: unknown;
+  mediaUrl?: unknown;
+  mediaKind?: unknown;
+  mimeType?: unknown;
 }
 
 const VAZIO = { text: "", blocked: false } as const;
@@ -99,17 +112,24 @@ export async function POST(req: NextRequest) {
     log.info("newton.grupo_ignorado", { phone });
     return NextResponse.json(VAZIO);
   }
-  if (!text && anexos === 0) return NextResponse.json(VAZIO);
+  // Flag desligada: o corpo de mídia é ignorado e o comportamento é o de antes.
+  const midia = newtonMediaAtiva() ? midiaDoBridge(corpo) : null;
+  if (newtonMediaAtiva() && corpo.mediaUrl !== undefined && corpo.mediaUrl !== null && !midia) {
+    log.warn("newton.midia_recusada", { phone });
+  }
+  if (!text && anexos === 0 && !midia) return NextResponse.json(VAZIO);
 
   const agoraMs = Date.now();
   const msg: InboundMessage = {
-    messageId: idDoBridge(corpo.messageId) ?? idSintetico({ phone, groupId, text: bruto, anexos, agoraMs }),
+    messageId:
+      idDoBridge(corpo.messageId) ?? idSintetico({ phone, groupId, text: bruto, anexos, agoraMs, midia: midia?.ref }),
     fromPhone: phone,
     groupId: null,
-    kind: text ? "text" : "unknown",
+    // Com mídia válida o tipo é o da mídia (a legenda, se houver, é o `text`).
+    kind: midia ? midia.kind : text ? "text" : "unknown",
     text: text || null,
-    mediaUrl: null,
-    mimeType: null,
+    mediaUrl: midia ? midia.ref : null,
+    mimeType: midia ? midia.mimeType : null,
     timestampMs: agoraMs,
     senderName: typeof corpo.caller?.name === "string" && corpo.caller.name.trim() ? corpo.caller.name.trim() : null,
     replyToMessageId: null,
