@@ -26,6 +26,7 @@ import { textoSemLeituraDeMidia } from "../prompt";
 import type { DepsDoFluxo } from "../fluxos";
 import type { ParteV2, PatchV2 } from "./contrato";
 import type { FluxoFormularioV2 } from "./estado";
+import { mascararValor } from "./mascara";
 import { salvarParcial, type ErroDoParcial, type ResultadoParcial } from "./proposta-v2";
 
 /** Mesmo teto do servidor (`midia_grande`, 3 MB decodificados). */
@@ -447,6 +448,37 @@ function decifrarCofre(payload: string, thread: string): string {
   return Buffer.concat([d.update(Buffer.from(dado, "base64")), d.final()]).toString("utf8");
 }
 
+/** Quantas falas anteriores o cofre guarda (a janela de extração usa no máximo isto menos a atual). */
+const FALAS_NO_COFRE = 7;
+/** Teto por fala (o da janela, `JANELA_MAX_CHARS`): o que passa disso nunca caberia na janela. */
+const FALA_MAX_CHARS = 6000;
+
+/**
+ * As falas anteriores do corretor neste fluxo, abertas do cofre. Qualquer falha (sem cofre, chave
+ * ausente ou rotacionada, outra thread, payload adulterado) é `[]`: nunca lança e nunca devolve
+ * fala de outra thread.
+ */
+export function falasDoCofre(fluxo: Pick<FluxoFormularioV2, "cofreFalas">, thread: string): string[] {
+  if (!fluxo.cofreFalas) return [];
+  try {
+    const bruto: unknown = JSON.parse(decifrarCofre(fluxo.cofreFalas, `falas|${thread}`));
+    return Array.isArray(bruto) ? bruto.filter((t): t is string => typeof t === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Acrescenta a fala do corretor ao cofre de falas (as mais novas ficam). Sem chave, descarta o
+ * cofre inteiro: a fala nunca vai em claro para o checkpoint (a janela fica sem anteriores).
+ */
+export function guardarFala(fluxo: FluxoFormularioV2, texto: string, thread: string): FluxoFormularioV2 {
+  const { cofreFalas: _antigo, ...resto } = fluxo;
+  if (!cofreDisponivel()) return resto;
+  const falas = [...falasDoCofre(fluxo, thread), texto.slice(0, FALA_MAX_CHARS)].slice(-FALAS_NO_COFRE);
+  return { ...resto, cofreFalas: cifrarCofre(JSON.stringify(falas), `falas|${thread}`) };
+}
+
 /**
  * Os campos lidos guardados no cofre do fluxo. Qualquer falha (sem cofre, chave
  * ausente ou rotacionada, outra thread, payload adulterado) é `[]`: nunca lança e
@@ -516,7 +548,21 @@ export function registrarLidos(
     const { semPapel: _vindo, ...limpo } = c;
     porPath.set(c.path, { ...limpo, ...(leitura.semPapel ? { semPapel: true } : {}), ref: leitura.ref });
   }
+  // F4: a unificação do mesmo CPF NÃO acontece aqui: guardar é cego ao que o servidor já tem. Quem LÊ
+  // (`lidosUnificados`) e quem grava (`gravarLidos`) unificam com as partes gravadas à vista (I4).
   return comLidos(fluxo, [...porPath.values()], thread);
+}
+
+/**
+ * Os lidos pendentes, já com o mesmo CPF dito para duas posições do mesmo lado fundido numa pessoa só
+ * (F4) e sempre à luz do que o servidor já tem (`partes`, I4): pessoa já gravada nunca é fundida em outra.
+ */
+export function lidosUnificados(
+  fluxo: FluxoFormularioV2,
+  thread: string,
+  partes?: PartesGravadas
+): CampoLido[] {
+  return unificarDocumentoRepetido(lidosDoCofre(fluxo, thread), partes);
 }
 
 const BAIXA_CONFIANCA = 0.5;
@@ -564,8 +610,27 @@ export function rotuloDoPath(path: string): { grupo: string; campo: string } {
   }
   const imovel = /^(?:imoveis\[0\]|imovel)\.(\w+)$/.exec(path);
   if (imovel) return { grupo: "Imóvel", campo: rotuloDoCampo(imovel[1]!) };
-  return { grupo: "Outros", campo: path };
+  const negociacao = /^negociacao\.(\w+)$/.exec(path);
+  if (negociacao) return { grupo: "Negociação", campo: NEGOCIACAO[negociacao[1]!] ?? rotuloDoCampo(negociacao[1]!) };
+  const corretor = /^corretor\.(\w+)$/.exec(path);
+  if (corretor) return { grupo: "Corretor", campo: CORRETOR[corretor[1]!] ?? rotuloDoCampo(corretor[1]!) };
+  if (path === "observacoes") return { grupo: "Outros", campo: "Observações" };
+  // Genérico: nunca o caminho técnico ("seguro.apolice_numero") para o corretor; só o último trecho, legível.
+  const ultimo = path.split(".").pop()?.replace(/\[\d+\]/g, "") ?? "";
+  return { grupo: "Outros", campo: ultimo ? rotuloDoCampo(ultimo) : "Outro dado" };
 }
+
+const NEGOCIACAO: Record<string, string> = {
+  valor: "Valor da negociação",
+  sinal: "Sinal",
+  prazo_meses: "Prazo (meses)",
+  data_entrada: "Data de entrada",
+  modalidade: "Modalidade",
+};
+
+const CORRETOR: Record<string, string> = {
+  creci: "CRECI",
+};
 
 /** Valor do documento para a tela: uma linha, curto e sem sinal de confirmação forjado. */
 function valorParaTela(v: string): string {
@@ -597,7 +662,8 @@ export function textoDeConferencia(l: {
   for (const c of l.campos) {
     const { grupo, campo } = rotuloDoPath(c.path);
     const itens = grupos.get(grupo) ?? [];
-    itens.push(`• ${campo}: ${valorParaTela(c.valor)}`);
+    // F2 (16/11): mascarado como na ficha. O corretor confere pelos dígitos do meio.
+    itens.push(`• ${campo}: ${mascararValor(c.path, valorParaTela(c.valor))}`);
     grupos.set(grupo, itens);
   }
   for (const [grupo, itens] of grupos) linhas.push("", grupo, ...itens);
@@ -681,6 +747,138 @@ function mesmoNome(a: string, b: string): boolean {
   if (pa.length === 0 || pb.length === 0) return true; // nada comparável: não há conflito detectável
   const [curto, longo] = pa.length <= pb.length ? [pa, pb] : [pb, pa];
   return curto.every((p) => longo.includes(p));
+}
+
+// ─── O mesmo CPF/CNPJ em duas partes (F4) ───────────────────────────────────
+
+/** Duas partes (lado + posição) que trazem o mesmo documento. Nunca leva o número. */
+export interface DocumentoRepetido {
+  a: { grupo: GrupoDaParte; posicao: number };
+  b: { grupo: GrupoDaParte; posicao: number };
+}
+
+interface ParteDoLido {
+  prefixo: string;
+  grupo: GrupoDaParte;
+  posicao: number;
+  conjuge: boolean;
+  campo: string;
+}
+
+function parteDoLido(path: string): ParteDoLido | null {
+  const m = RE_PARTE.exec(path);
+  if (!m) return null;
+  return { prefixo: m[1]!, grupo: PARTE_DO_PATCH[m[1]!]!, posicao: Number(m[2]), conjuge: !!m[3], campo: m[4]! };
+}
+
+const reescreverPosicao = (path: string, de: number, para: number): string => path.replace(`[${de}]`, `[${para}]`);
+
+/** Documento (CPF ou CNPJ) da parte, só dígitos; vazio quando o valor não tem cara de documento. */
+function documentoDaParte(c: CampoLido): { chave: string; grupo: GrupoDaParte; posicao: number } | null {
+  const p = parteDoLido(c.path);
+  if (!p || p.conjuge || (p.campo !== "cpf" && p.campo !== "cnpj")) return null;
+  const d = c.valor.replace(/\D/g, "");
+  return d.length === 11 || d.length === 14 ? { chave: d, grupo: p.grupo, posicao: p.posicao } : null;
+}
+
+function nomeDaParte(campos: CampoLido[], grupo: GrupoDaParte, posicao: number): string | undefined {
+  for (const c of campos) {
+    const p = parteDoLido(c.path);
+    if (p && !p.conjuge && p.campo === "nome" && p.grupo === grupo && p.posicao === posicao) return c.valor;
+  }
+  return undefined;
+}
+
+/**
+ * Nomes que se contradizem (os dois presentes e diferentes) = duas pessoas com o mesmo documento.
+ * O nome vem do lote; sem ele, da parte que o servidor já tem naquela posição (`partes`).
+ */
+function nomesContraditorios(
+  campos: CampoLido[],
+  a: DocumentoRepetido["a"],
+  b: DocumentoRepetido["b"],
+  partes?: PartesGravadas
+): boolean {
+  const na = nomeDaParte(campos, a.grupo, a.posicao) ?? partes?.[a.grupo][a.posicao];
+  const nb = nomeDaParte(campos, b.grupo, b.posicao) ?? partes?.[b.grupo][b.posicao];
+  return !!na && !!nb && !mesmoNome(na, nb);
+}
+
+function documentosPorChave(campos: CampoLido[]): Map<string, Array<{ grupo: GrupoDaParte; posicao: number }>> {
+  const porChave = new Map<string, Array<{ grupo: GrupoDaParte; posicao: number }>>();
+  for (const c of campos) {
+    const d = documentoDaParte(c);
+    if (!d) continue;
+    const lista = porChave.get(d.chave) ?? [];
+    if (!lista.some((x) => x.grupo === d.grupo && x.posicao === d.posicao)) lista.push({ grupo: d.grupo, posicao: d.posicao });
+    porChave.set(d.chave, lista);
+  }
+  return porChave;
+}
+
+/**
+ * O mesmo CPF/CNPJ em duas posições do MESMO lado, sem nomes que se contradigam, é UMA pessoa dita
+ * duas vezes: as posições viram uma (a menor fica; o que só a outra trazia passa para ela; os lados
+ * seguintes sobem). Nada disso toca o servidor: é a arrumação do que ainda é só leitura pendente.
+ * Documento igual em lados diferentes, ou em nomes diferentes, NÃO é unificado: é ambíguo
+ * (`documentoRepetido`) e quem decide é o corretor.
+ *
+ * `partes` é o que o servidor JÁ tem. Posição lida é posição do servidor, então: (a) o nome da parte
+ * gravada conta para o "nomes diferentes"; (b) uma posição que já é de uma pessoa gravada NUNCA é
+ * dobrada em outra (apagaria o documento de quem já está no rascunho e reindexaria dados de uma
+ * pessoa para a posição de outra): pergunta-se. Só posições novas (`>= partes[grupo].length`) se juntam.
+ */
+export function unificarDocumentoRepetido<T extends CampoLido>(campos: T[], partes?: PartesGravadas): T[] {
+  let atual = campos;
+  for (const posicoes of documentosPorChave(campos).values()) {
+    if (posicoes.length < 2) continue;
+    const grupo = posicoes[0]!.grupo;
+    if (posicoes.some((p) => p.grupo !== grupo)) continue;
+    const ordenadas = posicoes.map((p) => p.posicao).sort((x, y) => x - y);
+    const alvo = ordenadas[0]!;
+    const gravadas = partes?.[grupo].length ?? 0;
+    if (ordenadas.slice(1).some((q) => q < gravadas)) continue; // dobraria uma pessoa que já está no rascunho
+    if (ordenadas.slice(1).some((q) => nomesContraditorios(atual, { grupo, posicao: alvo }, { grupo, posicao: q }, partes))) continue;
+    const sobram = ordenadas.slice(1);
+    const resultado: T[] = [];
+    const ocupados = new Set<string>();
+    for (const c of atual) {
+      const p = parteDoLido(c.path);
+      if (p && p.grupo === grupo && p.posicao === alvo) ocupados.add(c.path);
+    }
+    for (const c of atual) {
+      const p = parteDoLido(c.path);
+      if (!p || p.grupo !== grupo || !sobram.includes(p.posicao)) {
+        resultado.push(c);
+        continue;
+      }
+      const novo = reescreverPosicao(c.path, p.posicao, alvo);
+      if (ocupados.has(novo)) continue; // o campo já existe na posição que fica: ela vale
+      ocupados.add(novo);
+      resultado.push({ ...c, path: novo });
+    }
+    // Fecha o buraco: o que vinha depois de uma posição removida sobe.
+    atual = resultado.map((c) => {
+      const p = parteDoLido(c.path);
+      if (!p || p.grupo !== grupo) return c;
+      const abaixo = sobram.filter((q) => q < p.posicao).length;
+      return abaixo > 0 ? { ...c, path: reescreverPosicao(c.path, p.posicao, p.posicao - abaixo) } : c;
+    });
+  }
+  return atual;
+}
+
+/** O primeiro documento que ainda está em duas partes que NÃO dá para tratar como a mesma pessoa. */
+export function documentoRepetido(campos: CampoLido[], partes?: PartesGravadas): DocumentoRepetido | null {
+  for (const posicoes of documentosPorChave(unificarDocumentoRepetido(campos, partes)).values()) {
+    if (posicoes.length >= 2) return { a: posicoes[0]!, b: posicoes[1]! };
+  }
+  return null;
+}
+
+/** O nome lido para a parte (do cofre), se houver. */
+export function nomeLidoDaParte(campos: CampoLido[], grupo: GrupoDaParte, posicao: number): string | undefined {
+  return nomeDaParte(campos, grupo, posicao);
 }
 
 interface PatchMontado {
@@ -836,7 +1034,7 @@ function montarPatchDosLidos(campos: CampoLido[], op: Pick<OpcoesDaGravacao, "pa
   return { patch, gravados, descartados };
 }
 
-export type ErroDosLidos = ErroDoParcial | "cofre_ilegivel" | "nada_a_gravar" | "papel_indefinido" | "conflito_de_parte";
+export type ErroDosLidos = ErroDoParcial | "cofre_ilegivel" | "nada_a_gravar" | "papel_indefinido" | "conflito_de_parte" | "documento_repetido";
 
 export type GravacaoDosLidos =
   | { ok: true; fluxo: FluxoFormularioV2; resultado: Extract<ResultadoParcial, { ok: true }>; descartados: string[] }
@@ -847,6 +1045,7 @@ export type GravacaoDosLidos =
       resultado?: ResultadoParcial;
       descartados: string[];
       conflito?: ConflitoDeParte;
+      repetido?: DocumentoRepetido;
     };
 
 /**
@@ -868,7 +1067,7 @@ export async function gravarLidos(
   if (typeof opts.messageIdDoSim !== "string" || opts.messageIdDoSim.trim().length === 0) {
     return { ok: false, erro: "sem_confirmacao", fluxo, descartados: [] };
   }
-  const pendentes = pendentesComValor(fluxo, thread);
+  const pendentes = unificarDocumentoRepetido(pendentesComValor(fluxo, thread), opts.partes);
   if (pendentes.length === 0) {
     // Havia pendência mas o cofre não abriu (chave rotacionada, thread trocada): o valor
     // se perdeu. Limpa o ponteiro sem valor e diz a verdade, em vez de reter lixo.
@@ -876,6 +1075,10 @@ export async function gravarLidos(
     const limpo = comLidos(fluxo, [], thread);
     return { ok: false, erro: perdido ? "cofre_ilegivel" : "nada_a_gravar", fluxo: limpo.ok ? limpo.fluxo : fluxo, descartados: [] };
   }
+
+  // F4: o mesmo CPF/CNPJ em duas pessoas diferentes nunca vai ao servidor (ele recusaria com 409 depois do "sim").
+  const repetido = documentoRepetido(pendentes, opts.partes);
+  if (repetido) return { ok: false, erro: "documento_repetido", fluxo, descartados: [], repetido };
 
   const { patch, gravados, descartados, conflito } = montarPatchDosLidos(pendentes, opts);
   const semDestino = new Set(descartados);

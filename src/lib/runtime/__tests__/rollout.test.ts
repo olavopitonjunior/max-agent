@@ -13,6 +13,7 @@ vi.mock('../../http', () => ({
   imobproBase: () => 'https://fixture.test', IMOBPRO_TIMEOUT_MS: 8000,
   IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS: 30000, IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS: 30000,
   IMOBPRO_DOCUMENT_READ_TIMEOUT_MS: 45000,
+  IMOBPRO_TEXT_EDIT_TIMEOUT_MS: 30000,
   captacaoSendTimeoutMs: () => 30000,
 }));
 const enabled = JSON.stringify({ 'pilot-org': ['runtime', 'queries', 'marketing', 'handoff'] });

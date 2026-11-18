@@ -95,7 +95,7 @@ describe("template.decisions — negado (fail-closed)", () => {
 
 describe("template.decisions — permitido", () => {
   it("a lista de capabilities tem template.decisions no índice 27 (antes de pending.summary e prefs.self)", () => {
-    expect(CAPABILITIES).toHaveLength(38);
+    expect(CAPABILITIES).toHaveLength(39);
     expect(CAPABILITIES.indexOf("template.decisions")).toBe(27);
   });
 

@@ -70,6 +70,76 @@ describe("lerIntencaoDeFormulario: negados primeiro", () => {
   });
 });
 
+// F5: tolerância ampliada (até 2 edições em proposta/captação, 7+ letras, mesma letra inicial) e a palavra-chave
+// sozinha. Os NEGADOS vêm primeiro: palavra comum parecida nunca vira proposta nem captação.
+describe("F5: erro de digitação, negados primeiro (palavra comum não vira proposta/captação)", () => {
+  const COMUNS = [
+    "resposta", "respostas", "aposta", "apostas", "capacitação", "capacitações", "propósito", "propósitos",
+    "adaptação", "adaptações", "formulação", "formulações", "preposta", "prepostos", "disposta", "composta",
+    "exposta", "posposta", "captador", "captadora", "proposto", "proposital", "capturar", "contrato", "contato",
+  ];
+
+  it.each(COMUNS)("%s fica como está na normalização", (palavra) => {
+    const sem = palavra.normalize("NFD").replace(/\p{Diacritic}/gu, "");
+    expect(normalizarParaIntencao(palavra)).toBe(sem);
+  });
+
+  it.each(COMUNS)("%s sozinha não é intenção", (palavra) => {
+    expect(lerIntencaoDeFormulario(palavra)).toBeNull();
+  });
+
+  it.each(["resposta", "aposta", "capacitação", "propósito", "adaptação", "formulação"])("cria uma %s não é pedido de proposta nem de captação", (palavra) => {
+    expect(lerIntencaoDeFormulario(`cria uma ${palavra} pro João`)).toBeNull();
+  });
+
+  it("frases comuns com a palavra sozinha no meio não viram intenção", () => {
+    expect(lerIntencaoDeFormulario("qual a resposta dele?")).toBeNull();
+    expect(lerIntencaoDeFormulario("fez uma aposta alta")).toBeNull();
+    expect(lerIntencaoDeFormulario("fiz a capacitação ontem")).toBeNull();
+  });
+
+  it("a palavra-chave sozinha só vale no singular, sem mais nada na frase", () => {
+    expect(lerIntencaoDeFormulario("proposta de novo?")).toBeNull();
+    expect(lerIntencaoDeFormulario("propostas")).toBeNull();
+    expect(lerIntencaoDeFormulario("a proposta do João")).toBeNull();
+  });
+});
+
+describe("F5: erro de digitação ampliado", () => {
+  it.each([
+    ["porposta", "proposta"],
+    ["propsota", "proposta"],
+    ["prposta", "proposta"],
+    ["capitaao", "captacao"],
+    ["captacão", "captacao"],
+    ["capitacao", "captacao"],
+  ])("%s vira %s", (entrada, esperado) => {
+    expect(normalizarParaIntencao(entrada)).toBe(esperado);
+  });
+
+  it.each(["propsta", "porposta", "proposa", "captaçao", "capitação", "captacão", "capitaao"])(
+    "a palavra sozinha, com erro (%s), é pedido de criação",
+    (palavra) => {
+      expect(lerIntencaoDeFormulario(palavra)).toMatchObject({ tipo: "criar", alvo: palavra.startsWith("cap") ? "captacao" : "proposta" });
+    }
+  );
+
+  it.each(["uma propsta", "Propsta!", "nova porposta", "uma captaçao"])("com artigo ou 'nova' (%s)", (texto) => {
+    expect(lerIntencaoDeFormulario(texto)).toMatchObject({ tipo: "criar" });
+  });
+
+  it("com verbo, 1 edição e 2 edições só em palavra longa (8+ letras)", () => {
+    expect(lerIntencaoDeFormulario("quero criar uma porposta de venda")).toEqual({ tipo: "criar", alvo: "proposta", esteira: "venda" });
+    expect(lerIntencaoDeFormulario("faz uma capitaao")).toEqual({ tipo: "criar", alvo: "captacao" });
+  });
+
+  // M2: palavra curta com 2 edições não é mais adivinhada (era como "cotação"/"proponha" entravam).
+  it("2 edições em palavra de 7 letras não é corrigida", () => {
+    expect(normalizarParaIntencao("porposa")).toBe("porposa");
+    expect(lerIntencaoDeFormulario("quero criar uma porposa de venda")).toBeNull();
+  });
+});
+
 describe("lerIntencaoDeFormulario: criar", () => {
   it.each(["propsta", "porposta", "proposa", "captaçao", "capitação"])("tolera erro de digitação: cria uma %s", (palavra) => {
     const r = lerIntencaoDeFormulario(`cria uma ${palavra} pro João`);
