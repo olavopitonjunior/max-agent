@@ -522,6 +522,60 @@ export function afirmaCriacao(texto: string): boolean {
   return AFIRMA_EM_PRIMEIRA_PESSOA.test(t) || AFIRMA_OBJETO_CRIADO.test(t);
 }
 
+// ─── Exclusão que não aconteceu ─────────────────────────────────────────────
+
+/**
+ * Smoke em prod 18/11: "Exclui a captação CAP-2026-0013" → o modelo livre
+ * montou o card ("Confirma que você quer excluir … mesmo (definitivo)?") e, no
+ * SIM, respondeu "Captação *CAP-2026-0013* excluída." — sem verbo nenhum (não
+ * existe exclusão de captação), linha intacta no banco. A exclusão real de
+ * proposta sai por template (`gestao.ts`) e não passa pelo `compose`: no texto
+ * livre, afirmar exclusão ou encenar o card de exclusão é falso por construção.
+ *
+ * Diferente da criação, vale mesmo quando o turno LEU: o que foi excluído não
+ * aparece em listagem, então leitura nenhuma sustenta "excluída".
+ */
+export const TEXTO_NADA_EXCLUIDO =
+  "Ainda não excluí nada por aqui. Captação se exclui pela tela, no sistema. " +
+  'Proposta eu excluo com o seu SIM: me diga "excluir a PROP-…".';
+
+const OBJETO_EXCLUIVEL = String.raw`(?:proposta|captacao|rascunho|formulario|ficha|negocio|cap-\d|prop-\d)`;
+/** "Captação CAP-… excluída.", "A captação foi excluída", "Proposta removida." — sem verbo genérico no meio. */
+const AFIRMA_OBJETO_EXCLUIDO = new RegExp(
+  String.raw`\b${OBJETO_EXCLUIVEL}(?:(?!\b(?:e|sera|seja|ser|sao|quando|pode|podem|precisa|precisam|deve|depois|antes|vai|vou|se)\b)[^.\n]){0,40}\b(?:excluid|apagad|deletad|removid)[oa]s?\b`
+);
+const AFIRMA_EXCLUSAO_PASSADO = /\b(?:apaguei|deletei|removi|cancelei)\b/;
+/** "Excluí" só com acento: sem ele, "exclui" é o presente ("captação se exclui pela tela"). */
+const AFIRMA_EXCLUI_ACENTUADO = /(?:^|[^\p{L}])excluí(?![\p{L}])/u;
+const PROMETE_EXCLUSAO = /\b(?:vou|irei|vamos|iremos)\s+(?:excluir|apagar|deletar|remover|cancelar)\b/;
+
+function fraseAfirmaExclusao(frase: string): boolean {
+  const bruto = frase.toLowerCase().replace(/\*/g, "").trim();
+  const t = NORM(bruto);
+  if (!t || /\?\s*$/.test(t)) return false;
+  if (/\b(?:nao|nunca|jamais)\b/.test(t)) return false;
+  // Verbo em 1ª pessoa só conta com objeto excluível na frase: "removi o filtro" é conversa.
+  const temObjeto = new RegExp(String.raw`\b${OBJETO_EXCLUIVEL}`).test(t);
+  return AFIRMA_OBJETO_EXCLUIDO.test(t) ||
+    (temObjeto && (AFIRMA_EXCLUSAO_PASSADO.test(t) || AFIRMA_EXCLUI_ACENTUADO.test(bruto) || PROMETE_EXCLUSAO.test(t)));
+}
+
+/** O texto do modelo AFIRMA (ou promete) ter excluído algo? Pergunta e negação passam. */
+export function afirmaExclusao(texto: string): boolean {
+  return frasesDe(texto).some(fraseAfirmaExclusao);
+}
+
+/** Card de exclusão montado pelo modelo: "Confirma que quer excluir…?", "…a exclusão é definitiva". */
+const ENCENA_EXCLUSAO_CONFIRMA =
+  /\b(?:confirma|confirmar|tem certeza|certeza que)\b[^\n]{0,80}\b(?:exclu\w*|apag\w*|delet\w*|remov\w*|cancel\w*)/;
+const ENCENA_EXCLUSAO_DEFINITIVA =
+  /\b(?:exclu\w*|apag\w*|delet\w*)\b[^\n]{0,80}\b(?:definitiv\w*|irreversivel|nao (?:da|pode|podera) (?:para |pra )?ser desfeit\w*)/;
+
+export function encenaExclusao(texto: string): boolean {
+  const t = NORM(texto).replace(/\*/g, "");
+  return ENCENA_EXCLUSAO_CONFIRMA.test(t) || ENCENA_EXCLUSAO_DEFINITIVA.test(t);
+}
+
 // ─── Promessa em presente/futuro que o turno não cumpriu ────────────────────
 
 /**
@@ -662,6 +716,10 @@ export function travarCriacaoFalsa(
   texto: string,
   ctx: { houveLeitura: boolean; podeCriar: boolean; podeEnviar?: boolean; houveEscrita?: boolean }
 ): { texto: string; travou: boolean } {
+  // Exclusão: antes de tudo e mesmo com leitura (ver `TEXTO_NADA_EXCLUIDO`).
+  if (!ctx.houveEscrita && (encenaExclusao(texto) || afirmaExclusao(texto))) {
+    return { texto: TEXTO_NADA_EXCLUIDO, travou: true };
+  }
   if (encenaConfirmacao(texto)) return { texto: TEXTO_SEM_ENCENACAO, travou: true };
   const promessa = travarPromessaSemEfeito(texto, ctx);
   texto = promessa.texto;
