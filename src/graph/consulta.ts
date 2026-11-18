@@ -2,6 +2,7 @@ import type { DepsDoFluxo } from "./fluxos";
 import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, termoDeBusca, type PropostaListada } from "./localizar";
 import { ehAjusteDeLista, PEDE_TODOS, pedeListaDeEquipeImplicita, pedidoDeLista, responderListaFiltrada } from "./consulta-equipe";
 import { normalizar } from "./tools";
+import { normalizarParaIntencao } from "./formularios/intencao";
 
 /**
  * Consultar propostas — listar, procurar pelo nome/endereço/código, ver o
@@ -80,13 +81,15 @@ export function textoDaConsulta(
  * o pedido da lista. Quem chama já descartou excluir/duplicar/editar,
  * conversão e envio, que vêm antes.
  */
-export function pedeConsulta(texto: string): boolean {
+export function pedeConsulta(texto: string, opts?: { tolerante?: boolean }): boolean {
   const t = normalizar(texto).replace(/^max\b[\s,:-]*/, "");
   const codigo = codigoCitado(texto);
+  // v2: "nova porposta" também é criação (o guarda fica mais estrito, nunca mais frouxo).
+  const criacao = CRIACAO.test(t) || (opts?.tolerante === true && CRIACAO.test(normalizarParaIntencao(t)));
   // "Outubro de 2026 somente as destinadas à Adélia como gerente, com o nome do corretor" (02/11).
-  if (!CRIACAO.test(t) && !codigo && pedeListaDeEquipeImplicita(texto)) return true;
+  if (!criacao && !codigo && pedeListaDeEquipeImplicita(texto)) return true;
   if (!PROPOSTA.test(t) && !codigo) return false;
-  if (CRIACAO.test(t)) return false;
+  if (criacao) return false;
   if (pedidoDeLista(texto)) return true;
   if (pedeLista(texto)) return true;
   if (!(pedeBusca(texto) || CONSULTA.test(t))) return false;

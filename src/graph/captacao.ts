@@ -72,6 +72,11 @@ export type FaltaDeDono = "cpf" | "cnpj" | "contato" | "estado_civil";
 
 export interface FluxoCaptacao {
   kind: "captacao";
+  /**
+   * Versão do fluxo (formulários v2, D3), gravada no início. Ausente = v1: o
+   * checkpoint antigo e o v1 não mudam. Só `2` liga o comportamento novo.
+   */
+  versao?: 1 | 2;
   etapa:
     | "natureza" | "nome" | "modelo" | "imovel" | "condicoes" | "exclusividade" | "proprietarios" | "estado_civil"
     | "extras" | "verificar" | "faltantes" | "selecao" | "revisao" | "enviando"
@@ -295,6 +300,8 @@ export interface ItemDaCaptacao {
   atualizadoEm: string | null;
   link: string | null;
   proprietarios: string[] | null;
+  /** Só quando o `captacao.list` foi filtrado por cliente/imóvel (v2): por que este item casou. */
+  casouPor?: Array<"cliente" | "imovel">;
 }
 
 /**
@@ -309,12 +316,16 @@ export function lerItemDaCaptacao(raw: unknown): ItemDaCaptacao | null {
   const nome = str(o.nome);
   if (!id || !codigo || !nome) return null;
   const donos = Array.isArray(o.proprietarios) ? o.proprietarios.filter((x): x is string => typeof x === "string" && !!x.trim()) : null;
+  const casouPor = Array.isArray(o.casouPor)
+    ? o.casouPor.filter((x): x is "cliente" | "imovel" => x === "cliente" || x === "imovel")
+    : [];
   return {
     ref: typeof o.ref === "number" && Number.isInteger(o.ref) ? o.ref : null,
     id, codigo, nome,
     esteira: str(o.esteira), estado: str(o.estado), tom: str(o.tom), endereco: str(o.endereco),
     atualizadoEm: str(o.atualizadoEm), link: str(o.link),
     proprietarios: donos && donos.length ? donos : null,
+    ...(casouPor.length ? { casouPor } : {}),
   };
 }
 

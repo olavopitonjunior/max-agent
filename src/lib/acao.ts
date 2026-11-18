@@ -8,7 +8,7 @@ import { orgById } from "./orgs";
 import { normalizeBrPhone } from "./phone";
 import {
   fetchWithTimeout, imobproBase, IMOBPRO_TIMEOUT_MS, IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS, IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS,
-  captacaoSendTimeoutMs,
+  captacaoSendTimeoutMs, IMOBPRO_DOCUMENT_READ_TIMEOUT_MS, IMOBPRO_TEXT_EDIT_TIMEOUT_MS,
 } from "./http";
 import type { ScopeSubject } from "@/graph/scope-contract";
 
@@ -33,6 +33,9 @@ export const VERBOS_DE_ACAO = [
   "proposal.status",
   "proposal.create",
   "proposal.update",
+  // Testemunhas da proposta v2 (PR-D/T13, par do contractmaker PR3, max.md §18.13.12.1): ESCRITA,
+  // `x-idempotency-key` = a `messageId` do primeiro "sim". Capability `proposal.create` (catalog).
+  "proposal.witnesses.set",
   "proposal.options",
   "proposal.preflight",
   "proposal.send",
@@ -83,8 +86,24 @@ export const VERBOS_DE_ACAO = [
   // Escritas: levam `x-idempotency-key` (a `messageId` do toque).
   "form.remind",
   "activity.postpone",
+  // Leitura de documento (PR-B/T8, par do contractmaker PR5, max.md §18.13.13): OCR da
+  // mídia que o corretor mandou, campos SUGERIDOS para conferir. Leitura (nunca grava),
+  // mas exige `x-idempotency-key` (a `messageId` da mídia): a resposta é cacheada e o OCR custa.
+  "document.read",
+  // Correção de texto por IA (PR-E, par do contractmaker §18.13.14): quatro ESCRITAS com capability
+  // `document.text.edit` (catalog), `x-idempotency-key` obrigatória (o fluxo guarda a chave pendente).
+  // `suggest` NUNCA altera o documento; `apply` só roda com SIM explícito do corretor.
+  "proposal.text.suggest",
+  "proposal.text.apply",
+  "captacao.text.suggest",
+  "captacao.text.apply",
 ] as const;
 export type VerboDeAcao = (typeof VERBOS_DE_ACAO)[number];
+
+/** Os quatro verbos da correção de texto por IA (capability `document.text.edit`). */
+export function ehVerboDeTexto(verb: string): boolean {
+  return verb === "proposal.text.suggest" || verb === "proposal.text.apply" || verb === "captacao.text.suggest" || verb === "captacao.text.apply";
+}
 
 /** Envio de proposta, de análise de crédito e de captação esperam mais; o resto, o teto comum. */
 export function timeoutDoVerbo(verb: VerboDeAcao): number {
@@ -93,6 +112,9 @@ export function timeoutDoVerbo(verb: VerboDeAcao): number {
   if (verb === "proposal.send" || verb === "proposal.remind" || verb === "proposal.send_owner") return IMOBPRO_PROPOSAL_SEND_TIMEOUT_MS;
   if (verb === "captacao.send") return captacaoSendTimeoutMs();
   if (verb === "credit.request") return IMOBPRO_CREDIT_REQUEST_TIMEOUT_MS;
+  // OCR de PDF: o teto comum de 8 s cortaria justo a leitura que o servidor termina e cobra.
+  if (verb === "document.read") return IMOBPRO_DOCUMENT_READ_TIMEOUT_MS;
+  if (ehVerboDeTexto(verb)) return IMOBPRO_TEXT_EDIT_TIMEOUT_MS;
   return IMOBPRO_TIMEOUT_MS;
 }
 
@@ -147,8 +169,16 @@ async function executarAcaoDireta(params: {
     // Tratá-los como "sem resposta" prenderia a pessoa num "ainda não confirmei" eterno, porque a
     // recusa fica no cache de idempotência da chave e o replay devolve o mesmo 5xx.
     const erroDoCorpo = body && typeof body === "object" ? (body as Record<string, unknown>).error : undefined;
+    // `document.read` 502 `leitura_indisponivel` (o OCR falhou): o chamador o traduz e repete UMA
+    // vez com chave nova; tratá-lo como "sem resposta" perderia a distinção do retry.
     const recusaCanonica = (params.verb === "proposal.remind" && erroDoCorpo === "lembrete_recusado") ||
-      (params.verb === "proposal.cancel" && erroDoCorpo === "cancelamento_falhou");
+      (params.verb === "proposal.cancel" && erroDoCorpo === "cancelamento_falhou") ||
+      (params.verb === "document.read" && erroDoCorpo === "leitura_indisponivel") ||
+      // Correção de texto (§18.13.14): 502 `documento_indisponivel` (o Google não respondeu), 502
+      // `redacao_indisponivel` (o modelo não respondeu) e 503 `nao_configurado` são frases FIXAS do
+      // fluxo, sem retry automático; tratá-los como "sem resposta" apagaria a distinção.
+      (ehVerboDeTexto(params.verb) &&
+        (erroDoCorpo === "documento_indisponivel" || erroDoCorpo === "redacao_indisponivel" || erroDoCorpo === "nao_configurado"));
     if (res.status >= 500 && !naoConfigurado && !falhaDeEnvio && !recusaCanonica) {
       console.warn(`[acao] ${params.verb} ${res.status} na org ${params.orgId}`);
       return null;
@@ -168,6 +198,12 @@ async function executarAcaoDireta(params: {
       `[acao] ${params.verb} falhou na org ${params.orgId}:`,
       err instanceof Error ? err.message : String(err)
     );
+    // `document.read` estourou o prazo: o servidor pode ter terminado (e cobrado) a leitura e
+    // guarda a resposta pela chave. Devolver `null` levaria o corretor a "tentar de novo" com
+    // outra `messageId` (segundo OCR pago); o desfecho canônico diz "ainda processando".
+    if (params.verb === "document.read" && err instanceof Error && /^timeout de \d+ms em /.test(err.message)) {
+      return { status: 504, body: { error: "processando" } };
+    }
     return null;
   }
 }
@@ -179,7 +215,11 @@ export async function executarAcao(params: Parameters<typeof executarAcaoDireta>
   if (e && (e.context.orgId !== params.orgId || contentDigest(e.context.subject) !== contentDigest(params.subject))) throw new Error("execution_tenant_mismatch");
   runEvent("tool.started", params.verb);
   if (e?.context.mode === "simulation") { runEvent("tool.simulated", params.verb); return { status: 409, body: { error: "simulation_effect_denied", simulated: true } }; }
-  if (!isWriteVerb(params.verb)) return executarAcaoDireta(params);
+  if (!isWriteVerb(params.verb)) {
+    // M5: `document.read` é leitura (sem confirmação), mas custa OCR (Gemini): o kill switch de gasto o cobre.
+    if (params.verb === "document.read" && process.env.MAX_PAID_KILL === "true") return { status: 503, body: { error: "paid_disabled" } };
+    return executarAcaoDireta(params);
+  }
   if (process.env.MAX_WRITES_KILL === "true" || ((params.verb === "marketing.generate" || params.verb === "credit.request") && process.env.MAX_PAID_KILL === "true")) return { status: 503, body: { error: "writes_disabled" } };
   if (e) {
     await assertBotWrite(e.context, params.rawPhone);

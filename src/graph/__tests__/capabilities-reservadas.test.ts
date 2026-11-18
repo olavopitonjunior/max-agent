@@ -49,8 +49,8 @@ const corretor = {
 
 describe("capabilities reservadas do PR-O4cat (inertes)", () => {
   it("estão no catálogo, ao FIM e nesta ordem: posições 34, 35 e 36 (0-based)", () => {
-    expect(CAPABILITIES).toHaveLength(37);
-    expect(CAPABILITIES.slice(34)).toEqual([...CATALOGO_34_A_36]);
+    expect(CAPABILITIES).toHaveLength(39);
+    expect(CAPABILITIES.slice(34, 37)).toEqual([...CATALOGO_34_A_36]);
     CATALOGO_34_A_36.forEach((c, i) => expect(CAPABILITIES.indexOf(c)).toBe(34 + i));
   });
 

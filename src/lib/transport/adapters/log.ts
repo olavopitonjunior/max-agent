@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { log } from "../../log";
-import type { TransportAdapter } from "../types";
+import type { DownloadMediaFn, TransportAdapter } from "../types";
 
 /**
  * Transporte sem rede, para staging e homologação de um deploy sem número
@@ -18,7 +18,5 @@ export const logAdapter: TransportAdapter = {
   async connectionStatus() {
     return { connected: true, raw: { adapter: "log" } };
   },
-  async downloadMedia() {
-    return null;
-  },
+  downloadMedia: (async () => null) as DownloadMediaFn,
 };

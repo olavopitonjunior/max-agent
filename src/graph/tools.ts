@@ -7,6 +7,7 @@ import { ESTADOS_DE_PROPOSTA, PERIODOS_DE_METRICA, QUEBRAS_DE_METRICA } from "./
 import { ALIAS_DE_TIPO_DE_AVISO } from "./preferencias-contract";
 import type { Candidate } from "@/lib/identity";
 import { captacaoLigada } from "./captacao-flags";
+import { normalizarParaIntencao, PEDE_CRIACAO, PEDE_CRIACAO_SEM_VERBO, toleranteNaOrg } from "./formularios/intencao";
 import { packsDoPerfil, type ToolPack } from "@/packs";
 
 /**
@@ -735,21 +736,20 @@ const PEDE_PROPOSTA = /\b(proposta|propostas)\b/i;
  * criação é verbo (ou "preciso de"/"quero") + artigo INDEFINIDO (ou nenhum) +
  * o documento: "cria uma proposta", "preciso de um formulário", "monta
  * proposta". "A proposta" (definido) é algo que já existe: consulta.
- */
-const PEDE_CRIACAO =
-  /\b(?:(?:cri[ae]r?|crie|mont[ae]r?|abr[ae]|abrir|fa[zc]a?|fazer|ger[ae]r?|manda?r?|envi[ae]r?)|(?:preciso|precisava|quero|queria|gostaria)(?:\s+de)?(?:\s+(?:criar|fazer|montar|abrir|gerar|mandar|enviar))?)\s+(?:(?:uma|um)\s+)?(?:(?:nova|novo)\s+)?(?:rascunho\s+de\s+)?(?:proposta|formulario|ficha|cadastro)\b/i;
-
-/**
+ *
  * Criação SEM verbo, só no INÍCIO do texto: "proposta nova pro João", "novo
  * formulário de locação". Ancorado no começo de propósito — "tem proposta
  * nova?" (consulta) começa com "tem" e fica fora (re-review do #37).
+ *
+ * Os regex moraram aqui; agora vivem em `formularios/intencao.ts` (texto
+ * idêntico) para a versão tolerante a erro de digitação do v2 usar os mesmos.
  */
-const PEDE_CRIACAO_SEM_VERBO =
-  /^(?:(?:uma|um)\s+)?(?:(?:nova|novo)\s+(?:proposta|formulario|ficha|cadastro)|(?:proposta|formulario|ficha|cadastro)\s+(?:nova|novo))\b/i;
-
 /** O texto é um pedido de criação de documento? (Normalizado: sem acento.) */
-export function ehPedidoDeCriacao(texto: string): boolean {
-  const n = corrigirProposta(normalizar(texto));
+export function ehPedidoDeCriacao(texto: string, opts?: { tolerante?: boolean }): boolean {
+  // `tolerante` só no v2 (feature `formularios_v2`): sem ele, o caminho de hoje, byte a byte
+  // (com a lista fechada de "propsta"/"porposta"… de `corrigirProposta`).
+  const hoje = corrigirProposta(normalizar(texto));
+  const n = opts?.tolerante ? normalizarParaIntencao(hoje) : hoje;
   return PEDE_CRIACAO.test(n) || PEDE_CRIACAO_SEM_VERBO.test(n);
 }
 
@@ -1234,6 +1234,7 @@ export function selecionarTools(params: {
   texto: string;
   catalogo?: ToolDef[];
   orgId?: string;
+  fluxoV2?: boolean;
 }): { tools: ToolDef[]; cortadas: number } {
   const catalogo = params.catalogo ?? TOOLS_DE_LEITURA;
   const texto = params.texto;
@@ -1243,7 +1244,7 @@ export function selecionarTools(params: {
   // em texto misto ("cria uma proposta e me diz como estão meus negócios"),
   // que perde a leitura NESTE turn. Troca deliberada: a criação é a única
   // escrita do Max, e a consulta pode ser refeita na mensagem seguinte.
-  if (ehPedidoDeCriacao(texto)) return { tools: [], cortadas: 0 };
+  if (ehPedidoDeCriacao(texto, { tolerante: toleranteNaOrg(params.orgId, { fluxoV2: params.fluxoV2 }) })) return { tools: [], cortadas: 0 };
 
   const elegiveis = catalogo
     .filter(t => !TOOLS_EXTENDIDAS.includes(t) || featureEnabled("queries",params.orgId))
@@ -1340,6 +1341,8 @@ export function ferramentasDoTurno(params: {
   agora?: number;
   /** Packs do perfil (testes); o padrão é `packsDoPerfil()`. */
   packs?: readonly ToolPack[];
+  /** `options.fluxoV2` do servidor: com a feature da org, liga a tolerância a erro de digitação (T3). */
+  fluxoV2?: boolean;
 }): { entradas: EntradaDeTool[]; cortadas: number } {
   const registro = entradasDoDeploy(params.packs);
   const escrita = registro.filter(
@@ -1360,6 +1363,7 @@ export function ferramentasDoTurno(params: {
     policy: params.policy,
     texto: params.texto,
     orgId: params.identity.orgId,
+    fluxoV2: params.fluxoV2,
     catalogo: catalogoDeLeitura,
   });
   return {
