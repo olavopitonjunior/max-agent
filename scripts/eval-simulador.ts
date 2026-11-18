@@ -217,7 +217,13 @@ export async function imobpro({ verb, args = {}, idempotencyKey }: { verb: strin
   }
   const p = achar(args);
   switch (verb) {
-    case "proposal.list": return { status: 200, body: lista(args) };
+    case "proposal.list": {
+      // Como o CM (`scope-action.ts`): com `escopo`, o servidor ecoa o escopo aplicado; sem eco o
+      // Max trata como "filtro indisponível". A equipe simulada tem 12 propostas (o usuário, só as suas).
+      const l = lista(args);
+      if (typeof args.escopo !== "string") return { status: 200, body: l };
+      return { status: 200, body: { ...l, escopo: args.escopo, ...(args.escopo === "equipe" ? { total: Math.max(12, l.total) } : {}) } };
+    }
     case "proposal.status": return p ? { status: 200, body: { proposta: p } } : { status: 404, body: { error: "nao_encontrada" } };
     case "proposal.complete": return { status: 200, body: { status: "completa" } };
     case "proposal.convert": return { status: 201, body: { negocio: { id: "d1", link: "https://app.imobpro.test/deals/d1" }, formulario: { id: "f1", link: "https://app.imobpro.test/f/abc" } } };
