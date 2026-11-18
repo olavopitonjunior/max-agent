@@ -1,8 +1,9 @@
+import { studioDraftStep } from './studio-drafts';
 import { featureEnabled } from '@/lib/runtime/rollout';
 import {runEvent} from '@/lib/runtime/context';
 interface Property {id:string;tipo?:string;bairro?:string;cidade?:string;dormitorios?:number}
 interface Template {id:string;name:string}
-export interface MarketingPending {briefId:string;confirmationDigest:string;expiresAt:number;summary:string;phase?:'property'|'template'|'approval'|'tracking';properties?:Property[];templates?:Template[];propertyId?:string;modality?:'copy'|'artwork'|'video';cursor?:string;jobId?:string}
+export interface MarketingPending {briefId:string;confirmationDigest:string;expiresAt:number;summary:string;phase?:'property'|'template'|'approval'|'tracking'|'studio_property';properties?:Property[];templates?:Template[];propertyId?:string;modality?:'copy'|'artwork'|'video';cursor?:string;jobId?:string}
 type Action=(verb:string,args:Record<string,unknown>,key?:string)=>Promise<{status:number;body:Record<string,unknown>}|null>;
 interface Step {reply:string;pending:MarketingPending|null;event:string}
 const isRequest=(text:string)=>/\b(marketing|arte|an[uú]ncio|campanha|v[ií]deo|divulga\w*|post)\b/i.test(text)||/texto.*im[oó]vel/i.test(text);
@@ -27,6 +28,11 @@ export async function marketingStep(p:{orgId:string;text:string;messageId:string
   if(!enabled)return isRequest(text)?{reply:'Novas gerações estão desligadas. A peça já aceita continua sendo processada; você pode consultar o status.',pending:previous,event:'marketing_tracking_preserved'}:null;
  }
  if(!enabled)return previous?{reply:'Marketing indisponível agora. A confirmação foi descartada.',pending:null,event:'marketing_disabled'}:null;
+ // Existing approvals and explicit legacy requests keep their original contract.
+ if (!/im[oó]vel\s+[\w-]+\s+template\s+[\w-]+/i.test(text)) {
+   const draft = await studioDraftStep(p,action);
+   if (draft) return draft;
+ }
  async function prepare(propertyId:string,template:Template,modality:'copy'|'artwork'|'video'):Promise<Step>{
   if(!p.canWrite||!p.policy.includes('marketing.generate'))return {reply:'A geração de marketing não está liberada para você.',pending:null,event:'marketing_denied'};
   const result=await action('marketing.prepare',{propertyId,templateId:template.id,modality},p.messageId);
