@@ -710,7 +710,7 @@ async function passoCanal(e: E, as: AssinaturaEmCurso, conf: ReturnType<typeof l
   if (r.status === 409) {
     const texto =
       erro === "signatarios_duplicados"
-        ? "Há assinantes repetidos (mesmo CPF ou contato) na proposta. Corrija na tela de propostas."
+        ? "Há assinantes repetidos na proposta. Corrija na tela de propostas."
         : "Essa proposta não está mais em rascunho, ou foi editada pela tela, então não mudo o canal por aqui.";
     return dizer(e, semAssinatura(limpo), `Não gravei o canal. ${texto}`, `proposal_update_${erro || r.status}`);
   }

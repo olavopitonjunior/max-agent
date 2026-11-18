@@ -93,6 +93,13 @@ export interface FluxoFormularioV2 {
    * claro. Só `midia.ts` abre. Some quando `lidosPendentes` esvazia.
    */
   cofreLidos?: string;
+  /**
+   * As últimas falas do corretor neste fluxo, cifradas (mesmo cofre, AAD própria): o histórico do
+   * checkpoint (`messages`) guarda só o marcador "(resposta da ficha de proposta)" (CPF/telefone
+   * ditos nunca ficam em claro), e a janela de extração lê as falas anteriores DAQUI. Só `midia.ts`
+   * abre. Ausente = sem falas anteriores para a janela.
+   */
+  cofreFalas?: string;
   /** Campos já perguntados (para não repetir a mesma pergunta). Só caminhos. */
   perguntados: string[];
   /** A escrita em curso: a `messageId` do primeiro "sim" (Global Constraint 5). */
