@@ -554,11 +554,29 @@ const SO_NA_TELA: [RegExp, string][] = [
   [/\bparcel\w*/, "Parcelamento"],
   [/\bfinanciament\w*/, "Financiamento"],
   [/\bconjuge\b/, "Cônjuge"],
-  [/\bestado civil\b/, "Estado civil"],
+  [/\bestado civil\b|\b(solteir[oa]|casad[oa]|divorciad[oa]|viuv[oa]|uniao estavel)\b/, "Estado civil"],
   [/\bprofiss\w*/, "Profissão"],
   [/\b(segundo|outro|mais um) (comprador|proponente|inquilino|locatario|vendedor)\b/, "Mais uma parte"],
   [/\bprazo\b|\bvigencia\b|\breajuste\b|\bmulta\b/, "Prazo e condições"],
 ];
+/**
+ * Prod 18/11 (item 8): a proposta v1 não guarda estado civil. "comprador X, casado" perdia o "casado" calado e
+ * "ele é casado" ia para o modelo, que dizia "anotei" sem gravar. O aviso é determinístico: vai para a tela.
+ * "separado" fica de fora ("garagem separada").
+ */
+const ESTADO_CIVIL_DITO = /\b(solteir[oa]|casad[oa]|divorciad[oa]|viuv[oa]|uniao estavel)\b/;
+const ROTULO_CIVIL: Record<string, string> = { "uniao estavel": "união estável", viuvo: "viúvo", viuva: "viúva" };
+export function estadoCivilDito(texto?: string): string | null {
+  const t = normalizar(texto ?? "");
+  const m = ESTADO_CIVIL_DITO.exec(t);
+  if (m) return ROTULO_CIVIL[m[1]!] ?? m[1]!;
+  return /\bestado civil\b/.test(t) ? "" : null;
+}
+function avisoDoEstadoCivil(texto?: string): string {
+  const c = estadoCivilDito(texto);
+  if (c === null) return "";
+  return `Estado civil${c ? ` (${c})` : ""} não entra pelo WhatsApp: complete na tela da proposta depois de gerar o rascunho (o cônjuge também, se houver).\n\n`;
+}
 function campoSoNaTela(texto: string): string | null {
   const t = normalizar(texto);
   return SO_NA_TELA.find(([re]) => re.test(t))?.[1] ?? null;
@@ -1653,7 +1671,7 @@ export async function iniciarProposta(
   const f: Fluxo = { kind: "proposta", etapa: "coleta", natureza, dados, leaseClientId, atualizadoEm: agora };
   // Sem ClickSign: segue (rascunho e PDF funcionam), mas avisa JÁ — antes de
   // a pessoa preencher tudo e descobrir no "sim" do envio (prod 07/10).
-  const aviso = semAssinatura ? `${TEXTO_AVISO_SEM_ASSINATURA}\n\n` : "";
+  const aviso = `${semAssinatura ? `${TEXTO_AVISO_SEM_ASSINATURA}\n\n` : ""}${avisoDoEstadoCivil(pedido)}`;
   const temAlgo = !igual(dados, mesclarDados({}, sanearDados({})));
   if (!temAlgo) return { reply: `${aviso}${textoCamposDaProposta(natureza, !!leaseClientId)}`, fluxo: f, evento: "proposta_campos" };
   const falta = faltandoNaProposta(dados, { temLead: !!leaseClientId });
@@ -2214,6 +2232,16 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   // Nada novo nesta mensagem: não é do fluxo (pergunta, conversa) — libera, e
   // nunca diz "Anotado" sem ter anotado (achado B5). Nenhuma escrita (B1).
   if (igual(dados, f.dados)) {
+    // Antes do rascunho, estado civil dito ("ele é casado"): o aviso da tela e o card de volta — nunca o modelo.
+    const avisoCivil = f.propostaId ? "" : avisoDoEstadoCivil(ctx.texto);
+    if (avisoCivil) {
+      const faltaAqui = faltandoNaProposta(f.dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
+      return {
+        reply: avisoCivil + (faltaAqui.length ? `Ainda falta: ${faltaAqui.join("; ")}.` : resumoDaProposta(f)),
+        fluxo: { ...f, atualizadoEm: agora },
+        evento: "estado_civil_so_na_tela",
+      };
+    }
     // Pediu para mudar o que o Max não toca (fiador, cláusula…): o caminho, sem o modelo.
     const soNaTela = f.propostaId ? campoSoNaTela(ctx.texto) : null;
     if (soNaTela) {
@@ -2254,9 +2282,10 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   const g: FluxoProposta = { ...f, dados, chave: undefined, aguardaCampo: undefined, duvidaTelefone: undefined, atualizadoEm: agora };
   const falta = parcial ? invalidosNoAjuste(dados) : faltandoNaProposta(dados, { temLead: !!f.leaseClientId && !f.leadIncompleto });
   const depoisDoRascunho = !!f.propostaId && (f.etapa === "ajustes" || f.etapa === "revisao_ajuste");
+  const avisoCivil = f.propostaId ? "" : avisoDoEstadoCivil(ctx.texto);
   if (falta.length > 0) {
     return {
-      reply: `Anotado. Ainda falta: ${falta.join("; ")}.`,
+      reply: `${avisoCivil}Anotado. Ainda falta: ${falta.join("; ")}.`,
       fluxo: { ...g, etapa: depoisDoRascunho ? "ajustes" : "coleta" },
       evento: "proposta_coleta",
     };
@@ -2269,7 +2298,7 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
       evento: "proposta_revisao_ajuste",
     };
   }
-  return { reply: resumoDaProposta(g), fluxo: { ...g, etapa: "revisao" }, evento: "proposta_revisao" };
+  return { reply: avisoCivil + resumoDaProposta(g), fluxo: { ...g, etapa: "revisao" }, evento: "proposta_revisao" };
 }
 
 function pdfDe(body: Record<string, unknown>): { link: string; ate: string | null } | null {
