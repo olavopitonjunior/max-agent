@@ -296,7 +296,7 @@ describe("fluxo no grafo", () => {
         {
           name: "preencher_proposta",
           args: {
-            proponente: { nome: "Letícia Gonçalves Nogueira", telefone: "11999990000" },
+            proponente: { nome: "Letícia Gonçalves Nogueira", telefone: "11999990000", cpf: "39276943803" },
             imovel: { endereco: "Rua Senador Godoi, 606", bairro: "Vila São Geraldo" },
             valor: 1500000,
             pagamento: { forma: "200 mil financiado, restante à vista" },
@@ -306,7 +306,7 @@ describe("fluxo no grafo", () => {
       usage: uso,
     });
     s = await run(
-      "Rua Senador godoi, 606, Vila São geraldo. Compradora Letícia Gonçalves Nogueira, 11 99999-0000. 1.500.000, sendo 200.000 financiado",
+      "Rua Senador godoi, 606, Vila São geraldo. Compradora Letícia Gonçalves Nogueira, 11 99999-0000, CPF 392.769.438-03. 1.500.000, sendo 200.000 financiado",
       { fluxo: s.fluxo, messages: s.messages },
       "t4"
     );
