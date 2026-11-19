@@ -661,6 +661,12 @@ export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaPropos
     const pessoa = out[k];
     if (!pessoa) continue;
     const q: Pessoa = { ...pessoa };
+    // O extrator pôs no CPF um número que o texto rotula como telefone ("tel 11999990000", sem CPF escrito):
+    // é o telefone. Sem isso o CPF saía e o telefone sumia junto (prod 18/11). Telefone já extraído não é trocado.
+    if (q.cpf && !q.telefone && telefonesRotulados.has(semDdi(so(q.cpf))) && !cpfsRotulados.has(so(q.cpf))) {
+      q.telefone = q.cpf;
+      delete q.cpf;
+    }
     // Telefone: pelos dígitos (com ou sem 55), nunca por um CPF que caiba no padrão.
     const tels = telefones.filter((t) => !cpfs.some((c) => so(c) === so(t)));
     q.telefone = conferirCampo(q.telefone, tels, (a, b) => semDdi(so(a)) === semDdi(so(b)));
