@@ -2636,7 +2636,7 @@ export const TEXTO_DO_CAMPO_RECUSADO: Record<string, string> = {
   email: "A ClickSign recusou o e-mail de um assinante: confira o endereço.",
   celular: "A ClickSign recusou o celular de um assinante: use DDD + número.",
   nascimento: "A ClickSign recusou a data de nascimento de um assinante: confira a data.",
-  outro: "A ClickSign recusou um dado de assinante.",
+  outro: "A ClickSign recusou o envio desta proposta.",
 };
 
 async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
@@ -2674,7 +2674,9 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
       reply:
         `${TEXTO_DO_CAMPO_RECUSADO[campo]} ` +
         `Nada foi enviado; o rascunho${f.codigo ? ` ${f.codigo}` : ""} continua salvo. ` +
-        `Me mande o dado correto e eu ajusto, ou corrija na tela e me peça o envio de novo.`,
+        (campo === "outro"
+          ? `Confira a proposta na tela e me peça o envio de novo.`
+          : `Corrija na tela e me peça o envio de novo; se for do comprador ou do vendedor, pode me mandar o dado aqui.`),
       fluxo: { ...f, etapa: "ajustes", chave: undefined, atualizadoEm: ctx.agora },
       evento: `envio_recusado_clicksign_${campo}`,
     };

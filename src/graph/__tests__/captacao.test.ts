@@ -1956,6 +1956,9 @@ describe("confirmação única (26/10): pendências só da tela", () => {
     ["pronto", false],
     ["obrigado", false],
     ["Dúvida: posso mandar amanhã?", false],
+    ["Obs: o cliente desistiu", false],
+    ["Atenção: mudou o preço", false],
+    ["Endereço: Rua A, 10", true],
     ["o bairro precisa ser exato?", false],
   ])("pareceDadoDaTela(%j) = %s", (texto, esperado) => {
     expect(cap.pareceDadoDaTela(texto)).toBe(esperado);

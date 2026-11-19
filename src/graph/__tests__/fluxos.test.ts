@@ -294,6 +294,8 @@ describe("fluxo de PROPOSTA", () => {
     const p2 = await F.conduzirFluxo(f, ctx("sim", { messageId: "env-2" }), d);
     expect(p2.evento).toBe("envio_recusado_clicksign_outro");
     expect(p2.reply).not.toContain("<script>");
+    expect(p2.reply).toContain("recusou o envio");
+    expect(p2.reply).not.toContain("mandar o dado");
   });
 
   it("envio sem resposta + interrupção: a chave do ENVIO sobrevive até o SIM seguinte", async () => {

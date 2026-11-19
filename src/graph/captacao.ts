@@ -3025,9 +3025,9 @@ async function conduzirExtras(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno,
 
 // ── conferência (preflight), faltantes e resumo ──
 
-/** "Campo: valor" ou frase que começa por um campo do imóvel ("bairro Bela Vista", "o CEP é…"). */
+/** Frase que começa por um campo do imóvel ("Bairro: Bela Vista", "bairro Bela Vista", "o CEP é…"). */
 const RE_DADO_DA_TELA =
-  /^\s*(?:[\p{L}][\p{L} ]{1,30}\s*[:=]\s*\S|(?:o|a)?\s*(?:bairro|cep|rua|logradouro|n[uú]mero|cidade|uf|complemento|matr[ií]cula|iptu|metragem|[aá]rea)\b)/iu;
+  /^\s*(?:(?:o|a)\s+)?(?:bairro|cep|rua|logradouro|endere[cç]o|n[uú]mero|cidade|uf|complemento|matr[ií]cula|iptu|metragem|[aá]rea)(?![\p{L}])/iu;
 
 export function pareceDadoDaTela(texto: string): boolean {
   // Pergunta ("Dúvida: posso mandar amanhã?") segue pro atendimento.
