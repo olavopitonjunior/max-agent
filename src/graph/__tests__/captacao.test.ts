@@ -1928,6 +1928,39 @@ describe("confirmação única (26/10): pendências só da tela", () => {
     expect(pronto.fluxo ?? null).toBeNull();
   });
 
+  it("prod 19/11: 'Bairro: Bela Vista' com pendência só da tela NÃO vai pro modelo nem finge gravar", async () => {
+    exigeMatricula = false;
+    faltantesDaTela = [{ path: "imovel.bairro", rotulo: "Bairro do imóvel", etapa: "imovel" }];
+    const fala = conversa();
+    await ateOFaltante(fala);
+    const chamadasDoModelo = llm.mock.calls.length;
+    const escritas = acao.mock.calls.length;
+    const s = await fala("Bairro: Bela Vista");
+    expect(llm.mock.calls.length).toBe(chamadasDoModelo);
+    expect(acao.mock.calls.length).toBe(escritas);
+    expect(s.reply).toContain("não consigo gravar por aqui");
+    expect(s.reply).toContain("/imoveis/captacoes/cap-1");
+    expect(s.reply).not.toContain("✅");
+    // O fluxo segue esperando o "pronto": depois de ajustar na tela, confere.
+    faltantesDaTela = [];
+    const pronto = await fala("pronto");
+    expect(pronto.reply).toContain("Pronta a captação");
+  });
+
+  it.each([
+    ["Bairro: Bela Vista", true],
+    ["bairro Bela Vista", true],
+    ["o CEP é 01310-100", true],
+    ["Número = 40", true],
+    ["qual o horário de vocês?", false],
+    ["pronto", false],
+    ["obrigado", false],
+    ["Dúvida: posso mandar amanhã?", false],
+    ["o bairro precisa ser exato?", false],
+  ])("pareceDadoDaTela(%j) = %s", (texto, esperado) => {
+    expect(cap.pareceDadoDaTela(texto)).toBe(esperado);
+  });
+
   it("'ajustei' depois de resolver na tela: confere e vai pro resumo", async () => {
     exigeMatricula = false;
     faltantesDaTela = [{ path: "campos.cor_fachada", rotulo: "Cor da fachada", etapa: "campos" }];

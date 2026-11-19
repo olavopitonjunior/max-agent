@@ -3025,9 +3025,30 @@ async function conduzirExtras(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno,
 
 // ── conferência (preflight), faltantes e resumo ──
 
-/** Etapa `verificar` com pendências só-da-tela já ditas: só "pronto"/"sim" confere de novo; o resto vai pro atendimento. */
+/** "Campo: valor" ou frase que começa por um campo do imóvel ("bairro Bela Vista", "o CEP é…"). */
+const RE_DADO_DA_TELA =
+  /^\s*(?:[\p{L}][\p{L} ]{1,30}\s*[:=]\s*\S|(?:o|a)?\s*(?:bairro|cep|rua|logradouro|n[uú]mero|cidade|uf|complemento|matr[ií]cula|iptu|metragem|[aá]rea)\b)/iu;
+
+export function pareceDadoDaTela(texto: string): boolean {
+  // Pergunta ("Dúvida: posso mandar amanhã?") segue pro atendimento.
+  return !texto.includes("?") && RE_DADO_DA_TELA.test(texto);
+}
+
+/** Etapa `verificar` com pendências só-da-tela já ditas: só "pronto"/"sim" confere de novo; dado tem resposta fixa; o resto vai pro atendimento. */
 async function conduzirVerificar(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
-  if (f.pendenciasDitas && !(QUER_CONFERIR.test(t) || lerConfirmacao(ctx.texto) === "sim" || confirmaEnvio(ctx.texto))) return pausar(f);
+  if (f.pendenciasDitas && !(QUER_CONFERIR.test(t) || lerConfirmacao(ctx.texto) === "sim" || confirmaEnvio(ctx.texto))) {
+    // Prod 19/11 (CAP-2026-0014): "Bairro: Bela Vista" ia pro atendimento, que
+    // respondeu "Bairro: Bela Vista ✅" sem gravar nada. Dado mandado nesta etapa
+    // tem resposta FIXA: não grava e aponta a tela. O resto segue pro atendimento.
+    if (pareceDadoDaTela(ctx.texto)) {
+      return resposta(
+        g(f, ctx, {}),
+        `Isso eu não consigo gravar por aqui: o que falta nesta captação só dá para ajustar pela tela: ${linkDe(f.captacaoId)}\nQuando terminar, me diga *pronto* que eu confiro.`,
+        "captacao_dado_so_da_tela"
+      );
+    }
+    return pausar(f);
+  }
   return verificar(f, ctx, deps, "");
 }
 
