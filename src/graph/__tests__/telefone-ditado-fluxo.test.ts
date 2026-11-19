@@ -21,8 +21,11 @@ function deps(extraido: DadosDaProposta): DepsDoFluxo {
 }
 
 const imovel = { endereco: "Rua Augusta, 500", numero: "500", cidade: "São Paulo", uf: "SP" };
+// decisão 18/11: CPF obrigatório antes do SIM — o card só sai com o CPF do proponente.
+const CPF = "39276943803";
+const CPF_TEXTO = "CPF 392.769.438-03";
 const completo = (telefone: string): DadosDaProposta => ({
-  proponente: { nome: "TESTE Newton Ditado", telefone },
+  proponente: { nome: "TESTE Newton Ditado", telefone, cpf: CPF },
   imovel,
   valor: 600000,
   pagamento: { forma: "à vista" },
@@ -30,7 +33,7 @@ const completo = (telefone: string): DadosDaProposta => ({
 
 describe("A — primeira mensagem (iniciarFluxo)", () => {
   const pedido =
-    "proposta de compra: comprador TESTE Newton Ditado, telefone 11, 9000-0002, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista";
+    `proposta de compra: comprador TESTE Newton Ditado, telefone 11, 9000-0002, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista, ${CPF_TEXTO}`;
 
   it("telefone de 10 dígitos que não fecha celular: pergunta, não mostra card", async () => {
     const d = deps(completo("11, 9000-0002"));
@@ -92,7 +95,7 @@ describe("R3.1 — o valor do extrator concilia com o texto ANTES da dúvida", (
   });
 
   it("primeira mensagem: o mesmo, sem pergunta", async () => {
-    const pedido = "proposta de compra: comprador TESTE Newton Ditado, telefone 11 98888-7777, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista";
+    const pedido = `proposta de compra: comprador TESTE Newton Ditado, telefone 11 98888-7777, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista, ${CPF_TEXTO}`;
     const p = await iniciarFluxo({ tipo: "proposta", pedido, policy: [...TUDO], agora }, deps(completo("119888-7777")));
     expect(p.evento).not.toBe("telefone_duvidoso");
     expect(p.reply).toContain("Comprador: TESTE Newton Ditado · 11 98888-7777");
@@ -109,7 +112,7 @@ describe("R3.1 — o valor do extrator concilia com o texto ANTES da dúvida", (
 
 describe("R3.2 — caso A em duas mensagens: guarda o resto e espera só o telefone", () => {
   const pedido =
-    "proposta de compra: comprador TESTE Newton Ditado, telefone 11, 9000-0002, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista";
+    `proposta de compra: comprador TESTE Newton Ditado, telefone 11, 9000-0002, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista, ${CPF_TEXTO}`;
 
   it("1ª pergunta o telefone com os dados guardados; 2ª completa o card", async () => {
     const d = deps(completo("11, 9000-0002"));
@@ -133,8 +136,8 @@ describe("R3.2 — caso A em duas mensagens: guarda o resto e espera só o telef
 
 describe("R3.3 — telefone com código de país aparece no texto: fica, sem pergunta", () => {
   const pedido = (tel: string) =>
-    `proposta de compra: comprador TESTE Estrangeiro, telefone ${tel}, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista`;
-  const dadosCom = (tel: string): DadosDaProposta => ({ ...completo(tel), proponente: { nome: "TESTE Estrangeiro", telefone: tel } });
+    `proposta de compra: comprador TESTE Estrangeiro, telefone ${tel}, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista, ${CPF_TEXTO}`;
+  const dadosCom = (tel: string): DadosDaProposta => ({ ...completo(tel), proponente: { nome: "TESTE Estrangeiro", telefone: tel, cpf: CPF } });
   const aberto = (): Fluxo => ({
     kind: "proposta", etapa: "revisao", natureza: "venda",
     dados: sanearDados(completo("(11) 90000-0003")), atualizadoEm: 1,
@@ -161,8 +164,8 @@ describe("R3.3 — telefone com código de país aparece no texto: fica, sem per
 
 describe("R3.5 — estrangeiro só com regra mínima (sem libphonenumber no max-agent)", () => {
   const pedido = (tel: string) =>
-    `proposta de compra: comprador TESTE Estrangeiro, telefone ${tel}, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista`;
-  const dadosCom = (tel: string): DadosDaProposta => ({ ...completo(tel), proponente: { nome: "TESTE Estrangeiro", telefone: tel } });
+    `proposta de compra: comprador TESTE Estrangeiro, telefone ${tel}, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista, ${CPF_TEXTO}`;
+  const dadosCom = (tel: string): DadosDaProposta => ({ ...completo(tel), proponente: { nome: "TESTE Estrangeiro", telefone: tel, cpf: CPF } });
   const aberto = (): Fluxo => ({
     kind: "proposta", etapa: "revisao", natureza: "venda",
     dados: sanearDados(completo("(11) 90000-0003")), atualizadoEm: 1,
@@ -233,8 +236,8 @@ describe("R3.4 — de quem é o telefone que não fecha (só o texto o trouxe)",
 
 describe("R3.6 — estrangeiro fora da regra mínima tem saída: a repetição vale como veio", () => {
   const pedido = (tel: string) =>
-    `proposta de compra: comprador TESTE Estrangeiro, telefone ${tel}, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista`;
-  const dadosCom = (tel: string): DadosDaProposta => ({ ...completo(tel), proponente: { nome: "TESTE Estrangeiro", telefone: tel } });
+    `proposta de compra: comprador TESTE Estrangeiro, telefone ${tel}, imóvel Rua Augusta, 500, São Paulo/SP, valor R$ 600.000 à vista, ${CPF_TEXTO}`;
+  const dadosCom = (tel: string): DadosDaProposta => ({ ...completo(tel), proponente: { nome: "TESTE Estrangeiro", telefone: tel, cpf: CPF } });
   const ctx = (texto: string): ContextoDoTurno => ({ texto, messageId: "m-r36", agora: 3, policy: [...TUDO] });
 
   it("1ª mensagem com +34: pergunta, citando o formato com +código do país", async () => {

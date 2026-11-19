@@ -735,6 +735,8 @@ export function faltandoNaProposta(d: DadosDaProposta, opts: { temLead?: boolean
   if (!opts.temLead) {
     if (!p.nome) falta.push("nome completo do comprador");
     else if (!nomeCompleto(p.nome)) falta.push(`sobrenome de ${p.nome}`);
+    // Decisão do Olavo (18/11): sem CPF, nada de card com SIM.
+    if (!p.cpf) falta.push("CPF de quem faz a proposta");
   }
   if (p.cpf && !cpfValido(p.cpf)) falta.push("CPF válido de quem faz a proposta");
   if (!d.imovel?.endereco) falta.push("endereço do imóvel");
