@@ -31,6 +31,25 @@ export function explicitStage(text: string, options: string[]): string | null {
   return matches.length === 1 ? matches[0] : null;
 }
 
+/** O texto cita alguma etapa real (inteira, como palavra)? Sem citação, um "em …" não é pedido de filtro. */
+export function mentionsStage(text: string, options: string[]): boolean {
+  const input = ` ${normalize(text).replace(/[^\p{L}\p{N}]+/gu, " ")} `;
+  return options.some(option => {
+    const label = normalize(option).replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    return label.length > 0 && input.includes(` ${label} `);
+  });
+}
+
+/**
+ * Estado que o modelo inventa para "todos os meus negócios em curso" (prod 18/11: "abertos", "parados",
+ * "em andamento"). Não é recorte de etapa: consultar sem filtro. "venda"/"locação" NÃO entram — esses
+ * recortam a carteira, e adivinhar a etapa deles é o que a regra do menu evita.
+ */
+const ESTADO_GENERICO = /^(?:em\s+)?(?:abert[oa]s?|andamento|curso|ativ[oa]s?|parad[oa]s?|travad[oa]s?|tod[oa]s?|qualquer|geral|atual|atuais|todas as etapas)$/;
+export function isGenericStage(value: unknown): boolean {
+  return typeof value === "string" && ESTADO_GENERICO.test(normalize(value).replace(/[.!?]+$/, "").trim());
+}
+
 export function renderQueryOptions(pending: QueryOptions): string {
   const labels = pending.options.slice(pending.offset, pending.offset + PAGE_SIZE)
     .map((s, i) => `${pending.offset + i + 1}) ${s.length > 65 ? s.slice(0, 62) + "…" : s}`);
@@ -43,6 +62,8 @@ export function queryChoice(text: string, pending: QueryOptions): QueryChoice {
   const input = normalize(text).replace(/[.!?]+$/, "").trim();
   if (/^(cancelar|cancela|deixa pra la)$/.test(input)) return { kind: "cancel" };
   if (input === "etapas") return { kind: "menu" };
+  // O título da opção 0 digitado ("Todas as etapas"): prod 18/11 caía no modelo, que prometia listar e não listava.
+  if (/^(?:todas|todos|tudo)(?:\s+as\s+etapas)?$/.test(input)) return { kind: "select" };
   if (input === "mais" && pending.numbered !== false) return { kind: "more" };
   const number = /^(?:opcao\s*)?(\d{1,2})$/.exec(input);
   if (number && pending.numbered !== false) {
