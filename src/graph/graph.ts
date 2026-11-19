@@ -148,7 +148,7 @@ import {
 import { executarAcao, type VerboDeAcao } from "@/lib/acao";
 import { OrgSuspensaError, TEXTO_ORG_SUSPENSA } from "@/lib/org-suspensa";
 import { subjectDe, consultarEscopo } from "@/lib/scope";
-import { explicitStage, queryChoice, renderQueryOptions, nextQueryPage, QUERY_OPTIONS_TTL, type QueryOptions } from "./query-options";
+import { explicitStage, mentionsStage, isGenericStage, queryChoice, renderQueryOptions, nextQueryPage, QUERY_OPTIONS_TTL, type QueryOptions } from "./query-options";
 import { chaveDePolitica, lerPreferencias, atualizarPreferencias } from "@/lib/cm";
 import type { InboundMessage } from "@/lib/transport";
 import { SEM_ORG } from "@/lib/sem-org";
@@ -2191,8 +2191,8 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
   const text = textoDoTurno(state);
   const filterText = text.replace(/\bem\s+(?:(?:um|uma)\s+)?(?:tabela|lista|listagem|formato|detalhes|ordem|texto|resumo|t[oó]picos|json)\b/gi, "");
   // Affirmative filter phrases exclude projections such as "a etapa atual".
-  const stageHint = /\b(?:na|pela)\s+(?:etapa|fase)\b|\b(?:etapa|fase)\s*:/i.test(text) ||
-    /\bem\s+\S/i.test(filterText);
+  const strongStageHint = /\b(?:na|pela)\s+(?:etapa|fase)\b|\b(?:etapa|fase)\s*:/i.test(text);
+  const stageHint = strongStageHint || /\bem\s+\S/i.test(filterText);
   const missing = chamadas.filter(call => stageHint && call.name === "listar_negocios" &&
     (typeof call.args.estado !== "string" || !call.args.estado.trim()));
 
@@ -2227,10 +2227,13 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
       ? await dispatch([{ name: "listar_negocios", args: { opcoes_etapas: true } }]) : null;
     const options = refresh?.resultados[0]?.clarification?.options ?? [];
     const stage = refresh && explicitStage(text, options);
+    // "em que etapa está…", "em andamento": o "em …" não cita etapa real nenhuma (prod 18/11) → consulta sem
+    // filtro. Com "na etapa"/"fase:" explícito, ou citando uma etapa que não deu para aplicar, segue o menu.
+    const semFiltro = !stage && refresh !== null && options.length > 0 && !strongStageHint && !mentionsStage(text, options);
     preflightLog.push(...(refresh?.trilha ?? missing.map(call => ({ name: call.name, args: call.args, outcome: "aguardando_etapa" }))));
-    prepared = chamadas.flatMap(call => !missing.includes(call) ? [call] : stage
+    prepared = chamadas.flatMap(call => !missing.includes(call) || semFiltro ? [call] : stage
       ? [{ ...call, args: { ...call.args, estado: stage } }] : []);
-    if (!stage) blocked.push(...missing.map(call => ({ tool: call.name, items: null, truncated: false,
+    if (!stage && !semFiltro) blocked.push(...missing.map(call => ({ tool: call.name, items: null, truncated: false,
       clarification: { field: "estado" as const, options } })));
   }
   let { resultados, trilha, referencias } = await dispatch(prepared);
@@ -2244,6 +2247,17 @@ async function tools(state: MaxStateType): Promise<Partial<MaxStateType>> {
   if (!missing.length && state.toolRounds === 0 && chamadas.length === 1 && chamadas[0].name === "listar_negocios" &&
       namedStage && namedStage !== chamadas[0].args.estado) {
     const corrected = await despacharLeituras({ chamadas: [{ ...chamadas[0], args: { ...chamadas[0].args, estado: namedStage } }],
+      oferecidas: oferecidasDaVolta(state), policy: state.policy, identity: state.identity,
+      fromPhone: state.inbound.fromPhone, referencias, turno: state.inbound.messageId });
+    resultados = corrected.resultados;
+    trilha = [...trilha, ...corrected.trilha];
+    referencias = corrected.referencias;
+  } else if (!missing.length && state.toolRounds === 0 && chamadas.length === 1 && chamadas[0].name === "listar_negocios" &&
+      clarification && !namedStage && isGenericStage(chamadas[0].args.estado)) {
+    // "abertos"/"parados"/"em andamento" (prod 18/11): o modelo pôs como etapa o que é "a carteira em curso".
+    // Uma única nova consulta, sem o filtro, pelas mesmas travas do despachante.
+    const { estado: _inventado, ...semEstado } = chamadas[0].args;
+    const corrected = await despacharLeituras({ chamadas: [{ ...chamadas[0], args: semEstado }],
       oferecidas: oferecidasDaVolta(state), policy: state.policy, identity: state.identity,
       fromPhone: state.inbound.fromPhone, referencias, turno: state.inbound.messageId });
     resultados = corrected.resultados;
