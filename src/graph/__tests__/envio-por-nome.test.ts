@@ -136,7 +136,7 @@ describe("achados do code review (envio por nome)", () => {
     const d = { acao: vi.fn(), extrairProposta: vi.fn().mockResolvedValue({ proponente: { email: "novo@x.com" } }), extrairCampos: vi.fn() };
     const f = {
       kind: "proposta" as const, etapa: "ajustes" as const, natureza: "venda" as const, propostaId: "a", atualizadoEm: agora,
-      dados: { proponente: { nome: "Letícia Gonçalves", telefone: "11999990000" }, imovel: { endereco: "Rua A" }, valor: 10 },
+      dados: { proponente: { nome: "Letícia Gonçalves", telefone: "11999990000", cpf: "39276943803" }, imovel: { endereco: "Rua A" }, valor: 10 },
     };
     const p = await F.conduzirFluxo(f, ctx("corrige o email dela pra novo@x.com e manda a proposta"), d);
     expect(p.reply).toContain("Atualizo o rascunho assim?");

@@ -28,7 +28,7 @@ describe("proposta — valores monetários destokenizados", () => {
 
 describe("proposta — complemento do imóvel", () => {
   it("não repete número já informado no endereço após corrigir apartamento", async () => {
-    const dados = sanearDados({ proponente: { nome: "TESTE QA", telefone: "11999063228" }, valor: 500000,
+    const dados = sanearDados({ proponente: { nome: "TESTE QA", telefone: "11999063228", cpf: "39276943803" }, valor: 500000,
       imovel: { endereco: "Rua de Teste QA, 100", numero: "100", complemento: "apartamento 1", cidade: "São Paulo", uf: "SP" } });
     const { conduzirFluxo } = await import("../fluxos");
     const resultado = await conduzirFluxo({ kind: "proposta", etapa: "revisao", natureza: "venda", dados, atualizadoEm: 1 }, {

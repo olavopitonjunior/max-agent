@@ -179,7 +179,7 @@ describe("achados do code review", () => {
     const d = dep();
     const f: Fluxo = {
       kind: "proposta", etapa: "ajustes", natureza: "venda", propostaId: "p1", ajustePendente: true, atualizadoEm: agora,
-      dados: { proponente: { nome: "Ana Lima", telefone: "11999990000" }, imovel: { endereco: "Rua A" }, valor: 10 },
+      dados: { proponente: { nome: "Ana Lima", telefone: "11999990000", cpf: "39276943803" }, imovel: { endereco: "Rua A" }, valor: 10 },
     };
     const p = await F.conduzirFluxo(f, ctx("Pode enviar para assinatura"), d);
     expect(p.fluxo).toMatchObject({ etapa: "revisao_ajuste" });

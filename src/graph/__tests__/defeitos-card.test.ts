@@ -10,7 +10,7 @@ import { juntarTelefone, telefoneDuvidoso } from "@/lib/phone";
  */
 
 const base: DadosDaProposta = {
-  proponente: { nome: "TESTE Comprador Reteste", telefone: "(11) 90000-0006" },
+  proponente: { nome: "TESTE Comprador Reteste", telefone: "(11) 90000-0006", cpf: "39276943803" },
   imovel: { endereco: "Rua Haddock Lobo, 300", numero: "300", complemento: "apto 41", cidade: "São Paulo", uf: "SP" },
   valor: 950000,
   pagamento: { sinal: 95000, forma: "restante financiado" },

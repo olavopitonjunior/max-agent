@@ -16,7 +16,7 @@ const agora = 1_000_000;
 const ctx = (texto: string) => ({ texto, messageId: `m-${texto.slice(0, 8)}`, policy: ["proposal.create", "proposal.send", "form.create"] as const, agora });
 
 const DADOS: import("../fluxos").DadosDaProposta = {
-  proponente: { nome: "TESTE Comprador Smoke", telefone: "11999990000" },
+  proponente: { nome: "TESTE Comprador Smoke", telefone: "11999990000", cpf: "52998224725" },
   imovel: { endereco: "Rua Teste 30", complemento: "Apto TESTE", cidade: "São Paulo", uf: "SP" },
   valor: 500_000,
   pagamento: { forma: "à vista" },

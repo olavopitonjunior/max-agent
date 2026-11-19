@@ -210,15 +210,17 @@ describe("fluxo de PROPOSTA", () => {
       extrairProposta: vi
         .fn()
         .mockResolvedValueOnce({ proponente: { nome: "Letícia Gonçalves Nogueira" }, valor: 1_500_000 })
-        .mockResolvedValueOnce({ imovel: { endereco: "Rua Senador Godoi, 606" }, proponente: { telefone: "11999990000" } }),
+        .mockResolvedValueOnce({ imovel: { endereco: "Rua Senador Godoi, 606" }, proponente: { telefone: "11999990000", cpf: "39276943803" } }),
     });
     let p = await F.conduzirFluxo({ kind: "proposta", etapa: "natureza", dados: {}, atualizadoEm: agora }, ctx("venda"), d);
     expect(p.reply).toContain("Comprador");
     p = await F.conduzirFluxo(p.fluxo!, ctx("compradora Letícia, 1,5 milhão"), d);
     expect(p.reply).toContain("endereço do imóvel");
     expect(p.reply).toContain("telefone do comprador");
+    // decisão 18/11: CPF obrigatório antes do SIM
+    expect(p.reply).toContain("CPF de quem faz a proposta");
     expect(p.reply).not.toContain("valor");
-    p = await F.conduzirFluxo(p.fluxo!, ctx("Rua Senador Godoi 606, tel 11 99999-0000"), d);
+    p = await F.conduzirFluxo(p.fluxo!, ctx("Rua Senador Godoi 606, tel 11 99999-0000, CPF 392.769.438-03"), d);
     expect(p.fluxo).toMatchObject({ kind: "proposta", etapa: "revisao" });
     expect(p.reply).toContain("R$");
     expect(p.reply).toContain("Está correto?");
@@ -676,8 +678,12 @@ describe("saídas e travas", () => {
 
   it("faltandoNaProposta espelha o buildProposalPayload", () => {
     expect(F.faltandoNaProposta(DADOS_OK)).toEqual([]);
-    expect(F.faltandoNaProposta({ ...DADOS_OK, proponente: { nome: "Letícia", telefone: "11999990000" } })).toEqual([
+    expect(F.faltandoNaProposta({ ...DADOS_OK, proponente: { nome: "Letícia", telefone: "11999990000", cpf: "39276943803" } })).toEqual([
       "sobrenome de Letícia",
+    ]);
+    // decisão 18/11: CPF obrigatório antes do SIM
+    expect(F.faltandoNaProposta({ ...DADOS_OK, proponente: { nome: "Letícia Gonçalves Nogueira", telefone: "11999990000" } })).toEqual([
+      "CPF de quem faz a proposta",
     ]);
     expect(F.faltandoNaProposta({ ...DADOS_OK, vendedor: { nome: "Carlos Souza" } })).toEqual([
       "telefone ou e-mail do vendedor",
@@ -690,9 +696,10 @@ describe("saídas e travas", () => {
   it("faltandoNaProposta({ temLead: true }) pula nome e valor — vêm do proposal.create — mas endereço/telefone seguem exigidos", () => {
     expect(F.faltandoNaProposta({}, { temLead: true })).toEqual(["endereço do imóvel", "telefone do comprador, com DDD"]);
     expect(F.faltandoNaProposta({ imovel: { endereco: "Rua X, 1" }, valor: 1000, proponente: { telefone: "11999990000" } }, { temLead: true })).toEqual([]);
-    // Sem o flag, o comportamento de hoje continua intacto.
+    // Sem o flag, nome e CPF seguem exigidos (decisão 18/11: CPF obrigatório antes do SIM).
     expect(F.faltandoNaProposta({ imovel: { endereco: "Rua X, 1" }, valor: 1000, proponente: { telefone: "11999990000" } })).toEqual([
       "nome completo do comprador",
+      "CPF de quem faz a proposta",
     ]);
   });
 
