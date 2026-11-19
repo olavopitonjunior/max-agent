@@ -2629,6 +2629,16 @@ async function pedirMidiaDoEnvio(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
   };
 }
 
+/** `dados_recusados_clicksign.campo` → o que a pessoa corrige (contrato em docs/max.md do CM). */
+export const TEXTO_DO_CAMPO_RECUSADO: Record<string, string> = {
+  nome: "A ClickSign recusou o nome de um assinante: use nome e sobrenome, sem números nem símbolos.",
+  cpf: "A ClickSign recusou o CPF de um assinante: confira os números.",
+  email: "A ClickSign recusou o e-mail de um assinante: confira o endereço.",
+  celular: "A ClickSign recusou o celular de um assinante: use DDD + número.",
+  nascimento: "A ClickSign recusou a data de nascimento de um assinante: confira a data.",
+  outro: "A ClickSign recusou um dado de assinante.",
+};
+
 async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const chave = chaveDe(f, "proposal.send", ctx);
   const r = await deps.acao("proposal.send", { proposta_id: f.propostaId, metodo: f.metodo?.valor }, chave.valor);
@@ -2652,6 +2662,21 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
       reply: `Esse tipo de assinatura não está liberado. ${textoMetodos(f.metodos ?? [])}`,
       fluxo: { ...f, etapa: "metodo", chave: undefined },
       evento: "metodo_recusado",
+    };
+  }
+  // A ClickSign recusou um dado de assinante (prod 19/11: nome com número). Antes
+  // vinha 500 e o Max entrava em loop de "não sei se deu certo"; agora diz o campo
+  // e volta aos ajustes, sem chave (o próximo "sim" é um envio novo).
+  if (r.status === 422 && r.body.error === "dados_recusados_clicksign") {
+    const campo =
+      typeof r.body.campo === "string" && Object.hasOwn(TEXTO_DO_CAMPO_RECUSADO, r.body.campo) ? r.body.campo : "outro";
+    return {
+      reply:
+        `${TEXTO_DO_CAMPO_RECUSADO[campo]} ` +
+        `Nada foi enviado; o rascunho${f.codigo ? ` ${f.codigo}` : ""} continua salvo. ` +
+        `Me mande o dado correto e eu ajusto, ou corrija na tela e me peça o envio de novo.`,
+      fluxo: { ...f, etapa: "ajustes", chave: undefined, atualizadoEm: ctx.agora },
+      evento: `envio_recusado_clicksign_${campo}`,
     };
   }
   if (r.body.error === "pendencias" && Array.isArray(r.body.faltando)) {
