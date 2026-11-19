@@ -294,6 +294,32 @@ describe("fluxo de PROPOSTA", () => {
     expect(acao.mock.calls.map((c) => c[2])).toEqual(["sim-1", "sim-1"]);
   });
 
+  it("prod 19/11: ClickSign recusa o nome → diz o campo, volta aos ajustes e o próximo SIM é envio NOVO (sem loop)", async () => {
+    const acao = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 422, body: { error: "dados_recusados_clicksign", campo: "nome" } })
+      .mockResolvedValueOnce({ status: 422, body: { error: "dados_recusados_clicksign", campo: "<script>" } });
+    const d = deps({ acao });
+    const f: Fluxo = {
+      kind: "proposta", etapa: "envio", natureza: "venda", dados: DADOS_OK, propostaId: "p1", codigo: "P-8",
+      metodo: { valor: "email", rotulo: "E-mail" }, assinantes: [{ nome: "L", papel: "proponente" }], atualizadoEm: agora,
+    };
+    const p = await F.conduzirFluxo(f, ctx("sim", { messageId: "env-1" }), d);
+    expect(p.reply).toContain("recusou o nome");
+    expect(p.reply).toContain("sem números");
+    expect(p.reply).toContain("Nada foi enviado");
+    expect(p.reply).not.toBe(F.TEXTO_ESCRITA_INCERTA);
+    expect(p.evento).toBe("envio_recusado_clicksign_nome");
+    expect(p.fluxo).toMatchObject({ etapa: "ajustes" });
+    expect((p.fluxo as { chave?: unknown }).chave).toBeUndefined();
+    // campo fora da lista vira "outro" (não entra cru no evento nem no texto)
+    const p2 = await F.conduzirFluxo(f, ctx("sim", { messageId: "env-2" }), d);
+    expect(p2.evento).toBe("envio_recusado_clicksign_outro");
+    expect(p2.reply).not.toContain("<script>");
+    expect(p2.reply).toContain("recusou o envio");
+    expect(p2.reply).not.toContain("mandar o dado");
+  });
+
   it("envio sem resposta + interrupção: a chave do ENVIO sobrevive até o SIM seguinte", async () => {
     const acao = vi.fn().mockImplementation(async (verb: string) =>
       verb === "proposal.options"
