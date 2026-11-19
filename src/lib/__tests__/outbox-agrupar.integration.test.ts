@@ -255,9 +255,11 @@ d("agrupar rajadas por negócio (Postgres real)", () => {
       await irmaoEnviado(AVISO_A, 5);
       const [{ sent_at }] = await query<{ sent_at: Date }>(`SELECT sent_at FROM outbox WHERE org_id = $1`, [ORG]);
       const a2 = await enfileirar(aviso(AVISO_A, "Dois"));
-      // fora da janela 7h-22h a abertura da janela manda; dentro, é sent + 10 exatos
+      // fora da janela 7h-22h a abertura da janela manda; dentro, é sent + 10 exatos. O teto é a janela
+      // aplicada a sent + 10: perto das 22h, sent + 10 cai depois do fechamento e vai para as 7h do dia
+      // seguinte (o teto antigo, max(sent + 10, agora), falhava no CI entre ~21:50 e 22:00 BRT).
       expect(a2.deliverAfter.getTime()).toBeLessThanOrEqual(
-        Math.max(sent_at.getTime() + DEZ_MIN, nextDeliveryTime().getTime())
+        nextDeliveryTime(new Date(sent_at.getTime() + DEZ_MIN)).getTime()
       );
     });
 
