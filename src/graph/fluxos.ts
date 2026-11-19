@@ -39,6 +39,15 @@ import { nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled } from "@/lib/runtime/rollout";
 import type { Capability } from "./policy";
 import { corrigirProposta, lerConfirmacao, normalizar, TEXTO_PARA_CONFIRMAR } from "./tools";
+import {
+  lerCatalogoDeMidias, lerMidia, lerMidias, midiaNoTexto, rotuloDaMidia, soPalavras, textoPerguntaMidia,
+  type MidiaDeOrigem, type PoliticaDeMidia,
+} from "./midia";
+
+export {
+  lerCatalogoDeMidias, lerMidia, lerMidias, lerPoliticaDeMidia, midiaNoTexto, rotuloDaMidia, textoPerguntaMidia,
+  type MidiaDeOrigem, type PoliticaDeMidia,
+} from "./midia";
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
 import { conduzirAssinatura, type FluxoAssinatura } from "./assinatura";
@@ -105,6 +114,8 @@ export interface DadosDaProposta {
   canal?: "whatsapp" | "email";
   /** Só locação. */
   finalidade?: "residencial" | "comercial";
+  /** Mídia de origem do proponente (id do catálogo do CM): como o cliente chegou até a imobiliária. */
+  midia?: string;
 }
 
 export interface CampoDoPopup {
@@ -191,6 +202,16 @@ export type Fluxo =
       leadIncompleto?: boolean;
       /** Dado mudou depois do rascunho e o servidor ainda não foi atualizado. */
       ajustePendente?: boolean;
+      /** Catálogo de mídias de origem do CM (`options.midias`). Ausente = CM antigo: o Max não pergunta nem manda `midia`. */
+      midias?: MidiaDeOrigem[];
+      /** Política da mídia do PROPONENTE (`options.midia.proponente`). Só `required` faz o Max perguntar. */
+      midiaPolitica?: "required" | "optional" | "hidden";
+      /** O catálogo de mídias já foi consultado antes do card (uma vez por proposta). */
+      midiaConsultada?: boolean;
+      /** A lista de mídias foi apresentada: a próxima resposta curta é a escolha. */
+      aguardaMidia?: boolean;
+      /** A mídia foi pedida por uma pendência do envio: ao gravar, volta ao cartão de envio. */
+      voltarAoEnvio?: boolean;
       /** CPF do proponente recusado no envio de um rascunho retomado. */
       pendenciaCpf?: boolean;
       /**
@@ -449,7 +470,7 @@ function formaLegivel(forma: string): string {
 }
 
 /** O corpo do resumo — montado do estado, nunca pelo modelo. */
-function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string }): string {
+function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string; midias?: MidiaDeOrigem[] }): string {
   const d = f.dados;
   const im = imovelParaPayload(d.imovel) ?? {};
   const endereco = enderecoNoResumo(d.imovel);
@@ -465,6 +486,7 @@ function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProp
     `${f.natureza === "locacao" ? "Aluguel" : "Valor"}: ${d.valor ? real(d.valor) : f.leaseClientId ? "dados do lead analisado" : "—"}`,
   ];
   if (d.vendedor?.nome) linhas.push(`Vendedor: ${linhaPessoa(d.vendedor)}`);
+  if (d.midia) linhas.push(`Mídia de origem: ${rotuloDaMidia(d.midia, f.midias)}`);
   if (d.pagamento?.sinal || d.pagamento?.forma) {
     linhas.push(
       `Pagamento: ${[d.pagamento.sinal ? `sinal ${real(d.pagamento.sinal)}` : "", d.pagamento.forma ? formaLegivel(d.pagamento.forma) : ""]
@@ -481,7 +503,7 @@ function corpoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProp
   return linhas.join("\n");
 }
 
-export function resumoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string }): string {
+export function resumoDaProposta(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; leaseClientId?: string; midias?: MidiaDeOrigem[] }): string {
   return `${corpoDaProposta(f)}\n\nEstá correto? Responda *SIM* para gerar o rascunho, ou me diga o que mudar.`;
 }
 
@@ -489,7 +511,7 @@ export function resumoDaProposta(f: { natureza?: "venda" | "locacao"; dados: Dad
  * Só o que MUDA, para a proposta retomada pelo nome/código (sem a natureza nem
  * os dados completos no fluxo): o servidor aplica um PATCH desses campos.
  */
-function linhasDoAjuste(d: DadosDaProposta): string[] {
+function linhasDoAjuste(d: DadosDaProposta, midias?: MidiaDeOrigem[]): string[] {
   const linhas: string[] = [];
   const p = d.proponente ?? {};
   if (p.nome) linhas.push(`Nome do proponente: ${p.nome}`);
@@ -507,16 +529,17 @@ function linhasDoAjuste(d: DadosDaProposta): string[] {
   if (d.comissao?.percentual) linhas.push(`Comissão: ${d.comissao.percentual}%`);
   else if (d.comissao?.valor) linhas.push(`Comissão: ${real(d.comissao.valor)}`);
   if (d.canal) linhas.push(`Assinatura chega por: ${d.canal === "email" ? "e-mail" : "WhatsApp"}`);
+  if (d.midia) linhas.push(`Mídia de origem: ${rotuloDaMidia(d.midia, midias)}`);
   return linhas;
 }
 
-function resumoDoAjuste(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; codigo?: string; rotulo?: string }): string {
+function resumoDoAjuste(f: { natureza?: "venda" | "locacao"; dados: DadosDaProposta; codigo?: string; rotulo?: string; midias?: MidiaDeOrigem[] }): string {
   const so = Object.keys(f.dados);
   if (!f.natureza && so.length === 1 && so[0] === "proponente" && Object.keys(f.dados.proponente ?? {}).join() === "cpf") {
     return `Vou corrigir apenas o CPF do proponente na proposta${f.codigo ? ` ${f.codigo}` : ""} para ${f.dados.proponente!.cpf}.\n\nAtualizo o rascunho assim? Responda *SIM*.`;
   }
   if (!f.natureza) {
-    return `Vou ajustar na proposta${f.codigo ? ` ${f.codigo}` : ""}${f.rotulo ? ` — ${f.rotulo}` : ""}:\n${linhasDoAjuste(f.dados).map((l) => `- ${l}`).join("\n")}\n\n` +
+    return `Vou ajustar na proposta${f.codigo ? ` ${f.codigo}` : ""}${f.rotulo ? ` — ${f.rotulo}` : ""}:\n${linhasDoAjuste(f.dados, f.midias).map((l) => `- ${l}`).join("\n")}\n\n` +
       "O resto da proposta não muda. Atualizo assim? Responda *SIM*, ou me diga o que mais mudar.";
   }
   return `${corpoDaProposta(f)}\n\nAtualizo o rascunho assim? Responda *SIM*, ou me diga o que mais mudar.`;
@@ -1018,6 +1041,8 @@ export function argsDaProposta(
     ...(d.vendedor?.nome ? { vendedor: d.vendedor } : {}),
     ...(d.pagamento?.sinal || d.pagamento?.forma ? { pagamento: d.pagamento } : {}),
     ...(d.comissao?.percentual || d.comissao?.valor ? { comissao: d.comissao } : {}),
+    // Só quando o CM trouxe o catálogo e a mídia foi dita/escolhida (CM antigo nunca recebe o campo).
+    ...(d.midia ? { midia: d.midia } : {}),
     // Só na CRIAÇÃO: o vínculo já foi decidido quando o rascunho nasceu.
     ...(f.leaseClientId && !opcoes.atualizacao ? { leaseClientId: f.leaseClientId } : {}),
   };
@@ -1033,6 +1058,7 @@ export function argsDoAjuste(d: DadosDaProposta): Record<string, unknown> {
   if (d.pagamento?.sinal || d.pagamento?.forma) args.pagamento = d.pagamento;
   if (d.comissao?.percentual || d.comissao?.valor) args.comissao = d.comissao;
   if (d.canal) args.canal = d.canal;
+  if (d.midia) args.midia = d.midia;
   return args;
 }
 
@@ -1072,6 +1098,13 @@ export function lerMetodo(texto: string, metodos: MetodoDeAssinatura[]): MetodoD
     (m) => t.includes(normalizar(m.valor).replace(/_/g, " ")) || t.includes(normalizar(m.rotulo).split(" ")[0]!)
   );
   return achados.length === 1 ? achados[0]! : null;
+}
+
+/** Mídia dita no texto entra nos dados (sem sobrescrever a já escolhida). */
+function comMidiaDoTexto(d: DadosDaProposta, texto: string, midias: MidiaDeOrigem[]): DadosDaProposta {
+  if (d.midia) return d;
+  const m = midiaNoTexto(texto, midias);
+  return m ? { ...d, midia: m.id } : d;
 }
 
 // ─── Chave de idempotência ─────────────────────────────────────────────────
@@ -1257,7 +1290,7 @@ export function citaOutraProposta(texto: string, codigoDoFluxo: string | undefin
 }
 
 /** Palavra do dado da proposta: com ela, a mensagem é ajuste, não troca de assunto. */
-const CAMPO_DA_PROPOSTA = /@|\br\$|\d{4,}|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|rua|bairro|cidade|cpf|telefone|celular|e-?mail|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal|fiador\w*|clausula\w*)\b/;
+const CAMPO_DA_PROPOSTA = /@|\br\$|\d{4,}|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|rua|bairro|cidade|cpf|telefone|celular|e-?mail|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal|fiador\w*|clausula\w*|midia)\b/;
 /** Quem vai assinar ("pro comprador assinar") não é dado novo da proposta. */
 const DESTINATARIO = /\b(pro|pra|para|ao|a)\s+(o\s+|a\s+)?(comprador\w*|inquilin\w*|locatari\w*|proponente|cliente|vendedor\w*|proprietari\w*|locador\w*)\b/g;
 /** Assunto de outra coisa (consulta de negócio, pendência, agenda): nunca é ajuste de rascunho. */
@@ -1647,6 +1680,63 @@ export async function iniciarProposta(
   if (semNenhum) {
     return { reply: textoSemModelo(natureza), fluxo: null, evento: "proposta_sem_modelo" };
   }
+  // Mídia de origem: o catálogo e a política só são consultados quando o card do rascunho vai aparecer
+  // (`exigirMidia`). Sem `midias` (CM antigo) nada muda: o Max não pergunta nem manda o campo.
+  const passo = await iniciarPropostaBase(natureza, pedido, agora, deps, prefill, leaseClientId, semAssinatura);
+  return (await exigirMidia(passo, pedido, deps)) as Extract<PassoDoFluxo, { reply: string }>;
+}
+
+type CatalogoDeMidias = { midias?: MidiaDeOrigem[]; midiaPolitica?: PoliticaDeMidia };
+
+const SCHEMA_DA_PROPOSTA = (natureza: "venda" | "locacao", finalidade?: "residencial" | "comercial") =>
+  natureza === "venda" ? "compra_venda_v1" : finalidade === "comercial" ? "locacao_comercial_v1" : "locacao_residencial_v1";
+
+/** `null` = sem resposta (tenta de novo no próximo card); `{}` = o CM não traz mídia (CM antigo, ou oculta). */
+async function catalogoDeMidias(deps: DepsDoFluxo, schemaType: string): Promise<CatalogoDeMidias | null> {
+  try {
+    const r = await deps.acao("proposal.options", { schemaType });
+    return r?.status === 200 ? lerCatalogoDeMidias(r.body) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Antes do SIM do rascunho (card de revisão, ainda sem proposta): consulta o catálogo de mídias UMA vez e
+ * aproveita o que o corretor já escreveu ("veio pelo Instagram"). Com a mídia obrigatória e ainda não dita,
+ * no lugar do card vai a pergunta com a lista numerada. Sem `midias` (CM antigo) o passo sai intacto.
+ */
+async function exigirMidia(p: PassoDoFluxo, texto: string | undefined, deps: DepsDoFluxo, consultar = true): Promise<PassoDoFluxo> {
+  if (!("reply" in p) || ("liberar" in p && p.liberar) || !p.fluxo || p.fluxo.kind !== "proposta") return p;
+  let f = p.fluxo;
+  if (f.etapa !== "revisao" || f.propostaId || !f.natureza) return p;
+  let reply = p.reply;
+  if (!f.midias && !f.midiaConsultada && consultar) {
+    const cat = await catalogoDeMidias(deps, SCHEMA_DA_PROPOSTA(f.natureza, f.dados.finalidade));
+    if (cat === null) return p;
+    const antes = f;
+    f = { ...f, ...cat, midiaConsultada: true };
+    if (cat.midias && texto) f = { ...f, dados: comMidiaDoTexto(f.dados, texto, cat.midias) };
+    // A mídia dita entra no card que já foi montado (a mesma linha que o resumo traria).
+    if (f.dados.midia && !antes.dados.midia) reply = reply.replace(resumoDaProposta(antes), resumoDaProposta(f));
+  }
+  if (f.midiaPolitica !== "required" || !f.midias?.length || f.dados.midia) return { ...p, reply, fluxo: f };
+  return {
+    reply: textoPerguntaMidia(f.midias),
+    fluxo: { ...f, etapa: "coleta", aguardaMidia: true, chave: undefined },
+    evento: "proposta_midia",
+  };
+}
+
+async function iniciarPropostaBase(
+  natureza: "venda" | "locacao",
+  pedido: string | undefined,
+  agora: number,
+  deps: DepsDoFluxo,
+  prefill: DadosDaProposta | undefined,
+  leaseClientId: string | undefined,
+  semAssinatura: boolean
+): Promise<Extract<PassoDoFluxo, { reply: string }>> {
   // O pedido original pode já trazer dados ("proposta pra Letícia, 1,5 mi"):
   // extraídos agora, para a lista de campos não pedir o que já foi dito.
   let dados: DadosDaProposta = {};
@@ -1988,8 +2078,44 @@ async function criarNegocio(f: FluxoNegocio, ctx: ContextoDoTurno, deps: DepsDoF
 // ── Proposta ──
 
 async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const passo = await conduzirPropostaBase(f, ctx, deps);
+  // Só a CHEGADA ao card, com dado novo, consulta o catálogo: quem já estava no card (ou só repete o resumo) não muda.
+  const chegouComDado = f.etapa !== "revisao" && "fluxo" in passo && passo.fluxo?.kind === "proposta" && !igual(passo.fluxo.dados, f.dados);
+  return exigirMidia(passo, ctx.texto, deps, chegouComDado);
+}
+
+/** Resposta curta à lista de mídias que não é uma opção: repete a lista. Texto com cara de dado (CPF, e-mail, frase) segue a extração. */
+const pareceEscolhaDeMidia = (texto: string) => soPalavras(texto).split(" ").length <= 4 && !/\d{3,}|@/.test(texto);
+
+async function conduzirPropostaBase(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const agora = ctx.agora;
   const resposta = lerConfirmacao(ctx.texto);
+
+  // Mídia escolhida e a gravação ficou incerta (sem resposta do servidor): o "sim" repete com a mesma chave.
+  if (f.voltarAoEnvio && f.propostaId && f.dados.midia && f.chave?.verbo === "proposal.update" && resposta === "sim") {
+    return atualizarRascunho(f, ctx, deps);
+  }
+
+  // A lista de mídias está na mesa: a resposta curta é a escolha (número ou nome).
+  if (f.aguardaMidia && f.midias?.length) {
+    const m = lerMidia(ctx.texto, f.midias);
+    if (m) {
+      const g: FluxoProposta = { ...f, dados: { ...f.dados, midia: m.id }, aguardaMidia: false, chave: undefined, atualizadoEm: agora };
+      // Pendência do envio: a mídia vai direto ao rascunho (a escolha na lista é a ordem) e o cartão de envio volta.
+      if (g.propostaId && g.voltarAoEnvio) return atualizarRascunho(g, ctx, deps);
+      if (g.propostaId) {
+        return { reply: resumoDoAjuste(g), fluxo: { ...g, etapa: "revisao_ajuste", ajustePendente: true }, evento: "proposta_revisao_ajuste" };
+      }
+      const falta = faltandoNaProposta(g.dados, { temLead: !!g.leaseClientId && !g.leadIncompleto });
+      if (falta.length) {
+        return { reply: `Anotado. Ainda falta: ${falta.join("; ")}.`, fluxo: { ...g, etapa: "coleta" }, evento: "proposta_coleta" };
+      }
+      return { reply: resumoDaProposta(g), fluxo: { ...g, etapa: "revisao" }, evento: "proposta_revisao" };
+    }
+    if (pareceEscolhaDeMidia(ctx.texto)) {
+      return { reply: textoPerguntaMidia(f.midias, "Não reconheci essa opção. "), fluxo: { ...f, atualizadoEm: agora }, evento: "proposta_midia" };
+    }
+  }
 
   if (f.etapa === "selecao_envio") {
     const n = /^(\d)$/.exec(normalizar(ctx.texto));
@@ -2158,9 +2284,9 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
           : { reply: "Ainda preciso de um CPF válido do proponente. Me mande o CPF correto para ajustar o rascunho.", fluxo: f, evento: "cpf_pendente" };
       }
     }
-    const pareceAjuste = /\d|@|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|imovel|rua|bairro|cidade|numero|complemento|cpf|telefone|celular|e-?mail|nome|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal)\b/.test(
+    const pareceAjuste = /\d|@|\b(valor|preco|aluguel|comprador\w*|inquilin\w*|locatari\w*|proponente|vendedor\w*|proprietari\w*|locador\w*|endereco|imovel|rua|bairro|cidade|numero|complemento|cpf|telefone|celular|e-?mail|nome|sobrenome|sinal|entrada|pagamento|forma|comissao|matricula|canal|midia)\b/.test(
       normalizar(ctx.texto)
-    ) || !!campoSoNaTela(ctx.texto);
+    ) || !!campoSoNaTela(ctx.texto) || !!(f.midias && midiaNoTexto(ctx.texto, f.midias));
     // Com dado novo, o ajuste vem ANTES do envio: "corrige o e-mail e manda
     // pra assinatura" não pode mandar a versão velha (review 09/10). Sem dado,
     // a extração não acha nada e o pedido de envio segue lá embaixo.
@@ -2200,6 +2326,11 @@ async function conduzirProposta(f: FluxoProposta, ctx: ContextoDoTurno, deps: De
   const novos = avulso
     ? semReferencia(sanearDados(extraido), f.referencia)
     : conferirDitado(semReferencia(sanearDados(extraido), f.referencia), ctx.texto);
+  // Mídia de origem dita em texto livre ("veio pelo Instagram"): só com catálogo (CM novo) e com sinal de origem.
+  if (f.midias?.length && !avulso) {
+    const m = midiaNoTexto(ctx.texto, f.midias);
+    if (m) novos.midia = m.id;
+  }
   // O modelo pode devolver a sequência ditada sem o rótulo que a regex do texto reconhece. A dúvida
   // vem DEPOIS de conciliar com o texto: o que a pessoa escreveu vale ("119888-7777" do modelo para
   // "11 98888-7777" escrito não vira pergunta) e o telefone que o texto não traz já saiu.
@@ -2339,6 +2470,22 @@ function recusaDoServidor(r: RespostaDoServidor): string | null {
   return frase ? frase.replace(/\s+/g, " ").trim().slice(0, 300) : null;
 }
 
+/** 422 `midia_invalida`: o id não está (mais) no catálogo — repete a lista, agora com o catálogo que o CM devolveu. */
+function midiaInvalida(f: FluxoProposta, body: Record<string, unknown>, ctx: ContextoDoTurno): PassoDoFluxo {
+  const midias = lerMidias(body.midias);
+  const lista = midias.length ? midias : (f.midias ?? []);
+  const { midia: _descartada, ...resto } = f.dados;
+  const etapa = f.propostaId ? ("ajustes" as const) : ("coleta" as const);
+  if (!lista.length) {
+    return { reply: "O sistema não aceitou a mídia de origem. Informe pela tela da proposta.", fluxo: { ...f, etapa, dados: resto, chave: undefined }, evento: "midia_invalida" };
+  }
+  return {
+    reply: textoPerguntaMidia(lista, "Essa opção de mídia não é válida. "),
+    fluxo: { ...f, etapa, dados: resto, midias: lista, aguardaMidia: true, chave: undefined, atualizadoEm: ctx.agora },
+    evento: "midia_invalida",
+  };
+}
+
 async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const chave = chaveDe(f, "proposal.create", ctx);
   const r = await deps.acao("proposal.create", argsDaProposta(f), chave.valor);
@@ -2362,6 +2509,7 @@ async function criarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsD
   // 403 é RBAC/política (`POLITICA_NAO_CONCEDE`/`can`), nunca posse — mesmo
   // com leaseClientId, cai aqui e nunca na oferta sem vínculo.
   if (r.status === 403) return { reply: textoSemPermissao(), fluxo: null, evento: "sem_permissao" };
+  if (r.status === 422 && r.body.error === "midia_invalida") return midiaInvalida(f, r.body, ctx);
   const recusa = recusaDoServidor(r);
   if (recusa || r.status === 422 || r.status === 400) {
     // Com leaseClientId, a recusa pode ser porque o lead está sem nome/aluguel
@@ -2405,7 +2553,9 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
     "proposal.update",
     // Retomada (sem a natureza): só os campos ditos — o CPF pendente incluído;
     // o resumo mostrou exatamente isso (review 09/10).
-    !f.natureza
+    f.voltarAoEnvio && f.dados.midia
+      ? { proposta_id: f.propostaId, midia: f.dados.midia }
+      : !f.natureza
       ? { proposta_id: f.propostaId, ...argsDoAjuste(f.dados) }
       : f.pendenciaCpf
         ? { proposta_id: f.propostaId, proponente: { cpf: f.dados.proponente?.cpf } }
@@ -2440,6 +2590,7 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
       evento: "proposta_nao_editavel",
     };
   }
+  if (r.status === 422 && r.body.error === "midia_invalida") return midiaInvalida(f, r.body, ctx);
   const recusa = recusaDoServidor(r);
   if (recusa) {
     return { reply: `${recusa}\nMe mande e eu ajusto.`, fluxo: { ...f, etapa: "ajustes", chave: undefined }, evento: "ajuste_recusado" };
@@ -2452,14 +2603,22 @@ async function atualizarRascunho(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
       evento: "proposta_ajustada_sem_modelo",
     };
   }
+  const depois: FluxoProposta = {
+    ...f, etapa: "ajustes", chave: undefined, ajustePendente: false, atualizadoEm: ctx.agora,
+    // Parcial: o que foi aplicado já está no servidor; o próximo ajuste não o
+    // reenvia (nem desfaz uma edição feita na tela no meio-tempo).
+    ...(f.natureza ? { pendenciaCpf: false } : { dados: {}, pendenciaCpf: !!f.pendenciaCpf && !f.dados.proponente?.cpf }),
+  };
+  // A mídia pedida pela pendência do envio: gravada, volta direto ao cartão de envio (sem a conversa de "ajustar algo?").
+  if (f.voltarAoEnvio) {
+    const proximo = await oferecerMetodos({ ...depois, voltarAoEnvio: false, aguardaMidia: false }, ctx, deps);
+    const anotei = `Registrei a mídia de origem: ${rotuloDaMidia(f.dados.midia ?? "", f.midias)}.`;
+    if ("reply" in proximo && !proximo.liberar) return { ...proximo, reply: `${anotei}\n\n${proximo.reply}` };
+    return proximo;
+  }
   return {
     reply: textoRascunho(f.codigo, pdfDe(r.body), true),
-    fluxo: {
-      ...f, etapa: "ajustes", chave: undefined, ajustePendente: false, atualizadoEm: ctx.agora,
-      // Parcial: o que foi aplicado já está no servidor; o próximo ajuste não o
-      // reenvia (nem desfaz uma edição feita na tela no meio-tempo).
-      ...(f.natureza ? { pendenciaCpf: false } : { dados: {}, pendenciaCpf: !!f.pendenciaCpf && !f.dados.proponente?.cpf }),
-    },
+    fluxo: depois,
     evento: "proposta_ajustada",
   };
 }
@@ -2533,7 +2692,7 @@ export async function oferecerMetodos(f: FluxoProposta, ctx: ContextoDoTurno, de
     return { reply: "Não encontrei assinantes nesta proposta, então não dá para enviar. Confira no sistema.", fluxo: null, evento: "sem_assinantes" };
   }
   const metodo = metodos.find((m) => m.valor === f.metodo?.valor);
-  const g = { ...f, metodos, metodo, assinantes, chave: manterChaveDeEnvio(f), atualizadoEm: ctx.agora };
+  const g = { ...f, ...lerCatalogoDeMidias(r.body), metodos, metodo, assinantes, chave: manterChaveDeEnvio(f), atualizadoEm: ctx.agora };
   if (metodo) {
     const h = { ...g, etapa: "envio" as const };
     return { reply: textoEnvio(h), fluxo: h, evento: "proposta_envio" };
@@ -2579,6 +2738,59 @@ const CAMPO_FALTANDO: Record<string, string> = {
   email: "e-mail",
 };
 
+type PendenciaDoEnvio = { signatario?: { papel?: string } | null; campo?: string; motivo?: string };
+
+const ePendenciaDeMidia = (x: PendenciaDoEnvio) =>
+  /\bmidia\b/.test(normalizar(`${x.campo ?? ""} ${typeof x.motivo === "string" ? x.motivo : ""}`));
+
+/**
+ * `motivo` do CM ("compradores.0.estadoCivil: Informe o estado civil.") em frase de corretor ("estado civil").
+ * O caminho técnico nunca vai à pessoa; o que não dá para traduzir cai no rótulo do `campo`.
+ */
+export function fraseDaPendencia(x: PendenciaDoEnvio): string | null {
+  const motivo = typeof x.motivo === "string" ? x.motivo : "";
+  if (!motivo.trim()) return null;
+  if (ePendenciaDeMidia(x)) return "mídia de origem";
+  const t = motivo
+    .replace(/[*_~`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^\w+(?:[.[]\w+\]?)+:\s*/, "")
+    .replace(/^(?:informe|preencha|complete|selecione|insira|falta|faltam)\s+(?:(?:o|a|os|as|um|uma)\s+)?/i, "")
+    .replace(/[.!]+$/, "")
+    .trim();
+  if (!t || t.length > 80 || /\w[.[]\d+/.test(t)) return null;
+  return t.charAt(0).toLowerCase() + t.slice(1);
+}
+
+/** Pendência só de mídia: entra no ajuste perguntando a lista; a resposta grava no rascunho e volta ao envio. */
+async function pedirMidiaDoEnvio(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  if (!ctx.policy.includes("proposal.create")) {
+    return {
+      reply: "Para enviar, falta a mídia de origem do cliente. Não tenho permissão para editar esse rascunho por aqui; preencha na tela de propostas e me peça o envio novamente.",
+      fluxo: null,
+      evento: "envio_pendencia_midia_sem_edicao",
+    };
+  }
+  let midias = f.midias;
+  if (!midias?.length) {
+    const o = await deps.acao("proposal.options", { proposta_id: f.propostaId }).catch(() => null);
+    midias = o?.status === 200 ? lerMidias(o.body.midias) : [];
+  }
+  if (!midias.length) {
+    return {
+      reply: `Para enviar, falta a mídia de origem do cliente. Preencha na tela da proposta${f.codigo ? ` ${f.codigo}` : ""} e me peça o envio de novo.`,
+      fluxo: { ...f, etapa: "ajustes", chave: undefined, atualizadoEm: ctx.agora },
+      evento: "envio_pendencia_midia_sem_catalogo",
+    };
+  }
+  return {
+    reply: textoPerguntaMidia(midias, "Para enviar, falta a mídia de origem do cliente. "),
+    fluxo: { ...f, etapa: "ajustes", midias, aguardaMidia: true, voltarAoEnvio: true, chave: undefined, atualizadoEm: ctx.agora },
+    evento: "envio_pendencia_midia",
+  };
+}
+
 async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const chave = chaveDe(f, "proposal.send", ctx);
   const r = await deps.acao("proposal.send", { proposta_id: f.propostaId, metodo: f.metodo?.valor }, chave.valor);
@@ -2605,7 +2817,7 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
     };
   }
   if (r.body.error === "pendencias" && Array.isArray(r.body.faltando)) {
-    const faltando = r.body.faltando as { signatario?: { papel?: string } | null; campo?: string }[];
+    const faltando = r.body.faltando as PendenciaDoEnvio[];
     // O ajuste pelo Max só mexe em comprador e vendedor. Pendência de outro
     // assinante (cônjuge, testemunha) seria escrita no comprador pelo extrator.
     const deOutro = faltando.some((x) => {
@@ -2638,8 +2850,12 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
         evento: "envio_pendencia_cpf",
       };
     }
+    // Só a mídia de origem: o CM exige "como o cliente chegou" e o Max sabe colher — lista e volta ao envio.
+    if (faltando.length > 0 && faltando.every(ePendenciaDeMidia)) {
+      return pedirMidiaDoEnvio(f, ctx, deps);
+    }
     const itens = faltando
-      .map((x) => `${CAMPO_FALTANDO[x.campo ?? ""] ?? x.campo ?? "dado"}${x.signatario?.papel ? ` (${papelDe(x.signatario.papel, f.natureza)})` : ""}`)
+      .map((x) => `${fraseDaPendencia(x) ?? CAMPO_FALTANDO[x.campo ?? ""] ?? x.campo ?? "dado"}${x.signatario?.papel ? ` (${papelDe(x.signatario.papel, f.natureza)})` : ""}`)
       .slice(0, 5);
     return {
       reply: f.natureza

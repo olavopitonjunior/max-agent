@@ -1,6 +1,7 @@
 import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { ContextoDoTurno, DepsDoFluxo, PassoDoFluxo } from "./fluxos";
 import { lerConfirmacao, normalizar } from "./tools";
+import { lerMidia, lerMidias, lerPoliticaDeMidia, midiaNoTexto, rotuloDaMidia, textoPerguntaMidia, type MidiaDeOrigem, type PoliticaDeMidia } from "./midia";
 import { brl, cpfValido, nomeValido, valoresNoTexto } from "./credito";
 import { captacaoAutorizacaoLigada, captacaoEnvioLigado, captacaoLigada } from "./captacao-flags";
 import { imobproBase } from "@/lib/http";
@@ -65,6 +66,8 @@ export interface DadosDeCaptacao {
   locacao?: Record<string, unknown>;
   proprietarios?: Record<string, unknown>[];
   assinantes?: Record<string, unknown>;
+  /** Mídia de origem (id do catálogo do CM). Vai como argumento `midia` do `captacao.create`, nunca dentro de `dados`. */
+  midia?: string;
 }
 
 export type CanalDeEnvio = "email" | "whatsapp" | "aceite";
@@ -79,7 +82,7 @@ export interface FluxoCaptacao {
   versao?: 1 | 2;
   etapa:
     | "natureza" | "nome" | "modelo" | "imovel" | "condicoes" | "exclusividade" | "proprietarios" | "estado_civil"
-    | "extras" | "verificar" | "faltantes" | "selecao" | "revisao" | "enviando"
+    | "extras" | "midia" | "verificar" | "faltantes" | "selecao" | "revisao" | "enviando"
     // Confirmação única (26/10): estas etapas não são mais escritas. Só existem
     // para ler um checkpoint antigo (de antes da troca) — `conduzirEtapaLegada`
     // as converte na etapa nova no primeiro turno.
@@ -114,6 +117,12 @@ export interface FluxoCaptacao {
   canalDito?: CanalDeEnvio;
   modelos?: ModeloDeCaptacao[];
   modeloId?: string;
+  /** Catálogo de mídias de origem (`captacao.options.midias`). Ausente = CM antigo: não pergunta nem manda `midia`. */
+  midias?: MidiaDeOrigem[];
+  /** Política da mídia (`captacao.options.midia`). Só `required` faz o Max perguntar antes de criar. */
+  midiaPolitica?: PoliticaDeMidia;
+  /** Mídia já dita (no pedido) ou escolhida na lista: id do catálogo. */
+  midia?: string;
   /** Imóvel e condições já colhidos, aguardando a criação (ou o replay dela). */
   criacao?: { chave: string; dados: DadosDeCaptacao };
   /**
@@ -1428,7 +1437,7 @@ export function toolExtrairCaptacao(secao: SecaoDeExtracao) {
 
 type TipoDeCampo =
   | "endereco_imovel" | "tipo_imovel" | "endereco_pessoa" | "texto" | "texto_longo" | "doc" | "email" | "telefone"
-  | "data" | "moeda" | "percentual" | "inteiro" | "booleano" | "estado_civil" | "nome" | "cep";
+  | "data" | "moeda" | "percentual" | "inteiro" | "booleano" | "estado_civil" | "nome" | "cep" | "midia";
 
 /** Os campos de nível `envio`/`ficha` que o Max sabe preencher. Path desconhecido vai para a tela. */
 const TIPO_DO_PATH: Record<string, TipoDeCampo> = {
@@ -1463,7 +1472,17 @@ const TIPO_DO_PATH: Record<string, TipoDeCampo> = {
  * qualquer `tipo` que o servidor mande.
  */
 export function tipoDoFaltante(fa: FaltanteDeCaptacao): TipoDeCampo | undefined {
+  if (ehFaltanteDeMidia(fa)) return "midia";
   return TIPO_DO_PATH[fa.path];
+}
+
+/** "Mídia de origem" pendente no preflight: `midia` (ou `….midia`). O Max sabe colher, com a lista do catálogo. */
+const ehFaltanteDeMidia = (fa: FaltanteDeCaptacao) => /(?:^|[.\]])midia$/.test(fa.path);
+
+/** Catálogo para perguntar o faltante: as opções que ele traz, senão o catálogo das options. */
+function listaDaMidia(f: FluxoCaptacao, fa: FaltanteDeCaptacao): MidiaDeOrigem[] {
+  const doFaltante = (fa.opcoes ?? []).map((o) => ({ id: o.valor, label: o.label }));
+  return doFaltante.length ? doFaltante : (f.midias ?? []);
 }
 
 /** O que a pergunta de cada faltante diz como exemplo. */
@@ -1495,6 +1514,10 @@ function perguntaDoFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao): string {
     ? (dono ? ` de ${dono}` : " do proprietário")
     : fa.path.startsWith("imovel.") && fa.path !== "imovel.endereco" && !rotuloJaDiz ? " do imóvel" : "";
   const dica = tipo ? (DICA[tipo] ?? "") : "";
+  if (tipo === "midia") {
+    const midias = listaDaMidia(f, fa);
+    if (midias.length) return textoPerguntaMidia(midias);
+  }
   if (fa.path === "imovel.endereco") return `Qual o endereço do imóvel${dica}?`;
   return `${fa.rotulo}${de}${dica}?`;
 }
@@ -1553,6 +1576,12 @@ async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: stri
   const limpo = texto.trim();
   if (!limpo) return "vazio";
   switch (tipo) {
+    case "midia": {
+      const midias = listaDaMidia(f, fa);
+      if (!midias.length) return { erro: "Essa informação eu não preencho por aqui; complete pela tela." };
+      const m = lerMidia(limpo, midias);
+      return m ? { dados: { midia: m.id }, eco: `mídia de origem: ${m.label}` } : { erro: "Não reconheci essa opção." };
+    }
     case "texto": case "texto_longo": {
       const valor = semRotulo(limpo, fa.rotulo).replace(/[.!]+$/, "");
       if (valor.length > (tipo === "texto" ? 200 : 1000) || valor.includes("\n")) return { erro: "Mande só o dado, em uma linha." };
@@ -1767,12 +1796,25 @@ export async function iniciarCaptacao(ctx: ContextoDoTurno, deps: DepsDoFluxo, p
   return depoisDaNatureza(f, ctx, deps, "");
 }
 
+/**
+ * Mídia de origem nas options: catálogo + política (CM novo) e o que o 1º pedido já disse ("veio pelo Instagram").
+ * Sem `midias`, ou com a mídia oculta, nada entra no fluxo (comportamento de sempre).
+ */
+function catalogoDeMidiasDaCaptacao(body: Record<string, unknown>, f: FluxoCaptacao): Partial<FluxoCaptacao> {
+  const midias = lerMidias(body.midias);
+  const politica = lerPoliticaDeMidia(body.midia);
+  if (!midias.length || politica === "hidden") return { midias: undefined, midiaPolitica: undefined };
+  const dita = f.midia ? null : f.pedidoOriginal ? midiaNoTexto(f.pedidoOriginal, midias) : null;
+  return { midias, midiaPolitica: politica, ...(dita ? { midia: dita.id } : {}) };
+}
+
 /** `captacao.options{tipo}`: modelos (e canais) da esteira. */
 async function depoisDaNatureza(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, prefixo: string): Promise<Resposta> {
   const r = await deps.acao("captacao.options", { tipo: f.tipo });
   if (!r) return resposta(g(f, ctx), `${TEXTO_SEM_RESPOSTA} Diga a natureza de novo para eu tentar outra vez.`, "captacao_options_sem_resposta");
   if (r.status === 403) { const n = textoDeNegado(r); return resposta(null, n.reply, n.evento); }
   if (r.status !== 200) return resposta(null, TEXTO_SEM_RESPOSTA, `captacao_options_${r.status}`);
+  f = { ...f, ...catalogoDeMidiasDaCaptacao(r.body, f) };
   const modelos = lista(r.body.modelos).flatMap((x): ModeloDeCaptacao[] => {
     const m = obj(x);
     const id = str(m.id);
@@ -2075,6 +2117,7 @@ export function continuacaoCaptacao(f: FluxoCaptacao): string {
     case "proprietarios": return f.donosEmAberto?.length ? `${cab}${textoDosProprietarios(f)}` : `${cab}mande o próximo proprietário, ou FIM.`;
     case "estado_civil": return `${cab}${perguntaDoEstadoCivil(nomeDoDono(f, f.estadoCivilDe))}`;
     case "extras": return `${cab}tem testemunha ou outra pessoa para assinar? Mande nome e e-mail/telefone, ou diga NÃO.`;
+    case "midia": return `${cab}${textoPerguntaMidia(f.midias ?? [])}`;
     case "faltantes": {
       const fa = f.faltantes?.[0];
       return fa ? `${cab}${perguntaDoFaltante(f, fa)}` : `${cab}mande CANCELAR para parar.`;
@@ -2139,7 +2182,7 @@ function capacidadeDaEtapa(etapa: FluxoCaptacao["etapa"]): CapacidadeDoFluxo {
   return "captacao.create";
 }
 
-const ETAPAS_DE_COLETA = new Set(["natureza", "nome", "modelo", "imovel", "condicoes", "exclusividade", "proprietarios", "estado_civil", "extras"]);
+const ETAPAS_DE_COLETA = new Set(["natureza", "nome", "modelo", "imovel", "condicoes", "exclusividade", "proprietarios", "estado_civil", "extras", "midia"]);
 
 export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, podeEscrever: boolean): Promise<PassoDoFluxo> {
   const t = normalizar(ctx.texto);
@@ -2222,6 +2265,7 @@ export async function conduzirCaptacao(f: FluxoCaptacao, ctx: ContextoDoTurno, d
     case "proprietarios": return conduzirProprietarios(f, t, ctx, deps);
     case "estado_civil": return conduzirEstadoCivil(f, t, ctx, deps);
     case "extras": return conduzirExtras(f, t, ctx, deps);
+    case "midia": return conduzirMidia(f, t, ctx, deps);
     case "verificar": return conduzirVerificar(f, t, ctx, deps);
     case "faltantes": return conduzirFaltantes(f, t, ctx, deps);
     case "selecao": return conduzirSelecao(f, t, ctx, deps);
@@ -2332,8 +2376,24 @@ function exclusivaDoServidor(body: Record<string, unknown>): boolean | undefined
 const comOuSem = (b: boolean) => (b ? "com" : "sem");
 
 /** `captacao.create` (rascunho novo). A chave é a `messageId` desta mensagem e fica guardada até a resposta. */
+/** Resposta à lista de mídias de origem, antes do `captacao.create`: número ou nome. Com ela, a captação é criada. */
+async function conduzirMidia(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
+  const midias = f.midias ?? [];
+  const m = lerMidia(ctx.texto, midias);
+  if (!m) {
+    if (PERGUNTA_FORA.test(t)) return pausar(f);
+    return resposta(g(f, ctx), textoPerguntaMidia(midias, "Não reconheci essa opção. "), "captacao_midia");
+  }
+  if (!f.criacao) return resposta(null, "Perdi o fio do que você tinha mandado. Peça a captação de novo, por favor.", "captacao_midia_sem_criacao");
+  return criar(g(f, ctx, { midia: m.id, etapa: "condicoes" }), ctx, deps, f.criacao.dados, `Mídia de origem: ${m.label}. `);
+}
+
 async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, dados: DadosDeCaptacao, prefixo: string): Promise<Resposta> {
   const chave = f.criacao?.chave || ctx.messageId;
+  // Mídia obrigatória e ainda não dita: pergunta (lista numerada) ANTES de criar — o CM recusaria o envio depois.
+  if (f.midiaPolitica === "required" && f.midias?.length && !f.midia) {
+    return resposta(g(f, ctx, { etapa: "midia", criacao: { chave, dados } }), `${prefixo}${textoPerguntaMidia(f.midias)}`, "captacao_midia");
+  }
   const guardado: FluxoCaptacao = g(f, ctx, { etapa: "condicoes", criacao: { chave, dados } });
   // Os proprietários do 1º pedido entram só nos args desta chamada (nunca em `f.criacao.dados`, que o
   // checkpoint guarda): o replay com a mesma chave reabre o mesmo cofre e manda exatamente o mesmo corpo.
@@ -2342,6 +2402,7 @@ async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, 
   const dadosEnviados: DadosDeCaptacao = donosLidos.length ? { ...dados, proprietarios: donosLidos } : dados;
   const args: Record<string, unknown> = {
     tipo: f.tipo, nome: f.nome, ...(f.modeloId ? { modeloId: f.modeloId } : {}),
+    ...(f.midia ? { midia: f.midia } : {}),
     ...(Object.keys(dadosEnviados).length ? { dados: dadosEnviados } : {}),
   };
   const r = await deps.acao("captacao.create", args, chave);
@@ -2388,6 +2449,18 @@ async function criar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFluxo, 
   }
   if (r.status === 409 && erro === "em_andamento") {
     return resposta(guardado, `${prefixo}Estou terminando de criar; responda *sim* em instantes para conferir.`, "captacao_create_em_andamento");
+  }
+  if (r.status === 422 && erro === "midia_invalida") {
+    // O id não está (mais) no catálogo: repete a lista, agora com o catálogo que o CM devolveu.
+    const novas = lerMidias(r.body.midias);
+    const midias = novas.length ? novas : (f.midias ?? []);
+    if (midias.length) {
+      return resposta(
+        g(f, ctx, { etapa: "midia", midias, midiaPolitica: f.midiaPolitica ?? "required", midia: undefined, criacao: { chave: "", dados } }),
+        `${prefixo}${textoPerguntaMidia(midias, "Essa opção de mídia não é válida. ")}`,
+        "captacao_midia_invalida"
+      );
+    }
   }
   if (r.status === 422 && erro === "sem_modelo") {
     return resposta(null, `Sua imobiliária não tem um modelo de captação de ${nomeDaEsteira(f)} ativo. Um administrador ativa em Modelos; depois é só me pedir de novo.`, "captacao_sem_modelo");
@@ -2480,7 +2553,17 @@ async function complementar(
   let atual = f;
   let prefixo = "";
   for (let tentativa = 0; tentativa < 2; tentativa++) {
-    const r = await deps.acao("captacao.create", { captacaoId: atual.captacaoId, version: atual.version, dados }, `${chaveBase}${tentativa ? ":r" : ""}`);
+    // A mídia vai como argumento próprio (nunca dentro de `dados`); sem ela, o corpo é exatamente o de sempre.
+    const { midia: midiaDita, ...dadosSemMidia } = dados;
+    const r = await deps.acao(
+      "captacao.create",
+      {
+        captacaoId: atual.captacaoId, version: atual.version,
+        ...(midiaDita ? { midia: midiaDita } : {}),
+        ...(!midiaDita || Object.keys(dadosSemMidia).length ? { dados: dadosSemMidia } : {}),
+      },
+      `${chaveBase}${tentativa ? ":r" : ""}`
+    );
     if (!r) return { ok: false, r: resposta(g(f, ctx), `${TEXTO_SEM_RESPOSTA} Mande de novo em instantes.`, "captacao_complemento_sem_resposta") };
     if (r.status === 200 || r.status === 201) {
       const v = obj(r.body.captacao).version;
@@ -2570,6 +2653,7 @@ const PENDENTES_VAZIOS: PendentesDeCaptacao = { proprietarios: [], testemunhas: 
  */
 function mesclarDadosDeCaptacao(a: DadosDeCaptacao, b: DadosDeCaptacao): DadosDeCaptacao {
   const out: DadosDeCaptacao = { ...a };
+  if (b.midia) out.midia = b.midia;
   if (b.imovel) out.imovel = { ...(out.imovel ?? {}), ...b.imovel };
   if (b.condicoes) out.condicoes = { ...(out.condicoes ?? {}), ...b.condicoes };
   if (b.locacao) out.locacao = { ...(out.locacao ?? {}), ...b.locacao };
@@ -2976,13 +3060,19 @@ async function verificar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFlu
   if (r.status !== 200 || !pf) return resposta(null, TEXTO_SEM_RESPOSTA, `captacao_preflight_${r.status}`);
   const version = typeof r.body.version === "number" ? r.body.version : f.version;
   const nomes = Object.fromEntries((f.proprietarios ?? []).map((p) => [p.id, p.nome]));
-  const base = g(f, ctx, { version, tentativas: 0 });
+  let base = g(f, ctx, { version, tentativas: 0 });
+  // Mídia de origem pendente sem opções no próprio faltante: o catálogo vem das options (uma consulta, só se preciso).
+  if (pf.faltantes.some((x) => ehFaltanteDeMidia(x) && !x.opcoes?.length) && !base.midias?.length) {
+    const o = await deps.acao("captacao.options", { captacaoId: f.captacaoId }).catch(() => null);
+    const midias = o?.status === 200 ? lerMidias(o.body.midias) : [];
+    if (midias.length) base = g(base, ctx, { midias });
+  }
 
   // Só pergunta o que o Max sabe preencher; o resto (campo personalizado, lista fechada…) é da tela.
   // Estado civil que a pessoa já disse PULAR não é perguntado de novo (vira pendência da tela).
   const pulados = new Set(f.estadoCivilPulado ?? []);
   const perguntavel = (x: FaltanteDeCaptacao) =>
-    !!tipoDoFaltante(x) && !(x.path === "proprietarios[].estado_civil" && !!x.proprietarioId && pulados.has(x.proprietarioId));
+    !!tipoDoFaltante(x) && (!ehFaltanteDeMidia(x) || listaDaMidia(base, x).length > 0) && !(x.path === "proprietarios[].estado_civil" && !!x.proprietarioId && pulados.has(x.proprietarioId));
   const perguntaveis = pf.faltantes.filter(perguntavel);
   const daTela = pf.faltantes.filter((x) => !perguntavel(x));
   if (perguntaveis.length) {
