@@ -35,7 +35,7 @@ it("fronteira do grafo preserva valor protegido e apartamento no rascunho", asyn
   const resultado = await buildGraph().compile().invoke({
     inbound: { messageId: "qa-extracao", fromPhone: "5511900000000", groupId: null, kind: "text", text: "imóvel Rua de Teste QA, 100, apartamento 1, São Paulo/SP; valor R$ 500.000,00 à vista", mediaUrl: null, mimeType: null, timestampMs: null, senderName: "TESTE QA", replyToMessageId: null },
     identity: { orgId: "org-qa", orgName: "QA", kind: "user", userId: "qa", userName: "TESTE QA" },
-    fluxo: { kind: "proposta", etapa: "coleta", natureza: "venda", dados: { proponente: { nome: "CLIENTE TESTE QA", telefone: "11900000000" } }, atualizadoEm: Date.now() },
+    fluxo: { kind: "proposta", etapa: "coleta", natureza: "venda", dados: { proponente: { nome: "CLIENTE TESTE QA", telefone: "11900000000", cpf: "39276943803" } }, atualizadoEm: Date.now() },
     reply: null, halt: null, propostaDescartada: false,
   });
   expect(resultado.fluxo).toMatchObject({ dados: { valor: 500000, imovel: { endereco: "Rua de Teste QA, 100", complemento: "apartamento 1" }, pagamento: { forma: "à vista" } } });

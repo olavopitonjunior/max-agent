@@ -102,7 +102,7 @@ describe("promessa em presente/futuro sem escrita no turno", () => {
 const F = await import("../fluxos");
 
 const DADOS = {
-  proponente: { nome: "TESTE QA", telefone: "11999063228" },
+  proponente: { nome: "TESTE QA", telefone: "11999063228", cpf: "39276943803" },
   valor: 500000,
   imovel: { endereco: "Rua de Teste QA, 100", cidade: "São Paulo", uf: "SP" },
 };
