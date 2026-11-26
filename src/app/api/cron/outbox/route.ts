@@ -5,6 +5,7 @@ import { reconcile } from "@/lib/delivery";
 import { connectionStatus } from "@/lib/transport";
 import { observeConnection } from "@/lib/connection";
 import { alertarRepresados } from "@/lib/alerta-represados";
+import { processarFollowups } from "@/lib/followup";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -69,6 +70,10 @@ export async function GET(req: NextRequest) {
         : { connected: false, fonte: "cron", motivo: "inacessivel" }
     );
 
+    // Conferências proativas (avisa o corretor quando um envio de captação que voltou 202 termina).
+    // ANTES do despacho: a mensagem que ela enfileira sai nesta mesma passada. Nunca lança.
+    const followups = await processarFollowups();
+
     const totals = await dispatchDue(50, status, iniciadoEm);
 
     /**
@@ -111,7 +116,7 @@ export async function GET(req: NextRequest) {
         `[cron/outbox] ${totals.sent} enviadas, ${totals.failed} falhas de ${totals.claimed}`
       );
     }
-    return NextResponse.json({ ...totals, reconcile: rec, ...(represados ? { alertaRepresados: true } : {}) });
+    return NextResponse.json({ ...totals, reconcile: rec, ...(followups.claimed > 0 ? { followups } : {}), ...(represados ? { alertaRepresados: true } : {}) });
   } catch (err) {
     // Nunca 500 silencioso: o cron da Vercel não repete no mesmo minuto, e um
     // erro engolido aqui é fila parada sem ninguém saber.

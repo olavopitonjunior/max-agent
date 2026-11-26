@@ -106,6 +106,8 @@ export async function POST(req: NextRequest) {
     await del("identity_cache", `DELETE FROM identity_cache WHERE phone = ANY($1)`, [plus]);
     await del("inbound_queue", `DELETE FROM inbound_queue WHERE from_phone = ANY($1)`, [bare]);
     await del("outbox", `DELETE FROM outbox WHERE phone = ANY($1)`, [bare]);
+    // Migration 031: conferência pendente do envio da captação guarda o telefone do corretor.
+    await del("followup_job", `DELETE FROM followup_job WHERE phone = ANY($1)`, [[...bare, ...plus]]);
     // Janela de 24h da Meta (migration 015): só o instante da última
     // mensagem, mas chaveado pelo telefone — então sai junto.
     await del(
