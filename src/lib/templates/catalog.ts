@@ -321,7 +321,7 @@ const FAMILIAS = {
     ["Ana", "RE/MAX Trio", "Envio da proposta cancelado"],
     { tipo: "url", texto: "Abrir proposta" }
   ),
-  /** stage_change / contract_sent / portal_comment (+ gêmeos `deal_*`). Título: "Status do negócio atualizado"… */
+  /** stage_change / contract_sent / portal_comment (+ gêmeos `deal_*`) / activity_partner_notice. Título: "Status do negócio atualizado"… */
   negocio: t(
     "max_negocio_andamento",
     "Olá, {{1}}! Andamento de negócio na {{2}}: {{3}}. Negócio: {{4}}. Os detalhes estão no botão abaixo.",
@@ -552,6 +552,13 @@ for (const kind of [
   "deal_contract_sent",
   "portal_comment",
   "deal_portal_comment",
+  // Aviso que o escritório parceiro externo manda à imobiliária pela atividade do
+  // negócio (26/11/2026, decisão do Olavo): NÃO ganha template novo na Meta —
+  // reaproveita o `max_negocio_andamento` já aprovado. Título "Aviso do
+  // escritório: <texto curto>" ({{3}}), `params.negocio` ({{4}}) e o botão
+  // "Abrir negócio" abre o `linkUrl` (a atividade do negócio). O WhatsApp dele
+  // está atrás de feature OFF no contractmaker.
+  "activity_partner_notice",
 ])
   CATALOGO[kind] = FAMILIAS.negocio;
 CATALOGO.participant_completed = FAMILIAS.formulario;
@@ -835,7 +842,7 @@ const v5 = (
   return { ...t(name, body, vars, exemplos, { tipo: "respostas", respostas }), ...extra };
 };
 
-/** Nível A — andamento do negócio (`stage_change` e o gêmeo do sino). */
+/** Nível A — andamento do negócio (`stage_change`, o gêmeo do sino e o aviso do escritório parceiro). */
 const ANDAMENTO_V5 = v5(
   "max_negocio_andamento_v5",
   "📌 Olá, {{1}}! Andamento na {{2}}: *{{3}}*. Negócio: *{{4}}*. Os detalhes estão no botão abaixo.",
@@ -845,6 +852,9 @@ const ANDAMENTO_V5 = v5(
 );
 V5.stage_change = ANDAMENTO_V5;
 V5.deal_stage_change = ANDAMENTO_V5;
+// Aviso do escritório parceiro (26/11/2026): mesma definição do andamento, sem
+// template novo. Só sai pelo V5 com `aviso` v1 + ação `abrir`; sem isso, v1.
+V5.activity_partner_notice = ANDAMENTO_V5;
 
 /** Nível B — formulário com respostas pendentes (`form_reminder` e o gêmeo do sino). */
 const FORMULARIO_V5 = v5(
