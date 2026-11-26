@@ -1201,6 +1201,114 @@ export async function lerImovel(texto: string, extrair: ExtratorDeSecao): Promis
   return { dados };
 }
 
+// ─── Bairro / cidade / UF pedidos pelo preflight (prod 19/11) ────────────
+// O CM manda `imovel.bairro|cidade|uf` como faltante de nível `envio`. O Max lê numa resposta só o que
+// estiver pendente ("Bela Vista, São Paulo/SP"), em código (sem modelo), e só confirma depois do CM aceitar.
+
+export type CampoDeLocal = "bairro" | "cidade" | "uf";
+const CAMPOS_DE_LOCAL: readonly CampoDeLocal[] = ["bairro", "cidade", "uf"];
+
+/** Nome do estado (sem acento, minúsculo) → sigla: "Minas Gerais" respondendo à pergunta da UF. */
+const SIGLA_DO_ESTADO: Record<string, string> = {
+  acre: "AC", alagoas: "AL", amapa: "AP", amazonas: "AM", bahia: "BA", ceara: "CE", "distrito federal": "DF", "espirito santo": "ES",
+  goias: "GO", maranhao: "MA", "mato grosso": "MT", "mato grosso do sul": "MS", "minas gerais": "MG", para: "PA", paraiba: "PB",
+  parana: "PR", pernambuco: "PE", piaui: "PI", "rio de janeiro": "RJ", "rio grande do norte": "RN", "rio grande do sul": "RS",
+  rondonia: "RO", roraima: "RR", "santa catarina": "SC", "sao paulo": "SP", sergipe: "SE", tocantins: "TO",
+};
+
+const CAMPO_DO_TIPO_LOCAL = { local_bairro: "bairro", local_cidade: "cidade", local_uf: "uf" } as const satisfies Record<string, CampoDeLocal>;
+
+const ERRO_DO_LOCAL: Record<CampoDeLocal, string> = {
+  bairro: "Mande só o bairro (por exemplo: Bela Vista).",
+  cidade: "Mande só o nome da cidade (por exemplo: São Paulo).",
+  uf: "Não reconheci a UF. Mande a sigla de 2 letras (por exemplo: SP).",
+};
+
+/** Sigla válida ("SP", "sp") ou, se `aceitaNome`, o nome do estado ("São Paulo"). */
+function ufDoTexto(v: string, aceitaNome: boolean): string | null {
+  const s = v.trim();
+  if (/^[A-Za-z]{2}$/.test(s)) return SIGLAS_UF.has(s.toUpperCase()) ? s.toUpperCase() : null;
+  return aceitaNome ? SIGLA_DO_ESTADO[chaveDeTexto(s)] ?? null : null;
+}
+
+/** Palavras de negação/adiamento: "ainda não sei o bairro" é uma não-resposta, nunca o nome do bairro/cidade. Lista conservadora. */
+const ADIAMENTO_DO_LOCAL = /\b(?:nao|sei|depois|ainda|vejo|talvez|tarde|desconheco|descubro|confirmo|pergunto|esqueci)\b/;
+const ehAdiamentoDoLocal = (v: string): boolean => ADIAMENTO_DO_LOCAL.test(normalizar(v));
+
+function valorDoLocal(campo: CampoDeLocal, v: string, aceitaNomeDeUf: boolean): string | null {
+  const t = v.trim().replace(/[.!]+$/, "");
+  if (campo === "uf") return ufDoTexto(t, aceitaNomeDeUf);
+  if (ehAdiamentoDoLocal(t)) return null;
+  if (!t || t.length > 80 || !/\p{L}/u.test(t) || (campo === "cidade" && /\d/.test(t))) return null;
+  return t;
+}
+
+const ROTULO_DO_LOCAL_SOLTO = /^(?:(?:o|a)\s+)?(bairro|uf|estado)\s*(?:[:=\-–]\s*|\s+)(.+)$/iu;
+// "cidade" é palavra de bairro ("Cidade Jardim"): só vira rótulo com separador ou com "de/do/da".
+const ROTULO_DA_CIDADE = /^(?:(?:o|a)\s+)?cidade\s*(?:[:=\-–]\s*|\s+(?:de|do|da)\s+)(.+)$/iu;
+const SO_ROTULO = new Set(["bairro", "cidade", "uf", "estado"]);
+
+/**
+ * Lê bairro/cidade/UF da resposta do corretor, só dos campos `pendentes`. `atual` é o campo da pergunta em
+ * curso (valor solto, sem rótulo, vai para ele); sem `atual`, só entram as formas inequívocas (rótulo ou
+ * "Cidade/UF"). `{}` = nada lido; `{ erro }` = o texto era para um campo daqui, mas não vale.
+ */
+export function lerLocalDoImovel(
+  texto: string, pendentes: ReadonlySet<CampoDeLocal>, atual?: CampoDeLocal,
+): Partial<Record<CampoDeLocal, string>> | { erro: string } {
+  const limpo = texto.replace(/(?<!\d)\d{2}\.?\d{3}-?\d{3}(?!\d)/, " ").trim().replace(/[.!]+$/, "");
+  if (!limpo) return {};
+  if (limpo.length > 160) return { erro: "Mande só o bairro, a cidade e a UF, em uma linha." };
+  const out: Partial<Record<CampoDeLocal, string>> = {};
+  const soltas: string[] = [];
+  let erro: string | null = null;
+  const poe = (campo: CampoDeLocal, bruto: string, aceitaNomeDeUf: boolean) => {
+    if (out[campo]) return;
+    const v = valorDoLocal(campo, bruto, aceitaNomeDeUf);
+    if (v) out[campo] = v; else erro ??= ERRO_DO_LOCAL[campo];
+  };
+
+  for (const parte of limpo.split(/[,;\n]/).map((p) => p.trim()).filter(Boolean)) {
+    const rot = ROTULO_DO_LOCAL_SOLTO.exec(parte);
+    // "Cidade de Deus" respondendo ao BAIRRO é o bairro: a forma sem separador só é rótulo quando a pergunta não é o bairro.
+    const rotCidade = rot ? null : ROTULO_DA_CIDADE.exec(parte);
+    const cidadeEhRotulo = !!rotCidade && (atual !== "bairro" || /^(?:(?:o|a)\s+)?cidade\s*[:=\-–]/iu.test(parte));
+    if (rot) {
+      const campo = rot[1]!.toLowerCase() === "bairro" ? "bairro" : "uf";
+      poe(campo, campo === "uf" ? rot[2]!.replace(/^(?:de|do|da)\s+/i, "") : rot[2]!, true);
+    } else if (rotCidade && cidadeEhRotulo) {
+      const junto = separarCidadeUf(rotCidade[1]!);
+      if (junto) { poe("cidade", junto.cidade, false); poe("uf", junto.uf, false); } else poe("cidade", rotCidade[1]!, false);
+    } else if (!SO_ROTULO.has(chaveDeTexto(parte))) {
+      soltas.push(parte);
+    }
+  }
+
+  const cu = soltas.length ? lerCidadeUfNoTexto(soltas.join(", ")) : null;
+  if (cu) {
+    poe("cidade", cu.cidade, false);
+    poe("uf", cu.uf, false);
+    const kc = chaveDeTexto(cu.cidade);
+    const candidatas = soltas.filter((p) => !chaveDeTexto(p).includes(kc) && p.toUpperCase() !== cu.uf)
+      .filter((p) => !/\d/.test(p) && !PALAVRA_DE_LOGRADOURO.has(normalizar(p.split(/\s+/)[0] ?? "")));
+    if (candidatas.length === 1) poe("bairro", candidatas[0]!, false);
+  } else if (soltas.length === 1) {
+    const p = soltas[0]!;
+    // Sigla solta em maiúsculas ("SP") é a UF mesmo quando a pergunta era outra; "Sé" (bairro) não é sigla.
+    if (atual && atual !== "uf" && pendentes.has("uf") && /^[A-Z]{2}$/.test(p) && SIGLAS_UF.has(p)) poe("uf", p, false);
+    else if (atual) poe(atual, p, atual === "uf");
+  } else if (soltas.length > 1 && atual) {
+    const ordem = CAMPOS_DE_LOCAL.filter((c) => pendentes.has(c));
+    const alvo = ordem.slice(Math.max(0, ordem.indexOf(atual)), Math.max(0, ordem.indexOf(atual)) + soltas.length);
+    if (alvo.length !== soltas.length) return { erro: "Mande só o bairro, a cidade e a UF, nessa ordem (por exemplo: Bela Vista, São Paulo/SP)." };
+    alvo.forEach((c, i) => poe(c, soltas[i]!, c === "uf"));
+  }
+
+  for (const c of CAMPOS_DE_LOCAL) if (!pendentes.has(c)) delete out[c];
+  if (erro && !Object.keys(out).length) return { erro };
+  return out;
+}
+
 const CAMPOS_DO_ENDERECO = ["rua", "numero", "complemento", "bairro", "cidade", "uf"] as const;
 
 /** Endereço de um proprietário, pelo mesmo caminho do imóvel (rua → `endereco`). */
@@ -1426,11 +1534,13 @@ export function toolExtrairCaptacao(secao: SecaoDeExtracao) {
 
 type TipoDeCampo =
   | "endereco_imovel" | "tipo_imovel" | "endereco_pessoa" | "texto" | "texto_longo" | "doc" | "email" | "telefone"
-  | "data" | "moeda" | "percentual" | "inteiro" | "booleano" | "estado_civil" | "nome" | "cep" | "midia";
+  | "data" | "moeda" | "percentual" | "inteiro" | "booleano" | "estado_civil" | "nome" | "cep" | "midia"
+  | "local_bairro" | "local_cidade" | "local_uf";
 
 /** Os campos de nível `envio`/`ficha` que o Max sabe preencher. Path desconhecido vai para a tela. */
 const TIPO_DO_PATH: Record<string, TipoDeCampo> = {
   "imovel.endereco": "endereco_imovel", "imovel.tipo": "tipo_imovel", "imovel.cep": "cep", "imovel.matricula": "texto", "imovel.cartorio": "texto",
+  "imovel.bairro": "local_bairro", "imovel.cidade": "local_cidade", "imovel.uf": "local_uf",
   "imovel.inscricao_iptu": "texto", "imovel.descricao": "texto_longo", "imovel.area": "texto", "imovel.vagas": "texto",
   "imovel.condominio_nome": "texto",
   "proprietarios[].nome": "nome", "proprietarios[].cpf": "doc", "proprietarios[].rg": "texto",
@@ -1486,6 +1596,7 @@ const DICA: Partial<Record<TipoDeCampo, string>> = {
   booleano: " (com ou sem exclusividade?)",
   tipo_imovel: " (apartamento, casa, terreno…)",
   cep: " (00000-000)",
+  local_uf: " (sigla, ex.: SP)",
 };
 
 const PERGUNTA_FORA = /\?\s*$|^(como|quando|onde|por que|porque|o que|qual|quais|quanto|quem|me (fala|diz|explica)|tem como)\b/;
@@ -1633,6 +1744,20 @@ async function lerFaltante(f: FluxoCaptacao, fa: FaltanteDeCaptacao, texto: stri
     case "tipo_imovel": {
       const k = TIPOS_DE_IMOVEL.find((x) => new RegExp(String.raw`\b${x}s?\b`).test(normalizar(texto)));
       return k ? { dados: { imovel: { kind: k } }, eco: `tipo: ${k}` } : { erro: "Diga o tipo: apartamento, casa, terreno…" };
+    }
+    case "local_bairro": case "local_cidade": case "local_uf": {
+      const campo = CAMPO_DO_TIPO_LOCAL[tipo];
+      // A pergunta em curso é a do 1º faltante: valor solto vai para ela; os demais só leem o que vier rotulado/inequívoco.
+      const pendentes = new Set<CampoDeLocal>();
+      for (const x of f.faltantes ?? [fa]) { const t = tipoDoFaltante(x); if (t && t in CAMPO_DO_TIPO_LOCAL) pendentes.add(CAMPO_DO_TIPO_LOCAL[t as keyof typeof CAMPO_DO_TIPO_LOCAL]); }
+      pendentes.add(campo);
+      const t0 = f.faltantes?.[0] ? tipoDoFaltante(f.faltantes[0]) : undefined;
+      const atual = t0 && t0 in CAMPO_DO_TIPO_LOCAL ? CAMPO_DO_TIPO_LOCAL[t0 as keyof typeof CAMPO_DO_TIPO_LOCAL] : undefined;
+      const l = lerLocalDoImovel(texto, pendentes, atual);
+      if ("erro" in l) return fa === f.faltantes?.[0] || !f.faltantes ? { erro: l.erro } : "vazio";
+      const v = l[campo];
+      if (!v) return "vazio";
+      return { dados: { imovel: { [campo]: v } } as DadosDeCaptacao, eco: `${campo === "uf" ? "UF" : campo}: ${v}` };
     }
     case "endereco_imovel": {
       const r = await lerImovel(texto, extrair);
@@ -3025,26 +3150,64 @@ async function conduzirExtras(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno,
 
 // ── conferência (preflight), faltantes e resumo ──
 
-/** Frase que começa por um campo do imóvel ("Bairro: Bela Vista", "bairro Bela Vista", "o CEP é…"). */
-const RE_DADO_DA_TELA =
-  /^\s*(?:(?:o|a)\s+)?(?:bairro|cep|rua|logradouro|endere[cç]o|n[uú]mero|cidade|uf|complemento|matr[ií]cula|iptu|metragem|[aá]rea)(?![\p{L}])/iu;
+/** Rótulo que a pessoa digita no começo da frase → path do campo do imóvel (o mesmo do `TIPO_DO_PATH`, quando o Max sabe preencher). */
+const CAMPO_DO_ROTULO: readonly { rotulo: string; path: string }[] = [
+  { rotulo: "bairro", path: "imovel.bairro" }, { rotulo: "cidade", path: "imovel.cidade" }, { rotulo: "uf", path: "imovel.uf" },
+  { rotulo: "cep", path: "imovel.cep" }, { rotulo: "matr[ií]cula", path: "imovel.matricula" }, { rotulo: "iptu", path: "imovel.inscricao_iptu" },
+  { rotulo: "metragem|[aá]rea", path: "imovel.area" },
+  // Só da tela (o Max pergunta o endereço inteiro, nunca o pedaço): rua, número e complemento.
+  { rotulo: "rua|logradouro|endere[cç]o", path: "imovel.rua" }, { rotulo: "n[uú]mero", path: "imovel.numero" }, { rotulo: "complemento", path: "imovel.complemento" },
+];
 
+/** Frase que começa por um campo do imóvel ("Bairro: Bela Vista", "bairro Bela Vista", "o CEP é…"). */
+function reDoRotulo(itens: readonly { rotulo: string }[]): RegExp {
+  return new RegExp(String.raw`^\s*(?:(?:o|a)\s+)?(?:${itens.map((i) => i.rotulo).join("|")})(?![\p{L}])`, "iu");
+}
+const RE_CAMPO_DO_IMOVEL = reDoRotulo(CAMPO_DO_ROTULO);
+const RE_DADO_DA_TELA = reDoRotulo(CAMPO_DO_ROTULO.filter((c) => !(c.path in TIPO_DO_PATH)));
+
+/** Dado de campo que SÓ a tela resolve (path fora do `TIPO_DO_PATH`). */
 export function pareceDadoDaTela(texto: string): boolean {
   // Pergunta ("Dúvida: posso mandar amanhã?") segue pro atendimento.
   return !texto.includes("?") && RE_DADO_DA_TELA.test(texto);
 }
 
-/** Etapa `verificar` com pendências só-da-tela já ditas: só "pronto"/"sim" confere de novo; dado tem resposta fixa; o resto vai pro atendimento. */
+/** Dado de QUALQUER campo do imóvel, perguntável ou não (nunca vai ao atendimento livre na etapa de verificação). */
+function campoDoRotulo(texto: string): CampoDoRotulo | null {
+  if (texto.includes("?")) return null;
+  for (const c of CAMPO_DO_ROTULO) if (reDoRotulo([c]).test(texto)) return c;
+  return null;
+}
+type CampoDoRotulo = { rotulo: string; path: string };
+
+const TEXTO_DADO_SO_DA_TELA = (f: FluxoCaptacao) =>
+  `Isso eu não consigo gravar por aqui: o que falta nesta captação só dá para ajustar pela tela: ${linkDe(f.captacaoId)}\nQuando terminar, me diga *pronto* que eu confiro.`;
+
+/**
+ * Etapa `verificar` com pendências só-da-tela já ditas: só "pronto"/"sim" confere de novo.
+ * Prod 19/11 (CAP-2026-0014): "Bairro: Bela Vista" ia pro atendimento, que respondeu "Bairro: Bela Vista ✅"
+ * sem gravar. Agora, dado de campo nunca vai ao modelo: se o campo está pendente e o Max sabe preencher,
+ * grava pelo mesmo caminho do complemento (nova versão); senão, resposta FIXA (a tela). O resto segue pro atendimento.
+ */
 async function conduzirVerificar(f: FluxoCaptacao, t: string, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   if (f.pendenciasDitas && !(QUER_CONFERIR.test(t) || lerConfirmacao(ctx.texto) === "sim" || confirmaEnvio(ctx.texto))) {
-    // Prod 19/11 (CAP-2026-0014): "Bairro: Bela Vista" ia pro atendimento, que
-    // respondeu "Bairro: Bela Vista ✅" sem gravar nada. Dado mandado nesta etapa
-    // tem resposta FIXA: não grava e aponta a tela. O resto segue pro atendimento.
-    if (pareceDadoDaTela(ctx.texto)) {
+    if (pareceDadoDaTela(ctx.texto)) return resposta(g(f, ctx, {}), TEXTO_DADO_SO_DA_TELA(f), "captacao_dado_so_da_tela");
+    const campo = campoDoRotulo(ctx.texto);
+    if (campo) {
+      // Campo que o Max sabe preencher: grava SÓ se o servidor ainda o pede (pendente); já preenchido = resposta fixa.
+      const r = await deps.acao("captacao.preflight", { captacaoId: f.captacaoId });
+      const pf = r?.status === 200 ? lerPreflight(r.body) : null;
+      const pedidos = (pf?.faltantes ?? []).filter((x) => !!tipoDoFaltante(x) && !ehFaltanteDeMidia(x));
+      const alvo = pedidos.find((x) => x.path === campo.path);
+      if (pf && alvo) {
+        const version = typeof r!.body.version === "number" ? r!.body.version : f.version;
+        const fila = [alvo, ...pedidos.filter((x) => x !== alvo)];
+        return conduzirFaltantes(g(f, ctx, { etapa: "faltantes", faltantes: fila, version, tentativas: 0, pendenciasDitas: undefined }), t, ctx, deps);
+      }
       return resposta(
         g(f, ctx, {}),
-        `Isso eu não consigo gravar por aqui: o que falta nesta captação só dá para ajustar pela tela: ${linkDe(f.captacaoId)}\nQuando terminar, me diga *pronto* que eu confiro.`,
-        "captacao_dado_so_da_tela"
+        `Esse dado não está pendente (ou já está gravado) e eu não troco campo já preenchido por aqui. Para alterar, use a tela: ${linkDe(f.captacaoId)}\nQuando terminar, me diga *pronto* que eu confiro.`,
+        "captacao_dado_ja_gravado"
       );
     }
     return pausar(f);
@@ -3129,7 +3292,7 @@ async function verificar(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsDoFlu
 }
 
 /** Faltantes curtos que uma mesma resposta pode trazer juntos ("01310-100, Casa"). */
-const COMBINAVEIS = new Set<TipoDeCampo>(["cep", "tipo_imovel", "estado_civil", "email"]);
+const COMBINAVEIS = new Set<TipoDeCampo>(["cep", "tipo_imovel", "estado_civil", "email", "local_bairro", "local_cidade", "local_uf"]);
 const leu = (l: Leitura): l is { dados: DadosDeCaptacao; eco: string } => l !== "vazio" && !("erro" in l);
 
 /**
@@ -3148,7 +3311,8 @@ async function conduzirFaltantes(f: FluxoCaptacao, t: string, ctx: ContextoDoTur
   let lido = await lerFaltante(f, fa, ctx.texto, extrair);
   // Texto livre (matrícula, nome, endereço…) não é lido por rótulo de condição: "valor" numa descrição não é o valor.
   const tipoAtual = tipoDoFaltante(fa);
-  const textoLivre = tipoAtual === "texto" || tipoAtual === "texto_longo" || tipoAtual === "nome" || tipoAtual === "endereco_imovel" || tipoAtual === "endereco_pessoa";
+  const textoLivre = tipoAtual === "texto" || tipoAtual === "texto_longo" || tipoAtual === "nome" || tipoAtual === "endereco_imovel" || tipoAtual === "endereco_pessoa"
+    || tipoAtual === "local_bairro" || tipoAtual === "local_cidade" || tipoAtual === "local_uf";
   // "valor 850 mil, comissão 6%" respondendo ao valor: dois números, o leitor de campo único recusa; o rotulado separa.
   if (!leu(lido) && !textoLivre) { const alt = lerCondicaoRotulada(fa, ctx.texto); if (leu(alt)) lido = alt; }
   // Item 5: quando a pergunta é de um campo curto, a mesma resposta preenche os
@@ -3171,6 +3335,10 @@ async function conduzirFaltantes(f: FluxoCaptacao, t: string, ctx: ContextoDoTur
       const l = lerCondicaoRotulada(outro, ctx.texto);
       if (leu(l)) juntos.push({ fa: outro, ...l });
     }
+  }
+  // "ainda não sei o bairro" / "o bairro eu vejo depois": não-resposta a um campo de local = PULAR (nada é gravado).
+  if (!leu(lido) && !juntos.length && tipoAtual && tipoAtual.startsWith("local_") && ehAdiamentoDoLocal(ctx.texto)) {
+    return resposta(null, `Certo. O rascunho${lembrete(f)} fica salvo; complete pela tela: ${linkDe(f.captacaoId)}`, "captacao_faltante_pulado");
   }
   if (!leu(lido) && !juntos.length) return falhou(f, lido === "vazio" ? "Não entendi." : lido.erro, ctx);
   let dados: DadosDeCaptacao = {};
