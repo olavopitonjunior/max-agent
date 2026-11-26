@@ -507,7 +507,9 @@ e ofereça tentar de novo. NÃO afirme que não há nada.
       const aviso = haMais ? '\ntruncado="true" — há mais itens além destes; diga isso se listar.' : "";
       const contagem = `mostrados="${mostrados}" total="${haMais ? "desconhecido" : mostrados}" ha_mais="${haMais}"`;
       const regra = haMais
-        ? `Mostrando ${mostrados}; há mais. Diga exatamente "mostrando ${mostrados}" e ofereça ver mais; não informe total nem outro número.`
+        ? `Há mais itens além destes ${mostrados}, e o total exato NÃO é conhecido. Liste só estes ${mostrados}, avise com suas palavras que há mais ` +
+          `(ex.: "as ${mostrados} mais recentes") e ofereça ver mais. Se perguntarem quantos existem, diga "mais de ${mostrados}" e nunca invente outro número. ` +
+          "Os atributos acima (mostrados, total, ha_mais) são internos: não os repita nem os cite."
         : `Mostrando ${mostrados} (lista completa). Cite exatamente ${mostrados}.`;
       return `<dados_do_sistema origem="${r.tool}">${aviso}
 ${contagem}
