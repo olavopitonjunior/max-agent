@@ -239,7 +239,6 @@ const TEXTO_TENTATIVAS = "Não estou conseguindo entender. Deixei o rascunho sal
 const link = (caminho: string) => new URL(caminho, imobproBase()).toString();
 const linkDe = (id?: string) => link(id ? `/imoveis/captacoes/${id}` : "/imoveis/captacoes");
 
-/** Texto do aviso proativo do envio concluído (cron `followup`): o mesmo `linkDe` do fluxo, só o nome da captação e o estado. */
 /**
  * Aviso de fim do envio (defeito 4), pelo RÓTULO que o `captacao.list` devolve. Os rótulos são os do
  * `captacaoStatusView` do ImobPro (`lib/captacao/status-view.ts`), um mapa fechado:
