@@ -3499,6 +3499,16 @@ async function conduzirRevisao(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: Dep
       "captacao_resumo_correcao_pela_tela"
     );
   }
+  // Prod 26/11 (CAP-2026-0015): "Bairro: Jardins" no resumo ia pro atendimento, que respondia
+  // "Anotei: bairro Jardins" sem gravar. No resumo nada está pendente para o Max (senão seria
+  // `faltantes`): campo do imóvel dito aqui é troca de valor já gravado → resposta FIXA, nunca o modelo.
+  if (campoDoRotulo(ctx.texto)) {
+    return resposta(
+      g(f, ctx),
+      `Não gravei: esse dado já está na captação e eu não troco campo preenchido por aqui. Para alterar, use a tela: ${linkDe(f.captacaoId)}\nDepois responda *sim* para enviar, ou CANCELAR.`,
+      "captacao_resumo_campo_pela_tela"
+    );
+  }
   const lida = lerRespostaDoResumo(ctx.texto);
   if (lida.nao) return cancelar(f);
   if (!lida.sim && !lida.canal) return pausar(f);
