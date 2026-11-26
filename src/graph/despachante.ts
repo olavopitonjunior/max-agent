@@ -552,7 +552,8 @@ export async function despacharLeituras(params: {
 
     if (soEmAberto) {
       // O servidor só trouxe a janela padrão das mais recentes: se ela veio cheia, pode haver outras em aberto além dela.
-      const cheia = r.items.length >= JANELA_DE_PROPOSTAS;
+      const janela = typeof args.limite === "number" && args.limite > 0 ? args.limite : JANELA_DE_PROPOSTAS;
+      const cheia = r.items.length >= janela;
       r.items = r.items.filter((p) => !propostaEncerrada((p ?? {}) as { status?: unknown; estado?: unknown }));
       if (cheia) r.truncated = true;
     }

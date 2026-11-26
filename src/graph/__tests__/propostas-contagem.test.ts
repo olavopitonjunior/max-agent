@@ -78,3 +78,22 @@ describe("rótulo interno da cerca na resposta do modelo", () => {
     expect(limparRotuloInterno(t)).toBe(t);
   });
 });
+
+describe("contagem só da própria carteira (code review 26/11)", () => {
+  it.each([
+    "quantas propostas a equipe tem?",
+    "quantas propostas minha equipe fez",
+    "quantas propostas o time tem",
+    "quantas propostas a imobiliária tem?",
+    "quantas propostas posso fazer por dia?",
+  ])("'%s' não vira 'Você tem N'", async (frase) => {
+    const r = await responderConsulta(deps({ items: cinco, total: 23 }), frase);
+    expect(r.evento).not.toBe("consulta_contagem");
+  });
+
+  it("filtro que esvaziou a janela cheia: não diz 'nenhuma' nem oferece 'ver mais'", () => {
+    const f = fenceToolResults([{ tool: "listar_propostas", items: [], truncated: true }]);
+    expect(f).toMatch(/pode haver outras mais antigas/);
+    expect(f).toMatch(/não ofereça "ver mais"/);
+  });
+});
