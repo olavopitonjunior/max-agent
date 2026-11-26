@@ -12,6 +12,14 @@ export function linhasListadas(texto: string): number {
   return linhas.filter((l) => /^ {0,1}[•*-]\s+\S/.test(l)).length;
 }
 
+/**
+ * Rótulo interno da cerca que vazou para a resposta entre asteriscos ou aspas (prod 26/11: "só consigo listar
+ * *mostrando 5* das suas propostas"): fica só o número. A frase comum ("Mostrando 5 atividades:") não mexe.
+ */
+export function limparRotuloInterno(texto: string): string {
+  return texto.replace(/[*"“'‘]\s*mostrando\s+(\d+)\s*[*"”'’]/gi, "$1");
+}
+
 /** Corrige "mostrando N" para o número de linhas realmente listadas. Sem lista no texto, não mexe. */
 export function corrigirContagemMostrada(texto: string): string {
   const listadas = linhasListadas(texto);

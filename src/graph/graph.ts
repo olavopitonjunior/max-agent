@@ -136,7 +136,7 @@ import {
 } from "./prompt";
 import { houveEscritaNoTurno } from "./escrita-do-turno";
 import { corrigirVocativo, humanizarCodigosInternos, limitarTamanho, paraWhatsApp, sanitizar, travarCriacaoFalsa } from "./compose";
-import { corrigirContagemMostrada } from "./lista-contagem";
+import { corrigirContagemMostrada, limparRotuloInterno } from "./lista-contagem";
 import { resolverPolitica, type Capability } from "./policy";
 import {
   argsDaCriacao,
@@ -2671,7 +2671,7 @@ async function compose(state: MaxStateType): Promise<MaxUpdate> {
   // (escrita real sai por template) — ver `travarCriacaoFalsa`.
   // Markdown do modelo (`**x**`, `## título`) vira a sintaxe do WhatsApp; só aqui, no texto do modelo.
   // "mostrando N" do modelo = linhas realmente listadas (prod 19/11: "mostrando 5" e 4 linhas); só com lista lida neste turn.
-  const textoWhats = paraWhatsApp(texto);
+  const textoWhats = limparRotuloInterno(paraWhatsApp(texto));
   const comLista = state.toolResults.some((r) => Array.isArray(r.items) && r.items.length > 0);
   const trava = travarCriacaoFalsa(comLista ? corrigirContagemMostrada(textoWhats) : textoWhats, {
     houveLeitura: state.toolResults.some((r) => r.items !== null),
