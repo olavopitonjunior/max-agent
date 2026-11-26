@@ -38,6 +38,7 @@ const {
   templatesDoKind,
   templateDoKind,
   templateUsavel,
+  parametrosDoCorpo,
   todosOsTemplates,
   botoesEmOrdem,
   submeteSoPeloGerenciador,
@@ -94,6 +95,7 @@ function linhaDe(aviso: Aviso | null, extra: Partial<LinhaParaTemplate> = {}): L
 const KINDS_V5 = [
   "stage_change",
   "deal_stage_change",
+  "activity_partner_notice",
   "form_reminder",
   "deal_form_reminder",
   "proposal_created_status",
@@ -133,7 +135,8 @@ describe("família V5 — catálogo", () => {
 
   it("o mapa dos kinds: etapa, formulário, proposta, atividade e marco", () => {
     const nome = (k: string) => templateDoKind(k)!.name;
-    for (const k of ["stage_change", "deal_stage_change"]) expect(nome(k)).toBe("max_negocio_andamento_v5");
+    for (const k of ["stage_change", "deal_stage_change", "activity_partner_notice"])
+      expect(nome(k)).toBe("max_negocio_andamento_v5");
     for (const k of ["form_reminder", "deal_form_reminder"]) expect(nome(k)).toBe("max_formulario_pendente_v5");
     for (const k of ["proposal_created_status", "proposal_sent", "proposal_delivered"])
       expect(nome(k)).toBe("max_proposta_v5");
@@ -261,6 +264,34 @@ describe("família V5 — templateUsavel", () => {
     for (const k of ["activity_assigned", "activity_due", "activity_due_soon"]) {
       expect(templateUsavel(templateDoKind(k)!, linhaDe(avisoAtividade)), k).toBe(true);
     }
+  });
+
+  it("aviso do escritório parceiro: mesma definição do stage_change, v1 como fallback, título em {{3}} e negócio em {{4}}", () => {
+    const def = templateDoKind("activity_partner_notice")!;
+    expect(def).toBe(templateDoKind("stage_change"));
+    expect(def.name).toBe("max_negocio_andamento_v5");
+    expect(templatesDoKind("activity_partner_notice").map((t) => t.name)).toEqual([
+      "max_negocio_andamento_v5",
+      "max_negocio_andamento",
+    ]);
+    expect(templatesDoKind("activity_partner_notice")[1]).toBe(CATALOGO.activity_partner_notice);
+    const aviso: Aviso = { ...AVISO_FORM, evento: "activity_partner_notice", acoes: [{ id: "abrir" }] };
+    const linha = linhaDe(aviso, {
+      title: "Aviso do escritório: Escritura marcada para quinta",
+      params: { quem: "Dra. Paula", escritorio: "Costa e Cancilleri", negocio: "Venda Apto 302", aviso: "Escritura marcada para quinta" },
+    });
+    expect(templateUsavel(def, linha)).toBe(true);
+    expect(parametrosDoCorpo(def, linha)).toEqual([
+      "Ana",
+      "RE/MAX Trio",
+      "Aviso do escritório: Escritura marcada para quinta",
+      "Venda Apto 302",
+    ]);
+    // Botão "Abrir negócio" = ação `abrir`, que responde com o link do aviso (ou o `link_url` da linha).
+    expect(botoesEmOrdem(def.botao)).toEqual([{ tipo: "quick_reply_aviso", texto: "Abrir negócio", acao: "abrir" }]);
+    // Sem `aviso` v1 cai no template v1, que é usável sem ele.
+    expect(templateUsavel(def, linhaDe(null))).toBe(false);
+    expect(templateUsavel(CATALOGO.activity_partner_notice, linhaDe(null))).toBe(true);
   });
 
   it("aviso de PARTE (deal_party) nunca usa V5", () => {
