@@ -77,6 +77,7 @@ describe("a régua do Olavo (01/10/2026)", () => {
         "activity_assigned",
         "activity_due",
         "activity_due_soon",
+        "activity_partner_notice",
         "certidao_batch_complete",
         "certidao_problem",
         "contract_sent",
@@ -689,7 +690,15 @@ describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
     },
     {
       // Motor de eventos do negócio (com `negocio`/`etapa`) e o sino (sem nada).
-      kinds: ["stage_change", "deal_stage_change", "contract_sent", "deal_contract_sent", "portal_comment", "deal_portal_comment"],
+      kinds: [
+        "stage_change",
+        "deal_stage_change",
+        "contract_sent",
+        "deal_contract_sent",
+        "portal_comment",
+        "deal_portal_comment",
+        "activity_partner_notice",
+      ],
       template: "max_negocio_andamento",
       botao: "Abrir negócio",
       linha: { ...base, title: "Status do negócio atualizado", params: { negocio: "Venda Apto 302", etapa: "Assinatura" } },
@@ -732,6 +741,35 @@ describe("famílias de avisos da equipe (fora_da_regua, 25/10/2026)", () => {
     expect(botoesEmOrdem(def!.botao)).toEqual([{ tipo: "url", texto: c.botao }]);
     expect(botoesDaLinha(def!, "r1")).toEqual([{ tipo: "url", param: "r1" }]);
     expect(parametrosDoCorpo(def!, c.linha)).toEqual(c.params);
+  });
+
+  it("activity_partner_notice (aviso do escritório parceiro) reusa max_negocio_andamento: título em {{3}}, negócio em {{4}}, botão no linkUrl", () => {
+    const def = templateDoKind("activity_partner_notice")!;
+    // Mesma definição do `stage_change` (nenhum template novo para a Meta).
+    expect(def).toBe(templateDoKind("stage_change"));
+    expect(def.name).toBe("max_negocio_andamento");
+    expect(templatesDoKind("activity_partner_notice").map((d) => d.name)).toEqual(["max_negocio_andamento"]);
+    const linha = {
+      ...base,
+      title: "Aviso do escritório: Escritura marcada para quinta",
+      // Chaves de `metadata.maxParams` do contractmaker (tetos 60/60/60/80).
+      params: {
+        quem: "Dra. Paula",
+        escritorio: "Costa e Cancilleri",
+        negocio: "Venda Apto 302",
+        aviso: "Escritura marcada para quinta",
+      },
+    };
+    expect(templateUsavel(def, linha)).toBe(true);
+    const ps = parametrosDoCorpo(def, linha);
+    expect(ps).toEqual(["Ana", "RE/MAX Trio", "Aviso do escritório: Escritura marcada para quinta", "Venda Apto 302"]);
+    expect(ps[2]).toBe(linha.title);
+    expect(ps[3]).toBe(linha.params.negocio);
+    // O botão "Abrir negócio" é de URL: o parâmetro é o id da linha, que `/r/<id>` redireciona para o `link_url`.
+    expect(botoesEmOrdem(def.botao)).toEqual([{ tipo: "url", texto: "Abrir negócio" }]);
+    expect(botoesDaLinha(def, "r1")).toEqual([{ tipo: "url", param: "r1" }]);
+    // Sem `negocio` cai no fallback, nunca vazio.
+    expect(parametrosDoCorpo(def, { ...linha, params: null })[3]).toBe("em andamento");
   });
 
   it("nenhum kind de parte (`*_parte`) usa template de família: família é só para a equipe", () => {
