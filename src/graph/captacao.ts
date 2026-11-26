@@ -239,6 +239,15 @@ const TEXTO_TENTATIVAS = "Não estou conseguindo entender. Deixei o rascunho sal
 const link = (caminho: string) => new URL(caminho, imobproBase()).toString();
 const linkDe = (id?: string) => link(id ? `/imoveis/captacoes/${id}` : "/imoveis/captacoes");
 
+/** Texto do aviso proativo do envio concluído (cron `followup`): o mesmo `linkDe` do fluxo, só o nome da captação e o estado. */
+export function textoDeEnvioConcluido(item: { id: string; nome: string; codigo: string }, estado: string): string {
+  // Estado final de falha nunca é dito como "concluído" (o corretor leria como enviado).
+  if (/falh|erro|recus|cancel/i.test(estado)) {
+    return `O envio da captação ${item.nome || item.codigo} não foi concluído (${estado}). Veja na tela: ${linkDe(item.id)}`;
+  }
+  return `Envio da captação ${item.nome || item.codigo} concluído: ${estado}. ${linkDe(item.id)}`;
+}
+
 export const NOME_DA_ESTEIRA: Record<TipoDeCaptacao, string> = { venda: "venda", locacao: "locação" };
 
 // ─── Texto por código do envio (mapa FECHADO — paridade com o ImobPro) ───
@@ -3618,7 +3627,25 @@ async function traduzirEnvio(
     const item = l?.status === 200 ? lista(l.body.items).map(lerItemDaCaptacao).find((x) => x?.id === f.captacaoId) : null;
     const estado = item?.estado ?? str(r.body.estado) ?? "Enviando…";
     if (/enviando/i.test(estado)) {
-      return resposta({ ...emCurso, etapa: "enviando" }, `O envio está em andamento (${estado}). Pergunte "como está a captação${f.nome ? ` ${f.nome}` : ""}" que eu confiro. ${url}`, "captacao_envio_202");
+      // Aviso proativo, UMA vez (defeito 4, 19/11): agenda a conferência ANTES de responder. Só promete
+      // "te aviso" se o agendamento deu certo; falha (ou sem a dep) mantém o texto de sempre.
+      let agendou = false;
+      if (deps.agendarConferenciaDeEnvio) {
+        try {
+          await deps.agendarConferenciaDeEnvio({ captacaoId: f.captacaoId!, messageId: emCurso.chave?.valor ?? ctx.messageId, ...(f.nome ? { nome: f.nome } : {}) });
+          agendou = true;
+        } catch (err) {
+          console.warn("[captacao] não agendei a conferência do envio:", err instanceof Error ? err.message : String(err));
+        }
+      }
+      const pergunta = `"como está a captação${f.nome ? ` ${f.nome}` : ""}"`;
+      return resposta(
+        { ...emCurso, etapa: "enviando" },
+        agendou
+          ? `O envio está em andamento (${estado}). Te aviso aqui quando terminar; se quiser, pergunte ${pergunta}. ${url}`
+          : `O envio está em andamento (${estado}). Pergunte ${pergunta} que eu confiro. ${url}`,
+        "captacao_envio_202"
+      );
     }
     return resposta(null, `Envio concluído: ${estado}. ${url}`, "captacao_envio_202_concluido");
   }
@@ -3661,6 +3688,12 @@ async function conferirEnvio(f: FluxoCaptacao, ctx: ContextoDoTurno, deps: DepsD
   const item = l?.status === 200 ? lista(l.body.items).map(lerItemDaCaptacao).find((x) => x?.id === f.captacaoId) : null;
   if (!item?.estado) return resposta(g(f, ctx), `Ainda não consegui conferir. Veja na tela: ${url}`, "captacao_envio_sem_conferencia");
   if (/enviando/i.test(item.estado)) return resposta(g(f, ctx), `Ainda em andamento (${item.estado}). Veja na tela: ${url}`, "captacao_envio_andamento");
+  // O corretor acabou de ver o estado final: a conferência proativa pendente não precisa mais avisar.
+  if (f.captacaoId && deps.concluirConferenciaDeEnvio) {
+    try { await deps.concluirConferenciaDeEnvio(f.captacaoId); } catch (err) {
+      console.warn("[captacao] não encerrei a conferência do envio:", err instanceof Error ? err.message : String(err));
+    }
+  }
   return resposta(null, `Não reenviei. A captação${lembrete(f)} está como "${item.estado}": ${url}`, "captacao_envio_conferido");
 }
 

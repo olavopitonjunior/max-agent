@@ -273,6 +273,14 @@ export interface DepsDoFluxo {
   /** v2 (T10): a fila da pausa antes da ficha (outbox com `deliverAfter`). Sem ela a ficha sai na hora. */
   pausa?: DepsDaPausa;
   /**
+   * Captação (defeito 4, 19/11): o envio voltou 202 e ainda está "Enviando…". Agenda UMA conferência
+   * proativa (cron do outbox) que avisa o corretor quando terminar. Best-effort: quem chama trata a
+   * falha (a resposta só promete "te aviso" se isto resolveu). Opcional: sem ela, o texto antigo.
+   */
+  agendarConferenciaDeEnvio?(job: { captacaoId: string; messageId: string; nome?: string }): Promise<void>;
+  /** Captação: o corretor já viu o estado final (consulta pós-202) — encerra a conferência pendente, sem mensagem. Best-effort. */
+  concluirConferenciaDeEnvio?(captacaoId: string): Promise<void>;
+  /**
    * Preferências de aviso (M3): leitura e PATCH das preferências da PRÓPRIA pessoa (telefone do turn).
    * `null` = sem resposta utilizável. Opcional: sem ele, o fluxo responde que não conseguiu.
    */
