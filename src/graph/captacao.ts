@@ -240,12 +240,31 @@ const link = (caminho: string) => new URL(caminho, imobproBase()).toString();
 const linkDe = (id?: string) => link(id ? `/imoveis/captacoes/${id}` : "/imoveis/captacoes");
 
 /** Texto do aviso proativo do envio concluído (cron `followup`): o mesmo `linkDe` do fluxo, só o nome da captação e o estado. */
+/**
+ * Aviso de fim do envio (defeito 4), pelo RÓTULO que o `captacao.list` devolve. Os rótulos são os do
+ * `captacaoStatusView` do ImobPro (`lib/captacao/status-view.ts`), um mapa fechado:
+ *  · "Em assinatura" / "Em assinatura · 1 de 3"                → enviada, aguardando assinaturas;
+ *  · vigência de captação ASSINADA ("Assinada", "Renova em…", "Renovação automática", "Vigente até…",
+ *    "Vence em…/hoje", "Termina em…/hoje", "Sem prazo", "Vencida há…", "Encerrada em…") → já assinada.
+ *    Sem isto o texto saía "concluído: Renova em 173 dias" (smoke 26/11);
+ *  · falha, recusa, cancelamento, expiração, arquivada, rascunho → NÃO concluído (nunca dito como enviado);
+ *  · qualquer outro (inclui "Situação desconhecida")           → neutro, manda conferir na tela.
+ */
 export function textoDeEnvioConcluido(item: { id: string; nome: string; codigo: string }, estado: string): string {
-  // Estado final de falha nunca é dito como "concluído" (o corretor leria como enviado).
-  if (/falh|erro|recus|cancel/i.test(estado)) {
-    return `O envio da captação ${item.nome || item.codigo} não foi concluído (${estado}). Veja na tela: ${linkDe(item.id)}`;
+  const nome = item.nome || item.codigo;
+  const link = linkDe(item.id);
+  const e = estado.trim();
+  if (/falh|erro|recus|cancel|expir|arquiv|rascunho/i.test(e)) {
+    return `O envio da captação ${nome} não foi concluído (${e}). Veja na tela: ${link}`;
   }
-  return `Envio da captação ${item.nome || item.codigo} concluído: ${estado}. ${linkDe(item.id)}`;
+  if (/^em assinatura/i.test(e)) {
+    return `A captação ${nome} foi enviada para assinatura (${e}). Acompanhe: ${link}`;
+  }
+  if (/^assinada$/i.test(e)) return `A captação ${nome} já está assinada. ${link}`;
+  if (/^(renova|vigente|vence|vencida|termina|sem prazo|encerrada)/i.test(e)) {
+    return `A captação ${nome} já está assinada (${e}). ${link}`;
+  }
+  return `Confira a situação da captação ${nome} na tela (${e}): ${link}`;
 }
 
 export const NOME_DA_ESTEIRA: Record<TipoDeCaptacao, string> = { venda: "venda", locacao: "locação" };
