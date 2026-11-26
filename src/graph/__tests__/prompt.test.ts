@@ -18,7 +18,8 @@ describe("buildSystemPrompt", () => {
     const prompt = buildSystemPrompt({ ...base, hits: [] }).replace(/\s+/g, " ");
     expect(prompt).toContain("Equipe → Incluir Parceiro");
     expect(prompt).toContain("selecionar o parceiro e o profissional aprovado");
-    expect(prompt).toContain("Corretagem externa");
+    expect(prompt).toContain("Para um corretor da equipe, use Adicionar corretor");
+    expect(prompt).toContain("de fora que participa da comissão, use Corretagem externa");
     expect(prompt).toContain("com as permissões da imobiliária");
   });
 
