@@ -1113,6 +1113,15 @@ export function depsDoFluxo(state: MaxStateType, usage: LlmUsage[]): DepsDoFluxo
     : {};
   return {
     ...janelaV2,
+    // Captação (defeito 4): aviso proativo depois do 202 do envio. Import tardio: o followup importa o grafo.
+    agendarConferenciaDeEnvio: async (job) => {
+      const { agendarConferenciaDeEnvio } = await import("@/lib/followup");
+      await agendarConferenciaDeEnvio({ orgId, phone: state.inbound.fromPhone, subject: subjectDe(state.identity) }, job);
+    },
+    concluirConferenciaDeEnvio: async (captacaoId) => {
+      const { concluirConferenciaDeEnvio } = await import("@/lib/followup");
+      await concluirConferenciaDeEnvio(orgId, captacaoId);
+    },
     acao: (verb, args, idempotencyKey) =>
       executarAcao({
         orgId,

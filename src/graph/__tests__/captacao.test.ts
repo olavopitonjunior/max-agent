@@ -44,6 +44,11 @@ vi.mock("@/lib/cm", async (orig) => ({
 }));
 vi.mock("@/lib/llm", () => ({ complete: vi.fn(), DEFAULT_MODEL: "openai/gpt-5.4-nano" }));
 vi.mock("@/lib/acao", () => ({ executarAcao: vi.fn() }));
+// Aviso proativo depois do 202 (defeito 4): o banco não entra; só o que o fluxo pede ao agendador.
+vi.mock("@/lib/followup", () => ({
+  agendarConferenciaDeEnvio: vi.fn().mockResolvedValue(undefined),
+  concluirConferenciaDeEnvio: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("@/lib/identity", async (orig) => ({
   ...(await orig<typeof import("@/lib/identity")>()),
   resolveIdentity: vi.fn(),
@@ -55,6 +60,7 @@ const cap = await import("../captacao");
 const { fetchProfile, searchKnowledge, reportUsage } = await import("@/lib/cm");
 const { complete } = await import("@/lib/llm");
 const { executarAcao } = await import("@/lib/acao");
+const followup = await import("@/lib/followup");
 const { MemorySaver } = await import("@langchain/langgraph");
 const { pedeAcaoForaDoMax, textoDeCapacidades } = await import("../capacidades");
 const { TIPOS_CRIAVEIS, lerTipo, capabilityDaCriacao, formToolAtual, FORM_TOOL } = await import("../tools");
@@ -919,6 +925,62 @@ describe("envio", () => {
     expect(fim.reply).toContain("Não reenviei");
     expect(fim.reply).toContain("Em assinatura");
     expect(verbos("captacao.send")).toHaveLength(1);
+  });
+
+  describe("aviso proativo depois do 202 (defeito 4, prod 19/11)", () => {
+    it("202 ainda Enviando: agenda a conferência (chave do envio, org/telefone/sujeito do turno) e promete avisar, sem markdown **", async () => {
+      sendModo = "202";
+      const fala = conversa();
+      await ateOResumo(fala);
+      const s = await fala("enviar");
+      expect(followup.agendarConferenciaDeEnvio).toHaveBeenCalledTimes(1);
+      const [quem, job] = vi.mocked(followup.agendarConferenciaDeEnvio).mock.calls[0]!;
+      expect(quem).toEqual({ orgId: "org1", phone: "5511987654321", subject: { kind: "user", userId: "u1" } });
+      // A chave é a do SEND (messageId do "enviar"): retentativa do mesmo envio cai no mesmo dedupe.
+      expect(job).toEqual({ captacaoId: "cap-1", messageId: verbos("captacao.send")[0]!.key, nome: "Apto da Dona Maria" });
+      expect(s.reply).toContain("Te aviso aqui quando terminar");
+      expect(s.reply).toContain("em andamento (Enviando…)");
+      expect(s.reply).toContain('pergunte "como está a captação Apto da Dona Maria"');
+      expect(s.reply).not.toContain("**");
+      expect(verbos("captacao.send")).toHaveLength(1);
+    });
+
+    it("202 já concluído (o list devolve estado final): não agenda nada", async () => {
+      sendModo = { status: 202, body: { estado: "Enviando…" } };
+      const fala = conversa();
+      await ateOResumo(fala);
+      const s = await fala("enviar");
+      expect(s.reply).toContain("Envio concluído");
+      expect(s.reply).not.toContain("Te aviso");
+      expect(followup.agendarConferenciaDeEnvio).not.toHaveBeenCalled();
+    });
+
+    it("o agendamento falha: a resposta não muda, mantém o texto antigo (sem prometer aviso)", async () => {
+      vi.mocked(followup.agendarConferenciaDeEnvio).mockRejectedValueOnce(new Error("db fora"));
+      sendModo = "202";
+      const fala = conversa();
+      await ateOResumo(fala);
+      const s = await fala("enviar");
+      expect(followup.agendarConferenciaDeEnvio).toHaveBeenCalledTimes(1);
+      expect(s.reply).toContain("em andamento");
+      expect(s.reply).toContain('Pergunte "como está a captação Apto da Dona Maria" que eu confiro');
+      expect(s.reply).not.toContain("Te aviso");
+    });
+
+    it("consulta pós-202 que já vê o estado final encerra a conferência pendente (sem mensagem depois)", async () => {
+      sendModo = "202";
+      const fala = conversa();
+      await ateOResumo(fala);
+      await fala("enviar");
+      const ainda = await fala("como está?");
+      expect(ainda.reply).toContain("Ainda em andamento");
+      expect(followup.concluirConferenciaDeEnvio).not.toHaveBeenCalled();
+      captacoes[0]!.status = "em_assinatura";
+      const fim = await fala("como está?");
+      expect(fim.reply).toContain("Não reenviei");
+      expect(followup.concluirConferenciaDeEnvio).toHaveBeenCalledTimes(1);
+      expect(followup.concluirConferenciaDeEnvio).toHaveBeenCalledWith("org1", "cap-1");
+    });
   });
 
   it("sem resposta: o 'enviar' seguinte repete a MESMA chave e os mesmos args — o servidor não envia em dobro", async () => {
