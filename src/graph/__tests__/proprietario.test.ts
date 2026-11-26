@@ -341,6 +341,47 @@ describe("enviar ao proprietário: esteira B sem vendedor (422 vendedor_obrigato
   });
 });
 
+describe("enviar ao proprietário: a ClickSign recusa um dado (422 dados_recusados_clicksign, prod 19/11)", () => {
+  it.each([
+    ["nome", "recusou o nome"],
+    ["cpf", "recusou o CPF"],
+    ["email", "recusou o e-mail"],
+    ["celular", "recusou o celular"],
+    ["nascimento", "recusou a data de nascimento"],
+    ["outro", "recusou o envio"],
+  ])("campo %s: diz o campo, nada enviado, sem chave (sem laço de 'não sei se deu certo')", async (campo, trecho) => {
+    acao.mockResolvedValue({ status: 422, body: { error: "dados_recusados_clicksign", campo } });
+    const r = await conduzirAssinatura(confirmando("enviar_proprietario", { chave: { verbo: "proposal.send_owner", valor: "velha" } }), ctx("sim", { messageId: "m-novo" }), deps);
+    expect(r.reply).toContain(trecho);
+    expect(r.reply).toContain("Nada foi enviado");
+    expect(r.reply).not.toContain("não confirmou");
+    expect(r.evento).toBe(`assinatura_recusada_clicksign_${campo}`);
+    expect(r.fluxo).toBeNull();
+  });
+  it("campo fora da lista vira 'outro' e não entra cru no texto", async () => {
+    acao.mockResolvedValue({ status: 422, body: { error: "dados_recusados_clicksign", campo: "<script>" } });
+    const r = await conduzirAssinatura(confirmando("enviar_proprietario"), ctx("sim"), deps);
+    expect(r.evento).toBe("assinatura_recusada_clicksign_outro");
+    expect(r.reply).not.toContain("<script>");
+  });
+  it("vendedor dito pela pessoa e recusado (nome/e-mail): volta a pedir quem assina, sem chave", async () => {
+    acao.mockResolvedValue({ status: 422, body: { error: "dados_recusados_clicksign", campo: "email" } });
+    const r = await conduzirAssinatura(confirmando("enviar_proprietario", { vendedor: { name: "Maria Souza", email: "maria@x" } }), ctx("sim"), deps);
+    expect(r.reply).toContain("recusou o e-mail");
+    expect(r.reply).toContain("nome e o e-mail");
+    expect(r.fluxo).toMatchObject({ etapa: "vendedor" });
+    expect((r.fluxo as FluxoAssinatura).chave).toBeUndefined();
+    expect((r.fluxo as FluxoAssinatura).vendedor).toBeUndefined();
+  });
+  it("o SIM seguinte é um envio NOVO (outra chave de idempotência)", async () => {
+    acao.mockResolvedValueOnce({ status: 422, body: { error: "dados_recusados_clicksign", campo: "nome" } });
+    await conduzirAssinatura(confirmando("enviar_proprietario"), ctx("sim", { messageId: "m1" }), deps);
+    acao.mockResolvedValueOnce({ status: 200, body: { ok: true, esteira: "a", avisos: [] } });
+    await conduzirAssinatura(confirmando("enviar_proprietario"), ctx("sim", { messageId: "m2" }), deps);
+    expect(acao.mock.calls.map((c) => c[2])).toEqual(["m1", "m2"]);
+  });
+});
+
 describe("encerrar: SIM e desfechos", () => {
   it("SIM chama proposal.complete com {proposta_id} e a messageId do SIM", async () => {
     acao.mockResolvedValue({ status: 200, body: { ok: true, status: "encerrada" } });

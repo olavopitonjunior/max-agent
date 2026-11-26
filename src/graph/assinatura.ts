@@ -5,6 +5,7 @@ import { avisoDeMais, buscarPropostas, codigoCitado, pedeBusca, pedeLista, rotul
 import { lerConfirmacao, normalizar } from "./tools";
 import { negaAcao } from "./capacidades";
 import { pedeProprietario } from "./proprietario";
+import { campoRecusadoDe, ehRecusaDeDadosClicksign, TEXTO_DO_CAMPO_RECUSADO } from "./recusa-clicksign";
 
 /**
  * Lembrar quem falta assinar e cancelar a assinatura de uma proposta pelo
@@ -609,6 +610,22 @@ export async function conduzirAssinatura(f: FluxoAssinatura, ctx: ContextoDoTurn
     return resposta({ ...f, etapa: "vendedor", chave: undefined, atualizadoEm: ctx.agora },
       `A proposta ${alvo.codigo} não tem o proprietário cadastrado. Me diga o nome e o e-mail de quem assina por ele (nada foi enviado ainda).`,
       "assinatura_pede_vendedor");
+  }
+  // A ClickSign recusou um dado de assinante (prod 19/11): nada foi enviado, então a chave não fica
+  // (o próximo SIM é envio novo). O texto é fixo por campo; nada do corpo entra nele.
+  if (f.operacao === "enviar_proprietario" && ehRecusaDeDadosClicksign(r.status, r.body)) {
+    const campo = campoRecusadoDe(r.body);
+    const evento = `assinatura_recusada_clicksign_${campo}`;
+    // Quem assina pelo proprietário foi DITO aqui: o dado recusado pode ser dele, então pergunta de novo.
+    if (f.vendedor && (campo === "nome" || campo === "email")) {
+      return resposta({ ...f, etapa: "vendedor", vendedor: undefined, chave: undefined, atualizadoEm: ctx.agora },
+        `${TEXTO_DO_CAMPO_RECUSADO[campo]} Nada foi enviado. Me diga de novo o nome e o e-mail de quem assina pelo proprietário.`,
+        evento);
+    }
+    return resposta(null,
+      `${TEXTO_DO_CAMPO_RECUSADO[campo]} Nada foi enviado; a proposta ${alvo.codigo} segue como estava. ` +
+      (campo === "outro" ? "Confira a proposta na tela e me peça de novo." : "Corrija na tela de propostas e me peça de novo."),
+      evento);
   }
   if (r.status !== 200) return resposta(null, textoDaRecusa(f, r.status, r.body), `assinatura_${f.operacao}_${r.status}`);
 
