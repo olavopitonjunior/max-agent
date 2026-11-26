@@ -244,26 +244,32 @@ const linkDe = (id?: string) => link(id ? `/imoveis/captacoes/${id}` : "/imoveis
  * `captacaoStatusView` do ImobPro (`lib/captacao/status-view.ts`), um mapa fechado:
  *  · "Em assinatura" / "Em assinatura · 1 de 3"                → enviada, aguardando assinaturas;
  *  · vigência de captação ASSINADA ("Assinada", "Renova em…", "Renovação automática", "Vigente até…",
- *    "Vence em…/hoje", "Termina em…/hoje", "Sem prazo", "Vencida há…", "Encerrada em…") → já assinada.
- *    Sem isto o texto saía "concluído: Renova em 173 dias" (smoke 26/11);
- *  · falha, recusa, cancelamento, expiração, arquivada, rascunho → NÃO concluído (nunca dito como enviado);
+ *    "Vence em…/hoje", "Termina em…/hoje", "Sem prazo") → já assinada. Sem isto o texto saía
+ *    "concluído: Renova em 173 dias" (smoke 26/11);
+ *  · "Vencida há…" / "Encerrada em…" → assinada, mas a vigência terminou (dito com todas as letras:
+ *    "já está assinada" sozinho soaria como captação ativa);
+ *  · falha, recusa, cancelamento, expiração, arquivada, rascunho → NÃO concluído (nunca dito como enviado).
+ *    `erro` não é rótulo do mapa: fica de propósito, como defesa, para um rótulo novo de erro nunca soar enviado;
  *  · qualquer outro (inclui "Situação desconhecida")           → neutro, manda conferir na tela.
  */
 export function textoDeEnvioConcluido(item: { id: string; nome: string; codigo: string }, estado: string): string {
   const nome = item.nome || item.codigo;
-  const link = linkDe(item.id);
+  const url = linkDe(item.id);
   const e = estado.trim();
   if (/falh|erro|recus|cancel|expir|arquiv|rascunho/i.test(e)) {
-    return `O envio da captação ${nome} não foi concluído (${e}). Veja na tela: ${link}`;
+    return `O envio da captação ${nome} não foi concluído (${e}). Veja na tela: ${url}`;
   }
   if (/^em assinatura/i.test(e)) {
-    return `A captação ${nome} foi enviada para assinatura (${e}). Acompanhe: ${link}`;
+    return `A captação ${nome} foi enviada para assinatura (${e}). Acompanhe: ${url}`;
   }
-  if (/^assinada$/i.test(e)) return `A captação ${nome} já está assinada. ${link}`;
-  if (/^(renova|vigente|vence|vencida|termina|sem prazo|encerrada)/i.test(e)) {
-    return `A captação ${nome} já está assinada (${e}). ${link}`;
+  if (/^(vencida|encerrada)/i.test(e)) {
+    return `A captação ${nome} foi assinada, mas a vigência terminou (${e}). ${url}`;
   }
-  return `Confira a situação da captação ${nome} na tela (${e}): ${link}`;
+  if (/^assinada$/i.test(e)) return `A captação ${nome} já está assinada. ${url}`;
+  if (/^(renova|vigente|vence|termina|sem prazo)/i.test(e)) {
+    return `A captação ${nome} já está assinada (${e}). ${url}`;
+  }
+  return `Confira a situação da captação ${nome} na tela (${e}): ${url}`;
 }
 
 export const NOME_DA_ESTEIRA: Record<TipoDeCaptacao, string> = { venda: "venda", locacao: "locação" };
