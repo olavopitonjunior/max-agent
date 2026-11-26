@@ -34,6 +34,10 @@ import { lerCertidaoStatus, renderCertidoes, type CertidaoStatusItem } from "./c
 import { lerDocumento, renderDocumentos, type DocumentoItem } from "./documentos";
 import { lerCobranca, renderCobrancas, type CobrancaItem } from "./cobranca";
 import { filtrarPorBusca, lerBusca } from "./busca";
+import { pedeEmAberto, propostaEncerrada } from "./estado-proposta";
+
+/** Quantas propostas o servidor traz por padrão (`listar_propostas`: "Padrão 10"). */
+const JANELA_DE_PROPOSTAS = 10;
 
 /** Teto de opções que uma busca por nome mostra quando acha mais de um negócio. */
 const ITENS_POR_BUSCA = 3;
@@ -409,6 +413,13 @@ export async function despacharLeituras(params: {
       }
       args.limite = ITENS_POR_LISTA;
     }
+    // "Em aberto"/"abertas"/"pendentes" não é status do servidor (o filtro cairia em silêncio e a lista viria
+    // inteira, com cancelada e "virou negócio"; prod 26/11): a consulta sai sem `estado` e o código tira as encerradas.
+    let soEmAberto = false;
+    if (entrada.verb === "proposal.list" && pedeEmAberto(args.estado)) {
+      soEmAberto = true;
+      delete args.estado;
+    }
     const lido = await executarLeitura({
       entrada: a.entrada as EntradaDeLeitura,
       chamada: { ...chamada, args },
@@ -537,6 +548,14 @@ export async function despacharLeituras(params: {
       resultados.push({ tool: chamada.name, items: null, truncated: false, clarification: r.clarification });
       trilha.push({ name: chamada.name, args: chamada.args, outcome: chamada.args.opcoes_etapas === true ? "opcoes_consulta" : "filtro_invalido" });
       continue;
+    }
+
+    if (soEmAberto) {
+      // O servidor só trouxe a janela padrão das mais recentes: se ela veio cheia, pode haver outras em aberto além dela.
+      const janela = typeof args.limite === "number" && args.limite > 0 ? args.limite : JANELA_DE_PROPOSTAS;
+      const cheia = r.items.length >= janela;
+      r.items = r.items.filter((p) => !propostaEncerrada((p ?? {}) as { status?: unknown; estado?: unknown }));
+      if (cheia) r.truncated = true;
     }
 
     // Fail-closed contra CM antigo: ele descarta `busca` em silêncio e devolve a lista inteira. Só o que casa

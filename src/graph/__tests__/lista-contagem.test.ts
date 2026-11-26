@@ -12,7 +12,9 @@ describe("contagem da lista que o modelo recebe", () => {
     expect(f).toContain('mostrados="5"');
     expect(f).toContain('total="desconhecido"');
     expect(f).toContain('ha_mais="true"');
-    expect(f).toMatch(/mostrando 5/);
+    // Prod 26/11: o modelo repetiu o rótulo ("*mostrando 5*") na resposta. A instrução não oferece mais esse texto.
+    expect(f).not.toMatch(/mostrando/i);
+    expect(f).toContain("mais de 5");
   });
 
   it("total == página: mostrados e total iguais, sem 'há mais'", () => {

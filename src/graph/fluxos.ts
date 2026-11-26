@@ -39,7 +39,7 @@ import { nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled } from "@/lib/runtime/rollout";
 import type { Capability } from "./policy";
 import { corrigirProposta, lerConfirmacao, normalizar, TEXTO_PARA_CONFIRMAR } from "./tools";
-import { noTexto, nomeComoEscrito, semAcento } from "./texto-ditado";
+import { noTexto, nomeComoEscrito, semAcento, semRotuloNoNome } from "./texto-ditado";
 import {
   lerCatalogoDeMidias, lerMidia, lerMidias, midiaNoTexto, rotuloDaMidia, soPalavras, textoPerguntaMidia,
   type MidiaDeOrigem, type PoliticaDeMidia,
@@ -210,6 +210,11 @@ export type Fluxo =
       midiaPolitica?: "required" | "optional" | "hidden";
       /** O catálogo de mídias já foi consultado antes do card (uma vez por proposta). */
       midiaConsultada?: boolean;
+      /**
+       * Só o trecho do PEDIDO INICIAL que fala da origem do cliente ("mídia de origem Instagram"), guardado porque o
+       * catálogo pode chegar depois do pedido (card em outro turno, ou só no envio). Nunca o pedido inteiro (CPF etc.).
+       */
+      dicaDeMidia?: string;
       /** A lista de mídias foi apresentada: a próxima resposta curta é a escolha. */
       aguardaMidia?: boolean;
       /** A mídia foi pedida por uma pendência do envio: ao gravar, volta ao cartão de envio. */
@@ -707,7 +712,8 @@ export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaPropos
     q.email = conferirCampo(q.email, emails, (a, b) => a.toLowerCase() === b.toLowerCase());
     for (const c of ["telefone", "cpf", "email"] as const) if (q[c] === undefined) delete q[c];
     // "TESTE Comprador Smoke": o extrator tirava o TESTE (prod 19/11). O nome vale como foi escrito.
-    if (q.nome) q.nome = nomeComoEscrito(q.nome, texto);
+    // E o rótulo do papel que o extrator deixa colado no começo ("comprador TESTE ..." → "Comprador TESTE ...", prod 26/11) sai.
+    if (q.nome) q.nome = semRotuloNoNome(nomeComoEscrito(q.nome, texto), texto);
     if (Object.keys(q).length) out[k] = q;
     else delete out[k];
   }
@@ -1176,11 +1182,18 @@ function pedidoDeTrocaDeMetodo(
   return null;
 }
 
-/** Mídia dita no texto entra nos dados (sem sobrescrever a já escolhida). */
-function comMidiaDoTexto(d: DadosDaProposta, texto: string, midias: MidiaDeOrigem[]): DadosDaProposta {
+/** Mídia dita no texto entra nos dados (sem sobrescrever a já escolhida). `dica`: a origem dita no pedido inicial. */
+function comMidiaDoTexto(d: DadosDaProposta, texto: string, midias: MidiaDeOrigem[], dica?: string): DadosDaProposta {
   if (d.midia) return d;
-  const m = midiaNoTexto(texto, midias);
+  const m = midiaNoTexto(texto, midias) ?? (dica ? midiaNoTexto(dica, midias) : null);
   return m ? { ...d, midia: m.id } : d;
+}
+
+/** O trecho do pedido que fala da origem do cliente: o sinal de origem e até 40 caracteres, sem passar de vírgula/linha. */
+const TRECHO_DE_ORIGEM = /\b(?:m[ií]dia|origem|veio|vieram|chegou|chegaram|conheceu|achou|encontrou|captad[oa]s?|indicad[oa]s?)\b[^,;\n]{0,40}/giu;
+export function dicaDeMidiaDoPedido(pedido: string | undefined): string | undefined {
+  const trechos = pedido ? [...pedido.matchAll(TRECHO_DE_ORIGEM)].slice(0, 3).map((m) => m[0].trim()) : [];
+  return trechos.length ? trechos.join(". ") : undefined;
 }
 
 // ─── Chave de idempotência ─────────────────────────────────────────────────
@@ -1758,7 +1771,10 @@ export async function iniciarProposta(
   }
   // Mídia de origem: o catálogo e a política só são consultados quando o card do rascunho vai aparecer
   // (`exigirMidia`). Sem `midias` (CM antigo) nada muda: o Max não pergunta nem manda o campo.
-  const passo = await iniciarPropostaBase(natureza, pedido, agora, deps, prefill, leaseClientId, semAssinatura);
+  let passo = await iniciarPropostaBase(natureza, pedido, agora, deps, prefill, leaseClientId, semAssinatura);
+  // A origem dita no pedido acompanha o fluxo: o card pode sair noutro turno, e o catálogo só chegar no envio.
+  const dica = dicaDeMidiaDoPedido(pedido);
+  if (dica && passo.fluxo?.kind === "proposta") passo = { ...passo, fluxo: { ...passo.fluxo, dicaDeMidia: dica } };
   return (await exigirMidia(passo, pedido, deps)) as Extract<PassoDoFluxo, { reply: string }>;
 }
 
@@ -1792,9 +1808,15 @@ async function exigirMidia(p: PassoDoFluxo, texto: string | undefined, deps: Dep
     if (cat === null) return p;
     const antes = f;
     f = { ...f, ...cat, midiaConsultada: true };
-    if (cat.midias && texto) f = { ...f, dados: comMidiaDoTexto(f.dados, texto, cat.midias) };
+    if (cat.midias && (texto || f.dicaDeMidia)) f = { ...f, dados: comMidiaDoTexto(f.dados, texto ?? "", cat.midias, f.dicaDeMidia) };
     // A mídia dita entra no card que já foi montado (a mesma linha que o resumo traria).
     if (f.dados.midia && !antes.dados.midia) reply = reply.replace(resumoDaProposta(antes), resumoDaProposta(f));
+  }
+  // Catálogo já em mãos (consultado antes) e a origem do pedido inicial ainda sem dono: vale aqui também.
+  if (f.midias?.length && !f.dados.midia && f.dicaDeMidia) {
+    const antes = f;
+    f = { ...f, dados: comMidiaDoTexto(f.dados, "", f.midias, f.dicaDeMidia) };
+    if (f.dados.midia) reply = reply.replace(resumoDaProposta(antes), resumoDaProposta(f));
   }
   if (f.midiaPolitica !== "required" || !f.midias?.length || f.dados.midia) return { ...p, reply, fluxo: f };
   return {
@@ -2877,6 +2899,12 @@ async function pedirMidiaDoEnvio(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
       fluxo: { ...f, etapa: "ajustes", chave: undefined, atualizadoEm: ctx.agora },
       evento: "envio_pendencia_midia_sem_catalogo",
     };
+  }
+  // O corretor já disse a origem no pedido inicial: grava no rascunho (o servidor confirma) em vez de perguntar de novo.
+  const dita = f.dicaDeMidia ? midiaNoTexto(f.dicaDeMidia, midias) : null;
+  if (dita) {
+    const g: FluxoProposta = { ...f, dados: { ...f.dados, midia: dita.id }, midias, aguardaMidia: false, voltarAoEnvio: true, dicaDeMidia: undefined, chave: undefined };
+    return atualizarRascunho(g, ctx, deps);
   }
   return {
     reply: textoPerguntaMidia(midias, "Para enviar, falta a mídia de origem do cliente. "),
