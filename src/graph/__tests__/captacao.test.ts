@@ -89,6 +89,8 @@ let modelos: { id: string; nome: string; resumo?: string; exclusiva?: boolean }[
 let exigeCep = false;
 let exigeTipo = false;
 let exigeEstadoCivil = false;
+/** Bairro/cidade/UF do imóvel pendentes no preflight (prod 19/11: nível envio, o Max tem que perguntar). */
+let exigeLocal = false;
 /** Faltantes que só a tela resolve (sem tipo conhecido pelo Max) e bloqueios do preflight. */
 let faltantesDaTela: { path: string; rotulo: string; etapa: string }[] = [];
 let bloqueiosDoPreflight: Record<string, unknown>[] = [];
@@ -136,6 +138,9 @@ function faltantesDe(c: Cap) {
   if (exigeMatricula && !im.matricula) f.push({ path: "imovel.matricula", rotulo: "Matrícula", etapa: "imovel" });
   if (exigeCep && !im.cep) f.push({ path: "imovel.cep", rotulo: "CEP do imóvel", etapa: "imovel" });
   if (exigeTipo && !im.kind) f.push({ path: "imovel.tipo", rotulo: "Tipo do imóvel", etapa: "imovel" });
+  if (exigeLocal && !im.bairro) f.push({ path: "imovel.bairro", rotulo: "Bairro do imóvel", etapa: "imovel" });
+  if (exigeLocal && !im.cidade) f.push({ path: "imovel.cidade", rotulo: "Cidade do imóvel", etapa: "imovel" });
+  if (exigeLocal && !im.uf) f.push({ path: "imovel.uf", rotulo: "UF do imóvel", etapa: "imovel" });
   for (const p of (d.proprietarios as Record<string, unknown>[] | undefined) ?? []) {
     if (!p.cpf && !p.cnpj) f.push({ path: "proprietarios[].cpf", rotulo: "CPF", etapa: "proprietarios", proprietarioId: String(p.id) });
     if (exigeRg && !p.rg) f.push({ path: "proprietarios[].rg", rotulo: "RG", etapa: "proprietarios", proprietarioId: String(p.id) });
@@ -280,7 +285,7 @@ beforeEach(() => {
   captacoes = []; chamadas = []; respostasPorChave = new Map();
   modelos = [{ id: "t1", nome: "Modelo de venda", resumo: "Pede 18 campos" }];
   assinaturaConfigurada = true; exigeMatricula = true; exigeRg = false; emBranco = 0; anexosDoPreflight = undefined;
-  exigeCep = false; exigeTipo = false; exigeEstadoCivil = false; faltantesDaTela = []; bloqueiosDoPreflight = []; assinanteImobiliaria = null; campos422 = []; complemento422 = false;
+  exigeCep = false; exigeTipo = false; exigeEstadoCivil = false; exigeLocal = false; faltantesDaTela = []; bloqueiosDoPreflight = []; assinanteImobiliaria = null; campos422 = []; complemento422 = false;
   sendModo = "ok"; createSemResposta = false; complementoDesatualizado = 0; complementoSemResposta = false; sendEnvios = 0; sendVersaoDesatualizada = 0;
   falhaFecharCofre.proximaFalha = false;
   extracao = null;
@@ -1928,30 +1933,116 @@ describe("confirmação única (26/10): pendências só da tela", () => {
     expect(pronto.fluxo ?? null).toBeNull();
   });
 
-  it("prod 19/11: 'Bairro: Bela Vista' com pendência só da tela NÃO vai pro modelo nem finge gravar", async () => {
+  it("prod 19/11: 'Bairro: Bela Vista' com o bairro pendente agora É perguntado e gravado no CM (nunca confirmado sem gravar)", async () => {
+    exigeMatricula = false; exigeLocal = true;
+    const fala = conversa();
+    extracao = { rua: "Rua Augusta", numero: "1250" };
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
+    await fala("FIM");
+    const perg = await fala("não");
+    expect(perg.reply).toContain("Bairro do imóvel");
+    expect(perg.reply).not.toContain("só dá para ajustar pela tela");
+    const antes = verbos("captacao.create").length;
+    const s = await fala("Bairro: Bela Vista");
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { bairro: "Bela Vista" } });
+    expect(ultimo("captacao.create")!.key).toBe(s.messageId);
+    expect(s.reply).toContain("Anotei: bairro: Bela Vista");
+    expect(s.reply).toContain("Cidade do imóvel");
+  });
+
+  it("prod 19/11 (regressão): campo REALMENTE só da tela ('Rua: …') segue com a resposta fixa, sem gravar nem confirmar", async () => {
     exigeMatricula = false;
-    faltantesDaTela = [{ path: "imovel.bairro", rotulo: "Bairro do imóvel", etapa: "imovel" }];
+    faltantesDaTela = [{ path: "imovel.rua", rotulo: "Rua do imóvel", etapa: "imovel" }];
     const fala = conversa();
     await ateOFaltante(fala);
     const chamadasDoModelo = llm.mock.calls.length;
     const escritas = acao.mock.calls.length;
-    const s = await fala("Bairro: Bela Vista");
+    const s = await fala("Rua: Augusta");
     expect(llm.mock.calls.length).toBe(chamadasDoModelo);
     expect(acao.mock.calls.length).toBe(escritas);
     expect(s.reply).toContain("não consigo gravar por aqui");
     expect(s.reply).toContain("/imoveis/captacoes/cap-1");
     expect(s.reply).not.toContain("✅");
+    expect(s.reply).not.toContain("Anotei");
     // O fluxo segue esperando o "pronto": depois de ajustar na tela, confere.
     faltantesDaTela = [];
     const pronto = await fala("pronto");
     expect(pronto.reply).toContain("Pronta a captação");
   });
 
+  it("etapa verificar, bairro JÁ PREENCHIDO: 'Bairro: Centro' não vai ao modelo, não grava e não confirma", async () => {
+    exigeMatricula = false; exigeLocal = true;
+    faltantesDaTela = [{ path: "campos.cor_fachada", rotulo: "Cor da fachada", etapa: "campos" }];
+    const fala = conversa();
+    await ateOFaltante(fala); // o endereço dito já traz bairro, cidade e UF
+    const chamadasDoModelo = llm.mock.calls.length;
+    const escritas = verbos("captacao.create").length;
+    const s = await fala("Bairro: Centro");
+    expect(llm.mock.calls.length).toBe(chamadasDoModelo);
+    expect(verbos("captacao.create")).toHaveLength(escritas);
+    expect(s.reply).toContain("já está gravado");
+    expect(s.reply).toContain("/imoveis/captacoes/cap-1");
+    expect(s.reply).not.toContain("✅");
+    expect(s.reply).not.toContain("Anotei");
+    // Segue esperando o "pronto".
+    expect((s.fluxo as { etapa?: string } | null)?.etapa).toBe("verificar");
+  });
+
+  it("etapa verificar, bairro PENDENTE: 'Bairro: Bela Vista' grava pelo complemento (nova versão) e só então confirma", async () => {
+    exigeMatricula = false;
+    faltantesDaTela = [{ path: "campos.cor_fachada", rotulo: "Cor da fachada", etapa: "campos" }];
+    extracao = { rua: "Rua Augusta", numero: "1250" };
+    const fala = conversa();
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
+    await fala("FIM");
+    const v = await fala("não");
+    expect((v.fluxo as { etapa?: string } | null)?.etapa).toBe("verificar");
+    exigeLocal = true; // o servidor passou a pedir bairro/cidade/UF
+    const chamadasDoModelo = llm.mock.calls.length;
+    const antes = verbos("captacao.create").length;
+    const s = await fala("Bairro: Bela Vista");
+    expect(llm.mock.calls.length).toBe(chamadasDoModelo);
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { bairro: "Bela Vista" } });
+    expect(ultimo("captacao.create")!.key).toBe(s.messageId);
+    expect(s.reply).toContain("Anotei: bairro: Bela Vista");
+    expect(s.reply).toContain("Cidade do imóvel");
+  });
+
+  it("etapa verificar, bairro pendente mas o CM recusa (422): nada é confirmado", async () => {
+    exigeMatricula = false;
+    faltantesDaTela = [{ path: "campos.cor_fachada", rotulo: "Cor da fachada", etapa: "campos" }];
+    extracao = { rua: "Rua Augusta", numero: "1250" };
+    const fala = conversa();
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
+    await fala("FIM");
+    await fala("não");
+    exigeLocal = true; complemento422 = true;
+    const s = await fala("Bairro: Bela Vista");
+    expect(s.reply).not.toContain("Anotei");
+    expect(s.reply).toContain("Não gravei");
+  });
+
   it.each([
-    ["Bairro: Bela Vista", true],
-    ["bairro Bela Vista", true],
-    ["o CEP é 01310-100", true],
+    ["Rua: Augusta", true],
     ["Número = 40", true],
+    ["Complemento: apto 41", true],
+    // Perguntáveis pelo Max (TIPO_DO_PATH): não são mais "só da tela".
+    ["Bairro: Bela Vista", false],
+    ["bairro Bela Vista", false],
+    ["cidade São Paulo", false],
+    ["UF: SP", false],
+    ["o CEP é 01310-100", false],
     ["qual o horário de vocês?", false],
     ["pronto", false],
     ["obrigado", false],
@@ -1972,6 +2063,189 @@ describe("confirmação única (26/10): pendências só da tela", () => {
     faltantesDaTela = [];
     const r = await fala("ajustei");
     expect(r.reply).toContain("Pronta a captação");
+  });
+});
+
+describe("bairro/cidade/UF do imóvel por chat (prod 19/11: preflight pede e o Max mandava para a tela)", () => {
+  /** Rascunho com rua e número só: o preflight pede bairro, cidade e UF; para na primeira pergunta. */
+  async function ateOLocal(fala: ReturnType<typeof conversa>) {
+    exigeMatricula = false; exigeLocal = true;
+    extracao = { rua: "Rua Augusta", numero: "1250" };
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
+    await fala("FIM");
+    return fala("não");
+  }
+  const SET = (...c: ("bairro" | "cidade" | "uf")[]) => new Set(c);
+
+  it("o Max pergunta (não manda para a tela) e as três perguntas têm o rótulo do servidor", async () => {
+    const fala = conversa();
+    const perg = await ateOLocal(fala);
+    expect(perg.reply).toContain("Bairro do imóvel");
+    expect(perg.reply).not.toContain("só dá para ajustar pela tela");
+    expect((perg.fluxo as { etapa?: string } | null)?.etapa).toBe("faltantes");
+  });
+
+  it("'Bela Vista, São Paulo/SP' preenche bairro, cidade e UF numa escrita só, e só confirma o que o CM aceitou", async () => {
+    const fala = conversa();
+    await ateOLocal(fala);
+    const antes = verbos("captacao.create").length;
+    const r = await fala("Bela Vista, São Paulo/SP");
+    expect(verbos("captacao.create")).toHaveLength(antes + 1);
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { bairro: "Bela Vista", cidade: "São Paulo", uf: "SP" } });
+    expect(ultimo("captacao.create")!.key).toBe(r.messageId);
+    expect(r.reply).toContain("Anotei: bairro: Bela Vista, cidade: São Paulo, UF: SP.");
+    expect(r.reply).toContain("Pronta a captação");
+    expect(r.reply).toContain("Bela Vista, São Paulo/SP");
+  });
+
+  it("'bairro Bela Vista' preenche só o bairro e pergunta a cidade", async () => {
+    const fala = conversa();
+    await ateOLocal(fala);
+    const r = await fala("bairro Bela Vista");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { bairro: "Bela Vista" } });
+    expect(r.reply).toContain("Anotei: bairro: Bela Vista.");
+    expect(r.reply).toContain("Cidade do imóvel");
+  });
+
+  it("UF por sigla minúscula e por nome do estado vira a sigla; UF inválida é perguntada de novo sem gravar", async () => {
+    const fala = conversa();
+    await ateOLocal(fala);
+    await fala("Bela Vista");
+    await fala("São Paulo");
+    const antes = verbos("captacao.create").length;
+    const ruim = await fala("XX");
+    expect(verbos("captacao.create")).toHaveLength(antes);
+    expect(ruim.reply).toContain("UF");
+    expect(ruim.reply).not.toContain("Anotei");
+    const ok = await fala("sp");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { uf: "SP" } });
+    expect(ok.reply).toContain("Anotei: UF: SP.");
+    expect(ok.reply).toContain("Pronta a captação");
+  });
+
+  it("UF pelo nome do estado ('Minas Gerais') vira MG", async () => {
+    const fala = conversa();
+    await ateOLocal(fala);
+    await fala("Savassi, Belo Horizonte");
+    const r = await fala("Minas Gerais");
+    expect(ultimo("captacao.create")!.args.dados).toEqual({ imovel: { uf: "MG" } });
+    expect(r.reply).toContain("Pronta a captação");
+  });
+
+  it("o CM recusa (422): nada é confirmado ao corretor e o fluxo segue perguntando", async () => {
+    const fala = conversa();
+    await ateOLocal(fala);
+    complemento422 = true;
+    const r = await fala("Bela Vista, São Paulo/SP");
+    expect(r.reply).not.toContain("Anotei");
+    expect(r.reply).toContain("Não gravei");
+    expect((r.fluxo as { etapa?: string } | null)?.etapa).toBe("faltantes");
+  });
+
+  it("sem resposta do CM: nada é confirmado", async () => {
+    const fala = conversa();
+    await ateOLocal(fala);
+    complementoSemResposta = true;
+    const r = await fala("Bela Vista, São Paulo/SP");
+    expect(r.reply).not.toContain("Anotei");
+  });
+
+  describe("lerLocalDoImovel", () => {
+    it("cidade/UF com barra, vírgula e hífen; o resto vira bairro", () => {
+      expect(cap.lerLocalDoImovel("Bela Vista, São Paulo/SP", SET("bairro", "cidade", "uf"), "bairro")).toEqual({ bairro: "Bela Vista", cidade: "São Paulo", uf: "SP" });
+      expect(cap.lerLocalDoImovel("Moema, São Paulo, SP", SET("bairro", "cidade", "uf"), "bairro")).toEqual({ bairro: "Moema", cidade: "São Paulo", uf: "SP" });
+      expect(cap.lerLocalDoImovel("Campinas - SP", SET("cidade", "uf"), "cidade")).toEqual({ cidade: "Campinas", uf: "SP" });
+    });
+    it("rótulos explícitos, com ou sem dois-pontos", () => {
+      expect(cap.lerLocalDoImovel("bairro: Bela Vista, cidade: São Paulo, uf: sp", SET("bairro", "cidade", "uf"), "bairro")).toEqual({ bairro: "Bela Vista", cidade: "São Paulo", uf: "SP" });
+      expect(cap.lerLocalDoImovel("Bairro Bela Vista", SET("bairro"), "bairro")).toEqual({ bairro: "Bela Vista" });
+      expect(cap.lerLocalDoImovel("cidade de Santos", SET("cidade"), "cidade")).toEqual({ cidade: "Santos" });
+      expect(cap.lerLocalDoImovel("estado: São Paulo", SET("uf"), "uf")).toEqual({ uf: "SP" });
+    });
+    it("bairro chamado 'Cidade Jardim' não é lido como rótulo de cidade", () => {
+      expect(cap.lerLocalDoImovel("Cidade Jardim", SET("bairro", "cidade"), "bairro")).toEqual({ bairro: "Cidade Jardim" });
+    });
+    it("só lê o que a pergunta atual aceita: valor solto vai para o campo perguntado", () => {
+      expect(cap.lerLocalDoImovel("Bela Vista", SET("bairro", "cidade", "uf"), "bairro")).toEqual({ bairro: "Bela Vista" });
+      expect(cap.lerLocalDoImovel("Santos", SET("cidade", "uf"), "cidade")).toEqual({ cidade: "Santos" });
+      expect(cap.lerLocalDoImovel("sp", SET("uf"), "uf")).toEqual({ uf: "SP" });
+      // Sem pergunta atual de local (a pergunta é do CEP), valor solto sem rótulo é ambíguo: não lê.
+      expect(cap.lerLocalDoImovel("Bela Vista", SET("bairro"), undefined)).toEqual({});
+    });
+    it("sigla inválida e cidade com dígito são recusadas", () => {
+      expect(cap.lerLocalDoImovel("XX", SET("uf"), "uf")).toHaveProperty("erro");
+      expect(cap.lerLocalDoImovel("Rua 12", SET("cidade"), "cidade")).toHaveProperty("erro");
+    });
+    it("duas partes sem rótulo: na ordem bairro, cidade, UF dos pendentes; contagem errada é erro", () => {
+      expect(cap.lerLocalDoImovel("Bela Vista, São Paulo", SET("bairro", "cidade"), "bairro")).toEqual({ bairro: "Bela Vista", cidade: "São Paulo" });
+      expect(cap.lerLocalDoImovel("a, b, c, d", SET("bairro", "cidade"), "bairro")).toHaveProperty("erro");
+    });
+    it("não preenche o que não está pendente e ignora CEP e logradouro", () => {
+      expect(cap.lerLocalDoImovel("Rua Augusta 1250, Bela Vista, São Paulo/SP 01310-100", SET("bairro"), "bairro")).toEqual({ bairro: "Bela Vista" });
+    });
+  });
+
+  describe("não-valor nunca vira bairro/cidade (revisão M1)", () => {
+    it.each([
+      "ainda não sei o bairro", "não sei", "eu vejo depois", "o bairro eu vejo depois", "talvez Centro, depois eu confirmo", "te falo mais tarde",
+    ])("bairro: %j não é lido como valor", (texto) => {
+      const r = cap.lerLocalDoImovel(texto, SET("bairro", "cidade", "uf"), "bairro");
+      expect(r).not.toHaveProperty("bairro");
+      expect(r).not.toHaveProperty("cidade");
+    });
+    it("cidade: 'ainda não sei a cidade' não é lido", () => {
+      expect(cap.lerLocalDoImovel("ainda não sei a cidade", SET("cidade"), "cidade")).not.toHaveProperty("cidade");
+    });
+    it.each(["Bela Vista", "Jardim Paulista", "Vila Nova Conceição", "Santa Cecília", "Nova Iguaçu"])("bairro normal %j segue valendo", (b) => {
+      expect(cap.lerLocalDoImovel(b, SET("bairro"), "bairro")).toEqual({ bairro: b });
+    });
+    it("'Cidade de Deus' respondendo ao bairro é o bairro, não cidade 'Deus'", () => {
+      expect(cap.lerLocalDoImovel("Cidade de Deus", SET("bairro", "cidade", "uf"), "bairro")).toEqual({ bairro: "Cidade de Deus" });
+      expect(cap.lerLocalDoImovel("Cidade de Deus, Rio de Janeiro/RJ", SET("bairro", "cidade", "uf"), "bairro"))
+        .toEqual({ bairro: "Cidade de Deus", cidade: "Rio de Janeiro", uf: "RJ" });
+    });
+    it("'cidade de Santos' continua sendo rótulo quando a pergunta é a cidade; com separador vale sempre", () => {
+      expect(cap.lerLocalDoImovel("cidade de Santos", SET("cidade"), "cidade")).toEqual({ cidade: "Santos" });
+      expect(cap.lerLocalDoImovel("cidade: Santos", SET("bairro", "cidade"), "bairro")).toEqual({ cidade: "Santos" });
+    });
+  });
+
+  it("revisão M1: 'ainda não sei o bairro' com o bairro perguntado NÃO grava; trata como PULAR", async () => {
+    const fala = conversa();
+    await ateOLocal(fala);
+    const antes = verbos("captacao.create").length;
+    const r = await fala("ainda não sei o bairro");
+    expect(verbos("captacao.create")).toHaveLength(antes);
+    expect(r.reply).not.toContain("Anotei");
+    expect(r.reply).toContain("/imoveis/captacoes/cap-1");
+    expect(r.fluxo ?? null).toBeNull();
+  });
+
+  it("revisão M1: na verificação, 'o bairro eu vejo depois' com bairro pendente NÃO grava nova versão", async () => {
+    exigeMatricula = false;
+    faltantesDaTela = [{ path: "campos.cor_fachada", rotulo: "Cor da fachada", etapa: "campos" }];
+    extracao = { rua: "Rua Augusta", numero: "1250" };
+    const fala = conversa();
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    await fala(`Maria Silva, CPF ${CPF}, casada`);
+    await fala("FIM");
+    await fala("não");
+    exigeLocal = true;
+    const antes = verbos("captacao.create").length;
+    const s = await fala("o bairro eu vejo depois");
+    expect(verbos("captacao.create")).toHaveLength(antes);
+    expect(s.reply).not.toContain("Anotei");
+  });
+
+  it("tipoDoFaltante conhece os três paths", () => {
+    for (const path of ["imovel.bairro", "imovel.cidade", "imovel.uf"]) {
+      expect(cap.tipoDoFaltante({ path, rotulo: "x", etapa: "imovel" } as never)).toBeDefined();
+    }
   });
 });
 
