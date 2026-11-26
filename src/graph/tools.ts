@@ -763,7 +763,9 @@ export const LISTAR_PROPOSTAS: ToolDef = {
           type: "string",
           description:
             "Filtra por status, só quando a pessoa pedir um. Valores: " +
-            `${ESTADOS_DE_PROPOSTA.join(", ")}.`,
+            `${ESTADOS_DE_PROPOSTA.join(", ")}. ` +
+            'Para "em aberto", "abertas" ou "pendentes" use exatamente "em_aberto": o sistema tira as ' +
+            "canceladas, recusadas, expiradas e as que viraram negócio.",
         },
         limite: {
           type: "integer",

@@ -1,6 +1,7 @@
 import type { DepsDoFluxo } from "./fluxos";
-import { buscarPropostas, codigoCitado, pedeBusca, pedeLista, termoDeBusca, type PropostaListada } from "./localizar";
+import { buscarPropostas, codigoCitado, paraListada, pedeBusca, pedeLista, termoDeBusca, type PropostaListada } from "./localizar";
 import { ehAjusteDeLista, PEDE_TODOS, pedeListaDeEquipeImplicita, pedidoDeLista, responderListaFiltrada } from "./consulta-equipe";
+import { propostaEncerrada } from "./estado-proposta";
 import { normalizar } from "./tools";
 
 /**
@@ -25,7 +26,7 @@ const ANDAMENTO = "andamento";
 const ESTADOS: [RegExp, string][] = [
   // "em andamento" = qualquer proposta ainda viva; não confundir com a pergunta
   // "como está o andamento da proposta…" (26/10, smoke real).
-  [/\bem (andamento|aberto)\b|\b(ativas?|vivas?)\b/, ANDAMENTO],
+  [/\bem (andamento|aberto)\b|\babert[oa]s?\b|\b(ativas?|vivas?)\b/, ANDAMENTO],
   [/\brascunhos?\b/, "rascunho"],
   [/\benviadas?\b/, "enviada"],
   [/\bassinadas?\b/, "assinada"],
@@ -87,10 +88,42 @@ export function pedeConsulta(texto: string): boolean {
   if (!CRIACAO.test(t) && !codigo && pedeListaDeEquipeImplicita(texto)) return true;
   if (!PROPOSTA.test(t) && !codigo) return false;
   if (CRIACAO.test(t)) return false;
+  if (pedeContagem(texto)) return true;
   if (pedidoDeLista(texto)) return true;
   if (pedeLista(texto)) return true;
   if (!(pedeBusca(texto) || CONSULTA.test(t))) return false;
   return !!(codigo || termoDeBusca(texto) || estadoPedido(texto));
+}
+
+/**
+ * "Quantas propostas eu tenho?": a pergunta é o NÚMERO, sem situação, nome nem código (com eles, a consulta de
+ * sempre já responde). Respondida com o total do servidor; sem ele, nunca um número inventado (prod 26/11: o
+ * modelo escreveu "só consigo listar *mostrando 5*... e há mais na fila").
+ */
+function pedeContagem(texto: string): boolean {
+  const t = normalizar(texto);
+  // Só a PRÓPRIA carteira: "a equipe tem", "o time", "a imobiliária" vão para a consulta de equipe; "quantas posso
+  // fazer por dia" é dúvida de regra, não contagem (code review 26/11).
+  if (/\b(equipe|time|imobiliaria|escritorio|corretores|corretor|gerente|todos|todas|cada)\b/.test(t)) return false;
+  return /\bquantas\s+propostas\s+(?:eu\s+)?(?:tenho|possuo|fiz|criei)\b/.test(t) && !codigoCitado(texto) && !estadoPedido(texto) && !termoDeBusca(texto) && !pedidoDeLista(texto);
+}
+
+async function responderContagem(deps: DepsDoFluxo): Promise<{ reply: string; evento: string }> {
+  const r = await deps.acao("proposal.list", {});
+  if (!r || r.status !== 200) return { reply: "Não consegui consultar suas propostas agora. Tente de novo em instantes.", evento: "consulta_sem_resposta" };
+  const vistas = Array.isArray(r.body.items) ? r.body.items.length : 0;
+  const total = Number(r.body.total);
+  if (Number.isInteger(total) && total >= vistas && (total > 0 || vistas === 0)) {
+    if (total === 0) return { reply: "Você ainda não tem propostas no sistema.", evento: "consulta_contagem" };
+    return { reply: `Você tem ${total} ${total === 1 ? "proposta" : "propostas"}. Quer que eu liste as mais recentes?`, evento: "consulta_contagem" };
+  }
+  // Sem o total do servidor: o que se viu é só o piso. O texto diz "pelo menos" e lista, sem inventar número.
+  const itens = (Array.isArray(r.body.items) ? r.body.items : []).map(paraListada).filter((p): p is PropostaListada => !!p);
+  if (!itens.length) return { reply: "Você ainda não tem propostas no sistema.", evento: "consulta_contagem" };
+  return {
+    reply: `Você tem pelo menos ${itens.length} ${itens.length === 1 ? "proposta" : "propostas"}; não consegui o total exato agora. As mais recentes:\n${itens.slice(0, 10).map((p) => `• ${linhaCurta(p)}`).join("\n")}`,
+    evento: "consulta_contagem",
+  };
 }
 
 function linhaCurta(p: PropostaListada): string {
@@ -98,10 +131,7 @@ function linhaCurta(p: PropostaListada): string {
 }
 
 /** Encerradas na visão do CM (status-view.ts): o rótulo vale quando o corpo não traz o status cru. */
-const ENCERRADOS = ["convertida", "recusada_proponente", "expirada", "cancelada"];
-const ROTULOS_ENCERRADOS = ["virou negocio", "recusada", "expirada", "cancelada"];
-const encerrada = (p: PropostaListada) =>
-  ENCERRADOS.includes(p.status) || ROTULOS_ENCERRADOS.includes(normalizar(p.estado ?? ""));
+const encerrada = propostaEncerrada;
 
 const casaEstado = (p: PropostaListada, estado: string) =>
   estado === ANDAMENTO ? !encerrada(p) : normalizar(`${p.estado ?? ""} ${p.status}`).includes(estado);
@@ -113,6 +143,7 @@ const emEstado = (estado: string) => `em ${estado === ANDAMENTO ? "andamento" : 
  * código, título e situação de cada uma (até 10), e quantas há ao todo.
  */
 export async function responderConsulta(deps: DepsDoFluxo, texto: string): Promise<{ reply: string; evento: string }> {
+  if (pedeContagem(texto)) return responderContagem(deps);
   // Mês, várias situações, equipe/responsável: o servidor filtra (02/11, caso da gerente da Newcore).
   const filtrada = pedidoDeLista(texto);
   if (filtrada) {
