@@ -120,3 +120,13 @@ describe("mídia dita no PRIMEIRO pedido não é perguntada de novo (prod 26/11)
     expect(p.reply).toContain("Como o cliente chegou");
   });
 });
+
+describe("dicaDeMidiaDoPedido", () => {
+  it("guarda só o trecho da origem, sem CPF nem o resto do pedido", () => {
+    const d = F.dicaDeMidiaDoPedido("comprador TESTE Smoke, CPF 392.769.438-03, R$ 500.000 à vista, mídia de origem Instagram");
+    expect(d).toBe("mídia de origem Instagram");
+  });
+  it("'assinatura via WhatsApp' não vira origem do cliente", () => {
+    expect(F.dicaDeMidiaDoPedido("proposta de compra, assinatura via WhatsApp, R$ 500.000")).toBeUndefined();
+  });
+});

@@ -102,7 +102,10 @@ export function pedeConsulta(texto: string): boolean {
  */
 function pedeContagem(texto: string): boolean {
   const t = normalizar(texto);
-  return /\bquantas\s+propostas\b/.test(t) && !codigoCitado(texto) && !estadoPedido(texto) && !termoDeBusca(texto) && !pedidoDeLista(texto);
+  // Só a PRÓPRIA carteira: "a equipe tem", "o time", "a imobiliária" vão para a consulta de equipe; "quantas posso
+  // fazer por dia" é dúvida de regra, não contagem (code review 26/11).
+  if (/\b(equipe|time|imobiliaria|escritorio|corretores|corretor|gerente|todos|todas|cada)\b/.test(t)) return false;
+  return /\bquantas\s+propostas\s+(?:eu\s+)?(?:tenho|possuo|fiz|criei)\b/.test(t) && !codigoCitado(texto) && !estadoPedido(texto) && !termoDeBusca(texto) && !pedidoDeLista(texto);
 }
 
 async function responderContagem(deps: DepsDoFluxo): Promise<{ reply: string; evento: string }> {

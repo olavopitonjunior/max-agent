@@ -1124,7 +1124,7 @@ function comMidiaDoTexto(d: DadosDaProposta, texto: string, midias: MidiaDeOrige
 }
 
 /** O trecho do pedido que fala da origem do cliente: o sinal de origem e até 40 caracteres, sem passar de vírgula/linha. */
-const TRECHO_DE_ORIGEM = /\b(?:m[ií]dia|origem|veio|vieram|chegou|chegaram|conheceu|achou|encontrou|captad[oa]s?|indicad[oa]s?|via)\b[^,;\n]{0,40}/giu;
+const TRECHO_DE_ORIGEM = /\b(?:m[ií]dia|origem|veio|vieram|chegou|chegaram|conheceu|achou|encontrou|captad[oa]s?|indicad[oa]s?)\b[^,;\n]{0,40}/giu;
 export function dicaDeMidiaDoPedido(pedido: string | undefined): string | undefined {
   const trechos = pedido ? [...pedido.matchAll(TRECHO_DE_ORIGEM)].slice(0, 3).map((m) => m[0].trim()) : [];
   return trechos.length ? trechos.join(". ") : undefined;
