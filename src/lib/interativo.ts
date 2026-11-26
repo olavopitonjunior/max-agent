@@ -72,7 +72,10 @@ function lista(texto: string): Interativo | null {
       .filter((l, i) => !fora.has(i) && !(mais && DIGA_MAIS.test(l)))
       .join("\n")
       .replace(/\n{3,}/g, "\n\n")
-      .trim() || "Escolha uma opção.";
+      .trim()
+      // As opções saem do corpo e vão para o botão: o texto aponta para ele (prod 26/11: "…assinar?\n\nResponda com o
+      // número." sem dizer onde estão os números). Digitar o número ou o nome continua valendo.
+      .replace(/\bResponda com o número\b/, `Toque em ${BOTAO_DA_LISTA} ou responda com o número`) || "Escolha uma opção.";
   if (corpo.length > MAX_CORPO) return null;
   return { tipo: "lista", corpo, botao: BOTAO_DA_LISTA, opcoes };
 }
