@@ -18,7 +18,7 @@ describe("derivarInterativo — menu numerado vira lista", () => {
     const i = derivarInterativo(texto);
     expect(i?.tipo).toBe("lista");
     expect(ids(i)).toEqual(["op:0", "op:1", "op:2", "op:3", "op:MAIS"]);
-    expect(i?.corpo).toBe("Qual etapa deseja consultar? Responda com o número.");
+    expect(i?.corpo).toBe("Qual etapa deseja consultar? Toque em Ver opções ou responda com o número.");
     expect(i?.tipo === "lista" && i.botao).toBe("Ver opções");
   });
 
@@ -35,7 +35,7 @@ describe("derivarInterativo — menu numerado vira lista", () => {
     expect(primeira.titulo.endsWith("…")).toBe(true);
     expect(primeira.descricao).toBe(longo);
     expect(segunda).toEqual({ id: "op:2", titulo: "Outra" });
-    expect(i!.corpo).toBe("Qual proposta?\n\nResponda com o número.");
+    expect(i!.corpo).toBe("Qual proposta?\n\nToque em Ver opções ou responda com o número.");
   });
 
   it("mais de 10 linhas, lista quebrada ou sem pedir número: fica em texto", () => {
@@ -100,5 +100,26 @@ describe("quem sabe mostrar botão", () => {
     expect(newtonBridgeAdapter.capabilities.interactive).toBe(false);
     expect(newtonBridgeAdapter.sendInteractive).toBeUndefined();
     expect(logAdapter.capabilities.interactive).toBe(false);
+  });
+});
+
+describe("lista: o corpo aponta para o botão (prod 26/11)", () => {
+  it("'Responda com o número' vira 'Toque em Ver opções ou responda com o número'", () => {
+    const i = derivarInterativo(
+      "Como os assinantes vão se identificar para assinar?\n\n1. E-mail (token)\n2. WhatsApp (token)\n\nResponda com o número.",
+    );
+    expect(i?.tipo).toBe("lista");
+    expect(i!.corpo).toBe("Como os assinantes vão se identificar para assinar?\n\nToque em Ver opções ou responda com o número.");
+    expect(i!.corpo).not.toMatch(/\*\*/);
+  });
+
+  it("mantém o resto da instrução ('ou o nome', 'da opção')", () => {
+    const i = derivarInterativo("Como o cliente chegou?\n1. Instagram\n2. Site\n\nResponda com o número ou o nome.");
+    expect(i!.corpo).toBe("Como o cliente chegou?\n\nToque em Ver opções ou responda com o número ou o nome.");
+  });
+
+  it("botões SIM/NÃO não mudam", () => {
+    const i = derivarInterativo("Confirma? Responda *SIM* para enviar.");
+    expect(i?.corpo).toBe("Confirma? Responda *SIM* para enviar.");
   });
 });
