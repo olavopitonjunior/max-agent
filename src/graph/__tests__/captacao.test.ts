@@ -2033,6 +2033,52 @@ describe("confirmação única (26/10): pendências só da tela", () => {
     expect(s.reply).toContain("Não gravei");
   });
 
+  it.each(["Bairro: Jardins", "bairro errado, é Jardins", "Rua: Haddock Lobo", "Cidade: Campinas"])(
+    "prod 26/11 (CAP-2026-0015): no RESUMO, %s nunca vai ao modelo nem é confirmado sem gravar",
+    async (texto) => {
+      const fala = conversa();
+      extracao = IMOVEL_EXTRAIDO;
+      await fala("cria uma captação de venda do Apto da Dona Maria");
+      await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+      await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+      await fala(`Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada`);
+      await fala("FIM");
+      await fala("não");
+      const resumo = await fala("matrícula 12345");
+      expect(resumo.reply).toContain("Pronta a captação");
+      const chamadasDoModelo = llm.mock.calls.length;
+      const escritas = verbos("captacao.create").length;
+      const s = await fala(texto);
+      expect(llm.mock.calls.length).toBe(chamadasDoModelo);
+      expect(verbos("captacao.create")).toHaveLength(escritas);
+      expect(verbos("captacao.send")).toEqual([]);
+      expect((s.reply ?? "").replace(/não gravei/gi, "")).not.toMatch(/anotei|gravei|atualizei|registrei/i);
+      expect(s.reply).toContain("Não gravei");
+      expect(s.reply).toContain("responda *sim* para enviar");
+      expect((s.fluxo as { etapa?: string } | null)?.etapa).toBe("revisao");
+      // O "sim" seguinte ainda envia normalmente.
+      const enviado = await fala("sim");
+      expect(verbos("captacao.send")).toHaveLength(1);
+      expect(enviado.reply).toContain("Enviado");
+    }
+  );
+
+  it("no RESUMO, pergunta sobre um campo ('bairro está certo?') segue para o atendimento", async () => {
+    const fala = conversa();
+    extracao = IMOVEL_EXTRAIDO;
+    await fala("cria uma captação de venda do Apto da Dona Maria");
+    await fala("Rua Augusta, 1250, ap 42, Bela Vista, São Paulo/SP");
+    await fala("valor 850 mil, comissão 6%, prazo 180 dias, com exclusividade");
+    await fala(`Maria Silva, CPF ${CPF}, tel ${FONE}, ${EMAIL}, casada`);
+    await fala("FIM");
+    await fala("não");
+    await fala("matrícula 12345");
+    const chamadasDoModelo = llm.mock.calls.length;
+    const s = await fala("bairro está certo?");
+    expect(llm.mock.calls.length).toBeGreaterThan(chamadasDoModelo);
+    expect(s.reply).not.toContain("Não gravei");
+  });
+
   it.each([
     ["Rua: Augusta", true],
     ["Número = 40", true],
