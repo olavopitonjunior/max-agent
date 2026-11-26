@@ -39,6 +39,7 @@ import { nomeDoAgente } from "@/lib/deploy-profile";
 import { featureEnabled } from "@/lib/runtime/rollout";
 import type { Capability } from "./policy";
 import { corrigirProposta, lerConfirmacao, normalizar, TEXTO_PARA_CONFIRMAR } from "./tools";
+import { noTexto, nomeComoEscrito, semAcento } from "./texto-ditado";
 import {
   lerCatalogoDeMidias, lerMidia, lerMidias, midiaNoTexto, rotuloDaMidia, soPalavras, textoPerguntaMidia,
   type MidiaDeOrigem, type PoliticaDeMidia,
@@ -51,6 +52,7 @@ export {
 import { conduzirContinuidade, pedeContinuidade, referenciaPropostaExistente, type FluxoContinuidade } from "./continuidade";
 import { conduzirGestao, type FluxoGestao } from "./gestao";
 import { conduzirAssinatura, type FluxoAssinatura } from "./assinatura";
+import { campoRecusadoDe, ehRecusaDeDadosClicksign, TEXTO_DO_CAMPO_RECUSADO } from "./recusa-clicksign";
 import { conduzirAtividade, rebaixarAtividade, type FluxoAtividade } from "./atividades";
 import { conduzirPreferencias, rebaixarPreferencias, type FluxoPreferencias } from "./preferencias";
 import type { PrefsPatch, PrefsPatchResult, PrefsView } from "./preferencias-contract";
@@ -696,10 +698,36 @@ export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaPropos
     q.cpf = conferirCampo(q.cpf, cpfs, (a, b) => so(a) === so(b));
     q.email = conferirCampo(q.email, emails, (a, b) => a.toLowerCase() === b.toLowerCase());
     for (const c of ["telefone", "cpf", "email"] as const) if (q[c] === undefined) delete q[c];
+    // "TESTE Comprador Smoke": o extrator tirava o TESTE (prod 19/11). O nome vale como foi escrito.
+    if (q.nome) q.nome = nomeComoEscrito(q.nome, texto);
     if (Object.keys(q).length) out[k] = q;
     else delete out[k];
   }
+  if (out.imovel?.bairro && bairroConferido(out.imovel, texto) === undefined) {
+    const { bairro: _b, ...resto } = out.imovel;
+    out.imovel = resto;
+  }
   return out;
+}
+
+/**
+ * Bairro só vale se a pessoa o escreveu e se não é a cidade, a sigla ou o nome do estado
+ * (prod 19/11: "Rua Augusta, 100, São Paulo/SP" gravou bairro "São Paulo"). Igual à cidade
+ * só passa com o rótulo escrito ("bairro Santo André").
+ */
+function bairroConferido(im: NonNullable<DadosDaProposta["imovel"]>, texto: string): string | undefined {
+  const bairro = im.bairro;
+  if (!bairro || !noTexto(bairro, texto)) return undefined;
+  const b = semAcento(bairro);
+  const uf = im.uf?.toUpperCase();
+  const lugares = new Set([semAcento(im.cidade ?? ""), semAcento(im.uf ?? "")]);
+  if (uf && ESTADOS_POR_UF[uf]) lugares.add(ESTADOS_POR_UF[uf]!);
+  else for (const [sigla, nome] of Object.entries(ESTADOS_POR_UF)) { lugares.add(sigla.toLowerCase()); lugares.add(nome); }
+  lugares.delete("");
+  if (!lugares.has(b)) return bairro;
+  // Sigla nunca é bairro; cidade/estado só com o rótulo "bairro" escrito.
+  if (b === semAcento(im.uf ?? "") || b.length <= 2) return undefined;
+  return ` ${semAcento(texto)} `.includes(` bairro ${b} `) ? bairro : undefined;
 }
 
 /**
@@ -1098,6 +1126,46 @@ export function lerMetodo(texto: string, metodos: MetodoDeAssinatura[]): MetodoD
     (m) => t.includes(normalizar(m.valor).replace(/_/g, " ")) || t.includes(normalizar(m.rotulo).split(" ")[0]!)
   );
   return achados.length === 1 ? achados[0]! : null;
+}
+
+const VERBO_DE_TROCA = /\b(quer\w*|prefir\w*|troc\w*|mud\w*|alter\w*|us(?:a|ar|e)|coloc\w*|pass(?:a|ar|e)|deix\w*|escolh\w*|seja|ser)\b/;
+const VERBO_DE_ENVIO = /\b(envi\w*|mand\w*|dispar\w*)\b/;
+// Só estas palavras mostram que o assunto é a assinatura; "tipo"/"forma" sozinhos são de qualquer coisa ("tipo do imóvel").
+const CONTEXTO_DE_ASSINATURA = /\b(assinatura|assinar|assina|metodo)\b/;
+/** Tipos de assinatura conhecidos; os que também são canal de contato (whatsapp, e-mail) só valem com "assinatura/método/tipo". */
+const TIPO_SO_DE_ASSINATURA = /\b(aceite|selfie|biometri\w*|facial|certificado|manuscrit\w*)\b/;
+const TIPO_OU_CANAL = /\b(whatsapp|zap|e-?mail|sms)\b/;
+
+/**
+ * No cartão de envio, o pedido de trocar o tipo de assinatura. `metodo`: o tipo pedido, dentre os liberados;
+ * `pediu`: citou um tipo (ou nenhum, só "mudar o tipo"). `null`: não é pedido de troca (inclui "canal", que é
+ * como o comprador recebe a proposta, outra coisa).
+ */
+function pedidoDeTrocaDeMetodo(
+  texto: string,
+  metodos: MetodoDeAssinatura[]
+): { metodo: MetodoDeAssinatura | null; pediu: boolean } | null {
+  if (texto.includes("?")) return null;
+  const t = normalizar(texto);
+  if (!VERBO_DE_TROCA.test(t) || VERBO_DE_ENVIO.test(t)) return null;
+  const contexto = CONTEXTO_DE_ASSINATURA.test(t);
+  if (/\bcanal\b/.test(t) && !contexto) return null;
+  // Sem "assinatura/assinar/método", só vale o pedido curto de tipo inequívoco: "prefiro aceite" (≤4 palavras).
+  // Frase longa que cita "aceite" ("coloca que o comprador deu aceite verbal") não é pedido de troca.
+  if (!contexto && t.split(/\s+/).filter(Boolean).length > 4) return null;
+  const nomeado = TIPO_SO_DE_ASSINATURA.test(t) || (contexto && TIPO_OU_CANAL.test(t));
+  if (!contexto && !nomeado) return null;
+  const doLiberado =
+    lerMetodo(texto, metodos) ??
+    (() => {
+      const achados = metodos.filter((m) => t.includes(normalizar(m.rotulo)));
+      return achados.length === 1 ? achados[0]! : null;
+    })();
+  if (doLiberado && (nomeado || contexto)) return { metodo: doLiberado, pediu: true };
+  if (nomeado) return { metodo: null, pediu: true };
+  // "muda o tipo de assinatura" sem dizer qual: mostra a lista.
+  if (contexto && /\b(tipo|metodo)\b/.test(t)) return { metodo: null, pediu: false };
+  return null;
 }
 
 /** Mídia dita no texto entra nos dados (sem sobrescrever a já escolhida). */
@@ -2217,6 +2285,24 @@ async function conduzirPropostaBase(f: FluxoProposta, ctx: ContextoDoTurno, deps
     };
   }
 
+  // Cartão de envio: "quero assinatura por aceite" troca o tipo e reemite o cartão (sem enviar);
+  // tipo fora da lista liberada responde com a lista e não altera nada. Nunca cai no modelo.
+  if (f.etapa === "envio" && resposta !== "sim" && resposta !== "nao") {
+    const troca = pedidoDeTrocaDeMetodo(ctx.texto, f.metodos ?? []);
+    if (troca?.metodo) {
+      const g = { ...f, metodo: troca.metodo, chave: manterChaveDeEnvio(f), atualizadoEm: agora };
+      return { reply: textoEnvio(g), fluxo: g, evento: "proposta_metodo_trocado" };
+    }
+    if (troca) {
+      const aviso = troca.pediu ? "Esse tipo de assinatura não está liberado. " : "";
+      return {
+        reply: `${aviso}${textoMetodos(f.metodos ?? [])}`,
+        fluxo: { ...f, etapa: "metodo", atualizadoEm: agora },
+        evento: troca.pediu ? "metodo_nao_liberado" : "metodo_a_escolher",
+      };
+    }
+  }
+
   if (f.etapa === "metodo" && !lerMetodo(ctx.texto, f.metodos ?? []) && pedeEnvio(ctx.texto)) {
     return { reply: textoMetodos(f.metodos ?? []), fluxo: { ...f, atualizadoEm: agora }, evento: "metodo_repetido" };
   }
@@ -2791,15 +2877,8 @@ async function pedirMidiaDoEnvio(f: FluxoProposta, ctx: ContextoDoTurno, deps: D
   };
 }
 
-/** `dados_recusados_clicksign.campo` → o que a pessoa corrige (contrato em docs/max.md do CM). */
-export const TEXTO_DO_CAMPO_RECUSADO: Record<string, string> = {
-  nome: "A ClickSign recusou o nome de um assinante: use nome e sobrenome, sem números nem símbolos.",
-  cpf: "A ClickSign recusou o CPF de um assinante: confira os números.",
-  email: "A ClickSign recusou o e-mail de um assinante: confira o endereço.",
-  celular: "A ClickSign recusou o celular de um assinante: use DDD + número.",
-  nascimento: "A ClickSign recusou a data de nascimento de um assinante: confira a data.",
-  outro: "A ClickSign recusou o envio desta proposta.",
-};
+// O texto por campo mora em `recusa-clicksign` (compartilhado com `assinatura.ts`, sem ciclo).
+export { TEXTO_DO_CAMPO_RECUSADO };
 
 async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo): Promise<PassoDoFluxo> {
   const chave = chaveDe(f, "proposal.send", ctx);
@@ -2829,9 +2908,8 @@ async function enviar(f: FluxoProposta, ctx: ContextoDoTurno, deps: DepsDoFluxo)
   // A ClickSign recusou um dado de assinante (prod 19/11: nome com número). Antes
   // vinha 500 e o Max entrava em loop de "não sei se deu certo"; agora diz o campo
   // e volta aos ajustes, sem chave (o próximo "sim" é um envio novo).
-  if (r.status === 422 && r.body.error === "dados_recusados_clicksign") {
-    const campo =
-      typeof r.body.campo === "string" && Object.hasOwn(TEXTO_DO_CAMPO_RECUSADO, r.body.campo) ? r.body.campo : "outro";
+  if (ehRecusaDeDadosClicksign(r.status, r.body)) {
+    const campo = campoRecusadoDe(r.body);
     return {
       reply:
         `${TEXTO_DO_CAMPO_RECUSADO[campo]} ` +
@@ -2960,7 +3038,7 @@ export const TOOL_EXTRAIR_PROPOSTA = {
           endereco: { type: "string", description: "Rua/avenida e número. Preserve o complemento informado em complemento." },
           complemento: { type: "string", description: "Apartamento, unidade, bloco, casa ou sala, exatamente como informado. Preencha também em correção isolada (ex.: Corrija o complemento para apartamento 2 → apartamento 2); omita endereco se a rua não foi dita; não copie o complemento anterior." },
           numero: { type: "string" },
-          bairro: { type: "string" },
+          bairro: { type: "string", description: "Bairro (neighborhood) do imóvel, só se a pessoa o disse; nunca a cidade nem o estado. Se não houver bairro dito, omita." },
           cidade: { type: "string" },
           uf: { type: "string" },
           matricula: { type: "string" },
