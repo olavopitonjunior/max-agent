@@ -98,7 +98,7 @@ describe("processarFollowups", () => {
     expect(enq).toHaveBeenCalledTimes(1);
     const p = enq.mock.calls[0]![0];
     expect(p).toMatchObject({ orgId: "org1", dedupeKey: "captacao-envio:cap-1:m5", phone: "5511987654321", audience: "platform_user", orgName: "FINCasa" });
-    expect(p.body).toMatch(/^Envio da captação Apto da Dona Maria concluído: Em assinatura\. https?:\/\/\S+\/imoveis\/captacoes\/cap-1$/);
+    expect(p.body).toMatch(/^A captação Apto da Dona Maria foi enviada para assinatura \(Em assinatura\)\. Acompanhe: https?:\/\/\S+\/imoveis\/captacoes\/cap-1$/);
     expect(p.body).not.toContain("**");
     const [u] = updates();
     expect(u!.sql).toMatch(/status = 'done'/);
@@ -112,6 +112,37 @@ describe("processarFollowups", () => {
     const p = enq.mock.calls[0]![0];
     expect(p.body).toMatch(/^O envio da captação Apto da Dona Maria não foi concluído \(Falha no envio\)\. Veja na tela: /);
     expect(p.body).not.toMatch(/concluído:/);
+  });
+
+  // Rótulos do `captacaoStatusView` do ImobPro (status-view.ts). Smoke 26/11: "concluído: Renova em 173 dias".
+  it.each([
+    ["Em assinatura · 1 de 3", /^A captação Apto da Dona Maria foi enviada para assinatura \(Em assinatura · 1 de 3\)\. Acompanhe: /],
+    ["Assinada", /^A captação Apto da Dona Maria já está assinada\. https?:/],
+    ["Renova em 173 dias", /^A captação Apto da Dona Maria já está assinada \(Renova em 173 dias\)\. /],
+    ["Renovação automática", /já está assinada \(Renovação automática\)\. /],
+    ["Vigente até 26/05/2027", /já está assinada \(Vigente até 26\/05\/2027\)\. /],
+    ["Vence em 3 dias", /já está assinada \(Vence em 3 dias\)\. /],
+    ["Termina hoje", /já está assinada \(Termina hoje\)\. /],
+    ["Sem prazo", /já está assinada \(Sem prazo\)\. /],
+    ["Renova amanhã", /já está assinada \(Renova amanhã\)\. /],
+    ["Vence hoje", /já está assinada \(Vence hoje\)\. /],
+    ["Vencida há 3 dias", /^A captação Apto da Dona Maria foi assinada, mas a vigência terminou \(Vencida há 3 dias\)\. /],
+    ["Encerrada em 01/01/2026", /foi assinada, mas a vigência terminou \(Encerrada em 01\/01\/2026\)\. /],
+    ["Recusada", /não foi concluído \(Recusada\)\. Veja na tela: /],
+    ["Recusada por Maria", /não foi concluído \(Recusada por Maria\)\. Veja na tela: /],
+    ["Cancelada", /não foi concluído \(Cancelada\)/],
+    ["Assinatura expirada", /não foi concluído \(Assinatura expirada\)/],
+    ["Arquivada", /não foi concluído \(Arquivada\)/],
+    ["Rascunho", /não foi concluído \(Rascunho\)/],
+    ["Situação desconhecida", /^Confira a situação da captação Apto da Dona Maria na tela \(Situação desconhecida\): /],
+  ])("estado %s: texto certo, nunca 'concluído:'", async (estado, esperado) => {
+    comClaim(job());
+    acao.mockResolvedValue(lista(estado));
+    await f.processarFollowups();
+    const p = enq.mock.calls[0]![0];
+    expect(p.body).toMatch(esperado);
+    expect(p.body).not.toMatch(/concluído:/);
+    expect(p.body).not.toContain("**");
   });
 
   it("repetido (claim devolve o mesmo job de novo): o outbox dedupa pela chave, ninguém recebe duas", async () => {
