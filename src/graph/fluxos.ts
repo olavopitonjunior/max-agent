@@ -38,7 +38,7 @@
 import { nomeDoAgente } from "@/lib/deploy-profile";
 import type { Capability } from "./policy";
 import { corrigirProposta, lerConfirmacao, normalizar } from "./tools";
-import { noTexto, nomeComoEscrito, semAcento } from "./texto-ditado";
+import { noTexto, nomeComoEscrito, semAcento, semRotuloNoNome } from "./texto-ditado";
 import {
   lerCatalogoDeMidias, lerMidia, lerMidias, midiaNoTexto, rotuloDaMidia, soPalavras, textoPerguntaMidia,
   type MidiaDeOrigem, type PoliticaDeMidia,
@@ -641,7 +641,8 @@ export function conferirDitado(d: DadosDaProposta, texto: string): DadosDaPropos
     q.email = conferirCampo(q.email, emails, (a, b) => a.toLowerCase() === b.toLowerCase());
     for (const c of ["telefone", "cpf", "email"] as const) if (q[c] === undefined) delete q[c];
     // "TESTE Comprador Smoke": o extrator tirava o TESTE (prod 19/11). O nome vale como foi escrito.
-    if (q.nome) q.nome = nomeComoEscrito(q.nome, texto);
+    // E o rótulo do papel que o extrator deixa colado no começo ("comprador TESTE ..." → "Comprador TESTE ...", prod 26/11) sai.
+    if (q.nome) q.nome = semRotuloNoNome(nomeComoEscrito(q.nome, texto), texto);
     if (Object.keys(q).length) out[k] = q;
     else delete out[k];
   }

@@ -20,6 +20,29 @@ export function noTexto(valor: string | undefined, texto: string): boolean {
   return ` ${semAcento(texto)} `.includes(` ${v} `);
 }
 
+/** Rótulos de papel/campo que o extrator às vezes deixa colados no começo do nome ("Comprador Maria Souza"). */
+const ROTULOS_DE_NOME = new Set([
+  "comprador", "compradora", "vendedor", "vendedora", "locatario", "locataria", "proprietario", "proprietaria", "nome",
+]);
+
+/**
+ * Tira o ROTULO do INÍCIO do nome ("Comprador TESTE Comprador Smoke" → "TESTE Comprador Smoke"; "Nome: Lúcia
+ * Prado" → "Lúcia Prado"). Só a primeira palavra, com ou sem ":" depois; o mesmo termo no meio ou no fim do nome
+ * fica. Só vale quando o nome, com esse rótulo, está no TEXTO e o rótulo é dele (nada escrito como rótulo logo
+ * antes): "comprador Comprador Smoke" tem o rótulo fora do nome, e um nome que o texto não traz fica como veio.
+ * Se o rótulo for tudo o que há, devolve o nome como veio (nunca um nome vazio).
+ */
+export function semRotuloNoNome(nome: string, texto: string): string {
+  const m = /^\s*(\p{L}+)(?:\s*:\s*|\s+)(\S[\s\S]*)$/u.exec(nome);
+  if (!m || !ROTULOS_DE_NOME.has(semAcento(m[1]!))) return nome;
+  const alvo = semAcento(nome).split(" ").filter(Boolean);
+  const p = palavras(texto);
+  const colado = p.some(
+    (_, i) => alvo.every((a, k) => p[i + k]?.norm === a) && !ROTULOS_DE_NOME.has(p[i - 1]?.norm ?? ""),
+  );
+  return colado ? m[2]!.trim() : nome;
+}
+
 /** A marca de dado de teste que o corretor cola no nome: TESTE, teste2... */
 const MARCA_DE_TESTE = /^teste\d*$/;
 
